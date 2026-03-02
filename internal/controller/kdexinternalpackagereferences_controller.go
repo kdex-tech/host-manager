@@ -338,11 +338,6 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobConfigMap(
 				configmap.Labels["kdex.dev/packages"] = ipr.Name
 			}
 
-			dockerfile := `
-FROM scratch
-COPY --chown=65532:65532 importmap.json importmap.json
-COPY --chown=65532:65532 node_modules .
-`
 			generateJS := fmt.Sprintf(`import { Generator } from '@jspm/generator';
 import fs from 'fs';
 
@@ -391,7 +386,6 @@ try {
 			packageJSON.WriteString("\n  }\n}")
 
 			configmap.Data = map[string]string{
-				"Dockerfile":   dockerfile,
 				"generate.js":  generateJS,
 				"package.json": packageJSON.String(),
 			}
