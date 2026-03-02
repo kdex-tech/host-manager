@@ -88,13 +88,10 @@ func AuthClientLoader(secrets kdexv1alpha1.ServiceAccountSecrets) (map[string]Au
 }
 
 func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) (string, string, string, error) {
-	oidcSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "oidc-client" })
-	if len(oidcSecrets) == 0 {
+	oidcSecret := secrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "oidc-client" })
+	if oidcSecret == nil {
 		return "", "", "", fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
 	}
-
-	// Use the first one found
-	oidcSecret := oidcSecrets[0]
 
 	clientSecret := string(oidcSecret.Data["client_secret"])
 	if clientSecret == "" {

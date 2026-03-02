@@ -370,12 +370,12 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 	if hc.function.Spec.Origin.Source != nil {
 		hc.function.Status.Source = hc.function.Spec.Origin.Source
 	} else {
-		gitSecrets := hc.host.Spec.ServiceAccountSecrets.Filter(
+		gitSecret := hc.host.Spec.ServiceAccountSecrets.Find(
 			func(s corev1.Secret) bool {
 				return s.Annotations["kdex.dev/secret-type"] == "git"
 			},
 		)
-		if len(gitSecrets) == 0 {
+		if gitSecret == nil {
 			err := fmt.Errorf(
 				"git secret not found for host %s/%s",
 				hc.host.Namespace,
@@ -394,14 +394,12 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 			return ctrl.Result{}, err
 		}
 
-		gitSecret := corev1.LocalObjectReference{
-			Name: gitSecrets[0].Name,
-		}
-
 		generator := generate.Generator{
-			Client:           r.Client,
-			Config:           *hc.function.Status.Generator,
-			GitSecret:        gitSecret,
+			Client: r.Client,
+			Config: *hc.function.Status.Generator,
+			GitSecret: corev1.LocalObjectReference{
+				Name: gitSecret.Name,
+			},
 			ImagePullSecrets: hc.imagePullSecrets,
 			OpenAPIBuilder:   r.HostHandler.GetOpenAPIBuilder(),
 			Scheme:           r.Scheme,

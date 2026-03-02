@@ -101,7 +101,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return r1, err
 	}
 
-	_, configMap, err := r.createOrUpdateJobConfigMap(ctx, &ipr)
+	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -117,15 +117,76 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
+	internalHost.Spec.ServiceAccountSecrets = secrets
+
+	imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(
+		func(s corev1.Secret) bool {
+			return s.Type == corev1.SecretTypeDockerConfigJson
+		},
+	)
+
+	imagePullSecretRefs := make([]corev1.LocalObjectReference, 0, len(imagePullSecrets))
+	for _, s := range imagePullSecrets {
+		imagePullSecretRefs = append(imagePullSecretRefs, corev1.LocalObjectReference{Name: s.Name})
+	}
+
+	imagePushSecret := internalHost.Spec.ServiceAccountSecrets.Find(
+		func(s corev1.Secret) bool {
+			return s.Type == corev1.SecretTypeDockerConfigJson && s.Annotations["kdex.dev/secret-type"] == "docker-push"
+		},
+	)
+
+	configMapOp, configMap, err := r.createOrUpdateJobConfigMap(ctx, &ipr)
+	if err != nil {
+		kdexv1alpha1.SetConditions(
+			&ipr.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionTrue,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileError,
+			err.Error(),
+		)
+
+		return ctrl.Result{}, err
+	}
+
+	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, internalHost.Spec.Registries.NpmRegistry, internalHost.Spec.ServiceAccountSecrets)
+	if err != nil {
+		kdexv1alpha1.SetConditions(
+			&ipr.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionTrue,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileError,
+			err.Error(),
+		)
+
+		return ctrl.Result{}, err
+	}
+
+	log.V(2).Info(
+		"created or updated job config map and secret",
+		"configMap", configMap.Name,
+		"configMapOperation", configMapOp,
+		"secret", secret.Name,
+		"secretOperation", secretOp,
+	)
+
 	builder := packref.PackRef{
 		Client:            r.Client,
-		ImageRegistry:     internalHost.Spec.Registries.ImageRegistry,
 		ConfigMap:         configMap,
+		ImageRegistry:     internalHost.Spec.Registries.ImageRegistry,
+		ImagePushSecret:   imagePushSecret,
+		ImagePullSecrets:  imagePullSecretRefs,
 		Log:               log,
-		NPMSecretRef:      ipr.Spec.NPMSecretRef,
+		NPMSecret:         *secret,
 		PackageBuilder:    &r.Configuration.PackageBuilder,
 		Scheme:            r.Scheme,
-		ServiceAccountRef: ipr.Spec.ServiceAccountRef,
+		ServiceAccountRef: internalHost.Spec.ServiceAccountRef,
 	}
 
 	job, err := builder.GetOrCreatePackRefJob(ctx, &ipr)
@@ -229,7 +290,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		}
 
 		ipr.Status.Attributes["image"] = fmt.Sprintf(
-			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry.Host, ipr.Name, ipr.Generation, imageDigest,
+			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
 		)
 		ipr.Status.Attributes["importmap"] = importmap
 	}
@@ -395,4 +456,64 @@ try {
 	)
 
 	return op, configmap, err
+}
+
+func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
+	ctx context.Context,
+	ipr *kdexv1alpha1.KDexInternalPackageReferences,
+	npmRegistry string,
+	secrets kdexv1alpha1.ServiceAccountSecrets,
+) (controllerutil.OperationResult, *corev1.Secret, error) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-secret", ipr.Name),
+			Namespace: ipr.Namespace,
+		},
+	}
+
+	op, err := ctrl.CreateOrUpdate(
+		ctx,
+		r.Client,
+		secret,
+		func() error {
+			if secret.CreationTimestamp.IsZero() {
+				secret.Annotations = make(map[string]string)
+				maps.Copy(secret.Annotations, ipr.Annotations)
+				secret.Labels = make(map[string]string)
+				maps.Copy(secret.Labels, ipr.Labels)
+
+				secret.Labels["kdex.dev/packages"] = ipr.Name
+			}
+
+			var npmrcContent strings.Builder
+
+			fmt.Fprintf(&npmrcContent, "registry=%s\n", npmRegistry)
+
+			npmSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "npm" })
+
+			for _, s := range npmSecrets {
+				fmt.Fprintf(&npmrcContent, "%s\n", s.Data[".npmrc"])
+			}
+
+			for _, packageReference := range ipr.Spec.PackageReferences {
+				// get secret for packageReference
+				secret := &corev1.Secret{}
+				if err := r.Client.Get(ctx, client.ObjectKey{
+					Namespace: ipr.Namespace,
+					Name:      packageReference.Name,
+				}, secret); err != nil {
+					return err
+				}
+				fmt.Fprintf(&npmrcContent, "%s\n", secret.Data[".npmrc"])
+			}
+
+			secret.StringData = map[string]string{
+				".npmrc": npmrcContent.String(),
+			}
+
+			return ctrl.SetControllerReference(ipr, secret, r.Scheme)
+		},
+	)
+
+	return op, secret, err
 }

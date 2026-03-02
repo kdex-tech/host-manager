@@ -19,10 +19,12 @@ import (
 
 type PackRef struct {
 	client.Client
-	ImageRegistry     kdexv1alpha1.Registry
 	ConfigMap         *corev1.ConfigMap
+	ImageRegistry     string
+	ImagePushSecret   *corev1.Secret
+	ImagePullSecrets  []corev1.LocalObjectReference
 	Log               logr.Logger
-	NPMSecretRef      *corev1.LocalObjectReference
+	NPMSecret         corev1.Secret
 	PackageBuilder    *configuration.PackageBuilder
 	Scheme            *runtime.Scheme
 	ServiceAccountRef corev1.LocalObjectReference
@@ -57,28 +59,22 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 				},
 			},
 		},
-	}
-
-	imagePullSecret := ""
-
-	if len(ipr.Spec.BuilderImagePullSecrets) > 0 {
-		imagePullSecret = ipr.Spec.BuilderImagePullSecrets[0].Name
-		volumes = append(volumes, corev1.Volume{
-			Name: imagePullSecret,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: imagePullSecret,
-				},
-			},
-		})
-	}
-
-	if p.NPMSecretRef != nil {
-		volumes = append(volumes, corev1.Volume{
+		{
 			Name: "npmrc",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: p.NPMSecretRef.Name,
+					SecretName: p.NPMSecret.Name,
+				},
+			},
+		},
+	}
+
+	if p.ImagePushSecret != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: "image-push-secret",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: p.ImagePushSecret.Name,
 				},
 			},
 		})
@@ -94,28 +90,30 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			MountPath: "/scripts",
 			ReadOnly:  true,
 		},
-	}
-
-	if imagePullSecret != "" {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      imagePullSecret,
-			MountPath: "/var/run/secrets/image-pull-secrets/" + imagePullSecret,
-			ReadOnly:  true,
-		})
-	}
-
-	if p.NPMSecretRef != nil {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		{
 			Name:      "npmrc",
 			MountPath: internal.WORKDIR + "/.npmrc",
 			SubPath:   ".npmrc",
 			ReadOnly:  true,
+		},
+	}
+
+	if p.ImagePushSecret != nil {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "image-push-secret",
+			MountPath: internal.WORKDIR + "/config.json",
+			SubPath:   ".dockerconfigjson",
+			ReadOnly:  true,
 		})
 	}
 
-	imageURL := fmt.Sprintf("%s/%s/packages:%d", p.ImageRegistry.Host, ipr.Name, ipr.Generation)
+	imageURL := fmt.Sprintf("%s/%s/packages:%d", p.ImageRegistry, ipr.Name, ipr.Generation)
 
 	env := []corev1.EnvVar{
+		{
+			Name:  "IMAGE_REGISTRY",
+			Value: p.ImageRegistry,
+		},
 		{
 			Name:  "IMAGE_URL",
 			Value: imageURL,
@@ -130,17 +128,10 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		},
 	}
 
-	if imagePullSecret != "" {
+	if p.ImagePushSecret != nil {
 		env = append(env, corev1.EnvVar{
-			Name:  "IMAGE_PULL_SECRET",
-			Value: "/var/run/secrets/image-pull-secrets/" + imagePullSecret + "/.dockerconfigjson",
-		})
-	}
-
-	if p.ImageRegistry.Insecure {
-		env = append(env, corev1.EnvVar{
-			Name:  "ORAS_ARGS",
-			Value: "--plain-http",
+			Name:  "IMAGE_PUSH_SECRET_PATH",
+			Value: internal.WORKDIR + "/config.json",
 		})
 	}
 
@@ -180,7 +171,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 							VolumeMounts:    volumeMounts,
 						},
 					},
-					ImagePullSecrets: ipr.Spec.BuilderImagePullSecrets,
+					ImagePullSecrets: p.ImagePullSecrets,
 					InitContainers: []corev1.Container{
 						{
 							Name: "npm-build",
@@ -203,9 +194,10 @@ npm install
 npx esbuild node_modules/**/*.js --allow-overwrite --outdir=node_modules --define:process.env.NODE_ENV=\"production\"
 `,
 							},
-							Env:          env,
-							Image:        ipr.Spec.BuilderImage,
-							VolumeMounts: volumeMounts,
+							Env:             env,
+							Image:           p.PackageBuilder.Image,
+							ImagePullPolicy: p.PackageBuilder.ImagePullPolicy,
+							VolumeMounts:    volumeMounts,
 						},
 						{
 							Name: "importmap-generator",
@@ -224,9 +216,10 @@ node generate.js
 cat importmap.json > /dev/termination-log
 						`,
 							},
-							Env:          env,
-							Image:        ipr.Spec.BuilderImage,
-							VolumeMounts: volumeMounts,
+							Env:             env,
+							Image:           p.PackageBuilder.Image,
+							ImagePullPolicy: p.PackageBuilder.ImagePullPolicy,
+							VolumeMounts:    volumeMounts,
 						},
 					},
 					RestartPolicy:      corev1.RestartPolicyNever,
