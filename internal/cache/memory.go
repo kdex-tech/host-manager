@@ -197,7 +197,7 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		mCache.mu.Lock()
 		mCache.uncycled = opts.Uncycled
 		var newTTL *time.Duration
-		if opts.TTL != nil && mCache.ttl != *opts.TTL {
+		if opts.TTL != nil && mCache.ttl != *opts.TTL && *opts.TTL >= minTTL {
 			newTTL = opts.TTL
 			mCache.ttl = *newTTL
 		}
@@ -217,7 +217,7 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ttl := m.ttl
-	if opts.TTL != nil {
+	if opts.TTL != nil && *opts.TTL >= minTTL {
 		ttl = *opts.TTL
 	}
 	cache = &InMemoryCache{

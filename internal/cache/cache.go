@@ -8,6 +8,8 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
+const minTTL = 1 * time.Millisecond
+
 type Cache interface {
 	Checksum() string
 	Class() string

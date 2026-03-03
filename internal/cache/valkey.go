@@ -142,7 +142,7 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		vCache := cache.(*ValkeyCache)
 		vCache.mu.Lock()
 		vCache.uncycled = opts.Uncycled
-		if opts.TTL != nil && vCache.ttl != *opts.TTL {
+		if opts.TTL != nil && vCache.ttl != *opts.TTL && *opts.TTL >= minTTL {
 			vCache.ttl = *opts.TTL
 		}
 		vCache.mu.Unlock()
@@ -153,7 +153,8 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ttl := m.ttl
-	if opts.TTL != nil {
+	// only accept TTLs greater than 5 second
+	if opts.TTL != nil && *opts.TTL >= minTTL {
 		ttl = *opts.TTL
 	}
 	cache := &ValkeyCache{
