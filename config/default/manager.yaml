@@ -109,14 +109,4 @@ metadata:
   namespace: system
 data:
   config.yaml: |
-    backendDefault:
-      serverImage: k3d-registry:5000/kdex-tech/kdex-themeserver:latest
-      serverImagePullPolicy: Always
-
-    defaultImageRegistry:
-      host: k3d-registry:5000
-      insecure: true
-
-    defaultNpmRegistry:
-      host: npm-registry-verdaccio.npm-registry:4873
-      insecure: true
+    # leave blank
