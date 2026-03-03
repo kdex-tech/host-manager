@@ -78,6 +78,9 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string) func(http
 				return
 			}
 
+			// TODO: now that refresh tokens are supported, we should implement auto extension of login session by
+			// checking if the token is close to expiration and if so, reissuing it.
+
 			// Inject authContext into context
 			ctx := SetAuthContext(r.Context(), authContext)
 			next.ServeHTTP(w, r.WithContext(ctx))
