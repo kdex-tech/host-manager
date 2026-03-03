@@ -508,7 +508,7 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 					}
 
 					secret := &corev1.Secret{}
-					if err := r.Client.Get(ctx, client.ObjectKey{
+					if err := r.Get(ctx, client.ObjectKey{
 						Namespace: namespace,
 						Name:      packageReference.SecretRef.Name,
 					}, secret); err != nil {
