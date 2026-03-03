@@ -5,7 +5,7 @@ package controller
 // +kubebuilder:rbac:groups=batch,resources=jobs,                                       verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,                                  verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,                                        verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=secrets,                                     verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,                                     verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,                                    verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,                             verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,             verbs=get;list;watch;create;update;patch;delete
