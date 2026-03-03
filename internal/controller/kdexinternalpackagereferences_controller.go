@@ -501,11 +501,19 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 			}
 
 			for _, packageReference := range ipr.Spec.PackageReferences {
-				// get secret for packageReference
+				if packageReference.SecretRef == nil {
+					continue
+				}
+
+				namespace := ipr.Namespace
+				if packageReference.SecretRef.Namespace != "" {
+					namespace = packageReference.SecretRef.Namespace
+				}
+
 				secret := &corev1.Secret{}
 				if err := r.Client.Get(ctx, client.ObjectKey{
-					Namespace: ipr.Namespace,
-					Name:      packageReference.Name,
+					Namespace: namespace,
+					Name:      packageReference.SecretRef.Name,
 				}, secret); err != nil {
 					return err
 				}
