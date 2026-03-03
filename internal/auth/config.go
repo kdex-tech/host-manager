@@ -29,9 +29,11 @@ type AuthClient struct {
 type Config struct {
 	ActivePair            *keys.KeyPair
 	AnonymousEntitlements []string
+	AutoExtendSession     bool
 	Clients               map[string]AuthClient
 	CookieName            string
 	KeyPairs              *keys.KeyPairs
+	MaxSessionAge         time.Duration
 	OIDC                  struct {
 		BlockKey     string
 		ClientID     string
@@ -41,11 +43,9 @@ type Config struct {
 		RedirectURL  string
 		Scopes       []string
 	}
-	Signer                sign.Signer
-	TokenTTL              time.Duration
-	AutoExtendSession     bool
-	MaxSessionAge         time.Duration
-	RefreshTokenTTL       time.Duration
+	RefreshTokenTTL time.Duration
+	Signer          sign.Signer
+	TokenTTL        time.Duration
 }
 
 func NewConfig(
@@ -79,7 +79,7 @@ func NewConfig(
 		cfg.KeyPairs = keyPairs
 		cfg.ActivePair = keyPairs.ActiveKey()
 		cfg.AutoExtendSession = true
-		cfg.MaxSessionAge = 24 * time.Hour    // Default 24h
+		cfg.MaxSessionAge = 24 * time.Hour        // Default 24h
 		cfg.RefreshTokenTTL = 30 * 24 * time.Hour // Default 30d
 
 		ttlString := "1h"
