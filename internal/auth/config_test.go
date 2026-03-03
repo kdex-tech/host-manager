@@ -552,7 +552,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 			},
 			assertions: func(t *testing.T, got *Config, gotErr error) {
 				mux := http.NewServeMux()
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				assert.NotNil(t, handler)
 				assert.True(t, mux == handler)
 			},
@@ -567,7 +567,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 			},
 			assertions: func(t *testing.T, got *Config, gotErr error) {
 				mux := http.NewServeMux()
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				assert.NotNil(t, handler)
 				assert.True(t, mux != handler)
 			},
@@ -585,7 +585,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 				handler.ServeHTTP(w, r)
@@ -605,7 +605,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 				r.Header.Set("Authorization", "Bearer foo")
@@ -627,7 +627,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 				r.Header.Set("Authorization", "Bearer foo bar")
@@ -649,7 +649,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 				r.Header.Set("Cookie", "auth_token=foo")
@@ -671,7 +671,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 
@@ -701,7 +701,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 
@@ -740,7 +740,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
 				}))
-				handler := got.AddAuthentication(mux)
+				handler := got.AddAuthentication(mux, nil)
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 

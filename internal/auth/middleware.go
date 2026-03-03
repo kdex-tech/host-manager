@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -13,7 +14,7 @@ import (
 // It injects the claims into the request context if the token is valid.
 // If the Header is present but invalid, it returns 401 Unauthorized.
 // If the Header is missing, it proceeds without claims (anonymous access).
-func WithAuthentication(publicKey crypto.PublicKey, cookieName string) func(http.Handler) http.Handler {
+func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger *Exchanger, autoExtend bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log := logf.FromContext(r.Context())
@@ -58,17 +59,68 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string) func(http
 				return publicKey, nil
 			})
 
+			if (err != nil || !token.Valid) && authSource == "cookie" && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
+				// Token is invalid (e.g. expired), try to refresh it
+				refreshCookie, cerr := r.Cookie(cookieName + "_refresh")
+				if cerr == nil && refreshCookie.Value != "" {
+					ts, rerr := exchanger.RedeemRefreshToken(r.Context(), refreshCookie.Value, "")
+					if rerr == nil {
+						// Update cookies
+						http.SetCookie(w, &http.Cookie{
+							Name:     cookieName,
+							Value:    ts.AccessToken,
+							Path:     "/",
+							HttpOnly: true,
+							Secure:   r.URL.Scheme == "https",
+							SameSite: http.SameSiteLaxMode,
+						})
+						if ts.RefreshToken != "" {
+							http.SetCookie(w, &http.Cookie{
+								Name:     cookieName + "_refresh",
+								Value:    ts.RefreshToken,
+								Path:     "/",
+								HttpOnly: true,
+								Secure:   r.URL.Scheme == "https",
+								SameSite: http.SameSiteLaxMode,
+							})
+						}
+
+						// Update authContext for the current request
+						token, err = jwt.ParseWithClaims(ts.AccessToken, &authContext, func(token *jwt.Token) (any, error) {
+							return publicKey, nil
+						})
+						if err == nil && token.Valid {
+							log.Info("Token refreshed after expiry")
+						}
+					}
+				}
+			}
+
 			if err != nil || !token.Valid {
 				log.Error(err, "Failed to parse JWT")
 
 				if authSource == "cookie" {
 					// Clear the cookie
 					http.SetCookie(w, &http.Cookie{
-						Name:   cookieName,
-						Value:  "",
-						Path:   "/",
-						MaxAge: -1,
+						Name:     cookieName,
+						Value:    "",
+						Path:     "/",
+						MaxAge:   -1,
+						HttpOnly: true,
+						Secure:   r.URL.Scheme == "https",
+						SameSite: http.SameSiteLaxMode,
 					})
+					// Also clear refresh token if present
+					http.SetCookie(w, &http.Cookie{
+						Name:     cookieName + "_refresh",
+						Value:    "",
+						Path:     "/",
+						MaxAge:   -1,
+						HttpOnly: true,
+						Secure:   r.URL.Scheme == "https",
+						SameSite: http.SameSiteLaxMode,
+					})
+
 					// Redirect to root
 					http.Redirect(w, r, "/", http.StatusSeeOther)
 					return
@@ -78,8 +130,47 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string) func(http
 				return
 			}
 
-			// TODO: now that refresh tokens are supported, we should implement auto extension of login session by
-			// checking if the token is close to expiration and if so, reissuing it.
+			if autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() && authSource == "cookie" {
+				exp, err := authContext.GetExpirationTime()
+				if err == nil && exp != nil && time.Until(exp.Time) < 10*time.Minute {
+					// Try to refresh
+					refreshCookie, err := r.Cookie(cookieName + "_refresh")
+					if err == nil && refreshCookie.Value != "" {
+						ts, err := exchanger.RedeemRefreshToken(r.Context(), refreshCookie.Value, "")
+						if err == nil {
+							// Update cookies
+							http.SetCookie(w, &http.Cookie{
+								Name:     cookieName,
+								Value:    ts.AccessToken,
+								Path:     "/",
+								HttpOnly: true,
+								Secure:   r.URL.Scheme == "https",
+								SameSite: http.SameSiteLaxMode,
+							})
+							if ts.RefreshToken != "" {
+								http.SetCookie(w, &http.Cookie{
+									Name:     cookieName + "_refresh",
+									Value:    ts.RefreshToken,
+									Path:     "/",
+									HttpOnly: true,
+									Secure:   r.URL.Scheme == "https",
+									SameSite: http.SameSiteLaxMode,
+								})
+							}
+
+							// Update authContext for the current request
+							newToken, err := jwt.ParseWithClaims(ts.AccessToken, &authContext, func(token *jwt.Token) (any, error) {
+								return publicKey, nil
+							})
+							if err == nil && newToken.Valid {
+								log.Info("Token refreshed")
+							}
+						} else {
+							log.Error(err, "Failed to refresh token")
+						}
+					}
+				}
+			}
 
 			// Inject authContext into context
 			ctx := SetAuthContext(r.Context(), authContext)

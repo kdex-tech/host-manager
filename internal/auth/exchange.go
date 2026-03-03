@@ -41,17 +41,19 @@ type Exchanger struct {
 	oidcVerifier      *oidc.IDTokenVerifier
 	refreshTokenCache cache.Cache
 	refreshTokenTTL   time.Duration
+	maxSessionAge     time.Duration
 	sp                InternalIdentityProvider
 }
 
 // RefreshTokenClaims holds the data stored inside a refresh token entry in the cache.
 type RefreshTokenClaims struct {
-	AuthMethod AuthMethod `json:"auth_method"`
-	ClientID   string     `json:"cid"`
-	ExpiresAt  int64      `json:"exp"`
-	IssuedAt   int64      `json:"iat"`
-	Scope      string     `json:"scp"`
-	Subject    string     `json:"sub"`
+	AuthMethod       AuthMethod `json:"auth_method"`
+	ClientID         string     `json:"cid"`
+	ExpiresAt        int64      `json:"exp"`
+	IssuedAt         int64      `json:"iat"`
+	OriginalIssuedAt int64      `json:"oiat"`
+	Scope            string     `json:"scp"`
+	Subject          string     `json:"sub"`
 }
 
 // TokenSet is the result of any successful token minting operation.
@@ -69,15 +71,15 @@ func NewExchanger(
 	cacheManager cache.CacheManager,
 	sp InternalIdentityProvider,
 ) (*Exchanger, error) {
-	refreshTokenTTL := 30 * 24 * time.Hour
 	ex := &Exchanger{
 		config:          cfg,
-		refreshTokenTTL: refreshTokenTTL,
+		refreshTokenTTL: cfg.RefreshTokenTTL,
+		maxSessionAge:   cfg.MaxSessionAge,
 		sp:              sp,
 	}
 	if cacheManager != nil {
 		ex.refreshTokenCache = cacheManager.GetCache("refresh-tokens", cache.CacheOptions{
-			TTL:      new(refreshTokenTTL),
+			TTL:      &ex.refreshTokenTTL,
 			Uncycled: true,
 		})
 	}
@@ -239,6 +241,9 @@ func (e *Exchanger) IsRefreshTokenEnabled() bool {
 func (e *Exchanger) createRefreshToken(ctx context.Context, claims RefreshTokenClaims) (string, error) {
 	now := time.Now()
 	claims.IssuedAt = now.Unix()
+	if claims.OriginalIssuedAt == 0 {
+		claims.OriginalIssuedAt = claims.IssuedAt
+	}
 	claims.ExpiresAt = now.Add(e.refreshTokenTTL).Unix()
 
 	payload, err := json.Marshal(claims)
@@ -530,6 +535,12 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("refresh token expired")
 	}
 
+	// Validate absolute session timeout
+	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
+		_ = e.refreshTokenCache.Delete(ctx, tokenID)
+		return TokenSet{}, fmt.Errorf("session absolute timeout reached")
+	}
+
 	// Validate the client matches what was issued.
 	if claims.ClientID != clientID {
 		return TokenSet{}, fmt.Errorf("refresh token was not issued to this client")
@@ -548,10 +559,11 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 
 	// Rotate: issue a new refresh token.
 	ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
-		AuthMethod: claims.AuthMethod,
-		ClientID:   claims.ClientID,
-		Scope:      claims.Scope,
-		Subject:    claims.Subject,
+		AuthMethod:       claims.AuthMethod,
+		ClientID:         claims.ClientID,
+		OriginalIssuedAt: claims.OriginalIssuedAt,
+		Scope:            claims.Scope,
+		Subject:          claims.Subject,
 	})
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to rotate refresh token: %w", err)

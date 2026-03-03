@@ -484,7 +484,7 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wrappedMux := hh.authConfig.AddAuthentication(mux)
+	wrappedMux := hh.authConfig.AddAuthentication(mux, hh.authExchanger)
 	wrappedMux = hh.DesignMiddleware(wrappedMux)
 	wrappedMux.ServeHTTP(w, r)
 }

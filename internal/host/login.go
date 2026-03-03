@@ -96,6 +96,17 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	if ts.RefreshToken != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     hh.authConfig.CookieName + "_refresh",
+			Value:    ts.RefreshToken,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   hh.isSecure(),
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
 	http.Redirect(w, r, returnURL, http.StatusSeeOther)
 }
 
@@ -105,6 +116,16 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 	// Clear local cookies
 	http.SetCookie(w, &http.Cookie{
 		Name:     hh.authConfig.CookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1, // Tells browser to delete immediately
+		HttpOnly: true,
+		Secure:   hh.isSecure(),
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     hh.authConfig.CookieName + "_refresh",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1, // Tells browser to delete immediately

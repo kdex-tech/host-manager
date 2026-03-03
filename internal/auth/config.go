@@ -41,8 +41,11 @@ type Config struct {
 		RedirectURL  string
 		Scopes       []string
 	}
-	Signer   sign.Signer
-	TokenTTL time.Duration
+	Signer                sign.Signer
+	TokenTTL              time.Duration
+	AutoExtendSession     bool
+	MaxSessionAge         time.Duration
+	RefreshTokenTTL       time.Duration
 }
 
 func NewConfig(
@@ -75,6 +78,9 @@ func NewConfig(
 
 		cfg.KeyPairs = keyPairs
 		cfg.ActivePair = keyPairs.ActiveKey()
+		cfg.AutoExtendSession = true
+		cfg.MaxSessionAge = 24 * time.Hour    // Default 24h
+		cfg.RefreshTokenTTL = 30 * 24 * time.Hour // Default 30d
 
 		ttlString := "1h"
 		if auth.JWT.TokenTTL != "" {
@@ -131,11 +137,11 @@ func NewConfig(
 	return cfg, nil
 }
 
-func (c *Config) AddAuthentication(mux http.Handler) http.Handler {
+func (c *Config) AddAuthentication(mux http.Handler, exchanger *Exchanger) http.Handler {
 	if !c.IsAuthEnabled() {
 		return mux
 	}
-	return WithAuthentication(c.ActivePair.Private.Public(), c.CookieName)(mux)
+	return WithAuthentication(c.ActivePair.Private.Public(), c.CookieName, exchanger, c.AutoExtendSession)(mux)
 }
 
 func (c *Config) IsAuthEnabled() bool {
