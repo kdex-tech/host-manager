@@ -1,5 +1,7 @@
 package auth
 
 const (
-	TRUE = "true"
+	COOKIE = "cookie"
+	HTTPS  = "https"
+	TRUE   = "true"
 )

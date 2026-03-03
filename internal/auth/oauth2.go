@@ -195,7 +195,7 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 		Value:    localToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.URL.Scheme == "https",
+		Secure:   r.URL.Scheme == HTTPS,
 		SameSite: http.SameSiteLaxMode,
 	})
 

@@ -14,6 +14,8 @@ import (
 // It injects the claims into the request context if the token is valid.
 // If the Header is present but invalid, it returns 401 Unauthorized.
 // If the Header is missing, it proceeds without claims (anonymous access).
+//
+//nolint:gocyclo
 func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger *Exchanger, autoExtend bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +46,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 					return
 				}
 				tokenString = cookie.Value
-				authSource = "cookie"
+				authSource = COOKIE
 			}
 
 			authContext := AuthContext{}
@@ -59,7 +61,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return publicKey, nil
 			})
 
-			if (err != nil || !token.Valid) && authSource == "cookie" && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
+			if (err != nil || !token.Valid) && authSource == COOKIE && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				// Token is invalid (e.g. expired), try to refresh it
 				refreshCookie, cerr := r.Cookie(cookieName + "_refresh")
 				if cerr == nil && refreshCookie.Value != "" {
@@ -71,7 +73,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 							Value:    ts.AccessToken,
 							Path:     "/",
 							HttpOnly: true,
-							Secure:   r.URL.Scheme == "https",
+							Secure:   r.URL.Scheme == HTTPS,
 							SameSite: http.SameSiteLaxMode,
 						})
 						if ts.RefreshToken != "" {
@@ -80,7 +82,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 								Value:    ts.RefreshToken,
 								Path:     "/",
 								HttpOnly: true,
-								Secure:   r.URL.Scheme == "https",
+								Secure:   r.URL.Scheme == HTTPS,
 								SameSite: http.SameSiteLaxMode,
 							})
 						}
@@ -99,7 +101,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 			if err != nil || !token.Valid {
 				log.Error(err, "Failed to parse JWT")
 
-				if authSource == "cookie" {
+				if authSource == COOKIE {
 					// Clear the cookie
 					http.SetCookie(w, &http.Cookie{
 						Name:     cookieName,
@@ -107,7 +109,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 						Path:     "/",
 						MaxAge:   -1,
 						HttpOnly: true,
-						Secure:   r.URL.Scheme == "https",
+						Secure:   r.URL.Scheme == HTTPS,
 						SameSite: http.SameSiteLaxMode,
 					})
 					// Also clear refresh token if present
@@ -117,7 +119,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 						Path:     "/",
 						MaxAge:   -1,
 						HttpOnly: true,
-						Secure:   r.URL.Scheme == "https",
+						Secure:   r.URL.Scheme == HTTPS,
 						SameSite: http.SameSiteLaxMode,
 					})
 
@@ -130,7 +132,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			if autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() && authSource == "cookie" {
+			if autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() && authSource == COOKIE {
 				exp, err := authContext.GetExpirationTime()
 				if err == nil && exp != nil && time.Until(exp.Time) < 10*time.Minute {
 					// Try to refresh
@@ -144,7 +146,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 								Value:    ts.AccessToken,
 								Path:     "/",
 								HttpOnly: true,
-								Secure:   r.URL.Scheme == "https",
+								Secure:   r.URL.Scheme == HTTPS,
 								SameSite: http.SameSiteLaxMode,
 							})
 							if ts.RefreshToken != "" {
@@ -153,7 +155,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 									Value:    ts.RefreshToken,
 									Path:     "/",
 									HttpOnly: true,
-									Secure:   r.URL.Scheme == "https",
+									Secure:   r.URL.Scheme == HTTPS,
 									SameSite: http.SameSiteLaxMode,
 								})
 							}
