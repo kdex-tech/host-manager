@@ -566,10 +566,6 @@ func (hh *HostHandler) SetHost(
 		}),
 	}
 
-	// TODO: Map the functions to a reverse proxy handler by their base path
-	// Note that once they are mapped, the sniffer will no longer work for those paths so we might need an alternative
-	// way to modify the OpenAPI spec for the functions.
-
 	hh.mu.Unlock()
 	hh.RebuildMux()
 }
