@@ -487,6 +487,11 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 
 			var npmrcContent strings.Builder
 
+			if !strings.Contains(npmRegistry, "://") {
+				// add https://
+				npmRegistry = "https://" + npmRegistry
+			}
+
 			fmt.Fprintf(&npmrcContent, "registry=%s\n", npmRegistry)
 
 			npmSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "npm" })
