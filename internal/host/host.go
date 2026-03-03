@@ -162,9 +162,13 @@ func (hh *HostHandler) GetUtilityPageHandler(name kdexv1alpha1.KDexUtilityPageTy
 }
 
 func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
-	packageReferences := make([]kdexv1alpha1.PackageReference, 0, len(hh.packageReferences)+len(handler.PackageReferences))
-	packageReferences = append(packageReferences, hh.packageReferences...)
-	packageReferences = append(packageReferences, handler.PackageReferences...)
+	packageReferences := make(map[string]kdexv1alpha1.PackageReference, len(hh.packageReferences)+len(handler.PackageReferences))
+	for _, pr := range hh.packageReferences {
+		packageReferences[pr.Name] = pr
+	}
+	for _, pr := range handler.PackageReferences {
+		packageReferences[pr.Name] = pr
+	}
 
 	var buffer bytes.Buffer
 	separator := ""
@@ -175,9 +179,16 @@ func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
 		buffer.WriteString("\n</script>\n")
 
 		buffer.WriteString("<script type=\"module\">\n")
+
+		seen := map[string]bool{}
 		for _, pr := range packageReferences {
+			statement := pr.ToImportStatement()
+			if seen[statement] {
+				continue
+			}
+			seen[statement] = true
 			buffer.WriteString(separator)
-			buffer.WriteString(pr.ToImportStatement())
+			buffer.WriteString(statement)
 			separator = "\n"
 		}
 		buffer.WriteString("\n</script>")
