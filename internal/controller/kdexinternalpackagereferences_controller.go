@@ -501,23 +501,35 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 			}
 
 			for _, packageReference := range ipr.Spec.PackageReferences {
-				if packageReference.SecretRef == nil {
-					continue
+				if packageReference.SecretRef != nil {
+					namespace := ipr.Namespace
+					if packageReference.SecretRef.Namespace != "" {
+						namespace = packageReference.SecretRef.Namespace
+					}
+
+					secret := &corev1.Secret{}
+					if err := r.Client.Get(ctx, client.ObjectKey{
+						Namespace: namespace,
+						Name:      packageReference.SecretRef.Name,
+					}, secret); err != nil {
+						return err
+					}
+					fmt.Fprintf(&npmrcContent, "%s\n", secret.Data[".npmrc"])
 				}
 
-				namespace := ipr.Namespace
-				if packageReference.SecretRef.Namespace != "" {
-					namespace = packageReference.SecretRef.Namespace
-				}
+				if packageReference.Registry != "" {
+					namespace := strings.Split(packageReference.Name, "/")[0]
 
-				secret := &corev1.Secret{}
-				if err := r.Client.Get(ctx, client.ObjectKey{
-					Namespace: namespace,
-					Name:      packageReference.SecretRef.Name,
-				}, secret); err != nil {
-					return err
+					if !strings.HasSuffix(packageReference.Registry, "/") {
+						packageReference.Registry = packageReference.Registry + "/"
+					}
+
+					regEntry := fmt.Sprintf("%s:registry=%s\n", namespace, packageReference.Registry)
+
+					if !strings.Contains(npmrcContent.String(), regEntry) {
+						fmt.Fprint(&npmrcContent, regEntry)
+					}
 				}
-				fmt.Fprintf(&npmrcContent, "%s\n", secret.Data[".npmrc"])
 			}
 
 			secret.StringData = map[string]string{
