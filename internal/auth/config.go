@@ -78,19 +78,37 @@ func NewConfig(
 
 		cfg.KeyPairs = keyPairs
 		cfg.ActivePair = keyPairs.ActiveKey()
-		cfg.AutoExtendSession = true
-		cfg.MaxSessionAge = 24 * time.Hour        // Default 24h
-		cfg.RefreshTokenTTL = 30 * 24 * time.Hour // Default 30d
+		cfg.AutoExtendSession = auth.AutoExtendSession
 
-		ttlString := "1h"
-		if auth.JWT.TokenTTL != "" {
-			ttlString = auth.JWT.TokenTTL
+		maxSessionAgeString := "24h"
+		if auth.MaxSessionAge != "" {
+			maxSessionAgeString = auth.MaxSessionAge
 		}
-		ttl, err := time.ParseDuration(ttlString)
+		maxSessionAge, err := time.ParseDuration(maxSessionAgeString)
 		if err != nil {
 			return nil, err
 		}
-		cfg.TokenTTL = ttl
+		cfg.MaxSessionAge = maxSessionAge
+
+		refreshTokenTTLString := "12h"
+		if auth.RefreshTokenTTL != "" {
+			refreshTokenTTLString = auth.RefreshTokenTTL
+		}
+		refreshTokenTTL, err := time.ParseDuration(refreshTokenTTLString)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RefreshTokenTTL = refreshTokenTTL
+
+		tokenTTLString := "1h"
+		if auth.JWT.TokenTTL != "" {
+			tokenTTLString = auth.JWT.TokenTTL
+		}
+		tokenTTL, err := time.ParseDuration(tokenTTLString)
+		if err != nil {
+			return nil, err
+		}
+		cfg.TokenTTL = tokenTTL
 
 		var mapper *dmapper.Mapper
 		if len(auth.ClaimMappings) > 0 {
@@ -101,7 +119,7 @@ func NewConfig(
 		}
 		signer, err := sign.NewSigner(
 			audience,
-			ttl,
+			tokenTTL,
 			issuer,
 			&cfg.ActivePair.Private,
 			cfg.ActivePair.KeyId,
