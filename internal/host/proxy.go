@@ -14,6 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/dmapper"
+	"github.com/kdex-tech/entitlements"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
@@ -161,8 +162,33 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		},
 	}
 
+	patternMux := http.NewServeMux()
+	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
+
+	for p, item := range fn.Spec.API.Paths {
+		// Use empty handler, we only care about the pattern match
+		patternMux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {})
+
+		for _, method := range []string{"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"} {
+			op := item.GetOp(method)
+			if op != nil && op.Security != nil {
+				raw := make([]kdexv1alpha1.SecurityRequirement, 0, len(*op.Security))
+				for _, s := range *op.Security {
+					raw = append(raw, kdexv1alpha1.SecurityRequirement(s))
+				}
+				parsedRequirements[method+" "+p] = hh.authChecker.ParseRequirements(raw)
+			}
+		}
+	}
+
+	fh := &KDexFunctionHandler{
+		Function:           fn,
+		parsedRequirements: parsedRequirements,
+		patternMux:         patternMux,
+	}
+
 	// Capture the start time and log the completion
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fh.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		defer func() {
 			code := http.StatusOK
@@ -186,22 +212,35 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			"target", target.String(),
 		)
 
-		if shouldReturn := hh.handleAuth(
-			r,
-			w,
-			"functions",
-			fn.Spec.API.BasePath,
-			functionCallRequirements(r, fn),
-		); shouldReturn {
-			return
+		if hh.authChecker != nil {
+			_, pattern := fh.patternMux.Handler(r)
+			key := r.Method + " " + pattern
+			var reqs entitlements.ParsedRequirements
+			if pr, ok := fh.parsedRequirements[key]; ok {
+				reqs = pr
+			} else {
+				// Default to empty requirements (allows access if identity matches)
+				reqs = hh.authChecker.ParseRequirements(nil)
+			}
+
+			parsedUserTokens := hh.authChecker.GetParsedEntitlements(r.Context())
+			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
+				"functions", fn.Spec.API.BasePath, parsedUserTokens, reqs)
+
+			if err != nil || !authorized {
+				if err != nil {
+					hh.log.Error(err, "authorization check failed", "function", fn.Name)
+				} else {
+					hh.log.V(1).Info("unauthorized access attempt", "function", fn.Name)
+				}
+				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
+				return
+			}
 		}
 
 		// Execute the proxy
 		proxy.ServeHTTP(w, r)
 	})
 
-	return &KDexFunctionHandler{
-		Function: fn,
-		Handler:  handler,
-	}
+	return fh
 }

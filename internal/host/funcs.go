@@ -11,7 +11,6 @@ import (
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
-	kh "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -180,53 +179,3 @@ func filterFromQuery(queryParams url.Values) ko.Filter {
 	return filter
 }
 
-func functionCallRequirements(
-	r *http.Request, fn *kdexv1alpha1.KDexFunction,
-) []kdexv1alpha1.SecurityRequirement {
-	var requirements []kdexv1alpha1.SecurityRequirement
-
-	routes := []string{}
-	for path, pathItem := range fn.Spec.API.Paths {
-		if pathItem.Connect != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodConnect, path))
-		}
-		if pathItem.Delete != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodDelete, path))
-		}
-		if pathItem.Get != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodGet, path))
-		}
-		if pathItem.Head != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodHead, path))
-		}
-		if pathItem.Options != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodOptions, path))
-		}
-		if pathItem.Patch != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodPatch, path))
-		}
-		if pathItem.Post != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodPost, path))
-		}
-		if pathItem.Put != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodPut, path))
-		}
-		if pathItem.Trace != nil {
-			routes = append(routes, fmt.Sprintf("%s %s", http.MethodTrace, path))
-		}
-	}
-
-	pattern, _ := kh.DiscoverPattern(routes, r)
-	if pattern != "" {
-		parts := strings.Split(pattern, " ")
-		pathItem := fn.Spec.API.Paths[parts[1]]
-		op := pathItem.GetOp(parts[0])
-		if op != nil && op.Security != nil {
-			for _, s := range *op.Security {
-				requirements = append(requirements, kdexv1alpha1.SecurityRequirement(s))
-			}
-		}
-	}
-
-	return requirements
-}

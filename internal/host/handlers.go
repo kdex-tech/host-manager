@@ -142,6 +142,91 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 	}, registeredPaths)
 }
 
+func (hh *HostHandler) checkHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
+	const path = "/-/check"
+	// Apply Authentication Middleware
+	handler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.CheckHandler), hh.authExchanger)
+	mux.Handle("POST "+path, handler)
+
+	hh.registerPath(path, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: path,
+			Paths: map[string]ko.PathItem{
+				path: {
+					Description: "Enables checking multiple resource entitlements for the current user in a single request.",
+					Post: &openapi.Operation{
+						Description: "POST a list of resource identifiers to check authorization.",
+						OperationID: "check-post",
+						RequestBody: &openapi.RequestBodyRef{
+							Value: &openapi.RequestBody{
+								Content: openapi.Content{
+									"application/json": &openapi.MediaType{
+										Schema: &openapi.SchemaRef{
+											Value: &openapi.Schema{
+												Properties: openapi.Schemas{
+													"checks": &openapi.SchemaRef{
+														Value: &openapi.Schema{
+															Items: &openapi.SchemaRef{
+																Value: &openapi.Schema{
+																	Type: &openapi.Types{openapi.TypeString},
+																},
+															},
+															Type: &openapi.Types{openapi.TypeArray},
+														},
+													},
+												},
+												Required: []string{"checks"},
+												Type:     &openapi.Types{openapi.TypeObject},
+											},
+										},
+									},
+								},
+								Description: "Check request body containing resource identifiers",
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"passed": &openapi.SchemaRef{
+												Value: &openapi.Schema{
+													Items: &openapi.SchemaRef{
+														Value: &openapi.Schema{
+															Type: &openapi.Types{openapi.TypeString},
+														},
+													},
+													Type: &openapi.Types{openapi.TypeArray},
+												},
+											},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("Subset of resource identifiers that passed the check"),
+							}),
+							openapi.WithStatus(400, &openapi.ResponseRef{
+								Ref: "#/components/responses/BadRequest",
+							}),
+							openapi.WithStatus(401, &openapi.ResponseRef{
+								Ref: "#/components/responses/Unauthorized",
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Check Entitlements",
+						Tags:    []string{"system", "auth"},
+					},
+					Summary: "Check multiple entitlements",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+}
+
 func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	if !hh.authConfig.IsAuthEnabled() {
 		return

@@ -60,6 +60,7 @@ type HostHandler struct {
 	defaultLanguage           string
 	favicon                   *ico.Ico
 	functions                 []kdexv1alpha1.KDexFunction
+	functionHandlers          map[string]*KDexFunctionHandler
 	host                      *kdexv1alpha1.KDexHostSpec
 	importmap                 string
 	log                       logr.Logger
@@ -106,6 +107,7 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 		defaultLanguage:           "en",
 		favicon:                   nil,
 		functions:                 []kdexv1alpha1.KDexFunction{},
+		functionHandlers:          map[string]*KDexFunctionHandler{},
 		host:                      nil,
 		importmap:                 "",
 		log:                       log,
@@ -158,8 +160,10 @@ type functionHandler struct {
 }
 
 type KDexFunctionHandler struct {
-	Function *kdexv1alpha1.KDexFunction
-	Handler  http.Handler
+	Function           *kdexv1alpha1.KDexFunction
+	Handler            http.Handler
+	parsedRequirements map[string]entitlements.ParsedRequirements
+	patternMux         *http.ServeMux
 }
 
 func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

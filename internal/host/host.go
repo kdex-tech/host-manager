@@ -360,14 +360,18 @@ func (hh *HostHandler) RebuildMux() {
 	}
 
 	functionHandlers := []functionHandler{}
+	actualHandlers := map[string]*KDexFunctionHandler{}
 	if hh.issuerAddress() != "" {
 		for _, f := range hh.functions {
 			if f.Status.State != kdexv1alpha1.KDexFunctionStateReady {
 				continue
 			}
+			h := hh.reverseProxyHandler(&f, hh.issuerAddress())
+			fh := h.(*KDexFunctionHandler)
+			actualHandlers[f.Spec.API.BasePath] = fh
 			functionHandlers = append(functionHandlers, functionHandler{
 				basePath: f.Spec.API.BasePath,
-				handler:  hh.reverseProxyHandler(&f, hh.issuerAddress()),
+				handler:  fh,
 			})
 		}
 	}
@@ -390,6 +394,7 @@ func (hh *HostHandler) RebuildMux() {
 
 	hh.Translations = *newTranslations
 	hh.registeredPaths = registeredPaths
+	hh.functionHandlers = actualHandlers
 	hh.Mux = mux
 	hh.mu.Unlock()
 }
@@ -636,6 +641,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	mux := http.NewServeMux()
 
 	hh.authorizeHandler(mux, registeredPaths)
+	hh.checkHandler(mux, registeredPaths)
 	hh.discoveryHandler(mux, registeredPaths)
 	hh.faviconHandler(mux, registeredPaths)
 	hh.jwksHandler(mux, registeredPaths)
@@ -648,8 +654,6 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.stateHandler(mux, registeredPaths)
 	hh.tokenHandler(mux, registeredPaths)
 	hh.translationHandler(mux, registeredPaths)
-
-	// TODO: implement a check handler
 
 	return mux
 }
