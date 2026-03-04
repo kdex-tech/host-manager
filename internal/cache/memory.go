@@ -244,7 +244,16 @@ func (c *InMemoryBitSet) getBit(data []byte, offset int64) bool {
 func (c *InMemoryBitSet) setBit(data []byte, offset int64, value bool) []byte {
 	byteIdx := offset / 8
 	if byteIdx >= int64(len(data)) {
-		newData := make([]byte, byteIdx+1)
+		// Use exponential growth to reduce allocations (O(log N) instead of O(N))
+		newLen := byteIdx + 1
+		newCap := int64(cap(data))
+		if newCap == 0 {
+			newCap = 8 // start with a small buffer
+		}
+		for newCap < newLen {
+			newCap *= 2
+		}
+		newData := make([]byte, newLen, newCap)
 		copy(newData, data)
 		data = newData
 	}

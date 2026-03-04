@@ -9,6 +9,17 @@ import (
 	"github.com/valkey-io/valkey-go"
 )
 
+var (
+	// Lua script to perform GETBIT only if the key exists.
+	// Returns -1 if key does not exist, otherwise returns the bit (0 or 1).
+	bitGetScript = valkey.NewLuaScript(`
+		if redis.call("EXISTS", KEYS[1]) == 1 then
+			return redis.call("GETBIT", KEYS[1], ARGV[1])
+		end
+		return -1
+	`)
+)
+
 type ValkeyCache struct {
 	client          valkey.Client
 	class           string
@@ -196,33 +207,30 @@ func (s *ValkeyBitSet) Set(ctx context.Context, key string, offset int64, value 
 		val = 1
 	}
 
-	cmd := s.client.B().Setbit().Key(prefix + key).Offset(offset).Value(val).Build()
-	if err := s.client.Do(ctx, cmd).Error(); err != nil {
-		return err
+	// Atomic Set + Expire via Multi (single RTT)
+	setCmd := s.client.B().Setbit().Key(prefix + key).Offset(offset).Value(val).Build()
+	expireCmd := s.client.B().Pexpire().Key(prefix + key).Milliseconds(s.ttl.Milliseconds()).Build()
+
+	for _, res := range s.client.DoMulti(ctx, setCmd, expireCmd) {
+		if err := res.Error(); err != nil {
+			return err
+		}
 	}
 
-	// Set expiration on the key. Valkey SETBIT does not support PX/EX.
-	expireCmd := s.client.B().Pexpire().Key(prefix + key).Milliseconds(s.ttl.Milliseconds()).Build()
-	return s.client.Do(ctx, expireCmd).Error()
+	return nil
 }
 
 func (s *ValkeyBitSet) getBit(ctx context.Context, fullKey string, offset int64) (bool, bool, error) {
-	// In Valkey, to know if the key exists, we check EXISTS first.
-	// GETBIT returns 0 for non-existent keys, which is ambiguous.
-	existsCmd := s.client.B().Exists().Key(fullKey).Build()
-	count, err := s.client.Do(ctx, existsCmd).AsInt64()
+	// Single RTT via Lua script
+	val, err := bitGetScript.Exec(ctx, s.client, []string{fullKey}, []string{fmt.Sprint(offset)}).AsInt64()
 	if err != nil {
 		return false, false, err
 	}
-	if count == 0 {
-		return false, false, nil
+
+	if val == -1 {
+		return false, false, nil // Key does not exist
 	}
 
-	cmd := s.client.B().Getbit().Key(fullKey).Offset(offset).Build()
-	val, err := s.client.Do(ctx, cmd).AsInt64()
-	if err != nil {
-		return false, true, err
-	}
 	return val == 1, true, nil
 }
 
