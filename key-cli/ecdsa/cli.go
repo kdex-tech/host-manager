@@ -26,17 +26,17 @@ func main() {
 
 	// 3. Wrap it in a PEM block
 	block := &pem.Block{
-		Type:  "PRIVATE KEY",
 		Bytes: derBytes,
 		Headers: map[string]string{
 			"KID": activeKeyPair.KeyId,
 		},
+		Type: "EC PRIVATE KEY",
 	}
 
 	pemString := string(pem.EncodeToMemory(block))
 
 	// 5. Print to console for easy copy-pasting into your test mock
-	fmt.Println("--- COPY THIS RSA PRIVATE KEY INTO YOUR TEST ---")
+	fmt.Println("--- COPY THIS ECDSA PRIVATE KEY ---")
 	fmt.Println(pemString)
 	fmt.Printf("KID for this key: %s\n", activeKeyPair.KeyId)
 }
