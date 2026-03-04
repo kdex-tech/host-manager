@@ -21,17 +21,6 @@ type Cache interface {
 	Uncycled() bool
 }
 
-type BitSet interface {
-	Checksum() string
-	Class() string
-	Delete(ctx context.Context, key string) error
-	Get(ctx context.Context, key string, offset int64) (bool, bool, bool, error)
-	Host() string
-	Set(ctx context.Context, key string, offset int64, value bool) error
-	TTL() time.Duration
-	Uncycled() bool
-}
-
 type CacheOptions struct {
 	TTL      *time.Duration
 	Uncycled bool
@@ -39,7 +28,6 @@ type CacheOptions struct {
 
 type CacheManager interface {
 	Cycle(checksum string, force bool) error
-	GetBitSet(class string, opts CacheOptions) BitSet
 	GetCache(class string, opts CacheOptions) Cache
 }
 
