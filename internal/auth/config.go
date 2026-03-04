@@ -54,7 +54,7 @@ func NewConfig(
 	auth *kdexv1alpha1.Auth,
 	authClientLoader func() (map[string]AuthClient, error),
 	keyLoader func() (*keys.KeyPairs, error),
-	oidcConfigLoader func() (string, string, string, error),
+	oidcClientConfigLoader func() (*OIDCClientConfig, error),
 	audience string,
 	issuer string,
 	devMode bool,
@@ -139,24 +139,27 @@ func NewConfig(
 		cfg.Clients = clients
 
 		if auth.OIDCProvider != nil && auth.OIDCProvider.OIDCProviderURL != "" {
-			clientID, clientSecret, blockKey, err := oidcConfigLoader()
+			oidcClientConfig, err := oidcClientConfigLoader()
 			if err != nil {
 				return nil, err
 			}
 
-			cfg.OIDC.BlockKey = getOrGenerate(blockKey)
-			cfg.OIDC.ClientID = clientID
-			cfg.OIDC.ClientSecret = clientSecret
+			cfg.OIDC.BlockKey = getOrGenerate(oidcClientConfig.BlockKey)
+			cfg.OIDC.ClientID = oidcClientConfig.ClientID
+			cfg.OIDC.ClientSecret = oidcClientConfig.ClientSecret
+			cfg.OIDC.Name = oidcClientConfig.Name
 			cfg.OIDC.ProviderURL = auth.OIDCProvider.OIDCProviderURL
 			cfg.OIDC.RedirectURL = "/-/oauth/callback"
 			cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
 			cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cacheManager, cfg.TokenTTL)
 
-			providerURL, err := url.Parse(cfg.OIDC.ProviderURL)
-			if err != nil {
-				return nil, err
+			if cfg.OIDC.Name == "" {
+				providerURL, err := url.Parse(cfg.OIDC.ProviderURL)
+				if err != nil {
+					return nil, err
+				}
+				cfg.OIDC.Name = providerURL.Host
 			}
-			cfg.OIDC.Name = providerURL.Host
 		}
 	}
 

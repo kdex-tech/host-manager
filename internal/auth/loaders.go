@@ -87,10 +87,17 @@ func AuthClientLoader(secrets kdexv1alpha1.ServiceAccountSecrets) (map[string]Au
 	return clients, nil
 }
 
-func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) (string, string, string, error) {
+type OIDCClientConfig struct {
+	ClientID     string
+	ClientSecret string
+	BlockKey     string
+	Name         string
+}
+
+func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) (*OIDCClientConfig, error) {
 	oidcSecret := secrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "oidc-client" })
 	if oidcSecret == nil {
-		return "", "", "", fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
+		return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
 	}
 
 	clientSecret := string(oidcSecret.Data["client_secret"])
@@ -99,7 +106,7 @@ func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) 
 	}
 
 	if clientSecret == "" {
-		return "", "", "", fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
+		return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
 	}
 
 	clientID := string(oidcSecret.Data["client_id"])
@@ -108,7 +115,7 @@ func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) 
 	}
 
 	if clientID == "" {
-		return "", "", "", fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
+		return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
 	}
 
 	blockKey := string(oidcSecret.Data["block_key"])
@@ -117,8 +124,15 @@ func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) 
 	}
 
 	if blockKey == "" && !devMode {
-		return "", "", "", fmt.Errorf("a 'block_key' or 'block-key' was not found in the OIDC secret, generating a new one is not supported in production")
+		return nil, fmt.Errorf("a 'block_key' or 'block-key' was not found in the OIDC secret, generating a new one is not supported in production")
 	}
 
-	return clientID, clientSecret, blockKey, nil
+	name := string(oidcSecret.Data["name"])
+
+	return &OIDCClientConfig{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		BlockKey:     blockKey,
+		Name:         name,
+	}, nil
 }

@@ -513,7 +513,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 						tt.args.secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "jwt-keys" }),
 						tt.args.devMode)
 				},
-				func() (string, string, string, error) {
+				func() (*OIDCClientConfig, error) {
 					return OIDCConfigLoader(tt.args.secrets, tt.args.devMode)
 				},
 				"audience",
@@ -773,7 +773,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 						tt.args.secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "jwt-keys" }),
 						tt.args.devMode)
 				},
-				func() (string, string, string, error) {
+				func() (*OIDCClientConfig, error) {
 					return OIDCConfigLoader(tt.args.secrets, tt.args.devMode)
 				},
 				"audience",
@@ -837,8 +837,8 @@ func TestConfig_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "", "", "", fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
 					},
 					"audience",
 					"issuer",
@@ -866,8 +866,8 @@ func TestConfig_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "", "", "", fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
 					},
 					"audience",
 					"issuer",
@@ -895,8 +895,8 @@ func TestConfig_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "", "", "", fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
 					},
 					"audience",
 					"issuer",
@@ -924,8 +924,11 @@ func TestConfig_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "bar", "foo", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "bar",
+							ClientSecret: "foo",
+						}, nil
 					},
 					"audience",
 					"issuer",
@@ -959,8 +962,11 @@ func TestConfig_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "bar", "foo", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "bar",
+							ClientSecret: "foo",
+						}, nil
 					},
 					"audience",
 					"issuer",

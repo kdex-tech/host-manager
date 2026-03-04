@@ -321,8 +321,8 @@ func TestNewExchanger(t *testing.T) {
 				func() (*keys.KeyPairs, error) {
 					return keys.GenerateECDSAKeyPair(), nil
 				},
-				func() (string, string, string, error) {
-					return "", "", "", nil
+				func() (*OIDCClientConfig, error) {
+					return nil, nil
 				},
 				"audience",
 				"issuer",
@@ -397,8 +397,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					"http://bad",
@@ -432,8 +435,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -466,8 +472,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -503,8 +512,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -539,8 +551,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -583,8 +598,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -620,8 +638,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -657,8 +678,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,
@@ -697,8 +721,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
-					func() (string, string, string, error) {
-						return "foo", "bar", "", nil
+					func() (*OIDCClientConfig, error) {
+						return &OIDCClientConfig{
+							ClientID:     "foo",
+							ClientSecret: "bar",
+						}, nil
 					},
 					"foo",
 					serverURL,

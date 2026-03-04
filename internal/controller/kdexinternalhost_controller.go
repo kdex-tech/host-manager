@@ -577,7 +577,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				internalHost.Spec.DevMode,
 			)
 		},
-		func() (string, string, string, error) {
+		func() (*auth.OIDCClientConfig, error) {
 			return auth.OIDCConfigLoader(internalHost.Spec.ServiceAccountSecrets, internalHost.Spec.DevMode)
 		},
 		issuer,
