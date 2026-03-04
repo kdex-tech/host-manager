@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/kdex-tech/dmapper"
@@ -39,6 +40,7 @@ type Config struct {
 		ClientID     string
 		ClientSecret string
 		IDTokenStore idtoken.IDTokenStore
+		Name         string
 		ProviderURL  string
 		RedirectURL  string
 		Scopes       []string
@@ -149,6 +151,12 @@ func NewConfig(
 			cfg.OIDC.RedirectURL = "/-/oauth/callback"
 			cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
 			cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cacheManager, cfg.TokenTTL)
+
+			providerURL, err := url.Parse(cfg.OIDC.ProviderURL)
+			if err != nil {
+				return nil, err
+			}
+			cfg.OIDC.Name = providerURL.Host
 		}
 	}
 

@@ -23,11 +23,13 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: when OIDC is enabled show it on the Login screen so that we retain ability to login locally
 
+	authCodeURL := hh.authExchanger.AuthCodeURL(returnURL)
+
 	// If OIDC is configured, force login through it
-	if authCodeURL := hh.authExchanger.AuthCodeURL(returnURL); authCodeURL != "" {
-		http.Redirect(w, r, authCodeURL, http.StatusSeeOther)
-		return
-	}
+	// if authCodeURL != "" {
+	// 	http.Redirect(w, r, authCodeURL, http.StatusSeeOther)
+	// 	return
+	// }
 
 	// Fallback: Local Login Page
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
@@ -36,10 +38,20 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	extras := map[string]any{}
+
+	if authCodeURL != "" {
+		extras["oidc"] = map[string]any{
+			"authCodeURL": authCodeURL,
+			"name":        hh.authConfig.OIDC.Name,
+			"provider":    hh.authConfig.OIDC.ProviderURL,
+		}
+	}
+
 	rendered := hh.renderUtilityPage(
 		kdexv1alpha1.LoginUtilityPageType,
 		l,
-		map[string]any{},
+		extras,
 		&hh.Translations,
 	)
 

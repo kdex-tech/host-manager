@@ -112,6 +112,7 @@ func TestHostHandler_AuthorizeHandler(t *testing.T) {
 					ClientID     string
 					ClientSecret string
 					IDTokenStore idtoken.IDTokenStore
+					Name         string
 					ProviderURL  string
 					RedirectURL  string
 					Scopes       []string
