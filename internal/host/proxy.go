@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,8 +15,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	"github.com/kdex-tech/host-manager/internal/utils"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer string) http.Handler {
@@ -47,9 +51,18 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		mapper,
 	)
 
+	// Downscoped Function Access Token (FAT) Cache
+	tokenCache := hh.cacheManager.GetCache("token", cache.CacheOptions{
+		TTL:      new(5 * time.Minute),
+		Uncycled: true,
+	})
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(preq *httputil.ProxyRequest) {
-			hh.log.V(2).Info("PROXY: modifying request", "url", preq.In.URL)
+			log := logf.FromContext(preq.In.Context())
+
+			log.V(2).Info("PROXY: modifying request", "url", preq.In.URL)
+
 			// 1. Set Target and Host
 			preq.Out.URL.Scheme = target.Scheme
 			preq.Out.URL.Host = target.Host
@@ -84,11 +97,20 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					authContext["headers"] = headers
 				}
 
-				token, err := signer.Sign(jwt.MapClaims(authContext))
-				if err != nil {
-					hh.log.Error(err, "failed to sign token")
-				} else {
+				tokenKey := fmt.Sprintf("%s-%s", fn.Name, utils.Hash(authContext))
+
+				if token, exists, isCurrent, _ := tokenCache.Get(preq.In.Context(), tokenKey); exists && isCurrent {
 					preq.Out.Header.Set("Authorization", "Bearer "+token)
+				} else {
+					token, err := signer.Sign(jwt.MapClaims(authContext))
+					if err != nil {
+						log.Error(err, "failed to sign token")
+					} else {
+						if err := tokenCache.Set(preq.In.Context(), tokenKey, token); err != nil {
+							log.Error(err, "failed to set token in cache")
+						}
+						preq.Out.Header.Set("Authorization", "Bearer "+token)
+					}
 				}
 			} else {
 				preq.Out.Header.Del("Authorization")
@@ -101,7 +123,9 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			preq.SetXForwarded()
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			hh.log.V(2).Info("PROXY: modifying response", "url", resp.Request.URL)
+			log := logf.FromContext(resp.Request.Context())
+
+			log.V(2).Info("PROXY: modifying response", "url", resp.Request.URL)
 			// 5. Rewrite Set-Cookie Domain
 			// This ensures cookies from the FaaS backend are tied to your proxy domain
 			cookies := resp.Header["Set-Cookie"]
@@ -124,7 +148,9 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			IdleConnTimeout:       90 * time.Second,
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			hh.log.Error(err, "PROXY: backend failure", "url", r.URL.String())
+			log := logf.FromContext(r.Context())
+
+			log.Error(err, "PROXY: backend failure", "url", r.URL.String())
 
 			code := http.StatusBadGateway
 			if errors.Is(err, context.DeadlineExceeded) {

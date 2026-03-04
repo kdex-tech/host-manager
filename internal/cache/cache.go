@@ -14,7 +14,7 @@ type Cache interface {
 	Checksum() string
 	Class() string
 	Delete(ctx context.Context, key string) error
-	Get(ctx context.Context, key string) (string, bool, bool, error)
+	Get(ctx context.Context, key string) (value string, exists bool, isCurrent bool, err error)
 	Host() string
 	Set(ctx context.Context, key string, value string) error
 	TTL() time.Duration
