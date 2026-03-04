@@ -11,8 +11,8 @@ import (
 
 // AuthorizationChecker validates whether a user has the required permissions.
 type AuthorizationChecker struct {
-	log logr.Logger
 	ec  *entitlements.EntitlementsChecker
+	log logr.Logger
 }
 
 // NewAuthorizationChecker creates a new authorization checker.
