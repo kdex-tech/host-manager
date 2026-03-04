@@ -31,17 +31,19 @@ type Stringer interface {
 	String() string
 }
 
-func Hash[T any](s T) string {
+func Hash[T any](s ...T) string {
 	var buf bytes.Buffer
-	switch v := any(s).(type) {
-	case string:
-		buf.WriteString(v)
-	case []byte:
-		buf.Write(v)
-	case Stringer:
-		buf.WriteString(v.String())
-	default:
-		fmt.Fprintf(&buf, "%v", v)
+	for _, v := range s {
+		switch v := any(v).(type) {
+		case string:
+			buf.WriteString(v)
+		case []byte:
+			buf.Write(v)
+		case Stringer:
+			buf.WriteString(v.String())
+		default:
+			fmt.Fprintf(&buf, "%v", v)
+		}
 	}
 	hash := sha256.Sum256(buf.Bytes())
 	return hex.EncodeToString(hash[:])
