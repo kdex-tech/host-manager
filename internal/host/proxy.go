@@ -223,9 +223,9 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				reqs = hh.authChecker.ParseRequirements(nil)
 			}
 
-			parsedUserTokens := hh.authChecker.GetParsedEntitlements(r.Context())
+			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
-				"functions", fn.Spec.API.BasePath, parsedUserTokens, reqs)
+				"functions", fn.Spec.API.BasePath, parsedUserEntitlements, reqs)
 
 			if err != nil || !authorized {
 				if err != nil {
