@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -33,8 +34,15 @@ type scopeProvider struct {
 	ControllerNamespace string
 	FocalHost           string
 
-	lookups  []Lookup
-	rolesMap map[string][]string
+	lookups       []Lookup
+	rolesMap      map[string][]string
+	exactBindings map[string][]string
+	regexBindings []bindingMatcher
+}
+
+type bindingMatcher struct {
+	re    *regexp.Regexp
+	roles []string
 }
 
 var _ InternalIdentityProvider = (*scopeProvider)(nil)
@@ -52,6 +60,7 @@ func NewRoleProvider(
 		ControllerNamespace: controllerNamespace,
 		FocalHost:           focalHost,
 		lookups:             lookups,
+		exactBindings:       make(map[string][]string),
 	}
 
 	roles, err := rc.collectRoles()
@@ -60,6 +69,37 @@ func NewRoleProvider(
 	}
 
 	rc.rolesMap = rc.buildMappingTable(roles)
+
+	bindings, err := rc.collectBindings()
+	if err != nil {
+		return nil, err
+	}
+
+	// KDexRoleBinding Subject Matching Syntax:
+	// 1. Exact Match: Default behavior (e.g., "john.doe").
+	// 2. Wildcard Match: "*" matches any subject.
+	// 3. Regex Match: Subjects enclosed in slashes (e.g., "/^admin-.*$/") are 
+	//    treated as Go-style regular expressions.
+	for _, b := range bindings.Items {
+		sub := b.Spec.Subject
+		if sub == "*" {
+			// Wildcard match
+			re := regexp.MustCompile(".*")
+			rc.regexBindings = append(rc.regexBindings, bindingMatcher{re: re, roles: b.Spec.Roles})
+		} else if strings.HasPrefix(sub, "/") && strings.HasSuffix(sub, "/") && len(sub) > 2 {
+			// Regex match
+			re, err := regexp.Compile(sub[1 : len(sub)-1])
+			if err != nil {
+				// Log error but continue with other bindings
+				fmt.Printf("failed to compile regex for binding %s: %v\n", b.Name, err)
+				continue
+			}
+			rc.regexBindings = append(rc.regexBindings, bindingMatcher{re: re, roles: b.Spec.Roles})
+		} else {
+			// Exact match
+			rc.exactBindings[sub] = append(rc.exactBindings[sub], b.Spec.Roles...)
+		}
+	}
 
 	return rc, nil
 }
@@ -91,11 +131,7 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 }
 
 func (rp *scopeProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	roles, err := rp.resolveRoles(subject)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve roles: %w", err)
-	}
-
+	roles := rp.resolveRoles(subject)
 	return roles, rp.collectEntitlements(roles), nil
 }
 
@@ -143,40 +179,33 @@ func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map
 	return table
 }
 
-func (rp *scopeProvider) resolveBindings(subject string) (*kdexv1alpha1.KDexRoleBindingList, error) {
+func (rp *scopeProvider) collectBindings() (*kdexv1alpha1.KDexRoleBindingList, error) {
 	var roleBindings kdexv1alpha1.KDexRoleBindingList
 	if err := rp.Client.List(rp.Context, &roleBindings, client.InNamespace(rp.ControllerNamespace), client.MatchingFields{
 		internal.HOST_INDEX_KEY: rp.FocalHost,
-		internal.SUB_INDEX_KEY:  subject,
 	}); err != nil {
 		return nil, err
 	}
 
-	// TODO: I think roleBindings are supposed to support regex "subject" such that the bindings may apply to antire
-	// class of users.
-
 	return &roleBindings, nil
 }
 
-func (rp *scopeProvider) resolveRoles(subject string) ([]string, error) {
+func (rp *scopeProvider) resolveRoles(subject string) []string {
 	var roles []string
 
-	bindings, err := rp.resolveBindings(subject)
-	if err != nil {
-		return roles, err
-	}
-	if len(bindings.Items) == 0 {
-		return roles, nil
+	// 1. Exact matches (O(1))
+	if r, ok := rp.exactBindings[subject]; ok {
+		roles = append(roles, r...)
 	}
 
-	for _, policy := range bindings.Items {
-		// Generalized sub matching: exact match for now, can be extended to regex
-		if policy.Spec.Subject == subject || policy.Spec.Subject == "*" {
-			roles = append(roles, policy.Spec.Roles...)
+	// 2. Regex/Wildcard matches (O(N))
+	for _, bm := range rp.regexBindings {
+		if bm.re.MatchString(subject) {
+			roles = append(roles, bm.roles...)
 		}
 	}
 
-	return roles, nil
+	return roles
 }
 
 type ldapLookup struct {

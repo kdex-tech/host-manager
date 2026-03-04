@@ -326,6 +326,74 @@ func TestNewRoleProvider(t *testing.T) {
 			},
 		},
 		{
+			name: "ResolveScopes - with regex subject",
+			c: cb().WithObjects(
+				&kdexv1alpha1.KDexRole{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "admin-role",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Rules: []kdexv1alpha1.PolicyRule{{Resources: []string{"admin"}, Verbs: []string{"all"}}},
+					},
+				},
+				&kdexv1alpha1.KDexRoleBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "admin-binding",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleBindingSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Subject: "/^admin-.*$/",
+						Roles:   []string{"admin-role"},
+					},
+				},
+			).Build(),
+			focalHost:           "foo",
+			controllerNamespace: "foo",
+			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
+				assert.Nil(t, gotErr)
+				roles, _, _ := got.FindInternalRolesAndEntitlements("admin-user")
+				assert.Equal(t, []string{"admin-role"}, roles)
+				roles, _, _ = got.FindInternalRolesAndEntitlements("other-user")
+				assert.Empty(t, roles)
+			},
+		},
+		{
+			name: "ResolveScopes - with wildcard subject",
+			c: cb().WithObjects(
+				&kdexv1alpha1.KDexRole{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "public-role",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Rules: []kdexv1alpha1.PolicyRule{{Resources: []string{"public"}, Verbs: []string{"read"}}},
+					},
+				},
+				&kdexv1alpha1.KDexRoleBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "public-binding",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleBindingSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Subject: "*",
+						Roles:   []string{"public-role"},
+					},
+				},
+			).Build(),
+			focalHost:           "foo",
+			controllerNamespace: "foo",
+			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
+				assert.Nil(t, gotErr)
+				roles, _, _ := got.FindInternalRolesAndEntitlements("any-user")
+				assert.Equal(t, []string{"public-role"}, roles)
+			},
+		},
+		{
 			name: "VerifyLocalIdentity - wrong password",
 			c: cb().WithObjects(
 				&kdexv1alpha1.KDexRole{
