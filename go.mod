@@ -5,6 +5,7 @@ go 1.26.0
 replace kdex.dev/crds => github.com/kdex-tech/kdex-crds v0.14.176
 
 require (
+	aidanwoods.dev/go-paseto v1.6.0
 	github.com/Masterminds/sprig/v3 v3.3.0
 	github.com/alicebob/miniredis/v2 v2.36.1
 	github.com/coreos/go-oidc/v3 v3.17.0
@@ -34,6 +35,7 @@ require (
 )
 
 require (
+	aidanwoods.dev/go-result v0.3.1 // indirect
 	cel.dev/expr v0.25.1 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ntlmssp v0.1.0 // indirect
