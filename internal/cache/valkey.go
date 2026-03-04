@@ -39,13 +39,19 @@ func (s *ValkeyCache) Delete(ctx context.Context, key string) error {
 	prev := s.prevPrefix
 	s.mu.RUnlock()
 
-	keys := []string{curr + key}
-	if prev != "" {
-		keys = append(keys, prev+key)
+	// Delete current generation
+	cmd := s.client.B().Del().Key(curr + key).Build()
+	if err := s.client.Do(ctx, cmd).Error(); err != nil {
+		return err
 	}
 
-	cmd := s.client.B().Del().Key(keys...).Build()
-	return s.client.Do(ctx, cmd).Error()
+	// Delete previous generation if it exists
+	if prev != "" {
+		cmd = s.client.B().Del().Key(prev + key).Build()
+		return s.client.Do(ctx, cmd).Error()
+	}
+
+	return nil
 }
 
 func (s *ValkeyCache) Host() string {
@@ -100,7 +106,128 @@ func (s *ValkeyCache) getValue(ctx context.Context, fullKey string) (string, boo
 	return val, true, err
 }
 
+type ValkeyBitSet struct {
+	client          valkey.Client
+	class           string
+	currentChecksum string
+	host            string
+	uncycled        bool
+	mu              sync.RWMutex
+	prefix          string // e.g. "{host:class:generation}:"
+	prevPrefix      string // e.g. "{host:class:generation-1}:"
+	ttl             time.Duration
+}
+
+var _ BitSet = (*ValkeyBitSet)(nil)
+
+func (s *ValkeyBitSet) Checksum() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currentChecksum
+}
+
+func (s *ValkeyBitSet) Class() string {
+	return s.class
+}
+
+func (s *ValkeyBitSet) Delete(ctx context.Context, key string) error {
+	s.mu.RLock()
+	curr := s.prefix
+	prev := s.prevPrefix
+	s.mu.RUnlock()
+
+	// Delete current generation
+	cmd := s.client.B().Del().Key(curr + key).Build()
+	if err := s.client.Do(ctx, cmd).Error(); err != nil {
+		return err
+	}
+
+	// Delete previous generation if it exists
+	if prev != "" {
+		cmd = s.client.B().Del().Key(prev + key).Build()
+		return s.client.Do(ctx, cmd).Error()
+	}
+
+	return nil
+}
+
+func (s *ValkeyBitSet) Host() string {
+	return s.host
+}
+
+func (s *ValkeyBitSet) TTL() time.Duration {
+	return s.ttl
+}
+
+func (s *ValkeyBitSet) Uncycled() bool {
+	return s.uncycled
+}
+
+func (s *ValkeyBitSet) Get(ctx context.Context, key string, offset int64) (bool, bool, bool, error) {
+	s.mu.RLock()
+	curr := s.prefix
+	prev := s.prevPrefix
+	s.mu.RUnlock()
+
+	// 1. Try Current Generation
+	val, found, err := s.getBit(ctx, curr+key, offset)
+	if err != nil || found {
+		return val, found, true, err // Found in current version
+	}
+
+	// 2. Try Previous Generation
+	if prev != "" {
+		val, found, err := s.getBit(ctx, prev+key, offset)
+		if found {
+			return val, true, false, err // Found, but it's the old version
+		}
+	}
+
+	return false, false, true, nil // Not found in either version
+}
+
+func (s *ValkeyBitSet) Set(ctx context.Context, key string, offset int64, value bool) error {
+	s.mu.RLock()
+	prefix := s.prefix
+	s.mu.RUnlock()
+
+	val := int64(0)
+	if value {
+		val = 1
+	}
+
+	cmd := s.client.B().Setbit().Key(prefix + key).Offset(offset).Value(val).Build()
+	if err := s.client.Do(ctx, cmd).Error(); err != nil {
+		return err
+	}
+
+	// Set expiration on the key. Valkey SETBIT does not support PX/EX.
+	expireCmd := s.client.B().Pexpire().Key(prefix + key).Milliseconds(s.ttl.Milliseconds()).Build()
+	return s.client.Do(ctx, expireCmd).Error()
+}
+
+func (s *ValkeyBitSet) getBit(ctx context.Context, fullKey string, offset int64) (bool, bool, error) {
+	// In Valkey, to know if the key exists, we check EXISTS first.
+	// GETBIT returns 0 for non-existent keys, which is ambiguous.
+	existsCmd := s.client.B().Exists().Key(fullKey).Build()
+	count, err := s.client.Do(ctx, existsCmd).AsInt64()
+	if err != nil {
+		return false, false, err
+	}
+	if count == 0 {
+		return false, false, nil
+	}
+
+	cmd := s.client.B().Getbit().Key(fullKey).Offset(offset).Build()
+	val, err := s.client.Do(ctx, cmd).AsInt64()
+	if err != nil {
+		return false, true, err
+	}
+	return val == 1, true, nil
+}
+
 type ValkeyCacheManager struct {
+	bitsets         map[string]BitSet
 	caches          map[string]Cache
 	client          valkey.Client
 	currentChecksum string
@@ -133,7 +260,62 @@ func (m *ValkeyCacheManager) Cycle(checksum string, force bool) error {
 			vCache.mu.Unlock()
 		}
 	}
+
+	for _, bitset := range m.bitsets {
+		if vBitSet, ok := bitset.(*ValkeyBitSet); ok {
+			if vBitSet.uncycled && !force {
+				continue
+			}
+			vBitSet.mu.Lock()
+			if force {
+				vBitSet.prevPrefix = ""
+			} else {
+				vBitSet.prevPrefix = vBitSet.prefix
+			}
+			vBitSet.currentChecksum = checksum
+			vBitSet.prefix = fmt.Sprintf("{%s:%s:%s}:", m.host, vBitSet.class, checksum)
+			vBitSet.mu.Unlock()
+		}
+	}
 	return nil
+}
+
+func (m *ValkeyCacheManager) GetBitSet(class string, opts CacheOptions) BitSet {
+	m.mu.RLock()
+	if bitset, ok := m.bitsets[class]; ok {
+		vBitSet := bitset.(*ValkeyBitSet)
+		vBitSet.mu.Lock()
+		vBitSet.uncycled = opts.Uncycled
+		if opts.TTL != nil && vBitSet.ttl != *opts.TTL && *opts.TTL >= minTTL {
+			vBitSet.ttl = *opts.TTL
+		}
+		vBitSet.mu.Unlock()
+		m.mu.RUnlock()
+		return bitset
+	}
+	m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.bitsets == nil {
+		m.bitsets = make(map[string]BitSet)
+	}
+
+	ttl := m.ttl
+	if opts.TTL != nil && *opts.TTL >= minTTL {
+		ttl = *opts.TTL
+	}
+	bitset := &ValkeyBitSet{
+		client:          m.client,
+		class:           class,
+		currentChecksum: m.currentChecksum,
+		host:            m.host,
+		uncycled:        opts.Uncycled,
+		prefix:          fmt.Sprintf("{%s:%s:%s}:", m.host, class, m.currentChecksum),
+		ttl:             ttl,
+	}
+	m.bitsets[class] = bitset
+	return bitset
 }
 
 func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
