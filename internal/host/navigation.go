@@ -30,11 +30,10 @@ func (hh *HostHandler) BuildMenuEntries(
 		parsedUserEntitlements = &p
 	}
 
-	hh.buildMenuEntriesRecursive(ctx, entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
+	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
 }
 
 func (hh *HostHandler) buildMenuEntriesRecursive(
-	ctx context.Context,
 	entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
@@ -94,7 +93,7 @@ func (hh *HostHandler) buildMenuEntriesRecursive(
 				pageEntry.Weight = ph.NavigationHints.Weight
 			}
 
-			hh.buildMenuEntriesRecursive(ctx, &pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)
+			hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)
 
 			(*entry.Children)[label] = pageEntry
 		}
