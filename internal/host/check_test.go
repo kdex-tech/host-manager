@@ -39,7 +39,7 @@ func TestHostHandler_CheckHandler(t *testing.T) {
 				"functions:/bar:post",
 			},
 			allowedChecks: map[string]bool{
-				"pages:/foo:read":    true,
+				"pages:/foo:read":     true,
 				"functions:/bar:post": true,
 			},
 			expectedPassed: []string{

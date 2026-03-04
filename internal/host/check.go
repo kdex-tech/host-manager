@@ -30,7 +30,7 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if hh.authChecker == nil {
-		// If auth is disabled, return empty or all? 
+		// If auth is disabled, return empty or all?
 		// Usually if checker is nil, auth is disabled and everything passes.
 		// However, KDex tech usually requires explicit grants.
 		json.NewEncoder(w).Encode(CheckResponse{Passed: []string{}})

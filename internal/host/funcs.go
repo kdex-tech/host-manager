@@ -178,4 +178,3 @@ func filterFromQuery(queryParams url.Values) ko.Filter {
 
 	return filter
 }
-
