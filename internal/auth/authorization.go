@@ -82,7 +82,7 @@ func (ac *AuthorizationChecker) CalculateRequirements(
 		return nil, err
 	}
 
-	kreq := make([]kdexv1alpha1.SecurityRequirement, len(requirements))
+	kreq := make([]kdexv1alpha1.SecurityRequirement, 0, len(requirements))
 	for _, v := range requirements {
 		kreq = append(kreq, v)
 	}
