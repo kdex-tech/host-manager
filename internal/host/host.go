@@ -489,6 +489,7 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wrappedMux.ServeHTTP(w, r)
 }
 
+// TODO: add individual cache configurations
 func (hh *HostHandler) SetHost(
 	ctx context.Context,
 	host *kdexv1alpha1.KDexHostSpec,
