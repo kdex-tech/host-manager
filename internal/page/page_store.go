@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/entitlements"
 )
 
 type PageStore struct {
@@ -68,5 +69,15 @@ func (s *PageStore) Set(handler PageHandler) {
 	s.mu.Unlock()
 	if s.onUpdate != nil {
 		s.onUpdate()
+	}
+}
+
+func (s *PageStore) UpdateParsedRequirements(name string, parsed entitlements.ParsedRequirements) {
+	s.log.V(3).Info("update parsed requirements", "name", name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if handler, ok := s.handlers[name]; ok {
+		handler.ParsedRequirements = &parsed
+		s.handlers[name] = handler
 	}
 }

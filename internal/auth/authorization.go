@@ -28,11 +28,49 @@ func (ac *AuthorizationChecker) CheckAccess(
 	resource string,
 	resourceName string,
 	kdexreqs []kdexv1alpha1.SecurityRequirement,
+	verbs ...string,
 ) (bool, error) {
 	if resource == "" || resourceName == "" {
 		return false, fmt.Errorf("resource and resourceName must not be empty")
 	}
 
+	parsedEntitlements := ac.GetParsedEntitlements(ctx)
+	requirements := ac.ParseRequirements(kdexreqs)
+
+	ac.log.V(2).Info("CheckAccess", "resource", resource, "resourceName", resourceName)
+
+	return ac.ec.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, requirements, verbs...)
+}
+
+func (ac *AuthorizationChecker) CalculateRequirements(
+	resource string,
+	resourceName string,
+	kdexreqs []kdexv1alpha1.SecurityRequirement,
+	verbs ...string,
+) ([]kdexv1alpha1.SecurityRequirement, error) {
+	if resource == "" || resourceName == "" {
+		return nil, fmt.Errorf("resource and resourceName must not be empty")
+	}
+
+	requirements := entitlements.Requirements{}
+	for _, v := range kdexreqs {
+		requirements = append(requirements, v)
+	}
+
+	requirements, err := ac.ec.CalculateResourceRequirements(resource, resourceName, requirements, verbs...)
+	if err != nil {
+		return nil, err
+	}
+
+	kreq := make([]kdexv1alpha1.SecurityRequirement, 0, len(requirements))
+	for _, v := range requirements {
+		kreq = append(kreq, v)
+	}
+
+	return kreq, nil
+}
+
+func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entitlements.ParsedEntitlements {
 	authContext, _ := GetAuthContext(ctx)
 
 	userEntitlements := entitlements.Entitlements{}
@@ -53,39 +91,23 @@ func (ac *AuthorizationChecker) CheckAccess(
 		}
 	}
 
-	requirements := entitlements.Requirements{}
-	for _, v := range kdexreqs {
-		requirements = append(requirements, v)
-	}
-
-	ac.log.V(2).Info("CheckAccess", "claim", authContext, "entitlements", userEntitlements, "requirements", requirements)
-
-	return ac.ec.VerifyResourceEntitlements(resource, resourceName, userEntitlements, requirements)
+	return ac.ec.ParseEntitlements(userEntitlements)
 }
 
-func (ac *AuthorizationChecker) CalculateRequirements(
-	resource string,
-	resourceName string,
-	kdexreqs []kdexv1alpha1.SecurityRequirement,
-) ([]kdexv1alpha1.SecurityRequirement, error) {
-	if resource == "" || resourceName == "" {
-		return nil, fmt.Errorf("resource and resourceName must not be empty")
-	}
-
+func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
 	requirements := entitlements.Requirements{}
 	for _, v := range kdexreqs {
 		requirements = append(requirements, v)
 	}
+	return ac.ec.ParseRequirements(requirements)
+}
 
-	requirements, err := ac.ec.CalculateResourceRequirements(resource, resourceName, requirements)
-	if err != nil {
-		return nil, err
-	}
-
-	kreq := make([]kdexv1alpha1.SecurityRequirement, 0, len(requirements))
-	for _, v := range requirements {
-		kreq = append(kreq, v)
-	}
-
-	return kreq, nil
+func (ac *AuthorizationChecker) VerifyResourceParsedEntitlements(
+	resource string,
+	resourceName string,
+	parsedEntitlements entitlements.ParsedEntitlements,
+	parsedRequirements entitlements.ParsedRequirements,
+	verbs ...string,
+) (bool, error) {
+	return ac.ec.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, parsedRequirements, verbs...)
 }

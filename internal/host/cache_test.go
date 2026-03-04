@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/entitlements"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -41,6 +42,9 @@ func TestHostHandler_PageCaching(t *testing.T) {
 		DefaultLang: "en",
 		BrandName:   "KDex",
 	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http")
+
+	// Mock authChecker to allow all access
+	hh.authChecker = &mockAuthChecker{}
 
 	// 1. Initial Request
 	req := httptest.NewRequest("GET", "/test/", nil)
@@ -145,4 +149,26 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	_, found2, _, err2 := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey2)
 	assert.NoError(t, err2)
 	assert.True(t, found2)
+}
+
+type mockAuthChecker struct{}
+
+func (m *mockAuthChecker) CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error) {
+	return nil, nil
+}
+
+func (m *mockAuthChecker) CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error) {
+	return true, nil
+}
+
+func (m *mockAuthChecker) GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements {
+	return entitlements.ParsedEntitlements{}
+}
+
+func (m *mockAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+	return entitlements.ParsedRequirements{}
+}
+
+func (m *mockAuthChecker) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
+	return true, nil
 }

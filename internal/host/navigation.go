@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/kdex-tech/entitlements"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
@@ -23,11 +24,38 @@ func (hh *HostHandler) BuildMenuEntries(
 	isDefaultLanguage bool,
 	parent *page.PageHandler,
 ) {
+	var parsedUserEntitlements *entitlements.ParsedEntitlements
+	if hh.authChecker != nil {
+		p := hh.authChecker.GetParsedEntitlements(ctx)
+		parsedUserEntitlements = &p
+	}
+
+	hh.buildMenuEntriesRecursive(ctx, entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
+}
+
+func (hh *HostHandler) buildMenuEntriesRecursive(
+	ctx context.Context,
+	entry *render.PageEntry,
+	l *language.Tag,
+	isDefaultLanguage bool,
+	parent *page.PageHandler,
+	parsedUserEntitlements *entitlements.ParsedEntitlements,
+) {
 	for _, handler := range hh.Pages.List() {
 		ph := handler.Page
 
-		if hh.authChecker != nil {
-			access, _ := hh.authChecker.CheckAccess(ctx, "pages", ph.BasePath, hh.pageRequirements(&handler))
+		if hh.authChecker != nil && parsedUserEntitlements != nil && handler.ParsedRequirements != nil {
+			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
+				"pages", ph.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
+
+			if !access {
+				continue
+			}
+		} else if hh.authChecker != nil && parsedUserEntitlements != nil {
+			// Fallback if requirements aren't pre-parsed for some reason
+			requirements := hh.authChecker.ParseRequirements(hh.pageRequirements(&handler))
+			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
+				"pages", ph.BasePath, *parsedUserEntitlements, requirements)
 
 			if !access {
 				continue
@@ -66,7 +94,7 @@ func (hh *HostHandler) BuildMenuEntries(
 				pageEntry.Weight = ph.NavigationHints.Weight
 			}
 
-			hh.BuildMenuEntries(ctx, &pageEntry, l, isDefaultLanguage, &handler)
+			hh.buildMenuEntriesRecursive(ctx, &pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)
 
 			(*entry.Children)[label] = pageEntry
 		}

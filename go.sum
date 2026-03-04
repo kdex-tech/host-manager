@@ -173,8 +173,8 @@ github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnr
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
 github.com/kdex-tech/dmapper v0.1.0 h1:ebOt2MbWZNYW3baLNotKwJ/1aJM0OiEtVQzskRyD+vw=
 github.com/kdex-tech/dmapper v0.1.0/go.mod h1:zg6QO7Yu0NcRTxP28ZJd0BNzuAeTEeEmUQ/8ysxuRdk=
-github.com/kdex-tech/entitlements v0.1.9 h1:9O1W+NB5APQ3ww2m6wFmvRN69OFcvUv/tBmcSqhSfag=
-github.com/kdex-tech/entitlements v0.1.9/go.mod h1:YSsmJWiizFs28NAoB/CJMnTbt+nr2gDCP5ZDw/+k6E0=
+github.com/kdex-tech/entitlements v0.1.12 h1:6XcUkslIk6nZ3iAlmj3hyt9V10IyEowqvQzG8ZgjdIk=
+github.com/kdex-tech/entitlements v0.1.12/go.mod h1:YSsmJWiizFs28NAoB/CJMnTbt+nr2gDCP5ZDw/+k6E0=
 github.com/kdex-tech/kdex-crds v0.14.176 h1:3g9zzPMS39WD8Y5GzwQ9fxlHDqVAwX6kzbnZsHr8qeg=
 github.com/kdex-tech/kdex-crds v0.14.176/go.mod h1:U7ISNSdEa3vBGdY+SAzvizgZhNQwdN8aJfuFz8tnnBk=
 github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=

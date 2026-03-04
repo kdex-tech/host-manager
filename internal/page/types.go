@@ -1,23 +1,25 @@
 package page
 
 import (
+	"github.com/kdex-tech/entitlements"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type PageHandler struct {
-	Content           map[string]PackedContent
-	Footer            string
-	Header            string
-	MainTemplate      string
-	Name              string
-	Navigations       map[string]string
-	PackageReferences []kdexv1alpha1.PackageReference
-	Page              *kdexv1alpha1.KDexPageBindingSpec
-	RequiredBackends  []kdexv1alpha1.KDexObjectReference
-	Scripts           []kdexv1alpha1.ScriptDef
-	Status            *kdexv1alpha1.KDexObjectStatus
-	UtilityPage       *kdexv1alpha1.KDexUtilityPageSpec
+	Content            map[string]PackedContent
+	Footer             string
+	Header             string
+	MainTemplate       string
+	Name               string
+	Navigations        map[string]string
+	PackageReferences  []kdexv1alpha1.PackageReference
+	Page               *kdexv1alpha1.KDexPageBindingSpec
+	ParsedRequirements *entitlements.ParsedRequirements
+	RequiredBackends   []kdexv1alpha1.KDexObjectReference
+	Scripts            []kdexv1alpha1.ScriptDef
+	Status             *kdexv1alpha1.KDexObjectStatus
+	UtilityPage        *kdexv1alpha1.KDexUtilityPageSpec
 
 	checksum string
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/entitlements"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/host/ico"
@@ -45,8 +46,11 @@ type HostHandler struct {
 
 	analysisCache *AnalysisCache
 	authChecker   interface {
-		CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement) ([]kdexv1alpha1.SecurityRequirement, error)
-		CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement) (bool, error)
+		CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error)
+		CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error)
+		GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements
+		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
+		VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)
 	}
 	authConfig                *auth.Config
 	authExchanger             *auth.Exchanger

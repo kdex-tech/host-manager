@@ -348,6 +348,14 @@ func (hh *HostHandler) RebuildMux() {
 			continue
 		}
 
+		// Pre-parse requirements for Power API
+		if hh.authChecker != nil {
+			reqs := hh.pageRequirements(&ph)
+			parsed := hh.authChecker.ParseRequirements(reqs)
+			hh.Pages.UpdateParsedRequirements(ph.Name, parsed)
+			ph.ParsedRequirements = &parsed // Also update the local copy used for rendering
+		}
+
 		renderedPages[basePath] = pageRender{ph: ph}
 	}
 

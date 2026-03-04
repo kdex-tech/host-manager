@@ -16,15 +16,34 @@ func (hh *HostHandler) pageHandlerFunc(
 	translations *Translations,
 ) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		shouldReturn := hh.handleAuth(
-			r,
-			w,
-			"pages",
-			ph.BasePath(),
-			hh.pageRequirements(&ph),
-		)
-		if shouldReturn {
-			return
+		if hh.authChecker != nil && ph.ParsedRequirements != nil {
+			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
+			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
+				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)
+
+			if err != nil {
+				hh.log.Error(err, "authorization check failed", "resource", "pages", "resourceName", ph.BasePath())
+				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
+				return
+			}
+
+			if !authorized {
+				hh.log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
+				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
+				return
+			}
+		} else {
+			// Fallback to standard path if requirements aren't pre-parsed
+			shouldReturn := hh.handleAuth(
+				r,
+				w,
+				"pages",
+				ph.BasePath(),
+				hh.pageRequirements(&ph),
+			)
+			if shouldReturn {
+				return
+			}
 		}
 
 		if hh.applyCachingHeaders(w, r, hh.pageRequirements(&ph), hh.reconcileTime) {
