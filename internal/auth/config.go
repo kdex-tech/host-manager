@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/kdex-tech/dmapper"
-	"github.com/kdex-tech/host-manager/internal/apitoken"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/idtoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
