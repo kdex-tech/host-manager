@@ -57,13 +57,9 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			audiences := []string{
-				exchanger.config.Audience,
-			}
-
-			for _, u := range exchanger.config.FunctionURLs {
-				audiences = append(audiences, u)
-			}
+			audiences := make([]string, 0, len(exchanger.config.FunctionURLs)+1)
+			audiences = append(audiences, exchanger.config.Audience)
+			audiences = append(audiences, exchanger.config.FunctionURLs...)
 
 			token, err := jwt.ParseWithClaims(
 				tokenString,
