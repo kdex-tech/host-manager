@@ -591,7 +591,6 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		func() (*apitoken.TokenManager, error) {
 			return apitoken.APITokenManagerLoader(
 				issuer,
-				issuer,
 				internalHost.Spec.ServiceAccountSecrets,
 				internalHost.Spec.DevMode,
 			)

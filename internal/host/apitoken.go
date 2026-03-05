@@ -13,10 +13,11 @@ import (
 )
 
 type MintRequest struct {
-	Action string `json:"action"`
-	Scope  string `json:"scope"`
-	Sub    string `json:"sub"`
-	TTL    string `json:"ttl"`
+	Action   string `json:"action"`
+	Audience string `json:"aud"`
+	Scope    string `json:"scope"`
+	Sub      string `json:"sub"`
+	TTL      string `json:"ttl"`
 }
 
 type MintResponse struct {
@@ -71,6 +72,13 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	audience := req.Audience
+	if audience == "" {
+		hh.log.Error(nil, "aud is required")
+		http.Error(w, "aud is required", http.StatusBadRequest)
+		return
+	}
+
 	subject := req.Sub
 	if subject == "" {
 		hh.log.Error(nil, "sub is required")
@@ -78,6 +86,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// TODO: entitlements should always URL encode the <resourceName> to protect from random colon ':' in the contents.
 	urlEncodedSubject := url.PathEscape(subject)
 
 	// 1. Check Entitlement
@@ -103,7 +112,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	token, err := hh.authConfig.TokenManager.MintStatelessKey(subject, req.Action, req.Scope, ttl)
+	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, req.Action, req.Scope, ttl)
 	if err != nil {
 		hh.log.Error(err, "Failed to mint token")
 		http.Error(w, "Failed to mint token", http.StatusInternalServerError)
@@ -163,12 +172,15 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 	}
 
 	discoveryPath := "/.well-known/pks.json"
-	mintPath := "/-/apitokens/mint"
-	verifyPath := "/-/apitokens/verify"
-
 	mux.HandleFunc("GET "+discoveryPath, hh.apitokenDiscoveryHandler)
-	mux.HandleFunc("POST "+mintPath, hh.apitokenMintHandler)
-	mux.HandleFunc("POST "+verifyPath, hh.apitokenVerifyHandler)
+
+	mintPath := "/-/apitokens/mint"
+	apiTokenHandler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.apitokenMintHandler), hh.authExchanger)
+	mux.Handle("POST "+mintPath, apiTokenHandler)
+
+	verifyPath := "/-/apitokens/verify"
+	apitokenVerifyHandler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.apitokenVerifyHandler), hh.authExchanger)
+	mux.Handle("POST "+verifyPath, apitokenVerifyHandler)
 
 	hh.registerPath(discoveryPath, ko.PathInfo{
 		API: ko.OpenAPI{

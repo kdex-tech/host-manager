@@ -99,6 +99,7 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 		AuthConfig:    hh.authConfig,
 		AuthExchanger: hh.authExchanger,
 	}
+
 	const path = "/-/oauth/authorize"
 	// Apply Authentication Middleware
 	handler := hh.authConfig.AddAuthentication(http.HandlerFunc(oauth2.AuthorizeHandler), hh.authExchanger)

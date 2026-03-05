@@ -62,14 +62,12 @@ func (p *KeyPairs) GetKey(kid string) (*KeyPair, bool) {
 }
 
 type TokenManager struct {
-	apiKeyAudience string
-	apiKeyIssuer   string
-	activeKey      KeyPair
-	keyPairs       KeyPairs
+	activeKey    KeyPair
+	apiKeyIssuer string
+	keyPairs     KeyPairs
 }
 
 func APITokenManagerLoader(
-	audience,
 	issuer string,
 	secrets kdexv1alpha1.ServiceAccountSecrets,
 	devMode bool,
@@ -118,22 +116,21 @@ func APITokenManagerLoader(
 			(*pairs)[0].ActiveKey = true
 		}
 
-		return NewTokenManager(audience, issuer, pairs)
+		return NewTokenManager(issuer, pairs)
 	}
 
 	if devMode {
-		return NewTokenManager(audience, issuer, GenerateDevmodeKeyPair())
+		return NewTokenManager(issuer, GenerateDevmodeKeyPair())
 	}
 
 	return nil, nil
 }
 
-func NewTokenManager(apiKeyAudience string, apiKeyIssuer string, keyPairs *KeyPairs) (*TokenManager, error) {
+func NewTokenManager(apiKeyIssuer string, keyPairs *KeyPairs) (*TokenManager, error) {
 	return &TokenManager{
-		apiKeyAudience: apiKeyAudience,
-		apiKeyIssuer:   apiKeyIssuer,
-		activeKey:      *keyPairs.ActiveKey(),
-		keyPairs:       *keyPairs,
+		apiKeyIssuer: apiKeyIssuer,
+		activeKey:    *keyPairs.ActiveKey(),
+		keyPairs:     *keyPairs,
 	}, nil
 }
 
@@ -141,13 +138,13 @@ func (tm *TokenManager) KeyPairs() KeyPairs {
 	return tm.keyPairs
 }
 
-func (tm *TokenManager) MintStatelessKey(sub string, action string, scope string, ttl time.Duration) (string, error) {
+func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, scope string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	exp := now.Add(ttl)
 
 	token := paseto.NewToken()
 
-	token.SetAudience(tm.apiKeyAudience)
+	token.SetAudience(aud)
 	token.SetExpiration(exp)
 	token.SetIssuedAt(now)
 	token.SetIssuer(tm.apiKeyIssuer)
@@ -188,7 +185,6 @@ func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
 		return nil, fmt.Errorf("key not found: %s", footerData.KID)
 	}
 
-	parser.AddRule(paseto.ForAudience(tm.apiKeyAudience))
 	parser.AddRule(paseto.IssuedBy(tm.apiKeyIssuer))
 	parser.AddRule(paseto.NotExpired())
 	parser.AddRule(paseto.ValidAt(time.Now()))
@@ -214,9 +210,9 @@ func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
 	}
 
 	return &TokenData{
-		Subject: subject,
 		Action:  action,
 		Scope:   scope,
+		Subject: subject,
 	}, nil
 }
 
