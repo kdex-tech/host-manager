@@ -335,7 +335,7 @@ func TestNewRoleProvider(t *testing.T) {
 					},
 					Spec: kdexv1alpha1.KDexRoleSpec{
 						HostRef: v1.LocalObjectReference{Name: "foo"},
-						Rules: []kdexv1alpha1.PolicyRule{{Resources: []string{"admin"}, Verbs: []string{"all"}}},
+						Rules:   []kdexv1alpha1.PolicyRule{{Resources: []string{"admin"}, Verbs: []string{"all"}}},
 					},
 				},
 				&kdexv1alpha1.KDexRoleBinding{
@@ -370,7 +370,7 @@ func TestNewRoleProvider(t *testing.T) {
 					},
 					Spec: kdexv1alpha1.KDexRoleSpec{
 						HostRef: v1.LocalObjectReference{Name: "foo"},
-						Rules: []kdexv1alpha1.PolicyRule{{Resources: []string{"public"}, Verbs: []string{"read"}}},
+						Rules:   []kdexv1alpha1.PolicyRule{{Resources: []string{"public"}, Verbs: []string{"read"}}},
 					},
 				},
 				&kdexv1alpha1.KDexRoleBinding{
