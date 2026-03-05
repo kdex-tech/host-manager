@@ -685,8 +685,8 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				token, err := got.Signer.Sign(jwt.MapClaims{
 					"sub":   "foo",
 					"email": "foo@foo.bar",
-					"iss":   "issuer",
-					"aud":   "audience",
+					"iss":   got.Issuer,
+					"aud":   got.Audience,
 				})
 				if assert.NoError(t, err) {
 					r.Header.Set("Authorization", "Bearer "+token)
@@ -704,6 +704,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				devMode:   true,
 			},
 			assertions: func(t *testing.T, got *Config, gotErr error) {
+				assert.NoError(t, gotErr)
 				mux := http.NewServeMux()
 				mux.Handle("GET /foo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(200)
@@ -715,8 +716,8 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				token, err := got.Signer.Sign(jwt.MapClaims{
 					"sub":   "foo",
 					"email": "foo@foo.bar",
-					"iss":   "issuer",
-					"aud":   got.OIDC.ClientID,
+					"iss":   got.Issuer,
+					"aud":   got.Audience,
 				})
 
 				assert.Nil(t, err)
@@ -754,8 +755,8 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				token, err := got.Signer.Sign(jwt.MapClaims{
 					"sub":   "foo",
 					"email": "foo@foo.bar",
-					"iss":   "issuer",
-					"aud":   got.OIDC.ClientID,
+					"iss":   got.Issuer,
+					"aud":   got.Audience,
 				})
 
 				assert.Nil(t, err)

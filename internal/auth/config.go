@@ -240,7 +240,7 @@ func (c *Config) AddAuthentication(mux http.Handler, exchanger *Exchanger) http.
 	if !c.IsAuthEnabled() {
 		return mux
 	}
-	return WithAuthentication(c.ActivePair.Private.Public(), c.CookieName, exchanger, c.AutoExtendSession)(mux)
+	return c.WithAuthentication(exchanger)(mux)
 }
 
 func (c *Config) IsAuthEnabled() bool {

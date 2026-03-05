@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto"
 	"net/http"
 	"strings"
 	"time"
@@ -16,7 +15,7 @@ import (
 // If the Header is missing, it proceeds without claims (anonymous access).
 //
 //nolint:gocyclo
-func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger *Exchanger, autoExtend bool) func(http.Handler) http.Handler {
+func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log := logf.FromContext(r.Context())
@@ -39,7 +38,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				}
 			} else {
 				// Check for cookie
-				cookie, err := r.Cookie(cookieName)
+				cookie, err := r.Cookie(c.CookieName)
 				if err != nil {
 					// Anonymous access
 					next.ServeHTTP(w, r)
@@ -57,29 +56,29 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			audiences := make([]string, 0, len(exchanger.config.FunctionURLs)+1)
-			audiences = append(audiences, exchanger.config.Audience)
-			audiences = append(audiences, exchanger.config.FunctionURLs...)
+			audiences := make([]string, 0, len(c.FunctionURLs)+1)
+			audiences = append(audiences, c.Audience)
+			audiences = append(audiences, c.FunctionURLs...)
 
 			token, err := jwt.ParseWithClaims(
 				tokenString,
 				&authContext,
 				func(token *jwt.Token) (any, error) {
-					return publicKey, nil
+					return c.ActivePair.Private.Public(), nil
 				},
-				jwt.WithIssuer(exchanger.config.Issuer),
+				jwt.WithIssuer(c.Issuer),
 				jwt.WithAudience(audiences...),
 			)
 
-			if (err != nil || !token.Valid) && authSource == COOKIE && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
+			if (err != nil || !token.Valid) && authSource == COOKIE && c.AutoExtendSession && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				// Token is invalid (e.g. expired), try to refresh it
-				refreshCookie, cerr := r.Cookie(cookieName + "_refresh")
+				refreshCookie, cerr := r.Cookie(c.CookieName + "_refresh")
 				if cerr == nil && refreshCookie.Value != "" {
 					ts, rerr := exchanger.RedeemRefreshToken(r.Context(), refreshCookie.Value, "")
 					if rerr == nil {
 						// Update cookies
 						http.SetCookie(w, &http.Cookie{
-							Name:     cookieName,
+							Name:     c.CookieName,
 							Value:    ts.AccessToken,
 							Path:     "/",
 							HttpOnly: true,
@@ -88,7 +87,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 						})
 						if ts.RefreshToken != "" {
 							http.SetCookie(w, &http.Cookie{
-								Name:     cookieName + "_refresh",
+								Name:     c.CookieName + "_refresh",
 								Value:    ts.RefreshToken,
 								Path:     "/",
 								HttpOnly: true,
@@ -102,7 +101,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 							tokenString,
 							&authContext,
 							func(token *jwt.Token) (any, error) {
-								return publicKey, nil
+								return c.ActivePair.Private.Public(), nil
 							},
 							jwt.WithIssuer(exchanger.config.Issuer),
 							jwt.WithAudience(audiences...),
@@ -120,7 +119,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				if authSource == COOKIE {
 					// Clear the cookie
 					http.SetCookie(w, &http.Cookie{
-						Name:     cookieName,
+						Name:     c.CookieName,
 						Value:    "",
 						Path:     "/",
 						MaxAge:   -1,
@@ -130,7 +129,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 					})
 					// Also clear refresh token if present
 					http.SetCookie(w, &http.Cookie{
-						Name:     cookieName + "_refresh",
+						Name:     c.CookieName + "_refresh",
 						Value:    "",
 						Path:     "/",
 						MaxAge:   -1,
@@ -148,17 +147,17 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			if authSource == COOKIE && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
+			if authSource == COOKIE && c.AutoExtendSession && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				exp, err := authContext.GetExpirationTime()
 				if err == nil && exp != nil && time.Until(exp.Time) < 10*time.Minute {
 					// Try to refresh
-					refreshCookie, err := r.Cookie(cookieName + "_refresh")
+					refreshCookie, err := r.Cookie(c.CookieName + "_refresh")
 					if err == nil && refreshCookie.Value != "" {
 						ts, err := exchanger.RedeemRefreshToken(r.Context(), refreshCookie.Value, "")
 						if err == nil {
 							// Update cookies
 							http.SetCookie(w, &http.Cookie{
-								Name:     cookieName,
+								Name:     c.CookieName,
 								Value:    ts.AccessToken,
 								Path:     "/",
 								HttpOnly: true,
@@ -167,7 +166,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 							})
 							if ts.RefreshToken != "" {
 								http.SetCookie(w, &http.Cookie{
-									Name:     cookieName + "_refresh",
+									Name:     c.CookieName + "_refresh",
 									Value:    ts.RefreshToken,
 									Path:     "/",
 									HttpOnly: true,
@@ -181,7 +180,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 								tokenString,
 								&authContext,
 								func(token *jwt.Token) (any, error) {
-									return publicKey, nil
+									return c.ActivePair.Private.Public(), nil
 								},
 								jwt.WithIssuer(exchanger.config.Issuer),
 								jwt.WithAudience(audiences...),
