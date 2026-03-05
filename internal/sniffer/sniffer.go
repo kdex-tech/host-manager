@@ -1,6 +1,7 @@
 package sniffer
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	kh "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/mime"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
+	"github.com/yuin/goldmark"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -152,7 +154,7 @@ func (s *RequestSniffer) DocsHandler(w http.ResponseWriter, r *http.Request) {
 	lastModified := s.ReconcileTime.UTC().Truncate(time.Second)
 	etag := fmt.Sprintf(`"%d"`, lastModified.Unix())
 
-	w.Header().Set("Content-Type", "text/markdown")
+	w.Header().Set("Content-Type", "text/html")
 	w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
 	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)
@@ -170,7 +172,33 @@ func (s *RequestSniffer) DocsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_, err := w.Write([]byte(docs))
+	var buf bytes.Buffer
+	if err := goldmark.Convert([]byte(docs), &buf); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	htmlDoc := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>KDex Request Sniffer Documentation</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; background-color: #333; color: #fff; line-height: 1.6; }
+        code { background-color: #444; padding: 0.2rem 0.4rem; border-radius: 4px; }
+        pre { background-color: #444; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+        h1, h2, h3 { border-bottom: 1px solid #555; padding-bottom: 0.5rem; }
+        li { margin-bottom: 0.5rem; }
+    </style>
+</head>
+<body>
+%s
+</body>
+</html>
+`, buf.String())
+
+	_, err := w.Write([]byte(htmlDoc))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -600,13 +628,13 @@ func (s *RequestSniffer) parseRequestIntoAPI(
 				}
 
 				if isJSON(contentType) {
-					bytes, err := io.ReadAll(body)
+					bodyBytes, err := io.ReadAll(body)
 					if err == nil {
 						// Restore body for any subsequent uses
-						// body = io.NopCloser(strings.NewReader(string(bytes)))
+						// body = io.NopCloser(strings.NewReader(string(bodyBytes)))
 
 						var data any
-						if err := json.Unmarshal(bytes, &data); err != nil {
+						if err := json.Unmarshal(bodyBytes, &data); err != nil {
 							return nil, nil, err
 						}
 
