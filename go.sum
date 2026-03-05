@@ -179,8 +179,8 @@ github.com/kdex-tech/dmapper v0.1.0 h1:ebOt2MbWZNYW3baLNotKwJ/1aJM0OiEtVQzskRyD+
 github.com/kdex-tech/dmapper v0.1.0/go.mod h1:zg6QO7Yu0NcRTxP28ZJd0BNzuAeTEeEmUQ/8ysxuRdk=
 github.com/kdex-tech/entitlements v0.1.13 h1:EK5bzFwUQ4/PwsHNV3gMCo00V9aeaV7QQ5m3gxKxADo=
 github.com/kdex-tech/entitlements v0.1.13/go.mod h1:YSsmJWiizFs28NAoB/CJMnTbt+nr2gDCP5ZDw/+k6E0=
-github.com/kdex-tech/kdex-crds v0.14.177 h1:TMi1hnh04jHGLX/Sx90iscLvTk3RwTUZNlzxcUne5WU=
-github.com/kdex-tech/kdex-crds v0.14.177/go.mod h1:rnjc853oBn/JnMetSIMDxSMyJKotJIBM2MRJ/6J51hk=
+github.com/kdex-tech/kdex-crds v0.14.178 h1:cCyV+jNsUfakbIVgy4/ciXj82m1Q/2UvVBp71tcQesU=
+github.com/kdex-tech/kdex-crds v0.14.178/go.mod h1:rnjc853oBn/JnMetSIMDxSMyJKotJIBM2MRJ/6J51hk=
 github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=
 github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
