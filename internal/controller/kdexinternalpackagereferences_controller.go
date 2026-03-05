@@ -52,6 +52,7 @@ type KDexInternalPackageReferencesReconciler struct {
 	Scheme              *runtime.Scheme
 }
 
+//nolint:gocyclo
 func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	log := logf.FromContext(ctx)
 
