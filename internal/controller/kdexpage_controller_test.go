@@ -604,9 +604,6 @@ var _ = Describe("KDexPage Controller", func() {
 									"example.com",
 								},
 							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
-							},
 						},
 					},
 				},

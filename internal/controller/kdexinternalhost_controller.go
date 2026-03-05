@@ -123,7 +123,11 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	seenPaths := map[string]bool{}
 	themeAssets := []kdexv1alpha1.Asset{}
 
-	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
+	serviceAccountName := internalHost.Name
+	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
+		serviceAccountName = internalHost.Spec.ServiceAccountRef.Name
+	}
+	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&internalHost.Status.Conditions,

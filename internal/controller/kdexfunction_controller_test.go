@@ -134,9 +134,6 @@ var _ = Describe("KDexFunction Controller", func() {
 									"kdex.dev",
 								},
 							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
-							},
 						},
 					},
 				},
@@ -242,9 +239,6 @@ var _ = Describe("KDexFunction Controller", func() {
 								Domains: []string{
 									"kdex.dev",
 								},
-							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
 							},
 						},
 					},
@@ -365,9 +359,6 @@ var _ = Describe("KDexFunction Controller", func() {
 									"kdex.dev",
 								},
 							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
-							},
 						},
 					},
 				},
@@ -485,9 +476,6 @@ var _ = Describe("KDexFunction Controller", func() {
 									"kdex.dev",
 								},
 							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
-							},
 						},
 					},
 				},
@@ -589,9 +577,6 @@ var _ = Describe("KDexFunction Controller", func() {
 								Domains: []string{
 									"kdex.dev",
 								},
-							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
 							},
 						},
 					},

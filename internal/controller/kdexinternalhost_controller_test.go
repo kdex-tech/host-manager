@@ -51,9 +51,6 @@ var _ = Describe("KDexInternalHost Controller", func() {
 						Routing: kdexv1alpha1.Routing{
 							Domains: []string{"foo.bar"},
 						},
-						ServiceAccountRef: corev1.LocalObjectReference{
-							Name: focalHost,
-						},
 					},
 				},
 			}

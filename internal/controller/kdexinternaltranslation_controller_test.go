@@ -90,9 +90,6 @@ var _ = Describe("KDexInternalTranslation Controller", func() {
 									"example.com",
 								},
 							},
-							ServiceAccountRef: corev1.LocalObjectReference{
-								Name: focalHost,
-							},
 						},
 						InternalTranslationRefs: []corev1.LocalObjectReference{
 							{
