@@ -1704,8 +1704,8 @@ func TestRequestSniffer_DocsHandler(t *testing.T) {
 	s.DocsHandler(w, r)
 
 	assert.Equal(t, 200, w.Code)
-	assert.Equal(t, "text/markdown", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Body.String(), "# KDex Request Sniffer Documentation")
+	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+	assert.Contains(t, w.Body.String(), "<h1>KDex Request Sniffer Documentation</h1>")
 	assert.Contains(t, w.Body.String(), "X-KDex-Function-Name")
 }
 
