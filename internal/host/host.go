@@ -429,7 +429,32 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 		return req
 	}
 
-	// TODO: add API key security
+	(*req)["apiKeyCookie"] = &openapi.SecuritySchemeRef{
+		Value: &openapi.SecurityScheme{
+			Description: "Stateless API Token in 'X-API-TOKEN' cookie",
+			Type:        "apiKey",
+			In:          "cookie",
+			Name:        "X-API-TOKEN",
+		},
+	}
+
+	(*req)["apiKeyHeader"] = &openapi.SecuritySchemeRef{
+		Value: &openapi.SecurityScheme{
+			Description: "Stateless API Token in 'X-API-TOKEN' header",
+			Type:        "apiKey",
+			In:          "header",
+			Name:        "X-API-TOKEN",
+		},
+	}
+
+	(*req)["apiKeyQuery"] = &openapi.SecuritySchemeRef{
+		Value: &openapi.SecurityScheme{
+			Description: "Stateless API Token in 'api_token' query parameter",
+			Type:        "apiKey",
+			In:          "query",
+			Name:        "api_token",
+		},
+	}
 
 	(*req)["bearer"] = &openapi.SecuritySchemeRef{
 		Value: &openapi.SecurityScheme{
@@ -640,6 +665,7 @@ func (hh *HostHandler) messagePrinter(translations *Translations, tag language.T
 func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathInfo) *http.ServeMux {
 	mux := http.NewServeMux()
 
+	hh.apitokensHandler(mux, registeredPaths)
 	hh.authorizeHandler(mux, registeredPaths)
 	hh.checkHandler(mux, registeredPaths)
 	hh.discoveryHandler(mux, registeredPaths)

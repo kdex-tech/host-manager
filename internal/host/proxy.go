@@ -117,7 +117,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				preq.Out.Header.Del("Authorization")
 			}
 
-			preq.Out.Header.Del("Cookie")
+			// Delete all cookies but preserve X-API-TOKEN
+			apiTokenCookie, err := preq.In.Cookie("X-API-TOKEN")
+			if err == nil && apiTokenCookie != nil && apiTokenCookie.Value != "" {
+				preq.Out.Header.Set("Cookie", apiTokenCookie.String())
+			} else {
+				preq.Out.Header.Del("Cookie")
+			}
 
 			// 4. Standard Proxy Headers
 			preq.Out.Header.Set("X-Kdex-Forwarded", "true")

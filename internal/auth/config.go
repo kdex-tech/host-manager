@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/kdex-tech/dmapper"
+	"github.com/kdex-tech/host-manager/internal/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/idtoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	"github.com/kdex-tech/host-manager/internal/utils"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -47,65 +49,101 @@ type Config struct {
 	}
 	RefreshTokenTTL time.Duration
 	Signer          sign.Signer
+	TokenManager    *apitoken.TokenManager
 	TokenTTL        time.Duration
 }
 
-func NewConfig(
-	auth *kdexv1alpha1.Auth,
-	authClientLoader func() (map[string]AuthClient, error),
-	keyLoader func() (*keys.KeyPairs, error),
-	oidcClientConfigLoader func() (*OIDCClientConfig, error),
-	audience string,
-	issuer string,
-	devMode bool,
-	cacheManager cache.CacheManager,
-) (*Config, error) {
+type ConfigBuilder struct {
+	AuthClientLoader       func() (map[string]AuthClient, error)
+	KeyLoader              func() (*keys.KeyPairs, error)
+	OIDCClientConfigLoader func() (*OIDCClientConfig, error)
+	APITokenManagerLoader  func() (*apitoken.TokenManager, error)
+	Audience               string
+	Issuer                 string
+	DevMode                bool
+	CacheManager           cache.CacheManager
+}
+
+func NewConfigBuilder() *ConfigBuilder {
+	return &ConfigBuilder{}
+}
+
+func (cb *ConfigBuilder) WithAuthClientLoader(authClientLoader func() (map[string]AuthClient, error)) *ConfigBuilder {
+	cb.AuthClientLoader = authClientLoader
+	return cb
+}
+
+func (cb *ConfigBuilder) WithKeyLoader(keyLoader func() (*keys.KeyPairs, error)) *ConfigBuilder {
+	cb.KeyLoader = keyLoader
+	return cb
+}
+
+func (cb *ConfigBuilder) WithOIDCClientConfigLoader(oidcClientConfigLoader func() (*OIDCClientConfig, error)) *ConfigBuilder {
+	cb.OIDCClientConfigLoader = oidcClientConfigLoader
+	return cb
+}
+
+func (cb *ConfigBuilder) WithAPITokenManagerLoader(apiTokenManagerLoader func() (*apitoken.TokenManager, error)) *ConfigBuilder {
+	cb.APITokenManagerLoader = apiTokenManagerLoader
+	return cb
+}
+
+func (cb *ConfigBuilder) WithAudience(audience string) *ConfigBuilder {
+	cb.Audience = audience
+	return cb
+}
+
+func (cb *ConfigBuilder) WithIssuer(issuer string) *ConfigBuilder {
+	cb.Issuer = issuer
+	return cb
+}
+
+func (cb *ConfigBuilder) WithDevMode(devMode bool) *ConfigBuilder {
+	cb.DevMode = devMode
+	return cb
+}
+
+func (cb *ConfigBuilder) WithCacheManager(cacheManager cache.CacheManager) *ConfigBuilder {
+	cb.CacheManager = cacheManager
+	return cb
+}
+
+func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 	cfg := &Config{}
 
 	if auth != nil {
-		keyPairs, err := keyLoader()
-		if err != nil {
-			return nil, err
+		if cb.KeyLoader != nil {
+			keyPairs, err := cb.KeyLoader()
+			if err != nil {
+				return nil, err
+			}
+			cfg.KeyPairs = keyPairs
+			cfg.ActivePair = keyPairs.ActiveKey()
 		}
-		if keyPairs == nil || len(*keyPairs) == 0 {
+
+		if cfg.ActivePair == nil {
 			return nil, fmt.Errorf("no key pairs found")
 		}
 
 		cfg.AnonymousEntitlements = auth.AnonymousEntitlements
-		cfg.CookieName = auth.JWT.CookieName
-
-		if cfg.CookieName == "" {
-			cfg.CookieName = "auth_token"
-		}
-
-		cfg.KeyPairs = keyPairs
-		cfg.ActivePair = keyPairs.ActiveKey()
 		cfg.AutoExtendSession = auth.AutoExtendSession
+		cfg.CookieName = utils.IfElse(auth.JWT.CookieName == "", "auth_token", auth.JWT.CookieName)
 
-		maxSessionAgeString := "24h"
-		if auth.MaxSessionAge != "" {
-			maxSessionAgeString = auth.MaxSessionAge
-		}
+		maxSessionAgeString := utils.IfElse(auth.MaxSessionAge == "", "24h", auth.MaxSessionAge)
 		maxSessionAge, err := time.ParseDuration(maxSessionAgeString)
 		if err != nil {
 			return nil, err
 		}
 		cfg.MaxSessionAge = maxSessionAge
 
-		refreshTokenTTLString := "12h"
-		if auth.RefreshTokenTTL != "" {
-			refreshTokenTTLString = auth.RefreshTokenTTL
-		}
+		refreshTokenTTLString := utils.IfElse(auth.RefreshTokenTTL == "", "12h", auth.RefreshTokenTTL)
 		refreshTokenTTL, err := time.ParseDuration(refreshTokenTTLString)
 		if err != nil {
 			return nil, err
 		}
 		cfg.RefreshTokenTTL = refreshTokenTTL
 
-		tokenTTLString := "1h"
-		if auth.JWT.TokenTTL != "" {
-			tokenTTLString = auth.JWT.TokenTTL
-		}
+		tokenTTLString := utils.IfElse(auth.JWT.TokenTTL == "", "1h", auth.JWT.TokenTTL)
 		tokenTTL, err := time.ParseDuration(tokenTTLString)
 		if err != nil {
 			return nil, err
@@ -120,9 +158,9 @@ func NewConfig(
 			}
 		}
 		signer, err := sign.NewSigner(
-			audience,
+			cb.Audience,
 			tokenTTL,
-			issuer,
+			cb.Issuer,
 			&cfg.ActivePair.Private,
 			cfg.ActivePair.KeyId,
 			mapper,
@@ -132,14 +170,24 @@ func NewConfig(
 		}
 		cfg.Signer = *signer
 
-		clients, err := authClientLoader()
-		if err != nil {
-			return nil, err
+		if cb.APITokenManagerLoader != nil {
+			tokenManager, err := cb.APITokenManagerLoader()
+			if err != nil {
+				return nil, err
+			}
+			cfg.TokenManager = tokenManager
 		}
-		cfg.Clients = clients
 
-		if auth.OIDCProvider != nil && auth.OIDCProvider.OIDCProviderURL != "" {
-			oidcClientConfig, err := oidcClientConfigLoader()
+		if cb.AuthClientLoader != nil {
+			clients, err := cb.AuthClientLoader()
+			if err != nil {
+				return nil, err
+			}
+			cfg.Clients = clients
+		}
+
+		if cb.OIDCClientConfigLoader != nil && auth.OIDCProvider != nil && auth.OIDCProvider.OIDCProviderURL != "" {
+			oidcClientConfig, err := cb.OIDCClientConfigLoader()
 			if err != nil {
 				return nil, err
 			}
@@ -147,11 +195,11 @@ func NewConfig(
 			cfg.OIDC.BlockKey = getOrGenerate(oidcClientConfig.BlockKey)
 			cfg.OIDC.ClientID = oidcClientConfig.ClientID
 			cfg.OIDC.ClientSecret = oidcClientConfig.ClientSecret
+			cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cb.CacheManager, cfg.TokenTTL)
 			cfg.OIDC.Name = oidcClientConfig.Name
 			cfg.OIDC.ProviderURL = auth.OIDCProvider.OIDCProviderURL
 			cfg.OIDC.RedirectURL = "/-/oauth/callback"
 			cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
-			cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cacheManager, cfg.TokenTTL)
 
 			if cfg.OIDC.Name == "" {
 				providerURL, err := url.Parse(cfg.OIDC.ProviderURL)

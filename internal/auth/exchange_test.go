@@ -313,22 +313,31 @@ func TestNewExchanger(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-			cfg, err := NewConfig(
-				tt.authConfig,
+
+			configBuilder := NewConfigBuilder().WithAuthClientLoader(
 				func() (map[string]AuthClient, error) {
 					return map[string]AuthClient{}, nil
 				},
+			).WithKeyLoader(
 				func() (*keys.KeyPairs, error) {
 					return keys.GenerateECDSAKeyPair(), nil
 				},
+			).WithOIDCClientConfigLoader(
 				func() (*OIDCClientConfig, error) {
 					return nil, nil
 				},
+			).WithAudience(
 				"audience",
+			).WithIssuer(
 				"issuer",
-				tt.devMode,
-				cacheManager)
-			if err != nil && tt.authConfig != nil { // If authConfig is nil, NewConfig will return an error, which is expected for some tests
+			).WithDevMode(
+				true,
+			).WithCacheManager(
+				cacheManager,
+			)
+
+			cfg, err := configBuilder.Build(tt.authConfig)
+			if err != nil && tt.authConfig != nil {
 				assert.Nil(t, err)
 			}
 			var got *Exchanger
@@ -385,28 +394,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: "http://bad",
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					"http://bad",
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: "http://bad",
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -423,28 +442,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -460,28 +489,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -499,29 +538,39 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-							Scopes:          []string{"job"},
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+							Scopes:          []string{"job"},
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -539,28 +588,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -586,28 +645,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -626,28 +695,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -666,28 +745,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)
@@ -709,28 +798,38 @@ func TestNewExchanger_OIDC(t *testing.T) {
 			assertions: func(t *testing.T, serverURL string, innerHandler *IH) {
 				ctx := context.Background()
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: serverURL,
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "foo",
 							ClientSecret: "bar",
 						}, nil
 					},
+				).WithAudience(
 					"foo",
+				).WithIssuer(
 					serverURL,
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: serverURL,
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "bar", cfg.OIDC.ClientSecret)

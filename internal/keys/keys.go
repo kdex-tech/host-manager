@@ -9,11 +9,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 const (
@@ -25,7 +26,6 @@ var (
 	once     sync.Once
 )
 
-// KeyPair holds an RSA key pair for JWT signing and verification.
 type KeyPair struct {
 	ActiveKey bool
 	KeyId     string
@@ -49,23 +49,28 @@ func (p *KeyPairs) ActiveKey() *KeyPair {
 	return nil
 }
 
-// LoadOrGenerateKeyPair loads an RSA key pair from a Kubernetes Secret.
+// LoadOrGenerateKeyPair loads a key pair from a Kubernetes Secret.
 // If the secret doesn't exist or is invalid, it generates a new key pair.
 func LoadOrGenerateKeyPair(
-	secrets []corev1.Secret,
+	secrets kdexv1alpha1.ServiceAccountSecrets,
 	devMode bool,
 ) (*KeyPairs, error) {
+	filtered := secrets.Filter(func(s corev1.Secret) bool {
+		return s.Annotations["kdex.dev/secret-type"] == "jwt-keys"
+	})
+
+	// reverse sort by creation timestamp
+	slices.SortFunc(filtered, func(a, b corev1.Secret) int {
+		// Sort to Ascending - oldest to newest
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
+	})
+
 	pairs := &KeyPairs{}
 	found := false
 
-	// Sort keys oldest to newest
-	sort.Slice(secrets, func(i, j int) bool {
-		return secrets[i].CreationTimestamp.Before(&secrets[j].CreationTimestamp)
-	})
-
 	// The newest secret with the active key annotation is the active key. If no
 	// active key annotation is found, the newest secret is the active key.
-	for _, secret := range secrets {
+	for i, secret := range filtered {
 		isActive := false
 		if secret.Annotations["kdex.dev/active-key"] == "true" {
 			isActive = true
@@ -78,6 +83,11 @@ func LoadOrGenerateKeyPair(
 
 		found = true
 		*pairs = append(*pairs, kp)
+
+		// make sure only one key is active
+		if kp.ActiveKey && i > 0 {
+			(*pairs)[i-1].ActiveKey = false
+		}
 	}
 
 	if found {
@@ -196,23 +206,23 @@ func LoadKeyFromPEM(privateKeyPEM []byte) (*KeyPair, error) {
 	return &KeyPair{Private: signer}, nil
 }
 
-// LoadKeysFromSecret loads an RSA key pair from a Kubernetes Secret.
+// LoadKeysFromSecret loads an key pair from a Kubernetes Secret.
 func LoadKeysFromSecret(secret *corev1.Secret, isActive bool) (*KeyPair, error) {
 	privateKeyPEM, ok := secret.Data[PrivateKeySecretKey]
 	if !ok {
 		return nil, fmt.Errorf("secret does not contain %s", PrivateKeySecretKey)
 	}
 
-	key, err := LoadKeyFromPEM(privateKeyPEM)
+	keyPair, err := LoadKeyFromPEM(privateKeyPEM)
 	if err != nil {
 		return nil, err
 	}
 
-	if key.KeyId == "" {
-		key.KeyId = secret.Name
+	if keyPair.KeyId == "" {
+		keyPair.KeyId = secret.Name
 	}
 
-	key.ActiveKey = isActive
+	keyPair.ActiveKey = isActive
 
-	return key, nil
+	return keyPair, nil
 }

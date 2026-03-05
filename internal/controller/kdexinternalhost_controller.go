@@ -26,6 +26,7 @@ import (
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal"
+	"github.com/kdex-tech/host-manager/internal/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/keys"
@@ -566,25 +567,50 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	issuer := fmt.Sprintf("%s://%s", internalHost.Spec.Routing.Scheme, internalHost.Spec.Routing.Domains[0])
 
-	authConfig, err := auth.NewConfig(
-		internalHost.Spec.Auth,
+	authConfigBuilder := auth.NewConfigBuilder().WithAuthClientLoader(
 		func() (map[string]auth.AuthClient, error) {
-			return auth.AuthClientLoader(internalHost.Spec.ServiceAccountSecrets)
+			return auth.AuthClientLoader(
+				internalHost.Spec.ServiceAccountSecrets,
+			)
 		},
+	).WithKeyLoader(
 		func() (*keys.KeyPairs, error) {
 			return keys.LoadOrGenerateKeyPair(
-				internalHost.Spec.ServiceAccountSecrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "jwt-keys" }),
+				internalHost.Spec.ServiceAccountSecrets,
 				internalHost.Spec.DevMode,
 			)
 		},
+	).WithOIDCClientConfigLoader(
 		func() (*auth.OIDCClientConfig, error) {
-			return auth.OIDCConfigLoader(internalHost.Spec.ServiceAccountSecrets, internalHost.Spec.DevMode)
+			return auth.OIDCConfigLoader(
+				internalHost.Spec.ServiceAccountSecrets,
+				internalHost.Spec.DevMode,
+			)
 		},
+	).WithAPITokenManagerLoader(
+		func() (*apitoken.TokenManager, error) {
+			return apitoken.APITokenManagerLoader(
+				issuer,
+				issuer,
+				internalHost.Spec.ServiceAccountSecrets,
+				internalHost.Spec.DevMode,
+			)
+		},
+	).WithAudience(
 		issuer,
+	).WithIssuer(
 		issuer,
+	).WithDevMode(
 		internalHost.Spec.DevMode,
+	).WithCacheManager(
 		r.HostHandler.GetCacheManager(),
 	)
+
+	authConfig, err := authConfigBuilder.Build(internalHost.Spec.Auth)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&internalHost.Status.Conditions,

@@ -91,7 +91,11 @@ func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entit
 		}
 	}
 
-	return ac.ec.ParseEntitlements(userEntitlements)
+	return ac.ParseEntitlements(userEntitlements)
+}
+
+func (ac *AuthorizationChecker) ParseEntitlements(e entitlements.Entitlements) entitlements.ParsedEntitlements {
+	return ac.ec.ParseEntitlements(e)
 }
 
 func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {

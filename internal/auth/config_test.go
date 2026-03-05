@@ -13,7 +13,6 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"kdex.dev/crds/api/v1alpha1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -370,7 +369,7 @@ ZMtAm8mrV+h0ef/lr6zdJffz/EmM5MZrRAu2/dcK6S6qSEkwCTZ4
 						ObjectMeta: metav1.ObjectMeta{
 							Name:              "bar",
 							Namespace:         "foo",
-							CreationTimestamp: metav1.NewTime(time.Now().Add(-48 * time.Hour)),
+							CreationTimestamp: metav1.NewTime(time.Now().Add(-5 * 24 * time.Hour)),
 							Annotations: map[string]string{
 								"kdex.dev/secret-type": "jwt-keys",
 							},
@@ -503,24 +502,32 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-			got, gotErr := NewConfig(
-				tt.args.auth,
+
+			configBuilder := NewConfigBuilder().WithAuthClientLoader(
 				func() (map[string]AuthClient, error) {
 					return AuthClientLoader(tt.args.secrets)
 				},
+			).WithKeyLoader(
 				func() (*keys.KeyPairs, error) {
 					return keys.LoadOrGenerateKeyPair(
-						tt.args.secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "jwt-keys" }),
+						tt.args.secrets,
 						tt.args.devMode)
 				},
+			).WithOIDCClientConfigLoader(
 				func() (*OIDCClientConfig, error) {
 					return OIDCConfigLoader(tt.args.secrets, tt.args.devMode)
 				},
+			).WithAudience(
 				"audience",
+			).WithIssuer(
 				"issuer",
+			).WithDevMode(
 				tt.args.devMode,
+			).WithCacheManager(
 				cacheManager,
 			)
+
+			got, gotErr := configBuilder.Build(tt.args.auth)
 			tt.assertions(t, got, gotErr)
 		})
 	}
@@ -763,24 +770,32 @@ func TestConfig_AddAuthentication(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-			got, gotErr := NewConfig(
-				tt.args.auth,
+
+			configBuilder := NewConfigBuilder().WithAuthClientLoader(
 				func() (map[string]AuthClient, error) {
 					return AuthClientLoader(tt.args.secrets)
 				},
+			).WithKeyLoader(
 				func() (*keys.KeyPairs, error) {
 					return keys.LoadOrGenerateKeyPair(
-						tt.args.secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "jwt-keys" }),
+						tt.args.secrets,
 						tt.args.devMode)
 				},
+			).WithOIDCClientConfigLoader(
 				func() (*OIDCClientConfig, error) {
 					return OIDCConfigLoader(tt.args.secrets, tt.args.devMode)
 				},
+			).WithAudience(
 				"audience",
+			).WithIssuer(
 				"issuer",
+			).WithDevMode(
 				tt.args.devMode,
+			).WithCacheManager(
 				cacheManager,
 			)
+
+			got, gotErr := configBuilder.Build(tt.args.auth)
 			tt.assertions(t, got, gotErr)
 		})
 	}
@@ -825,25 +840,35 @@ func TestConfig_OIDC(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, serverURL string) {
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				_, gotErr := NewConfig(
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
+					func() (map[string]AuthClient, error) {
+						return map[string]AuthClient{}, nil
+					},
+				).WithKeyLoader(
+					func() (*keys.KeyPairs, error) {
+						return keys.GenerateECDSAKeyPair(), nil
+					},
+				).WithOIDCClientConfigLoader(
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
+					},
+				).WithAudience(
+					"audience",
+				).WithIssuer(
+					"issuer",
+				).WithDevMode(
+					true,
+				).WithCacheManager(
+					cacheManager,
+				)
+
+				_, gotErr := configBuilder.Build(
 					&v1alpha1.Auth{
 						OIDCProvider: &v1alpha1.OIDCProvider{
 							OIDCProviderURL: "http://bad",
 						},
 					},
-					func() (map[string]AuthClient, error) {
-						return map[string]AuthClient{}, nil
-					},
-					func() (*keys.KeyPairs, error) {
-						return keys.GenerateECDSAKeyPair(), nil
-					},
-					func() (*OIDCClientConfig, error) {
-						return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
-					},
-					"audience",
-					"issuer",
-					true,
-					cacheManager,
 				)
 				assert.NotNil(t, gotErr)
 				assert.Contains(t, gotErr.Error(), "OIDC secret does not contain 'client_id' or 'client-id'")
@@ -854,25 +879,35 @@ func TestConfig_OIDC(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, serverURL string) {
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				_, gotErr := NewConfig(
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
+					func() (map[string]AuthClient, error) {
+						return map[string]AuthClient{}, nil
+					},
+				).WithKeyLoader(
+					func() (*keys.KeyPairs, error) {
+						return keys.GenerateECDSAKeyPair(), nil
+					},
+				).WithOIDCClientConfigLoader(
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
+					},
+				).WithAudience(
+					"audience",
+				).WithIssuer(
+					"issuer",
+				).WithDevMode(
+					true,
+				).WithCacheManager(
+					cacheManager,
+				)
+
+				_, gotErr := configBuilder.Build(
 					&v1alpha1.Auth{
 						OIDCProvider: &v1alpha1.OIDCProvider{
 							OIDCProviderURL: "http://bad",
 						},
 					},
-					func() (map[string]AuthClient, error) {
-						return map[string]AuthClient{}, nil
-					},
-					func() (*keys.KeyPairs, error) {
-						return keys.GenerateECDSAKeyPair(), nil
-					},
-					func() (*OIDCClientConfig, error) {
-						return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
-					},
-					"audience",
-					"issuer",
-					true,
-					cacheManager,
 				)
 				assert.NotNil(t, gotErr)
 				assert.Contains(t, gotErr.Error(), `missing secret of type 'oidc-client' required for OIDC provider`)
@@ -883,25 +918,35 @@ func TestConfig_OIDC(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, serverURL string) {
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				_, gotErr := NewConfig(
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
+					func() (map[string]AuthClient, error) {
+						return map[string]AuthClient{}, nil
+					},
+				).WithKeyLoader(
+					func() (*keys.KeyPairs, error) {
+						return keys.GenerateECDSAKeyPair(), nil
+					},
+				).WithOIDCClientConfigLoader(
+					func() (*OIDCClientConfig, error) {
+						return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
+					},
+				).WithAudience(
+					"audience",
+				).WithIssuer(
+					"issuer",
+				).WithDevMode(
+					true,
+				).WithCacheManager(
+					cacheManager,
+				)
+
+				_, gotErr := configBuilder.Build(
 					&v1alpha1.Auth{
 						OIDCProvider: &v1alpha1.OIDCProvider{
 							OIDCProviderURL: "http://bad",
 						},
 					},
-					func() (map[string]AuthClient, error) {
-						return map[string]AuthClient{}, nil
-					},
-					func() (*keys.KeyPairs, error) {
-						return keys.GenerateECDSAKeyPair(), nil
-					},
-					func() (*OIDCClientConfig, error) {
-						return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
-					},
-					"audience",
-					"issuer",
-					true,
-					cacheManager,
 				)
 				assert.NotNil(t, gotErr)
 				assert.Contains(t, gotErr.Error(), "OIDC secret does not contain 'client_secret' or 'client-secret'")
@@ -912,28 +957,38 @@ func TestConfig_OIDC(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, serverURL string) {
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: "http://bad",
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "bar",
 							ClientSecret: "foo",
 						}, nil
 					},
+				).WithAudience(
 					"audience",
+				).WithIssuer(
 					"issuer",
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: "http://bad",
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				assert.Equal(t, "foo", cfg.OIDC.ClientSecret)
@@ -944,12 +999,8 @@ func TestConfig_OIDC(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, serverURL string) {
 				cacheManager, _ := cache.NewCacheManager("", "foo", new(1*time.Hour))
-				cfg, gotErr := NewConfig(
-					&v1alpha1.Auth{
-						OIDCProvider: &v1alpha1.OIDCProvider{
-							OIDCProviderURL: "http://bad",
-						},
-					},
+
+				configBuilder := NewConfigBuilder().WithAuthClientLoader(
 					func() (map[string]AuthClient, error) {
 						return map[string]AuthClient{
 							"baz": {
@@ -959,19 +1010,33 @@ func TestConfig_OIDC(t *testing.T) {
 							},
 						}, nil
 					},
+				).WithKeyLoader(
 					func() (*keys.KeyPairs, error) {
 						return keys.GenerateECDSAKeyPair(), nil
 					},
+				).WithOIDCClientConfigLoader(
 					func() (*OIDCClientConfig, error) {
 						return &OIDCClientConfig{
 							ClientID:     "bar",
 							ClientSecret: "foo",
 						}, nil
 					},
+				).WithAudience(
 					"audience",
+				).WithIssuer(
 					"issuer",
+				).WithDevMode(
 					true,
+				).WithCacheManager(
 					cacheManager,
+				)
+
+				cfg, gotErr := configBuilder.Build(
+					&v1alpha1.Auth{
+						OIDCProvider: &v1alpha1.OIDCProvider{
+							OIDCProviderURL: "http://bad",
+						},
+					},
 				)
 				assert.Nil(t, gotErr)
 				authClient := cfg.Clients["baz"]
