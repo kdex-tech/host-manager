@@ -78,8 +78,20 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 
 	env = append(env, []corev1.EnvVar{
 		{
+			Name:  "ANONYMOUS_ENTITLEMENTS",
+			Value: "", // TODO: make this configurable, set by Function
+		},
+		{
+			Name:  "DEFAULT_SECURITY_SCHEME",
+			Value: "bearer", // TODO: make this configurable, set by Function
+		},
+		{
 			Name:  "AUDIENCE",
 			Value: function.Status.URL,
+		},
+		{
+			Name:  "DEBUG",
+			Value: "false", // TODO: make this configurable, set by Function
 		},
 		{
 			Name:  "FUNCTION_BASEPATH",
@@ -106,12 +118,16 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			Value: function.Namespace,
 		},
 		{
+			Name:  "ISSUER",
+			Value: issuer,
+		},
+		{
 			Name:  "JWKS_URL",
 			Value: issuer + "/.well-known/jwks.json",
 		},
 		{
-			Name:  "ISSUER",
-			Value: issuer,
+			Name:  "PKS_URL",
+			Value: issuer + "/.well-known/pks.json",
 		},
 	}...)
 
