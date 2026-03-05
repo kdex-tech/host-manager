@@ -35,9 +35,9 @@ package controller
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexinternalutilitypages/finalizers,     verbs=update
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexinternalutilitypages/status,         verbs=get;update;patch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexpagearchetypes,                      verbs=get;list;watch
-// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages,                        verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages/finalizers,             verbs=update
-// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages/status,                 verbs=get;update;patch
+// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages,                               verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages/finalizers,                    verbs=update
+// +kubebuilder:rbac:groups=kdex.dev,resources=kdexpages/status,                        verbs=get;update;patch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexpagefooters,                         verbs=get;list;watch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexpageheaders,                         verbs=get;list;watch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexpagenavigations,                     verbs=get;list;watch
