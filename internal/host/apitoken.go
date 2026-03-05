@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	openapi "github.com/getkin/kin-openapi/openapi3"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -186,7 +187,47 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 		API: ko.OpenAPI{
 			BasePath: discoveryPath,
 			Paths: map[string]ko.PathItem{
-				discoveryPath: {},
+				discoveryPath: {
+					Description: "Returns the public keys for verifying PASETO tokens in a format similar to JWKS but for PASETO v4.public keys.",
+					Get: &openapi.Operation{
+						Description: "GET the public keys for PASETO verification",
+						OperationID: "apitoken-discovery-get",
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"keys": &openapi.SchemaRef{
+												Value: &openapi.Schema{
+													Items: &openapi.SchemaRef{
+														Value: &openapi.Schema{
+															Properties: openapi.Schemas{
+																"alg": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+																"key": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+																"kid": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+															},
+															Type: &openapi.Types{openapi.TypeObject},
+														},
+													},
+													Type: &openapi.Types{openapi.TypeArray},
+												},
+											},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("PASETO Public Keys"),
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "PASETO Public Keys Discovery",
+						Tags:    []string{"system", "apitoken", "auth"},
+					},
+					Summary: "PASETO public keys discovery",
+				},
 			},
 		},
 		Type: ko.SystemPathType,
@@ -196,7 +237,63 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 		API: ko.OpenAPI{
 			BasePath: mintPath,
 			Paths: map[string]ko.PathItem{
-				mintPath: {},
+				mintPath: {
+					Description: "Mints a new stateless PASETO API token for a given subject and audience.",
+					Post: &openapi.Operation{
+						Description: "POST to mint a new PASETO API token",
+						OperationID: "apitoken-mint-post",
+						RequestBody: &openapi.RequestBodyRef{
+							Value: &openapi.RequestBody{
+								Content: openapi.Content{
+									"application/json": &openapi.MediaType{
+										Schema: &openapi.SchemaRef{
+											Value: &openapi.Schema{
+												Properties: openapi.Schemas{
+													"action": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"aud":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"scope":  &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"sub":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"ttl":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+												},
+												Required: []string{"aud", "sub"},
+												Type:     &openapi.Types{openapi.TypeObject},
+											},
+										},
+									},
+								},
+								Description: "Mint request body",
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("Minted PASETO Token"),
+							}),
+							openapi.WithStatus(400, &openapi.ResponseRef{
+								Ref: "#/components/responses/BadRequest",
+							}),
+							openapi.WithStatus(403, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Description: new("Forbidden"),
+								},
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Mint PASETO API Token",
+						Tags:    []string{"system", "apitoken", "auth"},
+					},
+					Summary: "Mint PASETO API token",
+				},
 			},
 		},
 		Type: ko.SystemPathType,
@@ -206,7 +303,59 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 		API: ko.OpenAPI{
 			BasePath: verifyPath,
 			Paths: map[string]ko.PathItem{
-				verifyPath: {},
+				verifyPath: {
+					Description: "Verifies a PASETO API token and returns its decoded claims.",
+					Post: &openapi.Operation{
+						Description: "POST to verify a PASETO API token",
+						OperationID: "apitoken-verify-post",
+						RequestBody: &openapi.RequestBodyRef{
+							Value: &openapi.RequestBody{
+								Content: openapi.Content{
+									"application/json": &openapi.MediaType{
+										Schema: &openapi.SchemaRef{
+											Value: &openapi.Schema{
+												Properties: openapi.Schemas{
+													"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+												},
+												Required: []string{"token"},
+												Type:     &openapi.Types{openapi.TypeObject},
+											},
+										},
+									},
+								},
+								Description: "Verify request body",
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"Action":  &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"Scope":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"Subject": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("Verified Token Claims"),
+							}),
+							openapi.WithStatus(400, &openapi.ResponseRef{
+								Ref: "#/components/responses/BadRequest",
+							}),
+							openapi.WithStatus(401, &openapi.ResponseRef{
+								Ref: "#/components/responses/Unauthorized",
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Verify PASETO API Token",
+						Tags:    []string{"system", "apitoken", "auth"},
+					},
+					Summary: "Verify PASETO API token",
+				},
 			},
 		},
 		Type: ko.SystemPathType,
