@@ -27,7 +27,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// TODO: update the sniffer documentation
 // TODO: support direct upload of JSON schema doc as the payload of a PUT request. This will
 // be interpreted not as the litteral body but as the schema for the request body.
 // TODO: Double check support for external schema references. (e.g. "Foo", "#/components/schemas/Foo" or a URL to an external schema)
