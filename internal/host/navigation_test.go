@@ -35,7 +35,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 			items: &map[string]page.PageHandler{
 				"foo": {
 					Name: "foo",
-					Page: &kdexv1alpha1.KDexPageBindingSpec{
+					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Foo",
 						Paths: kdexv1alpha1.Paths{
 							BasePath: "/foo",
@@ -59,7 +59,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 			items: &map[string]page.PageHandler{
 				"foo": {
 					Name: "foo",
-					Page: &kdexv1alpha1.KDexPageBindingSpec{
+					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Foo",
 						Paths: kdexv1alpha1.Paths{
 							BasePath: "/foo",
@@ -71,7 +71,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 				},
 				"home": {
 					Name: "home",
-					Page: &kdexv1alpha1.KDexPageBindingSpec{
+					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Home",
 						Paths: kdexv1alpha1.Paths{
 							BasePath: "/home",
@@ -80,7 +80,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 				},
 				"contact": {
 					Name: "contact",
-					Page: &kdexv1alpha1.KDexPageBindingSpec{
+					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Contact Us",
 						NavigationHints: &kdexv1alpha1.NavigationHints{
 							Weight: resource.MustParse("100"),
@@ -123,7 +123,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 			items: &map[string]page.PageHandler{
 				"foo": {
 					Name: "foo",
-					Page: &kdexv1alpha1.KDexPageBindingSpec{
+					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Foo",
 						Paths: kdexv1alpha1.Paths{
 							BasePath: "/foo",

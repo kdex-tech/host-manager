@@ -14,7 +14,7 @@ type PageHandler struct {
 	Name               string
 	Navigations        map[string]string
 	PackageReferences  []kdexv1alpha1.PackageReference
-	Page               *kdexv1alpha1.KDexPageBindingSpec
+	Page               *kdexv1alpha1.KDexPageSpec
 	ParsedRequirements *entitlements.ParsedRequirements
 	RequiredBackends   []kdexv1alpha1.KDexObjectReference
 	Scripts            []kdexv1alpha1.ScriptDef

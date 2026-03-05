@@ -226,7 +226,7 @@ var _ = BeforeSuite(func() {
 	err = internalHostReconciler.SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
 
-	pageBindingReconciler := &KDexPageBindingReconciler{
+	pageReconciler := &KDexPageReconciler{
 		Client:              k8sManager.GetClient(),
 		Configuration:       configuration,
 		ControllerNamespace: namespace,
@@ -235,7 +235,7 @@ var _ = BeforeSuite(func() {
 		RequeueDelay:        requeueDelay,
 		Scheme:              k8sManager.GetScheme(),
 	}
-	err = pageBindingReconciler.SetupWithManager(k8sManager)
+	err = pageReconciler.SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
 
 	translationReconciler := &KDexInternalTranslationReconciler{

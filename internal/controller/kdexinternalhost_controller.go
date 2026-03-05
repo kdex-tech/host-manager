@@ -255,7 +255,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 	}
 
-	var bindings kdexv1alpha1.KDexPageBindingList
+	var bindings kdexv1alpha1.KDexPageList
 	if err := r.List(ctx, &bindings, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to list page bindings: %w", err)
 	}
@@ -270,7 +270,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if seenPaths[pageHandler.Page.BasePath] {
 			err = fmt.Errorf(
 				"duplicated path %s, paths must be unique across backends and pages, obj: %s/%s, kind: %s",
-				pageHandler.Page.BasePath, r.ControllerNamespace, pageHandler.Name, "KDexPageBinding",
+				pageHandler.Page.BasePath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 			)
 
 			kdexv1alpha1.SetConditions(
@@ -292,7 +292,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if seenPaths[pageHandler.Page.PatternPath] {
 				err = fmt.Errorf(
 					"duplicated path %s, paths must be unique across backends and pages, obj: %s/%s, kind: %s",
-					pageHandler.Page.PatternPath, r.ControllerNamespace, pageHandler.Name, "KDexPageBinding",
+					pageHandler.Page.PatternPath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 				)
 
 				kdexv1alpha1.SetConditions(
@@ -751,7 +751,7 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return t.Name == r.FocalHost
 		case *kdexv1alpha1.KDexInternalPackageReferences:
 			return t.Name == fmt.Sprintf("%s-packages", r.FocalHost)
-		case *kdexv1alpha1.KDexPageBinding:
+		case *kdexv1alpha1.KDexPage:
 			return t.Spec.HostRef.Name == r.FocalHost
 		default:
 			return true
@@ -830,18 +830,18 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&kdexv1alpha1.KDexInternalUtilityPage{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.AnnouncementRef}", "{.Spec.ErrorRef}", "{.Spec.LoginRef}")).
 		Watches(
-			&kdexv1alpha1.KDexPageBinding{},
+			&kdexv1alpha1.KDexPage{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-				pageBinding, ok := obj.(*kdexv1alpha1.KDexPageBinding)
-				if !ok || pageBinding.Spec.HostRef.Name != r.FocalHost {
+				page, ok := obj.(*kdexv1alpha1.KDexPage)
+				if !ok || page.Spec.HostRef.Name != r.FocalHost {
 					return nil
 				}
 
 				return []reconcile.Request{
 					{
 						NamespacedName: types.NamespacedName{
-							Name:      pageBinding.Spec.HostRef.Name,
-							Namespace: pageBinding.Namespace,
+							Name:      page.Spec.HostRef.Name,
+							Namespace: page.Namespace,
 						},
 					},
 				}

@@ -15,7 +15,7 @@ resources:
   version: v1alpha1
 - controller: true
   domain: kdex.dev
-  kind: KDexPageBinding
+  kind: KDexPage
   version: v1alpha1
 - controller: true
   domain: kdex.dev

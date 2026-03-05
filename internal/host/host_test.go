@@ -73,7 +73,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",
@@ -128,7 +128,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",
@@ -183,7 +183,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",
@@ -221,7 +221,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",
@@ -262,7 +262,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",
@@ -337,7 +337,7 @@ func TestHostHandler_L10nRenders(t *testing.T) {
 			},
 			pageHandler: page.PageHandler{
 				Name: "sample-page-binding",
-				Page: &kdexv1alpha1.KDexPageBindingSpec{
+				Page: &kdexv1alpha1.KDexPageSpec{
 					Label: "TITLE",
 					Paths: kdexv1alpha1.Paths{
 						BasePath: "/",

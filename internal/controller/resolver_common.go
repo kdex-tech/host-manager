@@ -159,24 +159,24 @@ func ResolvePageNavigations(
 	return navigations, false, ctrl.Result{}, nil
 }
 
-func ResolvePageBinding(
+func ResolvePage(
 	ctx context.Context,
 	c client.Client,
 	object client.Object,
 	objectConditions *[]metav1.Condition,
-	pageBindingRef *corev1.LocalObjectReference,
+	pageRef *corev1.LocalObjectReference,
 	requeueDelay time.Duration,
-) (*kdexv1alpha1.KDexPageBinding, bool, ctrl.Result, error) {
-	if pageBindingRef == nil {
+) (*kdexv1alpha1.KDexPage, bool, ctrl.Result, error) {
+	if pageRef == nil {
 		return nil, false, ctrl.Result{}, nil
 	}
 
-	var pageBinding kdexv1alpha1.KDexPageBinding
-	pageBindingName := types.NamespacedName{
-		Name:      pageBindingRef.Name,
+	var kdexPage kdexv1alpha1.KDexPage
+	pageName := types.NamespacedName{
+		Name:      pageRef.Name,
 		Namespace: object.GetNamespace(),
 	}
-	if err := c.Get(ctx, pageBindingName, &pageBinding); err != nil {
+	if err := c.Get(ctx, pageName, &kdexPage); err != nil {
 		if errors.IsNotFound(err) {
 			kdexv1alpha1.SetConditions(
 				objectConditions,
@@ -195,11 +195,11 @@ func ResolvePageBinding(
 		return nil, true, ctrl.Result{}, err
 	}
 
-	if isReady, r1, err := isReady(&pageBinding, &pageBinding.Status.Conditions, requeueDelay); !isReady {
+	if isReady, r1, err := isReady(&kdexPage, &kdexPage.Status.Conditions, requeueDelay); !isReady {
 		return nil, true, r1, err
 	}
 
-	return &pageBinding, false, ctrl.Result{}, nil
+	return &kdexPage, false, ctrl.Result{}, nil
 }
 
 func ResolveKDexObjectReference(

@@ -38,12 +38,12 @@ func (r *KDexInternalHostReconciler) indexers(mgr ctrl.Manager) error {
 		return err
 	}
 
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kdexv1alpha1.KDexPageBinding{}, internal.HOST_INDEX_KEY, func(rawObj client.Object) []string {
-		pageBinding := rawObj.(*kdexv1alpha1.KDexPageBinding)
-		if pageBinding.Spec.HostRef.Name == "" {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kdexv1alpha1.KDexPage{}, internal.HOST_INDEX_KEY, func(rawObj client.Object) []string {
+		page := rawObj.(*kdexv1alpha1.KDexPage)
+		if page.Spec.HostRef.Name == "" {
 			return nil
 		}
-		return []string{pageBinding.Spec.HostRef.Name}
+		return []string{page.Spec.HostRef.Name}
 	}); err != nil {
 		return err
 	}

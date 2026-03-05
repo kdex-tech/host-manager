@@ -27,7 +27,7 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	// Mock Page
 	ph := page.PageHandler{
 		Name: "test-page",
-		Page: &kdexv1alpha1.KDexPageBindingSpec{
+		Page: &kdexv1alpha1.KDexPageSpec{
 			Label: "Test Page",
 			Paths: kdexv1alpha1.Paths{
 				BasePath: "/test",
@@ -92,7 +92,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	// Mock Page with Navigation
 	ph := page.PageHandler{
 		Name: "test-page",
-		Page: &kdexv1alpha1.KDexPageBindingSpec{
+		Page: &kdexv1alpha1.KDexPageSpec{
 			Label: "Test Page",
 			Paths: kdexv1alpha1.Paths{
 				BasePath: "/test",

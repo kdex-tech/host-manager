@@ -131,7 +131,7 @@ func (r *KDexInternalTranslationReconciler) SetupWithManager(mgr ctrl.Manager) e
 			return t.Name == r.FocalHost
 		case *kdexv1alpha1.KDexInternalPackageReferences:
 			return t.Name == fmt.Sprintf("%s-packages", r.FocalHost)
-		case *kdexv1alpha1.KDexPageBinding:
+		case *kdexv1alpha1.KDexPage:
 			return t.Spec.HostRef.Name == r.FocalHost
 		case *kdexv1alpha1.KDexInternalTranslation:
 			return t.Spec.HostRef.Name == r.FocalHost

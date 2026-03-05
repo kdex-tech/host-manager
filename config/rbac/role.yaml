@@ -97,7 +97,7 @@ rules:
   - kdexinternalpackagereferences
   - kdexinternaltranslations
   - kdexinternalutilitypages
-  - kdexpagebindings
+  - kdexpages
   verbs:
   - create
   - delete
@@ -114,7 +114,7 @@ rules:
   - kdexinternalpackagereferences/finalizers
   - kdexinternaltranslations/finalizers
   - kdexinternalutilitypages/finalizers
-  - kdexpagebindings/finalizers
+  - kdexpages/finalizers
   verbs:
   - update
 - apiGroups:
@@ -125,7 +125,7 @@ rules:
   - kdexinternalpackagereferences/status
   - kdexinternaltranslations/status
   - kdexinternalutilitypages/status
-  - kdexpagebindings/status
+  - kdexpages/status
   verbs:
   - get
   - patch

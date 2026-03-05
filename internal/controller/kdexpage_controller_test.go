@@ -26,7 +26,7 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
-var _ = Describe("KDexPageBinding Controller", func() {
+var _ = Describe("KDexPage Controller", func() {
 	Context("When reconciling a resource", func() {
 		const namespace = "default"
 		const resourceName = "test-resource"
@@ -38,12 +38,12 @@ var _ = Describe("KDexPageBinding Controller", func() {
 		})
 
 		It("with empty content entries should not succeed", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{},
 					HostRef: corev1.LocalObjectReference{
 						Name: "non-existent-host",
@@ -63,12 +63,12 @@ var _ = Describe("KDexPageBinding Controller", func() {
 		})
 
 		It("with content entries should succeed", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -95,12 +95,12 @@ var _ = Describe("KDexPageBinding Controller", func() {
 		})
 
 		It("with missing references should not succeed", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -127,7 +127,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdatePageArchetype(
 				ctx, k8sClient,
@@ -165,16 +165,16 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 		})
 
 		It("with override references", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -215,7 +215,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdatePageArchetype(
 				ctx, k8sClient,
@@ -287,16 +287,16 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 		})
 
 		It("with parent page reference", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -360,14 +360,14 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
-			referencedPage := &kdexv1alpha1.KDexPageBinding{
+			referencedPage := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "non-existent-page-binding",
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -394,16 +394,16 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 		})
 
 		It("updates when a dependency is updated", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -434,7 +434,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdatePageArchetype(
 				ctx, k8sClient,
@@ -484,7 +484,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 
 			pageHandler, ok := hostHandler.Pages.Get(resource.Name)
 			Expect(ok).To(BeTrue())
@@ -515,12 +515,12 @@ var _ = Describe("KDexPageBinding Controller", func() {
 		})
 
 		It("updates when an indirect dependency is updated", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -547,7 +547,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdatePageHeader(
 				ctx, k8sClient,
@@ -630,7 +630,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 
 			pageHandler, ok := hostHandler.Pages.Get(resource.Name)
 			Expect(ok).To(BeTrue())
@@ -665,12 +665,12 @@ var _ = Describe("KDexPageBinding Controller", func() {
 		})
 
 		It("cross namespace reference", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -698,7 +698,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdatePageArchetype(
 				ctx, k8sClient,
@@ -719,16 +719,16 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 		})
 
 		It("cluster reference", func() {
-			resource := &kdexv1alpha1.KDexPageBinding{
+			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,
 					Namespace: namespace,
 				},
-				Spec: kdexv1alpha1.KDexPageBindingSpec{
+				Spec: kdexv1alpha1.KDexPageSpec{
 					ContentEntries: []kdexv1alpha1.ContentEntry{
 						{
 							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
@@ -755,7 +755,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, false)
+				&kdexv1alpha1.KDexPage{}, false)
 
 			addOrUpdateClusterPageArchetype(
 				ctx, k8sClient,
@@ -775,7 +775,7 @@ var _ = Describe("KDexPageBinding Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, resourceName, namespace,
-				&kdexv1alpha1.KDexPageBinding{}, true)
+				&kdexv1alpha1.KDexPage{}, true)
 		})
 	})
 })

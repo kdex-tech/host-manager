@@ -8,7 +8,7 @@ const (
 	HOST_INDEX_KEY          = "spec.hostRef.name"
 	MODULE_PATH             = "/-/modules"
 	OCI_IMAGE               = "oci-image"
-	PAGE_BINDING_FINALIZER  = "kdex.dev/kdex-host-page-binding-finalizer"
+	PAGE_FINALIZER          = "kdex.dev/kdex-host-page-finalizer"
 	SHARED_VOLUME           = "shared-volume"
 	SUB_INDEX_KEY           = "spec.subject"
 	TRANSLATION_FINALIZER   = "kdex.dev/kdex-host-translation-finalizer"
