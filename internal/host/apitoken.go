@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -87,15 +86,18 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// TODO: entitlements should always URL encode the <resourceName> to protect from random colon ':' in the contents.
-	urlEncodedSubject := url.PathEscape(subject)
-
 	// 1. Check Entitlement
 	requirement := kdexv1alpha1.SecurityRequirement{
-		"bearer": []string{"apitokens:" + urlEncodedSubject + ":mint"},
+		"bearer": []string{"apitokens:mint"},
 	}
 
-	authorized, err := hh.authChecker.CheckAccess(r.Context(), "tokens", "mint", []kdexv1alpha1.SecurityRequirement{requirement})
+	authorized, err := hh.authChecker.CheckAccess(
+		r.Context(),
+		"tokens",
+		subject,
+		[]kdexv1alpha1.SecurityRequirement{requirement},
+		"mint",
+	)
 	if err != nil || !authorized {
 		hh.log.Error(err, "Failed to check access")
 		http.Error(w, "Forbidden", http.StatusForbidden)

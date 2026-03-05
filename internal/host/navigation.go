@@ -101,7 +101,7 @@ func (hh *HostHandler) buildMenuEntriesRecursive(
 }
 
 func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, []kdexv1alpha1.SecurityRequirement{{"authenticated": {}}}, hh.reconcileTime) {
+	if hh.applyCachingHeaders(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime) {
 		return
 	}
 
