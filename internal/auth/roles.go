@@ -78,7 +78,7 @@ func NewRoleProvider(
 	// KDexRoleBinding Subject Matching Syntax:
 	// 1. Exact Match: Default behavior (e.g., "john.doe").
 	// 2. Wildcard Match: "*" matches any subject.
-	// 3. Regex Match: Subjects enclosed in slashes (e.g., "/^admin-.*$/") are 
+	// 3. Regex Match: Subjects enclosed in slashes (e.g., "/^admin-.*$/") are
 	//    treated as Go-style regular expressions.
 	for _, b := range bindings.Items {
 		sub := b.Spec.Subject
