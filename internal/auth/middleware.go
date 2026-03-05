@@ -57,9 +57,23 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			token, err := jwt.ParseWithClaims(tokenString, &authContext, func(token *jwt.Token) (any, error) {
-				return publicKey, nil
-			})
+			audiences := []string{
+				exchanger.config.Audience,
+			}
+
+			for _, u := range exchanger.config.FunctionURLs {
+				audiences = append(audiences, u)
+			}
+
+			token, err := jwt.ParseWithClaims(
+				tokenString,
+				&authContext,
+				func(token *jwt.Token) (any, error) {
+					return publicKey, nil
+				},
+				jwt.WithIssuer(exchanger.config.Issuer),
+				jwt.WithAudience(audiences...),
+			)
 
 			if (err != nil || !token.Valid) && authSource == COOKIE && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				// Token is invalid (e.g. expired), try to refresh it
@@ -88,9 +102,15 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 						}
 
 						// Update authContext for the current request
-						token, err = jwt.ParseWithClaims(ts.AccessToken, &authContext, func(token *jwt.Token) (any, error) {
-							return publicKey, nil
-						})
+						token, err := jwt.ParseWithClaims(
+							tokenString,
+							&authContext,
+							func(token *jwt.Token) (any, error) {
+								return publicKey, nil
+							},
+							jwt.WithIssuer(exchanger.config.Issuer),
+							jwt.WithAudience(audiences...),
+						)
 						if err == nil && token.Valid {
 							log.Info("Token refreshed after expiry")
 						}
@@ -132,7 +152,7 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 				return
 			}
 
-			if autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() && authSource == COOKIE {
+			if authSource == COOKIE && autoExtend && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				exp, err := authContext.GetExpirationTime()
 				if err == nil && exp != nil && time.Until(exp.Time) < 10*time.Minute {
 					// Try to refresh
@@ -161,9 +181,15 @@ func WithAuthentication(publicKey crypto.PublicKey, cookieName string, exchanger
 							}
 
 							// Update authContext for the current request
-							newToken, err := jwt.ParseWithClaims(ts.AccessToken, &authContext, func(token *jwt.Token) (any, error) {
-								return publicKey, nil
-							})
+							newToken, err := jwt.ParseWithClaims(
+								tokenString,
+								&authContext,
+								func(token *jwt.Token) (any, error) {
+									return publicKey, nil
+								},
+								jwt.WithIssuer(exchanger.config.Issuer),
+								jwt.WithAudience(audiences...),
+							)
 							if err == nil && newToken.Valid {
 								log.Info("Token refreshed")
 							}

@@ -62,9 +62,9 @@ func (p *KeyPairs) GetKey(kid string) (*KeyPair, bool) {
 }
 
 type TokenManager struct {
-	activeKey    KeyPair
-	apiKeyIssuer string
-	keyPairs     KeyPairs
+	activeKey KeyPair
+	issuer    string
+	keyPairs  KeyPairs
 }
 
 func APITokenManagerLoader(
@@ -126,11 +126,11 @@ func APITokenManagerLoader(
 	return nil, nil
 }
 
-func NewTokenManager(apiKeyIssuer string, keyPairs *KeyPairs) (*TokenManager, error) {
+func NewTokenManager(issuer string, keyPairs *KeyPairs) (*TokenManager, error) {
 	return &TokenManager{
-		apiKeyIssuer: apiKeyIssuer,
-		activeKey:    *keyPairs.ActiveKey(),
-		keyPairs:     *keyPairs,
+		issuer:    issuer,
+		activeKey: *keyPairs.ActiveKey(),
+		keyPairs:  *keyPairs,
 	}, nil
 }
 
@@ -147,7 +147,7 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 	token.SetAudience(aud)
 	token.SetExpiration(exp)
 	token.SetIssuedAt(now)
-	token.SetIssuer(tm.apiKeyIssuer)
+	token.SetIssuer(tm.issuer)
 	token.SetJti(uuid.New().String())
 	token.SetNotBefore(now)
 	token.SetSubject(sub)
@@ -185,7 +185,7 @@ func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
 		return nil, fmt.Errorf("key not found: %s", footerData.KID)
 	}
 
-	parser.AddRule(paseto.IssuedBy(tm.apiKeyIssuer))
+	parser.AddRule(paseto.IssuedBy(tm.issuer))
 	parser.AddRule(paseto.NotExpired())
 	parser.AddRule(paseto.ValidAt(time.Now()))
 

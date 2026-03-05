@@ -32,9 +32,12 @@ type AuthClient struct {
 type Config struct {
 	ActivePair            *keys.KeyPair
 	AnonymousEntitlements []string
+	Audience              string
 	AutoExtendSession     bool
 	Clients               map[string]AuthClient
 	CookieName            string
+	FunctionURLs          []string
+	Issuer                string
 	KeyPairs              *keys.KeyPairs
 	MaxSessionAge         time.Duration
 	OIDC                  struct {
@@ -54,14 +57,15 @@ type Config struct {
 }
 
 type ConfigBuilder struct {
-	AuthClientLoader       func() (map[string]AuthClient, error)
-	KeyLoader              func() (*keys.KeyPairs, error)
-	OIDCClientConfigLoader func() (*OIDCClientConfig, error)
 	APITokenManagerLoader  func() (*apitoken.TokenManager, error)
 	Audience               string
-	Issuer                 string
-	DevMode                bool
+	AuthClientLoader       func() (map[string]AuthClient, error)
 	CacheManager           cache.CacheManager
+	DevMode                bool
+	Functions              kdexv1alpha1.KDexFunctionList
+	Issuer                 string
+	KeyLoader              func() (*keys.KeyPairs, error)
+	OIDCClientConfigLoader func() (*OIDCClientConfig, error)
 }
 
 func NewConfigBuilder() *ConfigBuilder {
@@ -90,6 +94,11 @@ func (cb *ConfigBuilder) WithAPITokenManagerLoader(apiTokenManagerLoader func() 
 
 func (cb *ConfigBuilder) WithAudience(audience string) *ConfigBuilder {
 	cb.Audience = audience
+	return cb
+}
+
+func (cb *ConfigBuilder) WithFunctions(functions kdexv1alpha1.KDexFunctionList) *ConfigBuilder {
+	cb.Functions = functions
 	return cb
 }
 
@@ -126,8 +135,21 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		}
 
 		cfg.AnonymousEntitlements = auth.AnonymousEntitlements
+		cfg.Audience = cb.Audience
 		cfg.AutoExtendSession = auth.AutoExtendSession
 		cfg.CookieName = utils.IfElse(auth.JWT.CookieName == "", "auth_token", auth.JWT.CookieName)
+
+		if len(cb.Functions.Items) > 0 {
+			functionURLs := make([]string, 0, len(cb.Functions.Items))
+			for _, fn := range cb.Functions.Items {
+				if fn.Status.URL != "" {
+					functionURLs = append(functionURLs, fn.Status.URL)
+				}
+			}
+			cfg.FunctionURLs = functionURLs
+		}
+
+		cfg.Issuer = cb.Issuer
 
 		maxSessionAgeString := utils.IfElse(auth.MaxSessionAge == "", "24h", auth.MaxSessionAge)
 		maxSessionAge, err := time.ParseDuration(maxSessionAgeString)
