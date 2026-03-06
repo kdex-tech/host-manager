@@ -320,7 +320,12 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 
 func (hh *HostHandler) faviconHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/favicon.ico"
-	mux.HandleFunc("GET "+path, hh.favicon.FaviconHandler)
+	mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
+		if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+			return
+		}
+		hh.favicon.FaviconHandler(w, r)
+	})
 	registeredPaths[path] = ko.PathInfo{
 		API: ko.OpenAPI{
 			BasePath: path,
@@ -554,13 +559,16 @@ func (hh *HostHandler) navigationHandler(mux *http.ServeMux, registeredPaths map
 }
 
 func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
-	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
 		return
 	}
 
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
+	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

@@ -22,6 +22,7 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	log := logf.FromContext(r.Context())
+
 	defer func() {
 		callbackURLStr := ""
 		if callbackURL != nil {

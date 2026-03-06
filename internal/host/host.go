@@ -34,10 +34,14 @@ func (hh *HostHandler) AddOrUpdateTranslation(name string, translation *kdexv1al
 		return
 	}
 	hh.log.V(3).Info("add or update translation", "translation", name)
+
 	hh.mu.Lock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
+
 	hh.translationResources[name] = *translation
-	hh.mu.Unlock()
-	hh.RebuildMux() // Called after lock is released
 }
 
 func (hh *HostHandler) AddOrUpdateUtilityPage(ph page.PageHandler) {
@@ -46,9 +50,12 @@ func (hh *HostHandler) AddOrUpdateUtilityPage(ph page.PageHandler) {
 	}
 	hh.log.V(3).Info("add or update utility page", "name", ph.Name, "type", ph.UtilityPage.Type)
 	hh.mu.Lock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
+
 	hh.utilityPages[ph.UtilityPage.Type] = ph
-	hh.mu.Unlock()
-	hh.RebuildMux()
 }
 
 func (hh *HostHandler) FootScriptToHTML(handler page.PageHandler) string {
@@ -76,6 +83,7 @@ func (hh *HostHandler) GetCacheManager() cache.CacheManager {
 func (hh *HostHandler) GetOpenAPIBuilder() *ko.Builder {
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
+
 	return &hh.openapiBuilder
 }
 
@@ -117,14 +125,6 @@ func (hh *HostHandler) Checksum() string {
 }
 
 func (hh *HostHandler) GeneratePageCacheKey(ph page.PageHandler, l language.Tag) string {
-	// generate a stable hash from the elements that make up the page
-	// this is used to invalidate the cache when the page changes
-	// we use the page generation to ensure that the cache is invalidated when the page changes
-	// we use the language to ensure that the cache is invalidated when the language changes
-	// we use the hh.importmap to ensure that the cache is invalidated when the importmap changes
-	// we use the hh.scripts to ensure that the cache is invalidated when the scripts change
-	// we use the hh.sitemap to ensure that the cache is invalidated when the sitemap changes
-
 	return fmt.Sprintf("%s:%s", ph.Name, l.String())
 }
 
@@ -154,6 +154,7 @@ func (hh *HostHandler) GetStatus() HostStatus {
 func (hh *HostHandler) GetUtilityPageHandler(name kdexv1alpha1.KDexUtilityPageType) page.PageHandler {
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
+
 	ph, ok := hh.utilityPages[name]
 	if !ok {
 		return page.PageHandler{}
@@ -331,10 +332,10 @@ func (hh *HostHandler) RebuildMux() {
 
 		hh.mu.RUnlock()
 		hh.mu.Lock()
+		defer hh.mu.Unlock()
 		hh.Translations = *newTranslations
 		hh.registeredPaths = registeredPaths
 		hh.Mux = mux
-		hh.mu.Unlock()
 
 		return
 	}
@@ -377,8 +378,8 @@ func (hh *HostHandler) RebuildMux() {
 	}
 
 	hh.mu.RUnlock()
-
 	hh.mu.Lock()
+	defer hh.mu.Unlock()
 
 	for _, pr := range renderedPages {
 		hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations)
@@ -396,30 +397,33 @@ func (hh *HostHandler) RebuildMux() {
 	hh.registeredPaths = registeredPaths
 	hh.functionHandlers = actualHandlers
 	hh.Mux = mux
-	hh.mu.Unlock()
 }
 
 func (hh *HostHandler) RemoveTranslation(name string) {
-	hh.log.V(1).Info("delete translation", "translation", name)
 	hh.mu.Lock()
-	delete(hh.translationResources, name)
-	hh.mu.Unlock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
 
-	hh.RebuildMux() // Called after lock is released
+	hh.log.V(1).Info("delete translation", "translation", name)
+	delete(hh.translationResources, name)
 }
 
 func (hh *HostHandler) RemoveUtilityPage(name string) {
-	hh.log.V(1).Info("delete utility page", "name", name)
 	hh.mu.Lock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
+
+	hh.log.V(1).Info("delete utility page", "name", name)
 	for t, ph := range hh.utilityPages {
 		if ph.Name == name {
 			delete(hh.utilityPages, t)
 			break
 		}
 	}
-	hh.mu.Unlock()
-
-	hh.RebuildMux() // Called after lock is released
 }
 
 func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
@@ -542,7 +546,14 @@ func (hh *HostHandler) SetHost(
 	authConfig *auth.Config,
 	scheme string,
 ) {
+	hh.log.V(2).Info("in SetHost, about to lock")
+
 	hh.mu.Lock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
+
 	hh.host = host
 	hh.status = status
 	hh.checksum = ""
@@ -564,6 +575,8 @@ func (hh *HostHandler) SetHost(
 	hh.themeAssets = themeAssets
 	hh.scripts = scripts
 
+	hh.log.V(2).Info("in SetHost, just set scripts, about to set sniffer")
+
 	var snif *sniffer.RequestSniffer
 	if host.DevMode {
 		snif = &sniffer.RequestSniffer{
@@ -582,6 +595,8 @@ func (hh *HostHandler) SetHost(
 	hh.sniffer = snif
 	hh.reconcileTime = time.Now()
 	hh.importmap = importmap
+
+	hh.log.V(2).Info("in SetHost, authConfig has been set")
 
 	if authConfig != nil {
 		hh.authConfig = authConfig
@@ -605,8 +620,7 @@ func (hh *HostHandler) SetHost(
 		}),
 	}
 
-	hh.mu.Unlock()
-	hh.RebuildMux()
+	hh.log.V(2).Info("in SetHost, end")
 }
 
 func (hh *HostHandler) ThemeAssetsToString() string {
@@ -685,8 +699,6 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 }
 
 func (hh *HostHandler) pageRequirements(ph *page.PageHandler) []kdexv1alpha1.SecurityRequirement {
-	hh.mu.RLock()
-	defer hh.mu.RUnlock()
 	var requirements []kdexv1alpha1.SecurityRequirement
 	if hh.host.Security != nil {
 		requirements = *hh.host.Security

@@ -562,27 +562,6 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.returnDegraged(&internalHost, err)
 	}
 
-	log.V(2).Info(
-		"foo",
-		"authExchanger", authExchanger,
-		"themeAssets", len(themeAssets),
-	)
-
-	r.HostHandler.SetHost(
-		ctx,
-		&internalHost.Spec.KDexHostSpec,
-		&internalHost.Status,
-		uniquePackageRefs,
-		themeAssets,
-		uniqueScriptDefs,
-		internalHost.Status.Attributes["packages.importmap"],
-		r.collectInitialPaths(requiredBackends, functions),
-		functions.Items,
-		authExchanger,
-		authConfig,
-		internalHost.Spec.Routing.Scheme,
-	)
-
 	for _, dep := range deployments {
 		if dep == nil {
 			continue
@@ -617,6 +596,25 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		internalHost.Status.Attributes[dep.Name+".deployment"] = "ready"
 	}
+
+	log.V(2).Info("deployments ready, about to set host")
+
+	r.HostHandler.SetHost(
+		ctx,
+		&internalHost.Spec.KDexHostSpec,
+		&internalHost.Status,
+		uniquePackageRefs,
+		themeAssets,
+		uniqueScriptDefs,
+		internalHost.Status.Attributes["packages.importmap"],
+		r.collectInitialPaths(requiredBackends, functions),
+		functions.Items,
+		authExchanger,
+		authConfig,
+		internalHost.Spec.Routing.Scheme,
+	)
+
+	log.V(2).Info("host has been set")
 
 	kdexv1alpha1.SetConditions(
 		&internalHost.Status.Conditions,

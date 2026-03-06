@@ -21,6 +21,9 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		returnURL = "/"
 	}
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -76,6 +79,9 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 
 	hh.log.V(1).Info("processing local login", "user", username)
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	// Local login doesn't have a clientID, so we pass empty string
 	// We also don't need the ID Token for cookie-based session
 	ts, err := hh.authExchanger.LoginLocal(r.Context(), username, password, "", "", auth.AuthMethodLocal)
@@ -113,6 +119,9 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 	returnURL := "/"
+
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
 
 	// Clear local cookies
 	http.SetCookie(w, &http.Cookie{

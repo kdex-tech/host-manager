@@ -188,7 +188,11 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := logf.FromContext(r.Context())
 
-		h, p := hh.Mux.Handler(r)
+		hh.mu.RLock()
+		mux := hh.Mux
+		sniffer := hh.sniffer
+
+		h, p := mux.Handler(r)
 		if h != nil {
 			log.V(2).Info("request match", "url", r.URL.String(), "pattern", p)
 		} else {
@@ -199,9 +203,13 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		wrapped := wrappedErrorResponseWriter(ew, w)
 
 		// Only intercept if we have a sniffer (checker), it's not an internal path
-		if hh.sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && h != nil) {
+		if sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && h != nil) {
+			hh.mu.RUnlock()
 			next.ServeHTTP(wrapped, r)
+
+			hh.mu.RLock()
 			hh.unwrap(ew, r, w)
+			hh.mu.RUnlock()
 			return
 		}
 
@@ -247,17 +255,19 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			}
 
 			// Analyze
-			result, err := hh.sniffer.Analyze(r)
+			result, err := sniffer.Analyze(r)
 			if err != nil {
 				hh.log.Error(err, "failed to analyze request", "path", r.URL.Path)
 				// Fallback to standard error serving if analysis fails
 				hh.serveError(w, r, http.StatusBadRequest, err.Error())
+				hh.mu.RUnlock()
 				return
 			}
 
 			if result.Function == nil {
 				// Analysis yielded nothing (maybe pattern mismatch), serve 404 as usual
 				hh.serveError(w, r, ew.statusCode, ew.statusMsg)
+				hh.mu.RUnlock()
 				return
 			}
 
@@ -286,9 +296,14 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			if err != nil {
 				hh.serveError(w, r, http.StatusInternalServerError, err.Error())
 			}
+			hh.mu.RUnlock()
 		} else {
+			hh.mu.RUnlock()
 			next.ServeHTTP(wrapped, r)
+
+			hh.mu.RLock()
 			hh.unwrap(ew, r, w)
+			hh.mu.RUnlock()
 		}
 	})
 }
@@ -329,6 +344,9 @@ func isMutable(matchedFunction *kdexv1alpha1.KDexFunction) bool {
 
 // InspectHandler serves the feedback UI
 func (hh *HostHandler) InspectHandler(w http.ResponseWriter, r *http.Request) {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	id := r.PathValue("uuid")
 	format := r.URL.Query().Get("format")
 

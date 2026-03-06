@@ -62,6 +62,7 @@ func (hh *HostHandler) TranslationGet(w http.ResponseWriter, r *http.Request) {
 
 	keysAndValues := map[string]string{}
 	printer := hh.messagePrinter(&hh.Translations, l)
+
 	for _, key := range keys {
 		keysAndValues[key] = printer.Sprintf(key)
 		// replace each occurrence of the string `%!s(MISSING)` with a placeholder `{{n}}` where `n` is the alphabetic index of the placeholder

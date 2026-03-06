@@ -106,6 +106,8 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	basePath := "/" + r.PathValue("basePathMinusLeadingSlash")
 	navKey := r.PathValue("navKey")
 	defaultLang := hh.defaultLanguage
@@ -121,7 +123,6 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	defer hh.mu.RUnlock()
 
 	if pageHandler == nil {
 		http.Error(w, "page not found", http.StatusNotFound)

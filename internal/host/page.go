@@ -16,6 +16,9 @@ func (hh *HostHandler) pageHandlerFunc(
 	translations *Translations,
 ) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		hh.mu.RLock()
+		defer hh.mu.RUnlock()
+
 		if hh.authChecker != nil && ph.ParsedRequirements != nil {
 			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(

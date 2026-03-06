@@ -25,7 +25,6 @@ func (hh *HostHandler) SchemaGet(w http.ResponseWriter, r *http.Request) {
 	defer hh.mu.RUnlock()
 
 	orderedSchemaArray := []schemaEntry{}
-
 	for path, info := range hh.registeredPaths {
 		for name, schema := range info.API.Schemas {
 			orderedSchemaArray = append(orderedSchemaArray, schemaEntry{

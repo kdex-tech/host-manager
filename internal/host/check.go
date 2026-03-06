@@ -29,6 +29,9 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	if hh.authChecker == nil {
 		// If auth is disabled, return empty or all?
 		// Usually if checker is nil, auth is disabled and everything passes.
@@ -43,9 +46,6 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. Pre-parse user entitlements once
 	parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 	passed := []string{}
-
-	hh.mu.RLock()
-	defer hh.mu.RUnlock()
 
 	for _, check := range req.Checks {
 		parts := strings.Split(check, ":")

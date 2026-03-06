@@ -219,6 +219,9 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			"target", target.String(),
 		)
 
+		hh.mu.RLock()
+		defer hh.mu.RUnlock()
+
 		if hh.authChecker != nil {
 			_, pattern := fh.patternMux.Handler(r)
 			key := r.Method + " " + pattern

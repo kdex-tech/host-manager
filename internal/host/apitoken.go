@@ -35,6 +35,9 @@ func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	keys := []map[string]string{}
 
 	for _, keyPair := range hh.authConfig.TokenManager.KeyPairs() {
@@ -91,6 +94,9 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"bearer": []string{"apitokens:mint"},
 	}
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	authorized, err := hh.authChecker.CheckAccess(
 		r.Context(),
 		"tokens",
@@ -133,18 +139,21 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 
 func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		hh.serveError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req VerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		hh.serveError(w, r, http.StatusBadRequest, "Invalid request body")
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	if hh.authConfig.TokenManager == nil {
-		hh.serveError(w, r, http.StatusNotImplemented, "Token manager not configured")
+		http.Error(w, "Token manager not configured", http.StatusInternalServerError)
 		return
 	}
 
@@ -156,7 +165,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 	data, err := hh.authConfig.TokenManager.ValidateToken(tokenString)
 	if err != nil {
 		hh.log.Error(err, "Token verification failed")
-		hh.serveError(w, r, http.StatusUnauthorized, "Invalid token")
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
 
@@ -164,7 +173,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
 		hh.log.Error(err, "Failed to encode response")
-		hh.serveError(w, r, http.StatusInternalServerError, "Failed to encode response")
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 }
