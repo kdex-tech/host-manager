@@ -154,7 +154,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
 	if err != nil {
-		return r.returnDegraged(&internalHost, err)
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
 	internalHost.Spec.ServiceAccountSecrets = secrets
@@ -230,7 +230,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var utilityPages kdexv1alpha1.KDexInternalUtilityPageList
 	if err := r.List(ctx, &utilityPages, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list utility pages: %w", err))
+		return ctrl.Result{}, r.returnDegraged(&internalHost, fmt.Errorf("failed to list utility pages: %w", err))
 	}
 
 	for _, utilityPageType := range []kdexv1alpha1.KDexUtilityPageType{
@@ -275,7 +275,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var bindings kdexv1alpha1.KDexPageList
 	if err := r.List(ctx, &bindings, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list page bindings: %w", err))
+		return ctrl.Result{}, r.returnDegraged(&internalHost, fmt.Errorf("failed to list page bindings: %w", err))
 	}
 
 	pageHandlers := r.HostHandler.Pages.List()
@@ -291,7 +291,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				pageHandler.Page.BasePath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 			)
 
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 		seenPaths[pageHandler.Page.BasePath] = true
 
@@ -302,7 +302,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					pageHandler.Page.PatternPath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 				)
 
-				return r.returnDegraged(&internalHost, err)
+				return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 			}
 			seenPaths[pageHandler.Page.PatternPath] = true
 		}
@@ -362,7 +362,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				backend.IngressPath, ref.Namespace, ref.Name, ref.Kind,
 			)
 
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 		seenPaths[backend.IngressPath] = true
 
@@ -381,7 +381,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var functions kdexv1alpha1.KDexFunctionList
 	if err := r.List(ctx, &functions, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list functions: %w", err))
+		return ctrl.Result{}, r.returnDegraged(&internalHost, fmt.Errorf("failed to list functions: %w", err))
 	}
 
 	for _, function := range functions.Items {
@@ -392,7 +392,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					routePath, function.Namespace, function.Name, "KDexFunction",
 				)
 
-				return r.returnDegraged(&internalHost, err)
+				return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 			}
 			seenPaths[routePath] = true
 		}
@@ -403,7 +403,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if r1.RequeueAfter > 0 {
 			return r1, err
 		}
-		return r.returnDegraged(&internalHost, err)
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
 	if iprBackend != nil {
@@ -416,12 +416,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		_, dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend)
 		if err != nil {
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 
 		_, err = r.createOrUpdateBackendService(ctx, &internalHost, name, backend)
 		if err != nil {
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 
 		deployments = append(deployments, dep)
@@ -436,12 +436,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if internalHost.Spec.Routing.Strategy == kdexv1alpha1.HTTPRouteRoutingStrategy {
 		_, err = r.createOrUpdateHTTPRoute(ctx, &internalHost, requiredBackends)
 		if err != nil {
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 	} else {
 		_, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends)
 		if err != nil {
-			return r.returnDegraged(&internalHost, err)
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 	}
 
@@ -487,7 +487,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	authConfig, err := authConfigBuilder.Build(internalHost.Spec.Auth)
 	if err != nil {
-		return r.returnDegraged(&internalHost, err)
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
 	authLookups := []auth.Lookup{
@@ -508,12 +508,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		authLookups,
 	)
 	if err != nil {
-		return r.returnDegraged(&internalHost, err)
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
 	authExchanger, err := auth.NewExchanger(ctx, *authConfig, r.HostHandler.GetCacheManager(), rp)
 	if err != nil {
-		return r.returnDegraged(&internalHost, err)
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
 	for _, dep := range deployments {
@@ -883,7 +883,7 @@ func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 	internalHost *kdexv1alpha1.KDexInternalHost,
 	internalPackageReferences *kdexv1alpha1.KDexInternalPackageReferences,
 	packageReferences []kdexv1alpha1.PackageReference,
-) (bool, ctrl.Result, error) {
+) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	op, err := ctrl.CreateOrUpdate(
@@ -932,10 +932,10 @@ func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 			err.Error(),
 		)
 
-		return true, ctrl.Result{}, err
+		return true, err
 	}
 
-	return false, ctrl.Result{}, nil
+	return false, nil
 }
 
 func (r *KDexInternalHostReconciler) createOrUpdateIngress(
@@ -1457,9 +1457,9 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 		return nil, "", false, ctrl.Result{}, nil
 	}
 
-	shouldReturn, r1, err := r.createOrUpdatePackageReferences(ctx, &internalHost, internalPackageReferences, uniquePackageRefs)
+	shouldReturn, err := r.createOrUpdatePackageReferences(ctx, &internalHost, internalPackageReferences, uniquePackageRefs)
 	if shouldReturn {
-		return nil, "", true, r1, err
+		return nil, "", true, ctrl.Result{}, err
 	}
 
 	if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
@@ -1485,7 +1485,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	return &packagesBackend, internalPackageReferences.Status.Attributes["importmap"], false, ctrl.Result{}, nil
 }
 
-func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) (ctrl.Result, error) {
+func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {
 	kdexv1alpha1.SetConditions(
 		&internalHost.Status.Conditions,
 		kdexv1alpha1.ConditionStatuses{
@@ -1497,7 +1497,7 @@ func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.K
 		err.Error(),
 	)
 
-	return ctrl.Result{}, err
+	return err
 }
 
 func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef string, secrets kdexv1alpha1.ServiceAccountSecrets) (string, error) {
