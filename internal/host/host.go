@@ -546,7 +546,7 @@ func (hh *HostHandler) SetHost(
 	authConfig *auth.Config,
 	scheme string,
 ) {
-	hh.log.V(2).Info("in SetHost, about to lock")
+	hh.log.V(3).Info("[SetHost] about to lock")
 
 	hh.mu.Lock()
 	defer func() {
@@ -554,28 +554,32 @@ func (hh *HostHandler) SetHost(
 		hh.RebuildMux()
 	}()
 
-	hh.host = host
-	hh.status = status
+	hh.log.V(3).Info("[SetHost] obtained lock")
+
 	hh.checksum = ""
+	hh.defaultLanguage = host.DefaultLang
+	hh.functions = functions
+	hh.host = host
+	hh.importmap = importmap
+	hh.packageReferences = packageReferences
+	hh.pathsCollectedInReconcile = paths
+	hh.reconcileTime = time.Now()
+	hh.scheme = scheme
+	hh.scripts = scripts
+	hh.status = status
+	hh.themeAssets = themeAssets
+
 	if err := hh.cacheManager.Cycle(hh.Checksum(), true); err != nil {
 		hh.log.Error(err, "failed to cycle cache manager")
 	}
-	hh.defaultLanguage = host.DefaultLang
-	hh.functions = functions
-	hh.scheme = scheme
-	hh.favicon = ico.NewICO(host.FaviconSVGTemplate, render.TemplateData{
+
+	favicon := ico.NewICO(host.FaviconSVGTemplate, render.TemplateData{
 		BrandName:       host.BrandName,
 		DefaultLanguage: host.DefaultLang,
 		Organization:    host.Organization,
 	})
-	hh.favicon.SetReconcileTime(hh.reconcileTime)
-	hh.packageReferences = packageReferences
-
-	hh.pathsCollectedInReconcile = paths
-	hh.themeAssets = themeAssets
-	hh.scripts = scripts
-
-	hh.log.V(2).Info("in SetHost, just set scripts, about to set sniffer")
+	favicon.SetReconcileTime(hh.reconcileTime)
+	hh.favicon = favicon
 
 	var snif *sniffer.RequestSniffer
 	if host.DevMode {
@@ -591,12 +595,9 @@ func (hh *HostHandler) SetHost(
 			SecuritySchemes: hh.SecuritySchemes(),
 		}
 	}
-
 	hh.sniffer = snif
-	hh.reconcileTime = time.Now()
-	hh.importmap = importmap
 
-	hh.log.V(2).Info("in SetHost, authConfig has been set")
+	hh.log.V(3).Info("[SetHost] authConfig has been set")
 
 	if authConfig != nil {
 		hh.authConfig = authConfig
@@ -604,7 +605,7 @@ func (hh *HostHandler) SetHost(
 		hh.authExchanger = authExchanger
 	}
 
-	hh.openapiBuilder = ko.Builder{
+	openapiBuilder := ko.Builder{
 		SecuritySchemes: hh.SecuritySchemes(),
 		TypesToInclude: utils.MapSlice(host.OpenAPI.TypesToInclude, func(i kdexv1alpha1.TypeToInclude) ko.PathType {
 			switch i {
@@ -620,7 +621,9 @@ func (hh *HostHandler) SetHost(
 		}),
 	}
 
-	hh.log.V(2).Info("in SetHost, end")
+	hh.openapiBuilder = openapiBuilder
+
+	hh.log.V(3).Info("[SetHost] end")
 }
 
 func (hh *HostHandler) ThemeAssetsToString() string {
