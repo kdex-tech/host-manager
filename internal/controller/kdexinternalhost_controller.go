@@ -34,6 +34,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -97,11 +98,23 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	defer func() {
 		internalHost.Status.ObservedGeneration = internalHost.Generation
 		if updateErr := r.Status().Update(ctx, &internalHost); updateErr != nil {
+			if errors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: r.RequeueDelay}
+				return
+			}
+
 			err = updateErr
 			res = ctrl.Result{}
 		}
 
 		log.V(3).Info("status", "status", internalHost.Status, "err", err, "res", res)
+
+		if errors.IsConflict(err) {
+			log.V(3).Info("status conflict, requeuing")
+			err = nil
+			res = ctrl.Result{RequeueAfter: r.RequeueDelay}
+		}
 	}()
 
 	kdexv1alpha1.SetConditions(
@@ -129,18 +142,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
 	if err != nil {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileError,
-			err.Error(),
-		)
-
-		return ctrl.Result{}, err
+		return r.returnDegraged(&internalHost, err)
 	}
 
 	internalHost.Spec.ServiceAccountSecrets = secrets
@@ -216,7 +218,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var utilityPages kdexv1alpha1.KDexInternalUtilityPageList
 	if err := r.List(ctx, &utilityPages, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to list utility pages: %w", err)
+		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list utility pages: %w", err))
 	}
 
 	for _, utilityPageType := range []kdexv1alpha1.KDexUtilityPageType{
@@ -261,7 +263,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var bindings kdexv1alpha1.KDexPageList
 	if err := r.List(ctx, &bindings, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to list page bindings: %w", err)
+		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list page bindings: %w", err))
 	}
 
 	pageHandlers := r.HostHandler.Pages.List()
@@ -277,18 +279,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				pageHandler.Page.BasePath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 			)
 
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 		seenPaths[pageHandler.Page.BasePath] = true
 
@@ -299,18 +290,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					pageHandler.Page.PatternPath, r.ControllerNamespace, pageHandler.Name, "KDexPage",
 				)
 
-				kdexv1alpha1.SetConditions(
-					&internalHost.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
-				)
-
-				return ctrl.Result{}, err
+				return r.returnDegraged(&internalHost, err)
 			}
 			seenPaths[pageHandler.Page.PatternPath] = true
 		}
@@ -370,18 +350,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				backend.IngressPath, ref.Namespace, ref.Name, ref.Kind,
 			)
 
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 		seenPaths[backend.IngressPath] = true
 
@@ -400,7 +369,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var functions kdexv1alpha1.KDexFunctionList
 	if err := r.List(ctx, &functions, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to list functions: %w", err)
+		return r.returnDegraged(&internalHost, fmt.Errorf("failed to list functions: %w", err))
 	}
 
 	for _, function := range functions.Items {
@@ -411,18 +380,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 					routePath, function.Namespace, function.Name, "KDexFunction",
 				)
 
-				kdexv1alpha1.SetConditions(
-					&internalHost.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
-				)
-
-				return ctrl.Result{}, err
+				return r.returnDegraged(&internalHost, err)
 			}
 			seenPaths[routePath] = true
 		}
@@ -439,20 +397,9 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		log.V(2).Info("deleting host package references", "packageReferences", internalPackageReferences.Name)
 
 		if err := r.Delete(ctx, internalPackageReferences); client.IgnoreNotFound(err) != nil {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
 			log.V(2).Info("error deleting package references", "packageReferences", internalPackageReferences.Name, "err", err)
 
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 
 		internalPackageReferences = nil
@@ -469,6 +416,21 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if internalPackageReferences != nil {
+		if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
+			kdexv1alpha1.SetConditions(
+				&internalHost.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionFalse,
+					Progressing: metav1.ConditionTrue,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileSuccess,
+				"image not available yet, requeueing",
+			)
+
+			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+		}
+
 		be := kdexv1alpha1.Backend{
 			IngressPath:           internal.MODULE_PATH,
 			StaticImage:           internalPackageReferences.Status.Attributes["image"],
@@ -499,31 +461,11 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		var dep *appsv1.Deployment
 		backendOps[keyBase+"/deployment"], dep, err = r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend)
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 		backendOps[keyBase+"/service"], err = r.createOrUpdateBackendService(ctx, &internalHost, name, backend)
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 		if dep != nil {
 			deployments = append(deployments, dep)
@@ -540,32 +482,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if internalHost.Spec.Routing.Strategy == kdexv1alpha1.HTTPRouteRoutingStrategy {
 		ingressOrHTTPRouteOp, err = r.createOrUpdateHTTPRoute(ctx, &internalHost, requiredBackends)
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 	} else {
 		ingressOrHTTPRouteOp, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends)
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-			return ctrl.Result{}, err
+			return r.returnDegraged(&internalHost, err)
 		}
 	}
 
@@ -611,21 +533,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	authConfig, err := authConfigBuilder.Build(internalHost.Spec.Auth)
 	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if err != nil {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileError,
-			err.Error(),
-		)
-		return ctrl.Result{}, err
+		return r.returnDegraged(&internalHost, err)
 	}
 
 	authLookups := []auth.Lookup{
@@ -646,33 +554,19 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		authLookups,
 	)
 	if err != nil {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileError,
-			err.Error(),
-		)
-		return ctrl.Result{}, err
+		return r.returnDegraged(&internalHost, err)
 	}
 
 	authExchanger, err := auth.NewExchanger(ctx, *authConfig, r.HostHandler.GetCacheManager(), rp)
 	if err != nil {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileError,
-			err.Error(),
-		)
-		return ctrl.Result{}, err
+		return r.returnDegraged(&internalHost, err)
 	}
+
+	log.V(2).Info(
+		"foo",
+		"authExchanger", authExchanger,
+		"themeAssets", len(themeAssets),
+	)
 
 	r.HostHandler.SetHost(
 		ctx,
@@ -699,6 +593,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				ready = true
 			}
 		}
+
 		if !ready {
 			kdexv1alpha1.SetConditions(
 				&internalHost.Status.Conditions,
@@ -719,6 +614,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
+
 		internalHost.Status.Attributes[dep.Name+".deployment"] = "ready"
 	}
 
@@ -1103,6 +999,7 @@ func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 		"generation", internalPackageReferences.Generation,
 		"observedGeneration", internalPackageReferences.Status.ObservedGeneration,
 		"packageReferences", internalPackageReferences.Spec.PackageReferences,
+		"error", err,
 	)
 
 	if err != nil {
@@ -1118,21 +1015,6 @@ func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 		)
 
 		return true, ctrl.Result{}, err
-	}
-
-	if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionFalse,
-				Progressing: metav1.ConditionTrue,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileSuccess,
-			"image not available yet, requeueing",
-		)
-
-		return true, ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
 	return false, ctrl.Result{}, nil
@@ -1563,4 +1445,19 @@ func (r *KDexInternalHostReconciler) cleanupObsoleteBackends(
 	}
 
 	return nil
+}
+
+func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) (ctrl.Result, error) {
+	kdexv1alpha1.SetConditions(
+		&internalHost.Status.Conditions,
+		kdexv1alpha1.ConditionStatuses{
+			Degraded:    metav1.ConditionTrue,
+			Progressing: metav1.ConditionFalse,
+			Ready:       metav1.ConditionFalse,
+		},
+		kdexv1alpha1.ConditionReasonReconcileError,
+		err.Error(),
+	)
+
+	return ctrl.Result{}, err
 }
