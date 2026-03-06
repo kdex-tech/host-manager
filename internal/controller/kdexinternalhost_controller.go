@@ -398,7 +398,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, internalHost, uniquePackageRefs)
+	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, &internalHost, uniquePackageRefs)
 	if shouldReturn {
 		if r1.RequeueAfter > 0 {
 			return r1, err
@@ -855,7 +855,7 @@ func (r *KDexInternalHostReconciler) collectInitialPaths(
 }
 
 func (r *KDexInternalHostReconciler) createIPRBackend(
-	internalHost kdexv1alpha1.KDexInternalHost,
+	internalHost *kdexv1alpha1.KDexInternalHost,
 	image string,
 ) resolvedBackend {
 	be := kdexv1alpha1.Backend{
@@ -1418,7 +1418,7 @@ func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {
 
 func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	ctx context.Context,
-	internalHost kdexv1alpha1.KDexInternalHost,
+	internalHost *kdexv1alpha1.KDexInternalHost,
 	uniquePackageRefs []kdexv1alpha1.PackageReference,
 ) (*resolvedBackend, string, bool, ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -1457,7 +1457,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 		return nil, "", false, ctrl.Result{}, nil
 	}
 
-	shouldReturn, err := r.createOrUpdatePackageReferences(ctx, &internalHost, internalPackageReferences, uniquePackageRefs)
+	shouldReturn, err := r.createOrUpdatePackageReferences(ctx, internalHost, internalPackageReferences, uniquePackageRefs)
 	if shouldReturn {
 		return nil, "", true, ctrl.Result{}, err
 	}
