@@ -213,6 +213,8 @@ cd ${WORKDIR}
 
 node generate.js
 
+cp importmap.json ${PACKAGING_DIR}/importmap.json
+
 cat importmap.json > /dev/termination-log
 						`,
 							},

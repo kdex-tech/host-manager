@@ -386,90 +386,33 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	internalPackageReferences := &kdexv1alpha1.KDexInternalPackageReferences{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      internalHost.Name,
-			Namespace: internalHost.Namespace,
-		},
-	}
-
-	if len(uniquePackageRefs) == 0 {
-		log.V(2).Info("deleting host package references", "packageReferences", internalPackageReferences.Name)
-
-		if err := r.Delete(ctx, internalPackageReferences); client.IgnoreNotFound(err) != nil {
-			log.V(2).Info("error deleting package references", "packageReferences", internalPackageReferences.Name, "err", err)
-
-			return r.returnDegraged(&internalHost, err)
-		}
-
-		internalPackageReferences = nil
-	} else {
-		shouldReturn, r1, err = r.createOrUpdatePackageReferences(ctx, &internalHost, internalPackageReferences, uniquePackageRefs)
-		if shouldReturn {
-			log.V(2).Info("package references shouldReturn", "packageReferences", internalPackageReferences.Name, "result", r1, "err", err)
-
+	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, internalHost, uniquePackageRefs)
+	if shouldReturn {
+		if r1.RequeueAfter > 0 {
 			return r1, err
 		}
-
-		internalHost.Status.Attributes["packages.image"] = internalPackageReferences.Status.Attributes["image"]
-		internalHost.Status.Attributes["packages.importmap"] = internalPackageReferences.Status.Attributes["importmap"]
+		return r.returnDegraged(&internalHost, err)
 	}
 
-	if internalPackageReferences != nil {
-		if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-			kdexv1alpha1.SetConditions(
-				&internalHost.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionFalse,
-					Progressing: metav1.ConditionTrue,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileSuccess,
-				"image not available yet, requeueing",
-			)
-
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-		}
-
-		be := kdexv1alpha1.Backend{
-			IngressPath:           internal.MODULE_PATH,
-			StaticImage:           internalPackageReferences.Status.Attributes["image"],
-			StaticImagePullPolicy: corev1.PullIfNotPresent,
-		}
-
-		if internalHost.Spec.Env != nil {
-			be.Env = append(be.Env, internalHost.Spec.Env...)
-		}
-
-		// Synthetic Backend for the packages
-		packagesBackend := resolvedBackend{
-			Backend: be,
-			Name:    "packages",
-			Kind:    "KDexInternalPackageReferences",
-		}
-
-		requiredBackends = append(requiredBackends, packagesBackend)
+	if iprBackend != nil {
+		requiredBackends = append(requiredBackends, *iprBackend)
 	}
 
-	backendOps := map[string]controllerutil.OperationResult{}
 	deployments := make([]*appsv1.Deployment, 0, len(requiredBackends))
-
 	for _, backend := range requiredBackends {
-		keyBase := fmt.Sprintf("%s/%s", strings.ToLower(backend.Kind), backend.Name)
 		name := fmt.Sprintf("%s-%s", internalHost.Name, backend.Name)
 
-		var dep *appsv1.Deployment
-		backendOps[keyBase+"/deployment"], dep, err = r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend)
+		_, dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend)
 		if err != nil {
 			return r.returnDegraged(&internalHost, err)
 		}
-		backendOps[keyBase+"/service"], err = r.createOrUpdateBackendService(ctx, &internalHost, name, backend)
+
+		_, err = r.createOrUpdateBackendService(ctx, &internalHost, name, backend)
 		if err != nil {
 			return r.returnDegraged(&internalHost, err)
 		}
-		if dep != nil {
-			deployments = append(deployments, dep)
-		}
+
+		deployments = append(deployments, dep)
 	}
 
 	if err := r.cleanupObsoleteBackends(ctx, &internalHost, requiredBackends); err != nil {
@@ -478,14 +421,13 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	var ingressOrHTTPRouteOp controllerutil.OperationResult
 	if internalHost.Spec.Routing.Strategy == kdexv1alpha1.HTTPRouteRoutingStrategy {
-		ingressOrHTTPRouteOp, err = r.createOrUpdateHTTPRoute(ctx, &internalHost, requiredBackends)
+		_, err = r.createOrUpdateHTTPRoute(ctx, &internalHost, requiredBackends)
 		if err != nil {
 			return r.returnDegraged(&internalHost, err)
 		}
 	} else {
-		ingressOrHTTPRouteOp, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends)
+		_, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends)
 		if err != nil {
 			return r.returnDegraged(&internalHost, err)
 		}
@@ -597,7 +539,11 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		internalHost.Status.Attributes[dep.Name+".deployment"] = "ready"
 	}
 
-	log.V(2).Info("deployments ready, about to set host")
+	log.V(3).Info("deployments ready, about to set host")
+
+	initialPaths := r.collectInitialPaths(requiredBackends, functions)
+
+	log.V(3).Info("collected initial paths", "paths", initialPaths)
 
 	r.HostHandler.SetHost(
 		ctx,
@@ -606,15 +552,15 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		uniquePackageRefs,
 		themeAssets,
 		uniqueScriptDefs,
-		internalHost.Status.Attributes["packages.importmap"],
-		r.collectInitialPaths(requiredBackends, functions),
+		importMap,
+		initialPaths,
 		functions.Items,
 		authExchanger,
 		authConfig,
 		internalHost.Spec.Routing.Scheme,
 	)
 
-	log.V(2).Info("host has been set")
+	log.V(3).Info("host has been set")
 
 	kdexv1alpha1.SetConditions(
 		&internalHost.Status.Conditions,
@@ -627,11 +573,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		"Reconciliation successful",
 	)
 
-	log.V(1).Info(
-		"reconciled",
-		"backendOps", backendOps,
-		"ingressOrHTTPRouteOp", ingressOrHTTPRouteOp,
-	)
+	log.V(1).Info("reconciled")
 
 	return ctrl.Result{}, nil
 }
@@ -791,13 +733,6 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-type resolvedBackend struct {
-	Backend   kdexv1alpha1.Backend
-	Kind      string
-	Name      string
-	Namespace string
-}
-
 func (r *KDexInternalHostReconciler) collectInitialPaths(
 	backends []resolvedBackend, functions kdexv1alpha1.KDexFunctionList,
 ) map[string]ko.PathInfo {
@@ -907,55 +842,28 @@ func (r *KDexInternalHostReconciler) collectInitialPaths(
 	return initialPaths
 }
 
-func (r *KDexInternalHostReconciler) getMemoizedBackendDeployment() *appsv1.DeploymentSpec {
-	r.mu.RLock()
-
-	if r.memoizedDeployment != nil {
-		r.mu.RUnlock()
-		return r.memoizedDeployment
+func (r *KDexInternalHostReconciler) createIPRBackend(
+	internalHost kdexv1alpha1.KDexInternalHost,
+	image string,
+) resolvedBackend {
+	be := kdexv1alpha1.Backend{
+		IngressPath:           internal.MODULE_PATH,
+		StaticImage:           image,
+		StaticImagePullPolicy: corev1.PullIfNotPresent,
 	}
 
-	r.mu.RUnlock()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.memoizedDeployment = r.Configuration.BackendDefault.Deployment.DeepCopy()
-
-	return r.memoizedDeployment
-}
-
-func (r *KDexInternalHostReconciler) getMemoizedIngress() *networkingv1.IngressSpec {
-	r.mu.RLock()
-
-	if r.memoizedIngress != nil {
-		r.mu.RUnlock()
-		return r.memoizedIngress
+	if internalHost.Spec.Env != nil {
+		be.Env = append(be.Env, internalHost.Spec.Env...)
 	}
 
-	r.mu.RUnlock()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.memoizedIngress = r.Configuration.BackendDefault.Ingress.DeepCopy()
-
-	return r.memoizedIngress
-}
-
-func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {
-	r.mu.RLock()
-
-	if r.memoizedService != nil {
-		r.mu.RUnlock()
-		return r.memoizedService
+	// Synthetic Backend for the packages
+	packagesBackend := resolvedBackend{
+		Backend: be,
+		Name:    "packages",
+		Kind:    "KDexInternalPackageReferences",
 	}
 
-	r.mu.RUnlock()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.memoizedService = r.Configuration.BackendDefault.Service.DeepCopy()
-
-	return r.memoizedService
+	return packagesBackend
 }
 
 func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
@@ -1445,6 +1353,115 @@ func (r *KDexInternalHostReconciler) cleanupObsoleteBackends(
 	return nil
 }
 
+func (r *KDexInternalHostReconciler) getMemoizedBackendDeployment() *appsv1.DeploymentSpec {
+	r.mu.RLock()
+
+	if r.memoizedDeployment != nil {
+		r.mu.RUnlock()
+		return r.memoizedDeployment
+	}
+
+	r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.memoizedDeployment = r.Configuration.BackendDefault.Deployment.DeepCopy()
+
+	return r.memoizedDeployment
+}
+
+func (r *KDexInternalHostReconciler) getMemoizedIngress() *networkingv1.IngressSpec {
+	r.mu.RLock()
+
+	if r.memoizedIngress != nil {
+		r.mu.RUnlock()
+		return r.memoizedIngress
+	}
+
+	r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.memoizedIngress = r.Configuration.BackendDefault.Ingress.DeepCopy()
+
+	return r.memoizedIngress
+}
+
+func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {
+	r.mu.RLock()
+
+	if r.memoizedService != nil {
+		r.mu.RUnlock()
+		return r.memoizedService
+	}
+
+	r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.memoizedService = r.Configuration.BackendDefault.Service.DeepCopy()
+
+	return r.memoizedService
+}
+
+func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
+	ctx context.Context,
+	internalHost kdexv1alpha1.KDexInternalHost,
+	uniquePackageRefs []kdexv1alpha1.PackageReference,
+) (*resolvedBackend, string, bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// TODO: if the host has a internal package reference image AND and importmap already specified, we should just use
+	//       those and not create any new ones
+
+	internalPackageReferences := &kdexv1alpha1.KDexInternalPackageReferences{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      internalHost.Name,
+			Namespace: internalHost.Namespace,
+		},
+	}
+
+	if len(uniquePackageRefs) == 0 {
+		log.V(2).Info("host has no package references")
+
+		if err := r.Delete(ctx, internalPackageReferences); client.IgnoreNotFound(err) != nil {
+			return nil, "", true, ctrl.Result{}, err
+		}
+
+		delete(internalHost.Status.Attributes, "packages.image")
+		delete(internalHost.Status.Attributes, "packages.importmap")
+
+		return nil, "", false, ctrl.Result{}, nil
+	}
+
+	shouldReturn, r1, err := r.createOrUpdatePackageReferences(ctx, &internalHost, internalPackageReferences, uniquePackageRefs)
+	if shouldReturn {
+		return nil, "", true, r1, err
+	}
+
+	if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
+		kdexv1alpha1.SetConditions(
+			&internalHost.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionFalse,
+				Progressing: metav1.ConditionTrue,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileSuccess,
+			"image not available yet, requeueing",
+		)
+
+		return nil, "", true, ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+	}
+
+	internalHost.Status.Attributes["packages.image"] = internalPackageReferences.Status.Attributes["image"]
+	internalHost.Status.Attributes["packages.importmap"] = internalPackageReferences.Status.Attributes["importmap"]
+
+	packagesBackend := r.createIPRBackend(internalHost, internalPackageReferences.Status.Attributes["image"])
+
+	return &packagesBackend, internalPackageReferences.Status.Attributes["importmap"], false, ctrl.Result{}, nil
+}
+
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) (ctrl.Result, error) {
 	kdexv1alpha1.SetConditions(
 		&internalHost.Status.Conditions,
@@ -1458,4 +1475,11 @@ func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.K
 	)
 
 	return ctrl.Result{}, err
+}
+
+type resolvedBackend struct {
+	Backend   kdexv1alpha1.Backend
+	Kind      string
+	Name      string
+	Namespace string
 }
