@@ -20,6 +20,7 @@ import (
 type PackRef struct {
 	client.Client
 	ConfigMap         *corev1.ConfigMap
+	InternalHost      *kdexv1alpha1.KDexInternalHost
 	ImageRegistry     string
 	ImagePushSecret   *corev1.Secret
 	ImagePullSecrets  []corev1.LocalObjectReference
@@ -107,7 +108,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		})
 	}
 
-	imageURL := fmt.Sprintf("%s/%s/packages:%d", p.ImageRegistry, ipr.Name, ipr.Generation)
+	imageURL := fmt.Sprintf("%s/%s/packages:%d", p.ImageRegistry, ipr.Name, p.InternalHost.Generation)
 
 	env := []corev1.EnvVar{
 		{

@@ -17,9 +17,15 @@ limitations under the License.
 package controller
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
+	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +37,8 @@ import (
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -41,6 +49,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
+	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/registry/remote"
+	remoteauth "oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -1411,8 +1423,19 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 ) (*resolvedBackend, string, bool, ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	// TODO: if the host has a internal package reference image AND and importmap already specified, we should just use
-	//       those and not create any new ones
+	if internalHost.Spec.PackagesImage != "" {
+		importMap, err := r.PullImportMap(ctx, internalHost.Spec.PackagesImage, internalHost.Spec.ServiceAccountSecrets)
+		if err != nil {
+			return nil, "", true, ctrl.Result{}, fmt.Errorf("failed to pull importmap from %s: %w", internalHost.Spec.PackagesImage, err)
+		}
+
+		internalHost.Status.Attributes["packages.image"] = internalHost.Spec.PackagesImage
+		internalHost.Status.Attributes["packages.importmap"] = importMap
+
+		packagesBackend := r.createIPRBackend(internalHost, internalHost.Spec.PackagesImage)
+
+		return &packagesBackend, importMap, false, ctrl.Result{}, nil
+	}
 
 	internalPackageReferences := &kdexv1alpha1.KDexInternalPackageReferences{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1475,6 +1498,157 @@ func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.K
 	)
 
 	return ctrl.Result{}, err
+}
+
+func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef string, secrets kdexv1alpha1.ServiceAccountSecrets) (string, error) {
+	log := logf.FromContext(ctx)
+
+	repo, err := remote.NewRepository(imageRef)
+	if err != nil {
+		return "", fmt.Errorf("failed to create repository client: %w", err)
+	}
+
+	log.V(3).Info("[PullImportMap]", "registry", repo.Reference.Registry)
+
+	registryURL, err := url.Parse("//" + repo.Reference.Registry)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse registry URL: %w", err)
+	}
+
+	log.V(3).Info("[PullImportMap]", "hostname", registryURL.Hostname())
+
+	// Determine if we should use HTTP for local registries
+	if strings.HasSuffix(registryURL.Hostname(), ".local") {
+		repo.PlainHTTP = true
+	}
+
+	// Handle Authentication
+	cred := r.getRegistryCredential(repo.Reference.Registry, secrets)
+	if cred.Username != "" {
+		repo.Client = &remoteauth.Client{
+			Client: retry.DefaultClient,
+			Cache:  remoteauth.NewCache(),
+			Credential: func(ctx context.Context, s string) (remoteauth.Credential, error) {
+				return cred, nil
+			},
+		}
+	}
+
+	log.V(3).Info("[PullImportMap]", "repo.reference", repo.Reference.String())
+
+	// 1. Resolve to a manifest (handles OCI index/multi-arch)
+	descriptor, err := oras.Resolve(ctx, repo, repo.Reference.Reference, oras.ResolveOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve image: %w", err)
+	}
+
+	// 2. Fetch Manifest
+	rc, err := repo.Fetch(ctx, descriptor)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	manifestData, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		return "", fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	var manifest struct {
+		Layers []struct {
+			MediaType string `json:"mediaType"`
+			Digest    string `json:"digest"`
+			Size      int64  `json:"size"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return "", fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	// 3. Find our importmap layer
+	var layerDescriptor ocispec.Descriptor
+	for _, layer := range manifest.Layers {
+		// Accept both tar+gzip (the new correct format) and raw json (legacy/direct)
+		if layer.MediaType == "application/json" ||
+			layer.MediaType == "application/vnd.kdex.importmap+json" ||
+			layer.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip" {
+			layerDescriptor.MediaType = layer.MediaType
+			layerDescriptor.Digest = digest.Digest(layer.Digest)
+			layerDescriptor.Size = layer.Size
+			break
+		}
+	}
+
+	if layerDescriptor.Digest == "" {
+		return "", fmt.Errorf("could not find importmap layer in image %s", imageRef)
+	}
+
+	// 4. Fetch the Blob
+	rc, err = repo.Fetch(ctx, layerDescriptor)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch importmap blob: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	// If it's a tarball, we need to extract the json file
+	if strings.Contains(layerDescriptor.MediaType, "tar") {
+		gr, err := gzip.NewReader(rc)
+		if err != nil {
+			return "", fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer func() { _ = gr.Close() }()
+
+		tr := tar.NewReader(gr)
+		for {
+			header, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", fmt.Errorf("failed to read tar: %w", err)
+			}
+			// Clean the path to handle potential './' prefixes or other variations
+			cleanName := path.Clean(header.Name)
+			if cleanName == "importmap.json" || strings.HasSuffix(cleanName, "/importmap.json") {
+				data, err := io.ReadAll(tr)
+				if err != nil {
+					return "", fmt.Errorf("failed to read file from tar: %w", err)
+				}
+				return string(data), nil
+			}
+		}
+		return "", fmt.Errorf("importmap.json not found in tarball layer")
+	}
+
+	// Otherwise, assume it's raw data
+	blobData, err := io.ReadAll(rc)
+	if err != nil {
+		return "", fmt.Errorf("failed to read importmap blob: %w", err)
+	}
+
+	return string(blobData), nil
+}
+
+func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.ServiceAccountSecrets) remoteauth.Credential {
+	dockerSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
+	if len(dockerSecrets) == 0 {
+		return remoteauth.EmptyCredential
+	}
+
+	var config struct {
+		Auths map[string]struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"auths"`
+	}
+
+	if err := json.Unmarshal(dockerSecrets[0].Data[corev1.DockerConfigJsonKey], &config); err != nil {
+		return remoteauth.EmptyCredential
+	}
+
+	if a, ok := config.Auths[registry]; ok {
+		return remoteauth.Credential{Username: a.Username, Password: a.Password}
+	}
+	return remoteauth.EmptyCredential
 }
 
 type resolvedBackend struct {

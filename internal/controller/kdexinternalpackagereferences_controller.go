@@ -191,6 +191,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	builder := packref.PackRef{
 		Client:            r.Client,
 		ConfigMap:         configMap,
+		InternalHost:      internalHost,
 		ImageRegistry:     internalHost.Spec.Registries.ImageRegistry,
 		ImagePushSecret:   imagePushSecret,
 		ImagePullSecrets:  imagePullSecretRefs,
