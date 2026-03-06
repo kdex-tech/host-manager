@@ -31,6 +31,7 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 
+	"go.uber.org/zap/zapcore"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -76,6 +77,8 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	start := time.Now()
+
 	var cacheAddr string
 	var configFile string
 	var focalHost string
@@ -160,10 +163,16 @@ func main() {
 	}
 
 	if zapTimeEncodingEnv := os.Getenv("ZAP_TIME_ENCODING"); zapTimeEncodingEnv != "" {
-		enc := flag.CommandLine.Lookup("zap-time-encoding")
-		if enc != nil {
-			if err := enc.Value.Set(zapTimeEncodingEnv); err != nil {
-				panic(err)
+		if zapTimeEncodingEnv == "offset" {
+			opts.TimeEncoder = func(t time.Time, pae zapcore.PrimitiveArrayEncoder) {
+				pae.AppendString(t.Sub(start).String())
+			}
+		} else {
+			enc := flag.CommandLine.Lookup("zap-time-encoding")
+			if enc != nil {
+				if err := enc.Value.Set(zapTimeEncodingEnv); err != nil {
+					panic(err)
+				}
 			}
 		}
 	}
