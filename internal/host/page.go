@@ -36,8 +36,9 @@ func (hh *HostHandler) pageHandlerFunc(
 
 			if !authorized {
 				log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
-				if r.URL.Path == "/" {
-
+				if r.URL.Path == "/" || r.URL.Path == "" {
+					http.Redirect(w, r, "/-/login", http.StatusSeeOther)
+					return
 				}
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
