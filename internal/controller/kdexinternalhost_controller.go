@@ -1423,6 +1423,9 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 ) (*resolvedBackend, string, bool, ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// TODO: when there is no package image and the only packageRef is @kdex-tech/ui use a prebuilt image.
+	// There should be a configuration that holds the default image reference.
+
 	if internalHost.Spec.PackagesImage != "" {
 		importMap, err := r.PullImportMap(ctx, internalHost.Spec.PackagesImage, internalHost.Spec.ServiceAccountSecrets)
 		if err != nil {
