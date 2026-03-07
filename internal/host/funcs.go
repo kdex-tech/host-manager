@@ -13,7 +13,6 @@ import (
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) convertRequirements(in *[]kdexv1alpha1.SecurityRequirement) *openapi.SecurityRequirements {
@@ -103,38 +102,6 @@ func (hh *HostHandler) getUserHash(r *http.Request) string {
 		}
 	}
 	return "anon"
-}
-
-func (hh *HostHandler) handleAuth(
-
-	r *http.Request,
-	w http.ResponseWriter,
-	resource string,
-	resourceName string,
-	requirements []kdexv1alpha1.SecurityRequirement,
-) bool {
-	if !hh.authConfig.IsAuthEnabled() {
-		return false
-	}
-
-	authorized, err := hh.authChecker.CheckAccess(
-		r.Context(), resource, resourceName, requirements)
-
-	log := logf.FromContext(r.Context())
-
-	if err != nil {
-		log.Error(err, "authorization check failed", resource, resourceName)
-		http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
-		return true
-	}
-
-	if !authorized {
-		log.V(1).Info("unauthorized access attempt", resource, resourceName)
-		http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
-		return true
-	}
-
-	return false
 }
 
 // Helper to strip the Domain attribute from a Set-Cookie string

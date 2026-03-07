@@ -42,18 +42,6 @@ func (hh *HostHandler) pageHandlerFunc(
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}
-		} else {
-			// Fallback to standard path if requirements aren't pre-parsed
-			shouldReturn := hh.handleAuth(
-				r,
-				w,
-				"pages",
-				ph.BasePath(),
-				hh.pageRequirements(&ph),
-			)
-			if shouldReturn {
-				return
-			}
 		}
 
 		if hh.applyCachingHeaders(w, r, hh.pageRequirements(&ph), hh.reconcileTime) {
