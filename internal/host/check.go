@@ -7,6 +7,7 @@ import (
 
 	"github.com/kdex-tech/entitlements"
 	"kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type CheckRequest struct {
@@ -29,6 +30,8 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log := logf.FromContext(r.Context())
+
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
@@ -38,7 +41,7 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 		// However, KDex tech usually requires explicit grants.
 		err := json.NewEncoder(w).Encode(CheckResponse{Passed: []string{}})
 		if err != nil {
-			hh.log.Error(err, "failed to encode check response")
+			log.Error(err, "failed to encode check response")
 		}
 		return
 	}
@@ -104,6 +107,6 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	err := json.NewEncoder(w).Encode(CheckResponse{Passed: passed})
 	if err != nil {
-		hh.log.Error(err, "failed to encode check response")
+		log.Error(err, "failed to encode check response")
 	}
 }

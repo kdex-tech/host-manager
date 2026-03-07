@@ -10,6 +10,7 @@ import (
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type MintRequest struct {
@@ -29,8 +30,10 @@ type VerifyRequest struct {
 }
 
 func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
+	log := logf.FromContext(r.Context())
+
 	if r.Method != http.MethodGet {
-		hh.log.Error(nil, "Method not allowed")
+		log.Error(nil, "Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -55,36 +58,38 @@ func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.R
 		"keys": keys,
 	})
 	if err != nil {
-		hh.log.Error(err, "Failed to encode response")
+		log.Error(err, "Failed to encode response")
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 }
 
 func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Request) {
+	log := logf.FromContext(r.Context())
+
 	if r.Method != http.MethodPost {
-		hh.log.Error(nil, "Method not allowed")
+		log.Error(nil, "Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	var req MintRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		hh.log.Error(err, "Failed to decode request body")
+		log.Error(err, "Failed to decode request body")
 		http.Error(w, "Failed to decode request body", http.StatusBadRequest)
 		return
 	}
 
 	audience := req.Audience
 	if audience == "" {
-		hh.log.Error(nil, "aud is required")
+		log.Error(nil, "aud is required")
 		http.Error(w, "aud is required", http.StatusBadRequest)
 		return
 	}
 
 	subject := req.Sub
 	if subject == "" {
-		hh.log.Error(nil, "sub is required")
+		log.Error(nil, "sub is required")
 		http.Error(w, "sub is required", http.StatusBadRequest)
 		return
 	}
@@ -105,7 +110,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"mint",
 	)
 	if err != nil || !authorized {
-		hh.log.Error(err, "Failed to check access")
+		log.Error(err, "Failed to check access")
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -116,14 +121,14 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	if hh.authConfig.TokenManager == nil {
-		hh.log.Error(nil, "Token manager not configured")
+		log.Error(nil, "Token manager not configured")
 		http.Error(w, "Token manager not configured", http.StatusNotImplemented)
 		return
 	}
 
 	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, req.Action, req.Scope, ttl)
 	if err != nil {
-		hh.log.Error(err, "Failed to mint token")
+		log.Error(err, "Failed to mint token")
 		http.Error(w, "Failed to mint token", http.StatusInternalServerError)
 		return
 	}
@@ -131,13 +136,15 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(MintResponse{Token: token})
 	if err != nil {
-		hh.log.Error(err, "Failed to encode response")
+		log.Error(err, "Failed to encode response")
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 }
 
 func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Request) {
+	log := logf.FromContext(r.Context())
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -164,7 +171,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 
 	data, err := hh.authConfig.TokenManager.ValidateToken(tokenString)
 	if err != nil {
-		hh.log.Error(err, "Token verification failed")
+		log.Error(err, "Token verification failed")
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -172,7 +179,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(data)
 	if err != nil {
-		hh.log.Error(err, "Failed to encode response")
+		log.Error(err, "Failed to encode response")
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}

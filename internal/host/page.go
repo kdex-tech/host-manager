@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"golang.org/x/text/language"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) pageHandlerFunc(
@@ -16,6 +18,8 @@ func (hh *HostHandler) pageHandlerFunc(
 	translations *Translations,
 ) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		log := logf.FromContext(r.Context())
+
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 
@@ -25,13 +29,16 @@ func (hh *HostHandler) pageHandlerFunc(
 				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)
 
 			if err != nil {
-				hh.log.Error(err, "authorization check failed", "resource", "pages", "resourceName", ph.BasePath())
+				log.Error(err, "authorization check failed", "resource", "pages", "resourceName", ph.BasePath())
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}
 
 			if !authorized {
-				hh.log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
+				log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
+				if r.URL.Path == "/" {
+
+				}
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}
@@ -65,13 +72,13 @@ func (hh *HostHandler) pageHandlerFunc(
 
 		rendered, ok, isCurrent, err := pageCache.Get(r.Context(), cacheKey)
 		if err != nil {
-			hh.log.Error(err, "failed to get from cache", "page", ph.Name, "language", l)
+			log.Error(err, "failed to get from cache", "page", ph.Name, "language", l)
 		}
 
 		if ok {
 			// Check if we need to migrate this stale entry to the current generation
 			if !isCurrent {
-				hh.log.V(2).Info("serving stale page, migrating in background", "page", ph.Name, "lang", l)
+				log.V(2).Info("serving stale page, migrating in background", "page", ph.Name, "lang", l)
 
 				// Background Migration
 				go func(p page.PageHandler, lang language.Tag, trans *Translations) {
@@ -82,41 +89,41 @@ func (hh *HostHandler) pageHandlerFunc(
 					if err == nil {
 						_ = pageCache.Set(bgCtx, cacheKey, newRender)
 					} else {
-						hh.log.Error(err, "background migration failed", "page", p.Name)
+						log.Error(err, "background migration failed", "page", p.Name)
 					}
 				}(ph, l, translations)
 			}
 
-			hh.log.V(2).Info("serving from cache", "page", ph.Name, "lang", l)
+			log.V(2).Info("serving from cache", "page", ph.Name, "lang", l)
 
 			// Serve the cached content (Current or Stale)
-			hh.serveRendered(w, l, ph.Name, rendered)
+			hh.serveRendered(w, log, l, ph.Name, rendered)
 			return
 		}
 
 		// 2. Cache Miss: Synchronous Render
 		rendered, err = hh.L10nRender(ph, nil, l, map[string]any{}, translations)
 		if err != nil {
-			hh.log.Error(err, "failed to render page", "page", ph.Name, "language", l)
+			log.Error(err, "failed to render page", "page", ph.Name, "language", l)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		// Store the fresh render
 		if err := pageCache.Set(r.Context(), cacheKey, rendered); err != nil {
-			hh.log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
+			log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
 		}
 
-		hh.serveRendered(w, l, ph.Name, rendered)
+		hh.serveRendered(w, log, l, ph.Name, rendered)
 	}
 }
 
 // Small helper to keep the main handler clean
-func (hh *HostHandler) serveRendered(w http.ResponseWriter, l language.Tag, name string, rendered string) {
-	hh.log.V(1).Info("serving", "page", name, "language", l)
+func (hh *HostHandler) serveRendered(w http.ResponseWriter, log logr.Logger, l language.Tag, name string, rendered string) {
+	log.V(1).Info("serving", "page", name, "language", l)
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
 	if _, err := w.Write([]byte(rendered)); err != nil {
-		hh.log.Error(err, "failed to write response", "page", name, "language", l)
+		log.Error(err, "failed to write response", "page", name, "language", l)
 	}
 }

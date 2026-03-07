@@ -11,6 +11,7 @@ import (
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/utils"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) addHandlerAndRegister(mux *http.ServeMux, pr pageRender, registeredPaths map[string]ko.PathInfo, translations *Translations) {
@@ -563,6 +564,8 @@ func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log := logf.FromContext(r.Context())
+
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
@@ -584,7 +587,7 @@ func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hh.log.V(1).Info("serving announcement page", "language", l.String())
+	log.V(1).Info("serving announcement page", "language", l.String())
 
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
@@ -844,9 +847,11 @@ func (hh *HostHandler) stateHandler(mux *http.ServeMux, registeredPaths map[stri
 			return
 		}
 
+		log := logf.FromContext(r.Context())
+
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(authContext); err != nil {
-			hh.log.Error(err, "failed to encode claims")
+			log.Error(err, "failed to encode claims")
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		}
 	})

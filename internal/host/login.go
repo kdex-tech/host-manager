@@ -8,12 +8,15 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 	if hh.applyCachingHeaders(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime) {
 		return
 	}
+
+	log := logf.FromContext(r.Context())
 
 	query := r.URL.Query()
 	returnURL := query.Get("return")
@@ -52,7 +55,7 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hh.log.V(1).Info("serving login page", "language", l.String())
+	log.V(1).Info("serving login page", "language", l.String())
 
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
@@ -77,7 +80,9 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 		returnURL = "/"
 	}
 
-	hh.log.V(1).Info("processing local login", "user", username)
+	log := logf.FromContext(r.Context())
+
+	log.V(1).Info("processing local login", "user", username)
 
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
@@ -88,7 +93,7 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// FAILED: 401 Unauthorized / render login page again with error message?
 		// For now simple redirect back to login
-		hh.log.Error(err, "local login failed")
+		log.Error(err, "local login failed")
 		http.Redirect(w, r, "/-/login?error=invalid_credentials&return="+url.QueryEscape(returnURL), http.StatusSeeOther)
 		return
 	}

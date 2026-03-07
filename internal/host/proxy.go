@@ -196,6 +196,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 	// Capture the start time and log the completion
 	fh.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log := logf.FromContext(r.Context())
+
 		start := time.Now()
 		defer func() {
 			code := http.StatusOK
@@ -204,7 +206,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			}
 
 			// Log the Completion
-			hh.log.V(2).Info("proxy request finished",
+			log.V(2).Info("proxy request finished",
 				"function", fn.Name,
 				"statusCode", code,
 				"duration", time.Since(start).String(),
@@ -212,7 +214,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		}()
 
 		// Log the Inbound Request
-		hh.log.V(2).Info("proxy request started",
+		log.V(2).Info("proxy request started",
 			"function", fn.Name,
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -239,9 +241,9 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 			if err != nil || !authorized {
 				if err != nil {
-					hh.log.Error(err, "authorization check failed", "function", fn.Name)
+					log.Error(err, "authorization check failed", "function", fn.Name)
 				} else {
-					hh.log.V(1).Info("unauthorized access attempt", "function", fn.Name)
+					log.V(1).Info("unauthorized access attempt", "function", fn.Name)
 				}
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return

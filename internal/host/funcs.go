@@ -13,6 +13,7 @@ import (
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) convertRequirements(in *[]kdexv1alpha1.SecurityRequirement) *openapi.SecurityRequirements {
@@ -119,14 +120,16 @@ func (hh *HostHandler) handleAuth(
 	authorized, err := hh.authChecker.CheckAccess(
 		r.Context(), resource, resourceName, requirements)
 
+	log := logf.FromContext(r.Context())
+
 	if err != nil {
-		hh.log.Error(err, "authorization check failed", resource, resourceName)
+		log.Error(err, "authorization check failed", resource, resourceName)
 		http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 		return true
 	}
 
 	if !authorized {
-		hh.log.V(1).Info("unauthorized access attempt", resource, resourceName)
+		log.V(1).Info("unauthorized access attempt", resource, resourceName)
 		http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 		return true
 	}

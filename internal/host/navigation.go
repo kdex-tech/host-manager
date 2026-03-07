@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/render"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func (hh *HostHandler) BuildMenuEntries(
@@ -105,6 +106,8 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log := logf.FromContext(r.Context())
+
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
@@ -149,7 +152,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 2. Stale Hit (vN-1): Serve fast, migrate in background
-		hh.log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
+		log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
 
 		// Clone necessary request context or data for the goroutine
 		// Note: we don't pass r.Context() because it cancels when the request ends
@@ -176,7 +179,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Cache Miss: Perform Synchronous Render
-	hh.log.V(2).Info("generating navigation", "basePath", basePath, "lang", l.String(), "navKey", navKey)
+	log.V(2).Info("generating navigation", "basePath", basePath, "lang", l.String(), "navKey", navKey)
 	rendered, err = hh.performNavigationRender(
 		r.Context(),
 		l,
@@ -194,7 +197,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := navCache.Set(r.Context(), cacheKey, rendered); err != nil {
-		hh.log.Error(err, "failed to cache navigation", "key", cacheKey)
+		log.Error(err, "failed to cache navigation", "key", cacheKey)
 	}
 
 	w.Header().Set("Content-Type", "text/html")
