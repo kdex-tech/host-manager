@@ -38,6 +38,10 @@ func (hh *HostHandler) pageHandlerFunc(
 			if !authorized {
 				log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
 
+				// TODO: find the next page that is public and redirect there.
+				// If there are no public pages, redirect to the login page if
+				// it exists. If there is no loging page, throw the error
+
 				_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
 				if r.URL.Path == "/" || r.URL.Path == "" && hasLoginPage {
 					http.Redirect(w, r, "/-/login", http.StatusSeeOther)
