@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -789,9 +788,16 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 	}
 
 	// collect stacktrace
-	stacktrace := string(debug.Stack())
+	// stacktrace := string(debug.Stack())
 
-	hh.log.V(2).Info("generating error page", "requestURI", r.URL.Path, "code", code, "msg", msg, "language", l, "stacktrace", stacktrace)
+	hh.log.V(2).Info(
+		"generating error page",
+		"requestURI", r.URL.Path,
+		"code", code,
+		"msg", msg,
+		"language", l,
+		// "stacktrace", stacktrace,
+	)
 
 	rendered := hh.renderUtilityPage(
 		kdexv1alpha1.ErrorUtilityPageType,
