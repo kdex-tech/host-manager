@@ -10,6 +10,7 @@ import (
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"golang.org/x/text/language"
+	"kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -23,7 +24,7 @@ func (hh *HostHandler) pageHandlerFunc(
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 
-		if hh.authChecker != nil && ph.ParsedRequirements != nil {
+		if hh.authConfig.IsAuthEnabled() && hh.authChecker != nil && ph.ParsedRequirements != nil {
 			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)
@@ -36,10 +37,13 @@ func (hh *HostHandler) pageHandlerFunc(
 
 			if !authorized {
 				log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
-				if r.URL.Path == "/" || r.URL.Path == "" {
+
+				_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
+				if r.URL.Path == "/" || r.URL.Path == "" && hasLoginPage {
 					http.Redirect(w, r, "/-/login", http.StatusSeeOther)
 					return
 				}
+
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}
