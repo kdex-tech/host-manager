@@ -44,18 +44,9 @@ func (hh *HostHandler) buildMenuEntriesRecursive(
 	for _, handler := range hh.Pages.List() {
 		ph := handler.Page
 
-		if hh.authChecker != nil && parsedUserEntitlements != nil && handler.ParsedRequirements != nil {
+		if hh.IsAuthEnabled() && hh.authChecker != nil && parsedUserEntitlements != nil && handler.ParsedRequirements != nil {
 			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
-
-			if !access {
-				continue
-			}
-		} else if hh.authChecker != nil && parsedUserEntitlements != nil {
-			// Fallback if requirements aren't pre-parsed for some reason
-			requirements := hh.authChecker.ParseRequirements(hh.pageRequirements(&handler))
-			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
-				"pages", ph.BasePath, *parsedUserEntitlements, requirements)
 
 			if !access {
 				continue
