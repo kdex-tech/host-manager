@@ -192,7 +192,8 @@ echo -e "\n==============================="
 
 npm install
 
-npx esbuild node_modules/**/*.js --allow-overwrite --outdir=node_modules --define:process.env.NODE_ENV=\"production\"
+cp /scripts/optimize.js ${WORKDIR}/optimize.js
+node optimize.js
 `,
 							},
 							Env:             env,
