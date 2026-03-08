@@ -14,7 +14,12 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func (hh *HostHandler) addHandlerAndRegister(mux *http.ServeMux, pr pageRender, registeredPaths map[string]ko.PathInfo, translations *Translations) {
+func (hh *HostHandler) addHandlerAndRegister(
+	mux *http.ServeMux,
+	pr pageRender,
+	registeredPaths map[string]ko.PathInfo,
+	translations *Translations,
+) (err error) {
 	finalPath := toFinalPath(pr.ph.BasePath())
 	label := pr.ph.Label()
 
@@ -76,6 +81,14 @@ func (hh *HostHandler) addHandlerAndRegister(mux *http.ServeMux, pr pageRender, 
 		}, registeredPaths)
 	}
 
+	// capture any panics
+	// http.NewServeMux().HandleFunc panics if the pattern is invalid.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("error registering %s: %v", pr.ph.BasePath(), r)
+		}
+	}()
+
 	mux.HandleFunc("GET "+finalPath, handler)
 	mux.HandleFunc("GET /{l10n}"+finalPath, handler)
 
@@ -89,6 +102,8 @@ func (hh *HostHandler) addHandlerAndRegister(mux *http.ServeMux, pr pageRender, 
 		regFunc(pr.ph.Page.PatternPath, pr.ph.Name, label, true, false)
 		regFunc("/{l10n}"+pr.ph.Page.PatternPath, pr.ph.Name, label, true, true)
 	}
+
+	return nil
 }
 
 func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {

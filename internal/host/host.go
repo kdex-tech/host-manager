@@ -381,7 +381,10 @@ func (hh *HostHandler) RebuildMux() {
 	defer hh.mu.Unlock()
 
 	for _, pr := range renderedPages {
-		hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations)
+		err = hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations)
+		if err != nil {
+			hh.log.Error(err, "skipping")
+		}
 	}
 	for _, fh := range functionHandlers {
 		// Register both the exact path and the prefix path (with trailing slash)
