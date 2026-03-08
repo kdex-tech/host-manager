@@ -131,7 +131,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 
 	navCache := hh.cacheManager.GetCache("nav", cache.CacheOptions{})
 	userHash := hh.getUserHash(r)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s", navKey, pageHandler.Checksum(), l.String(), userHash)
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, pageHandler.Checksum(), l.String(), userHash)
 
 	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
 	if err == nil && ok {
