@@ -24,7 +24,7 @@ func (hh *HostHandler) pageHandlerFunc(
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 
-		if hh.authConfig.IsAuthEnabled() && hh.authChecker != nil && ph.ParsedRequirements != nil {
+		if hh.IsAuthEnabled() && hh.authChecker != nil && ph.ParsedRequirements != nil {
 			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)

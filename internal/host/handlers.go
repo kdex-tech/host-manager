@@ -107,7 +107,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 }
 
 func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return
 	}
 
@@ -245,7 +245,7 @@ func (hh *HostHandler) checkHandler(mux *http.ServeMux, registeredPaths map[stri
 }
 
 func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return
 	}
 
@@ -378,7 +378,7 @@ func (hh *HostHandler) faviconHandler(mux *http.ServeMux, registeredPaths map[st
 }
 
 func (hh *HostHandler) jwksHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return
 	}
 
@@ -425,7 +425,7 @@ func (hh *HostHandler) jwksHandler(mux *http.ServeMux, registeredPaths map[strin
 }
 
 func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return
 	}
 
@@ -910,7 +910,7 @@ func (hh *HostHandler) stateHandler(mux *http.ServeMux, registeredPaths map[stri
 }
 
 func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return
 	}
 

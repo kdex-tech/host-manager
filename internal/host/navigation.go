@@ -239,7 +239,7 @@ func (hh *HostHandler) performNavigationRender(
 	authContext, _ := auth.GetAuthContext(ctx)
 	extra := map[string]any{}
 	if authContext != nil {
-		extra["AuthEnabled"] = hh.authConfig.IsAuthEnabled()
+		extra["AuthEnabled"] = hh.IsAuthEnabled()
 		extra["Identity"] = authContext
 	}
 

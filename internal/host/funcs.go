@@ -39,7 +39,7 @@ func (hh *HostHandler) applyCachingHeaders(
 	requirements []kdexv1alpha1.SecurityRequirement,
 	lastModified time.Time,
 ) bool {
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		// If auth is disabled, everything is public
 		requirements = []kdexv1alpha1.SecurityRequirement{}
 	}
@@ -53,13 +53,13 @@ func (hh *HostHandler) applyCachingHeaders(
 	}
 
 	vary := "Accept-Language"
-	if isPrivate && hh.authConfig.IsAuthEnabled() {
+	if isPrivate && hh.IsAuthEnabled() {
 		vary += ", Authorization, Cookie"
 	}
 	w.Header().Set("Vary", vary)
 
 	identity := ""
-	if isPrivate && hh.authConfig.IsAuthEnabled() {
+	if isPrivate && hh.IsAuthEnabled() {
 		identity = ":" + hh.getUserHash(r)
 	}
 

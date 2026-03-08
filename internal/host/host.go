@@ -208,6 +208,10 @@ func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
 	return buffer.String()
 }
 
+func (hh *HostHandler) IsAuthEnabled() bool {
+	return hh.authConfig != nil && hh.authConfig.IsAuthEnabled()
+}
+
 func (hh *HostHandler) L10nRender(
 	handler page.PageHandler,
 	pageMap map[string]any,
@@ -431,7 +435,7 @@ func (hh *HostHandler) RemoveUtilityPage(name string) {
 func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 	req := &openapi.SecuritySchemes{}
 
-	if !hh.authConfig.IsAuthEnabled() {
+	if !hh.IsAuthEnabled() {
 		return req
 	}
 
