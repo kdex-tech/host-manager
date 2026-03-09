@@ -26,7 +26,7 @@ type PackRef struct {
 	ImagePullSecrets  []corev1.LocalObjectReference
 	Log               logr.Logger
 	NPMSecret         corev1.Secret
-	PackageBuilder    *configuration.PackageBuilder
+	Packages          *configuration.Packages
 	Scheme            *runtime.Scheme
 	ServiceAccountRef corev1.LocalObjectReference
 }
@@ -120,6 +120,10 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Value: imageURL,
 		},
 		{
+			Name:  "MODULE_PATH",
+			Value: internal.MODULE_PATH,
+		},
+		{
 			Name:  "PACKAGING_DIR",
 			Value: internal.WORKDIR + "/node_modules",
 		},
@@ -167,8 +171,8 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 
 							Command:         []string{"package_image"},
 							Env:             env,
-							Image:           p.PackageBuilder.Image,
-							ImagePullPolicy: p.PackageBuilder.ImagePullPolicy,
+							Image:           p.Packages.PackagerImage,
+							ImagePullPolicy: p.Packages.PackagerImagePullPolicy,
 							VolumeMounts:    volumeMounts,
 						},
 					},
@@ -177,52 +181,19 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 						{
 							Name: "npm-build",
 
-							Command: []string{
-								"sh",
-								"-c",
-								`set -e
-
-cp /scripts/package.json ${WORKDIR}/package.json
-
-cd ${WORKDIR}
-
-echo "======== package.json ========="
-cat package.json
-echo -e "\n==============================="
-
-npm install
-
-cp /scripts/optimize.js ${WORKDIR}/optimize.js
-node optimize.js
-`,
-							},
+							Command:         []string{"get_modules"},
 							Env:             env,
-							Image:           "node:22-alpine",
-							ImagePullPolicy: corev1.PullIfNotPresent,
+							Image:           "k3d-registry:5000/kdex-tech/node-tools:latest",
+							ImagePullPolicy: corev1.PullAlways,
 							VolumeMounts:    volumeMounts,
 						},
 						{
 							Name: "importmap-generator",
 
-							Command: []string{
-								"sh",
-								"-c",
-								`set -e
-
-cp /scripts/generate.js ${WORKDIR}/generate.js
-
-cd ${WORKDIR}
-
-node generate.js
-
-cp importmap.json ${PACKAGING_DIR}/importmap.json
-
-cat importmap.json > /dev/termination-log
-						`,
-							},
+							Command:         []string{"importmap_generator"},
 							Env:             env,
-							Image:           "node:22-alpine",
-							ImagePullPolicy: corev1.PullIfNotPresent,
+							Image:           "k3d-registry:5000/kdex-tech/node-tools:latest",
+							ImagePullPolicy: corev1.PullAlways,
 							VolumeMounts:    volumeMounts,
 						},
 					},

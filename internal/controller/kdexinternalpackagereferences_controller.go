@@ -18,12 +18,12 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
 	"time"
 
-	"github.com/kdex-tech/host-manager/internal"
 	kjob "github.com/kdex-tech/host-manager/internal/job"
 	"github.com/kdex-tech/host-manager/internal/packref"
 	batchv1 "k8s.io/api/batch/v1"
@@ -197,7 +197,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		ImagePullSecrets:  imagePullSecretRefs,
 		Log:               log,
 		NPMSecret:         *secret,
-		PackageBuilder:    &r.Configuration.PackageBuilder,
+		Packages:          &r.Configuration.Packages,
 		Scheme:            r.Scheme,
 		ServiceAccountRef: *serviceAccountRef,
 	}
@@ -412,120 +412,24 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobConfigMap(
 				configmap.Labels["kdex.dev/packages"] = ipr.Name
 			}
 
-			generateJS := fmt.Sprintf(`import { Generator } from '@jspm/generator';
-import fs from 'fs';
-
-const generator = new Generator({
-    defaultProvider: 'nodemodules',
-    env: ['production', 'module', 'browser'],
-    integrity: true,
-});
-
-try {
-    const packageJSONStr = fs.readFileSync('package.json', 'utf8');
-    const packageJSON = JSON.parse(packageJSONStr);
-    
-    for (const [key, value] of Object.entries(packageJSON.dependencies)) {
-        await generator.install(key);
-    }
-
-    let importMap = JSON.stringify(generator.getMap(), null, 2)
-
-    importMap = importMap.replaceAll(/\.\/node_modules/g, '%s')
-
-    console.log('The import map is:', importMap);
-
-    fs.writeFileSync('importmap.json', importMap);
-} catch (err) {
-    console.error('Error:', err);
-    process.exit(1);
-}
-`, internal.MODULE_PATH)
-
-			var packageJSON strings.Builder
-			packageJSON.WriteString(`{
-  "name": "importmap",
-  "type": "module",
-  "devDependencies": {
-    "@jspm/generator": "^2.7.6",
-    "esbuild": "^0.27.0"
-  },
-  "dependencies": {`)
-			for i, pkg := range ipr.Spec.PackageReferences {
-				if i > 0 {
-					packageJSON.WriteString(",")
-				}
-				fmt.Fprintf(&packageJSON, "\n    \"%s\": \"%s\"", pkg.Name, pkg.Version)
+			pj := struct {
+				Name         string            `json:"name"`
+				Type         string            `json:"type"`
+				Dependencies map[string]string `json:"dependencies"`
+			}{
+				Name:         "importmap",
+				Type:         "module",
+				Dependencies: map[string]string{},
 			}
-			packageJSON.WriteString("\n  }\n}")
 
-			optimizeJS := `import { build } from 'esbuild';
-import fs from 'fs';
-import path from 'path';
+			for _, pkg := range ipr.Spec.PackageReferences {
+				pj.Dependencies[pkg.Name] = pkg.Version
+			}
 
-async function run() {
-    const files = [];
-
-    function walk(dir) {
-        const list = fs.readdirSync(dir);
-        for (const file of list) {
-            const fullPath = path.join(dir, file);
-            
-            // Skip hidden directories, node_modules sub-repos, and common garbage
-            if (file.startsWith('.') || file === 'node_modules' || file === 'bin' || file === 'test' || file === '__tests__') continue;
-            
-            let stat;
-            try {
-                stat = fs.statSync(fullPath);
-            } catch (e) { continue; }
-
-            if (stat.isDirectory()) {
-                walk(fullPath);
-            } else if (file.endsWith('.js') || file.endsWith('.mjs')) {
-                files.push(fullPath);
-            }
-        }
-    }
-
-    console.log('--- Discovering source files in node_modules ---');
-    if (!fs.existsSync('node_modules')) {
-        console.log('node_modules not found, skipping optimization.');
-        return;
-    }
-    
-    const uniqueFiles = Array.from(new Set(files));
-    console.log('Found ' + uniqueFiles.length + ' unique files to optimize.');
-
-    for (const file of uniqueFiles) {
-        try {
-            await build({
-                entryPoints: [file],
-                bundle: false,
-                allowOverwrite: true,
-                outfile: file,
-                define: { 'process.env.NODE_ENV': '"production"' },
-                sourcemap: true,
-                sourcesContent: true,
-                logLevel: 'error',
-            });
-        } catch (e) {
-            console.error("Failed to optimize " + file + ": " + e.message);
-            // We allow individual failures but report them
-        }
-    }
-    console.log("--- Optimization complete ---");
-}
-
-run().catch(err => {
-    console.error("Optimization runner failed:", err);
-    process.exit(1);
-});
-`
+			bytes, _ := json.MarshalIndent(pj, "", "  ")
 
 			configmap.Data = map[string]string{
-				"generate.js":  generateJS,
-				"optimize.js":  optimizeJS,
-				"package.json": packageJSON.String(),
+				"package.json": string(bytes),
 			}
 
 			return ctrl.SetControllerReference(ipr, configmap, r.Scheme)
