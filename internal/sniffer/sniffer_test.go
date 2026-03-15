@@ -22,8 +22,16 @@ import (
 func TestRequestSniffer_analyze(t *testing.T) {
 	s := RequestSniffer{
 		BasePathRegex: (&kdexv1alpha1.API{}).BasePathRegex(),
+		Functions: func() []kdexv1alpha1.KDexFunction {
+			return nil
+		},
 		HostName:      "test-host",
 		ItemPathRegex: (&kdexv1alpha1.API{}).ItemPathRegex(),
+		OpenAPIBuilder: func() *ko.Builder {
+			return &ko.Builder{
+				Contact: &openapi.Contact{},
+			}
+		},
 	}
 
 	tests := []struct {
