@@ -37,6 +37,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
+	"github.com/kdex-tech/host-manager/internal/sniffer"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -551,11 +552,36 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		internalHost.Status.Attributes[dep.Name+".deployment"] = "ready"
 	}
 
+	reconcileTime := time.Now()
+
 	log.V(3).Info("deployments ready, about to set host")
 
 	initialPaths := r.collectInitialPaths(requiredBackends, functions)
 
 	log.V(3).Info("collected initial paths", "paths", initialPaths)
+
+	var snif *sniffer.RequestSniffer
+	if internalHost.Spec.DevMode {
+		snif = &sniffer.RequestSniffer{
+			BasePathRegex: (&kdexv1alpha1.API{}).BasePathRegex(),
+			CreateFunc: func(obj client.Object, f controllerutil.MutateFn) (controllerutil.OperationResult, error) {
+				return controllerutil.CreateOrUpdate(ctx, r.Client, obj, f)
+			},
+			Functions: func() []kdexv1alpha1.KDexFunction {
+				return functions.Items
+			},
+			HostName:      internalHost.Name,
+			ItemPathRegex: (&kdexv1alpha1.API{}).ItemPathRegex(),
+			OpenAPIBuilder: func() *ko.Builder {
+				return r.HostHandler.GetOpenAPIBuilder()
+			},
+			Namespace:     internalHost.Namespace,
+			ReconcileTime: reconcileTime,
+			SecuritySchemes: func() *openapi.SecuritySchemes {
+				return r.HostHandler.SecuritySchemes()
+			},
+		}
+	}
 
 	r.HostHandler.SetHost(
 		ctx,
@@ -570,6 +596,8 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		authExchanger,
 		authConfig,
 		internalHost.Spec.Routing.Scheme,
+		snif,
+		reconcileTime,
 	)
 
 	log.V(3).Info("host has been set")

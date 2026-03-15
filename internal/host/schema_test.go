@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-logr/logr"
@@ -72,7 +73,7 @@ func TestHostHandler_SchemaHandler(t *testing.T) {
 
 	th.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
 		DefaultLang: "en",
-	}, nil, nil, nil, nil, "", registeredPaths, nil, nil, nil, "http")
+	}, nil, nil, nil, nil, "", registeredPaths, nil, nil, nil, "http", nil, time.Now())
 
 	tests := []struct {
 		name       string

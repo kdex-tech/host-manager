@@ -579,10 +579,12 @@ func TestRequestSniffer_mergeAPIIntoFunction(t *testing.T) {
 func TestRequestSniffer_parseRequestIntoAPI(t *testing.T) {
 	s := &RequestSniffer{
 		HostName: "test-host",
-		SecuritySchemes: &openapi.SecuritySchemes{
-			"bearer": &openapi.SecuritySchemeRef{
-				Value: openapi.NewJWTSecurityScheme(),
-			},
+		SecuritySchemes: func() *openapi.SecuritySchemes {
+			return &openapi.SecuritySchemes{
+				"bearer": &openapi.SecuritySchemeRef{
+					Value: openapi.NewJWTSecurityScheme(),
+				},
+			}
 		},
 	}
 
@@ -2173,14 +2175,16 @@ func TestRequestSniffer_sniff_A(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := RequestSniffer{
 				BasePathRegex: (&kdexv1alpha1.API{}).BasePathRegex(),
-				Functions:     tt.functions,
+				Functions:     func() []kdexv1alpha1.KDexFunction { return tt.functions },
 				HostName:      "test-host",
 				ItemPathRegex: (&kdexv1alpha1.API{}).ItemPathRegex(),
 				Namespace:     "test-namespace",
-				SecuritySchemes: &openapi.SecuritySchemes{
-					"bearer": &openapi.SecuritySchemeRef{
-						Value: openapi.NewJWTSecurityScheme(),
-					},
+				SecuritySchemes: func() *openapi.SecuritySchemes {
+					return &openapi.SecuritySchemes{
+						"bearer": &openapi.SecuritySchemeRef{
+							Value: openapi.NewJWTSecurityScheme(),
+						},
+					}
 				},
 			}
 
@@ -2312,11 +2316,11 @@ func TestRequestSniffer_sniff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := RequestSniffer{
 				BasePathRegex:   (&kdexv1alpha1.API{}).BasePathRegex(),
-				Functions:       tt.functions,
+				Functions:       func() []kdexv1alpha1.KDexFunction { return tt.functions },
 				HostName:        "test-host",
 				ItemPathRegex:   (&kdexv1alpha1.API{}).ItemPathRegex(),
 				Namespace:       "test-namespace",
-				SecuritySchemes: tt.securitySchemes,
+				SecuritySchemes: func() *openapi.SecuritySchemes { return tt.securitySchemes },
 			}
 
 			got, gotErr := s.sniff(tt.r)

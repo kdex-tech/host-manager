@@ -551,6 +551,8 @@ func (hh *HostHandler) SetHost(
 	authExchanger *auth.Exchanger,
 	authConfig *auth.Config,
 	scheme string,
+	sniffer *sniffer.RequestSniffer,
+	reconcileTime time.Time,
 ) {
 	hh.log.V(3).Info("[SetHost] about to lock")
 
@@ -569,7 +571,7 @@ func (hh *HostHandler) SetHost(
 	hh.importmap = importmap
 	hh.packageReferences = packageReferences
 	hh.pathsCollectedInReconcile = paths
-	hh.reconcileTime = time.Now()
+	hh.reconcileTime = reconcileTime
 	hh.scheme = scheme
 	hh.scripts = scripts
 	hh.status = status
@@ -587,21 +589,7 @@ func (hh *HostHandler) SetHost(
 	favicon.SetReconcileTime(hh.reconcileTime)
 	hh.favicon = favicon
 
-	var snif *sniffer.RequestSniffer
-	if host.DevMode {
-		snif = &sniffer.RequestSniffer{
-			BasePathRegex:   (&kdexv1alpha1.API{}).BasePathRegex(),
-			Client:          hh.client,
-			Functions:       functions,
-			HostName:        hh.Name,
-			ItemPathRegex:   (&kdexv1alpha1.API{}).ItemPathRegex(),
-			OpenAPIBuilder:  hh.openapiBuilder,
-			Namespace:       hh.Namespace,
-			ReconcileTime:   hh.reconcileTime,
-			SecuritySchemes: hh.SecuritySchemes(),
-		}
-	}
-	hh.sniffer = snif
+	hh.sniffer = sniffer
 
 	hh.log.V(3).Info("[SetHost] authConfig has been set")
 

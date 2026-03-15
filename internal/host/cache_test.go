@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/entitlements"
@@ -41,7 +42,7 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	hh.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
 		DefaultLang: "en",
 		BrandName:   "KDex",
-	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http")
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
 
 	// Mock authChecker to allow all access
 	hh.authChecker = &mockAuthChecker{}
@@ -107,7 +108,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	hh.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
 		DefaultLang: "en",
 		BrandName:   "KDex",
-	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http")
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
 
 	// 1. Initial Request
 	req := httptest.NewRequest("GET", "/-/navigation/main/en/test", nil)
@@ -120,7 +121,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 
 	// Verify it's in cache
 	// Key format: nav:main:/test:en:anon (since no auth)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s", "main", ph.Checksum(), language.English.String(), "anon")
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, ph.Checksum(), language.English.String(), "anon")
 	cacheVal, found, isCurrent, err := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -144,7 +145,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	userHash := hh.getUserHash(req2)
 	assert.NotEqual(t, "anon", userHash)
 	// cacheKey2 := fmt.Sprintf("main:/test:en:%s", userHash)
-	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s", "main", ph.Checksum(), language.English.String(), userHash)
+	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, ph.Checksum(), language.English.String(), userHash)
 
 	_, found2, _, err2 := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey2)
 	assert.NoError(t, err2)

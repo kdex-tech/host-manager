@@ -193,17 +193,17 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		sniffer := hh.sniffer
 
 		h, p := mux.Handler(r)
-		if h != nil {
-			log.V(2).Info("request match", "url", r.URL.String(), "pattern", p)
-		} else {
+		if p == "" {
 			log.V(2).Info("request did not match", "url", r.URL.String())
+		} else {
+			log.V(2).Info("request match", "url", r.URL.String(), "pattern", p)
 		}
 
 		ew := &errorResponseWriter{ResponseWriter: w}
 		wrapped := wrappedErrorResponseWriter(ew, w)
 
 		// Only intercept if we have a sniffer (checker), it's not an internal path
-		if sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && h != nil) {
+		if sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && p != "") {
 			hh.mu.RUnlock()
 			next.ServeHTTP(wrapped, r)
 
@@ -218,7 +218,7 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		// - if the handler is a KDexFunctionHandler AND the function is
 		//   mutable AND we have X-KDex-* headers
 		invokeSniffer := false
-		if h != nil {
+		if p != "" {
 			var matchedFunction *kdexv1alpha1.KDexFunction
 			if fh, ok := h.(*KDexFunctionHandler); ok {
 				matchedFunction = fh.Function
