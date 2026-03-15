@@ -227,10 +227,11 @@ func (hh *HostHandler) performNavigationRender(
 		pageMap = *rootEntry.Children
 	}
 
-	authContext, _ := auth.GetAuthContext(ctx)
 	extra := map[string]any{}
+	extra["AuthEnabled"] = hh.IsAuthEnabled()
+
+	authContext, _ := auth.GetAuthContext(ctx)
 	if authContext != nil {
-		extra["AuthEnabled"] = hh.IsAuthEnabled()
 		extra["Identity"] = authContext
 	}
 
