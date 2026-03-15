@@ -551,7 +551,7 @@ func (hh *HostHandler) SetHost(
 	authExchanger *auth.Exchanger,
 	authConfig *auth.Config,
 	scheme string,
-	sniffer *sniffer.RequestSniffer,
+	snif *sniffer.RequestSniffer,
 	reconcileTime time.Time,
 ) {
 	hh.log.V(3).Info("[SetHost] about to lock")
@@ -589,7 +589,7 @@ func (hh *HostHandler) SetHost(
 	favicon.SetReconcileTime(hh.reconcileTime)
 	hh.favicon = favicon
 
-	hh.sniffer = sniffer
+	hh.sniffer = snif
 
 	hh.log.V(3).Info("[SetHost] authConfig has been set")
 
