@@ -42,8 +42,8 @@ runs:
     run: |
       CHART_VERSION=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
       mkdir -p dist
-      helm dependency update chart
-      helm package --app-version ${CHART_VERSION} --version ${CHART_VERSION} -d dist chart
+      helm dependency update kdex-host-manager/chart
+      helm package --app-version ${CHART_VERSION} --version ${CHART_VERSION} -d dist kdex-host-manager/chart
 
   - name: Log in to registry with Helm
     shell: bash
@@ -61,7 +61,7 @@ runs:
     run: |
       CHART_VERSION=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
       REPOSITORY_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
-      REGISTRY_URL=ghcr.io/${REPOSITORY_OWNER_LOWER}/charts
+      REGISTRY_URL=ghcr.io/${REPOSITORY_OWNER_LOWER}
       OCI_URL=oci://${REGISTRY_URL}
       for f in *.tgz ; do
           echo "$f"
