@@ -1,0 +1,43 @@
+name: Publish Helm Chart
+description: Publish Helm Chart to Github Container Registry (OCI)
+
+runs:
+  using: "composite"
+  steps:
+  - name: Install Helm
+    shell: bash
+    run: |
+      curl -sL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
+
+  - name: Verify Helm Installation
+    shell: bash
+    run: |
+      helm version
+
+  - name: Setup Go
+    uses: actions/setup-go@v6
+    with:
+      go-version-file: go.mod
+
+  - name: Package the Helm Chart
+    shell: bash
+    run: |
+      export CHART_VERSION=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
+      mkdir -p dist
+      helm package --app-version ${CHART_VERSION} --version ${CHART_VERSION} -d dist kdex-host-manager/chart
+
+  - name: Log in to registry with Helm
+    shell: bash
+    run: |
+      echo "${{ github.token }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+  - name: Push Helm Charts to Github Container Registry (OCI)
+    working-directory: dist
+    shell: bash
+    run: |
+      REPOSITORY_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
+      OCI_URL=oci://ghcr.io/${REPOSITORY_OWNER_LOWER}/charts
+      for f in *.tgz ; do
+          echo "$f"
+          helm push "$f" "$OCI_URL"
+      done
