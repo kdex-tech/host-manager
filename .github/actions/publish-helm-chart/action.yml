@@ -60,9 +60,8 @@ runs:
     shell: bash
     run: |
       CHART_VERSION=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
-      REPOSITORY_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')
-      REGISTRY_URL=ghcr.io/${REPOSITORY_OWNER_LOWER}/charts
-      OCI_URL=oci://${REGISTRY_URL}
+      REGISTRY_URL="ghcr.io/${{ github.repository }}/charts"
+      OCI_URL="oci://$(echo "$REGISTRY_URL" | tr '[:upper:]' '[:lower:]')"
       for f in *.tgz ; do
           echo "$f"
           helm push "$f" "$OCI_URL"
