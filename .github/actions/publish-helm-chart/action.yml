@@ -66,5 +66,5 @@ runs:
       for f in *.tgz ; do
           echo "$f"
           helm push "$f" "$OCI_URL"
-          oras tag "${REGISTRY_URL}/host-manager:${CHART_VERSION}" latest
+          # oras tag "${REGISTRY_URL}/host-manager:${CHART_VERSION}" latest
       done
