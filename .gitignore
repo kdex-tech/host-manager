@@ -28,4 +28,5 @@ go.work
 *~
 buildkitd.toml
 
+dist
 chart/charts/*.tgz
