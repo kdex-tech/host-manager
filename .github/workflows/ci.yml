@@ -16,7 +16,6 @@ on:
 
 env:
   LC_ALL: en_US.UTF-8
-  PUBLISH: ${{ (github.repository == 'kdex-tech/host-manager') && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request') }}
 
 defaults:
   run:
@@ -49,19 +48,26 @@ jobs:
         go mod tidy
         make test
 
+  publish-image:
+    name: Publish Docker Image
+    needs: ci
+    runs-on: ubuntu-latest
+    if: (github.repository == 'kdex-tech/host-manager') && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request')
+    steps:
+    - name: Clone the code
+      uses: actions/checkout@v6
+
     - name: Publish Docker Image
-      if: ${{ env.PUBLISH == 'true' }}
       uses: ./.github/actions/publish-docker-image
 
   publish-chart:
     name: Publish Helm Chart
-    needs: ci
+    needs: publish-image
     runs-on: ubuntu-latest
-    if: ${{ env.PUBLISH == 'true' }}
+    if: (github.repository == 'kdex-tech/host-manager') && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request')
     steps:
     - name: Clone the code
       uses: actions/checkout@v6
 
     - name: Publish Helm Chart
       uses: ./.github/actions/publish-helm-chart
-
