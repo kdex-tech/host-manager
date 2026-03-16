@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -474,31 +475,43 @@ func (s *RequestSniffer) parseRequestIntoAPI(
 	if r.Header.Get("X-KDex-Function-Security") != "" {
 		secValues := strings.Split(r.Header.Get("X-KDex-Function-Security"), ";")
 		securityArgs := map[string][]string{}
+		schemeNamesInOrder := []string{}
 		for _, val := range secValues {
 			secValue := strings.TrimSpace(val)
+			var schemeName string
+			var scopes []string
 			if strings.Contains(secValue, "=") {
 				parts := strings.SplitN(secValue, "=", 2)
-				schemeName := strings.TrimSpace(parts[0])
+				schemeName = strings.TrimSpace(parts[0])
 				if strings.Contains(parts[1], "|") {
-					securityArgs[schemeName] = []string{}
 					for scope := range strings.SplitSeq(parts[1], "|") {
-						securityArgs[schemeName] = append(securityArgs[schemeName], strings.TrimSpace(scope))
+						scopes = append(scopes, strings.TrimSpace(scope))
 					}
 				} else {
-					securityArgs[schemeName] = []string{parts[1]}
+					scopes = []string{strings.TrimSpace(parts[1])}
 				}
 			} else {
-				securityArgs[secValue] = []string{}
+				schemeName = secValue
+				scopes = []string{}
+			}
+
+			if schemeName != "" {
+				securityArgs[schemeName] = scopes
+				if !slices.Contains(schemeNamesInOrder, schemeName) {
+					schemeNamesInOrder = append(schemeNamesInOrder, schemeName)
+				}
 			}
 		}
 		securitySchemes := s.SecuritySchemes()
-		if securitySchemes != nil && len(*securitySchemes) > 0 && len(secValues) > 0 {
+		if securitySchemes != nil && len(*securitySchemes) > 0 && len(schemeNamesInOrder) > 0 {
 			security := openapi.SecurityRequirements{}
 			found := false
-			for schemeName := range *securitySchemes {
-				if args, ok := securityArgs[schemeName]; ok {
-					security = append(security, openapi.NewSecurityRequirement().Authenticate(schemeName, args...))
-					found = true
+			for _, schemeName := range schemeNamesInOrder {
+				if _, ok := (*securitySchemes)[schemeName]; ok {
+					if args, ok := securityArgs[schemeName]; ok {
+						security = append(security, openapi.NewSecurityRequirement().Authenticate(schemeName, args...))
+						found = true
+					}
 				}
 			}
 
