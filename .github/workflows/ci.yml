@@ -52,3 +52,16 @@ jobs:
     - name: Publish Docker Image
       if: ${{ env.PUBLISH == 'true' }}
       uses: ./.github/actions/publish-docker-image
+
+  publish-chart:
+    name: Publish Helm Chart
+    needs: ci
+    runs-on: ubuntu-latest
+    if: ${{ env.PUBLISH == 'true' }}
+    steps:
+    - name: Clone the code
+      uses: actions/checkout@v6
+
+    - name: Publish Helm Chart
+      uses: ./.github/actions/publish-helm-chart
+
