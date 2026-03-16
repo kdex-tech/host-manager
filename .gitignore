@@ -27,3 +27,5 @@ go.work
 *.swo
 *~
 buildkitd.toml
+
+chart/charts/*.tgz
