@@ -1,0 +1,7 @@
+{
+  "ref": "refs/tags/v0.0.1",
+  "repository": {
+    "full_name": "kdex-tech/host-manager"
+  },
+  "event_name": "push" 
+}

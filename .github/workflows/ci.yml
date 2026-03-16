@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   ci:
-    name: Build, Test, Publish
+    name: Build, Test
     runs-on: ubuntu-latest
     steps:
     - name: Clone the code
