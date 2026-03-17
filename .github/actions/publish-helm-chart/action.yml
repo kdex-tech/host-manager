@@ -60,10 +60,10 @@ runs:
     shell: bash
     run: |
       CHART_VERSION=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
-      REGISTRY_URL="ghcr.io/${{ github.repository }}/charts"
+      REGISTRY_URL="ghcr.io/${{ github.repository_owner }}/charts"
       OCI_URL="oci://$(echo "$REGISTRY_URL" | tr '[:upper:]' '[:lower:]')"
       for f in *.tgz ; do
           echo "$f"
           helm push "$f" "$OCI_URL"
-          # oras tag "${REGISTRY_URL}/host-manager:${CHART_VERSION}" latest
+          oras tag "${REGISTRY_URL}/host-manager:${CHART_VERSION}" latest
       done
