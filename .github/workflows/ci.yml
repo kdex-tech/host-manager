@@ -23,7 +23,7 @@ defaults:
 
 permissions:
   packages: write
-  contents: read
+  contents: write
 
 jobs:
   ci:
