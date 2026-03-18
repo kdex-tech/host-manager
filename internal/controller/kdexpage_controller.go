@@ -24,8 +24,8 @@ import (
 
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/host"
-	"github.com/kdex-tech/host-manager/internal/page"
-	"k8s.io/apimachinery/pkg/api/meta"
+	pages "github.com/kdex-tech/host-manager/internal/page"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -60,49 +60,49 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		return ctrl.Result{}, nil
 	}
 
-	var kdexPage kdexv1alpha1.KDexPage
-	if err := r.Get(ctx, req.NamespacedName, &kdexPage); err != nil {
+	var page kdexv1alpha1.KDexPage
+	if err := r.Get(ctx, req.NamespacedName, &page); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if kdexPage.Spec.HostRef.Name != r.FocalHost {
-		log.V(1).Info("skipping reconcile", "host", kdexPage.Spec.HostRef.Name, "focalHost", r.FocalHost)
+	if page.Spec.HostRef.Name != r.FocalHost {
+		log.V(1).Info("skipping reconcile", "host", page.Spec.HostRef.Name, "focalHost", r.FocalHost)
 		return ctrl.Result{}, nil
 	}
 
-	if kdexPage.Status.Attributes == nil {
-		kdexPage.Status.Attributes = make(map[string]string)
+	if page.Status.Attributes == nil {
+		page.Status.Attributes = make(map[string]string)
 	}
 
 	// Defer status update
 	defer func() {
-		kdexPage.Status.ObservedGeneration = kdexPage.Generation
-		if updateErr := r.Status().Update(ctx, &kdexPage); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		page.Status.ObservedGeneration = page.Generation
+		updateErr := r.Status().Update(ctx, &page)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+			}
 		}
 
-		if meta.IsStatusConditionFalse(kdexPage.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-			r.HostHandler.Pages.Delete(kdexPage.Name)
-		}
-
-		log.V(3).Info("status", "status", kdexPage.Status, "err", err, "res", res)
+		log.V(3).Info("status", "status", page.Status, "err", err, "res", res)
 	}()
 
-	if kdexPage.DeletionTimestamp.IsZero() {
-		if !controllerutil.ContainsFinalizer(&kdexPage, internal.PAGE_FINALIZER) {
-			controllerutil.AddFinalizer(&kdexPage, internal.PAGE_FINALIZER)
-			if err := r.Update(ctx, &kdexPage); err != nil {
+	if page.DeletionTimestamp.IsZero() {
+		if !controllerutil.ContainsFinalizer(&page, internal.PAGE_FINALIZER) {
+			controllerutil.AddFinalizer(&page, internal.PAGE_FINALIZER)
+			if err := r.Update(ctx, &page); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{Requeue: true}, nil
 		}
 	} else {
-		if controllerutil.ContainsFinalizer(&kdexPage, internal.PAGE_FINALIZER) {
-			r.HostHandler.Pages.Delete(kdexPage.Name)
+		if controllerutil.ContainsFinalizer(&page, internal.PAGE_FINALIZER) {
+			r.HostHandler.RemovePage(page.Name)
 
-			controllerutil.RemoveFinalizer(&kdexPage, internal.PAGE_FINALIZER)
-			if err := r.Update(ctx, &kdexPage); err != nil {
+			controllerutil.RemoveFinalizer(&page, internal.PAGE_FINALIZER)
+			if err := r.Update(ctx, &page); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -110,7 +110,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	kdexv1alpha1.SetConditions(
-		&kdexPage.Status.Conditions,
+		&page.Status.Conditions,
 		kdexv1alpha1.ConditionStatuses{
 			Degraded:    metav1.ConditionFalse,
 			Progressing: metav1.ConditionTrue,
@@ -125,12 +125,12 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	packageRefs := []kdexv1alpha1.PackageReference{}
 	scriptDefs := []kdexv1alpha1.ScriptDef{}
 
-	archetypeObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, &kdexPage.Spec.PageArchetypeRef, r.RequeueDelay)
+	archetypeObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, &page.Spec.PageArchetypeRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
 
-	kdexPage.Status.Attributes["archetype.generation"] = fmt.Sprintf("%d", archetypeObj.GetGeneration())
+	page.Status.Attributes["archetype.generation"] = fmt.Sprintf("%d", archetypeObj.GetGeneration())
 
 	var pageArchetypeSpec kdexv1alpha1.KDexPageArchetypeSpec
 
@@ -141,7 +141,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		pageArchetypeSpec = v.Spec
 	}
 
-	archetypeScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, pageArchetypeSpec.ScriptLibraryRef, r.RequeueDelay)
+	archetypeScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, pageArchetypeSpec.ScriptLibraryRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
@@ -149,7 +149,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if archetypeScriptLibraryObj != nil {
 		CollectBackend(defaultBackendServerImage, &backendRefs, archetypeScriptLibraryObj)
 
-		kdexPage.Status.Attributes["archetype.scriptLibrary.generation"] = fmt.Sprintf("%d", archetypeScriptLibraryObj.GetGeneration())
+		page.Status.Attributes["archetype.scriptLibrary.generation"] = fmt.Sprintf("%d", archetypeScriptLibraryObj.GetGeneration())
 
 		var scriptLibrary kdexv1alpha1.KDexScriptLibrarySpec
 
@@ -166,19 +166,19 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		scriptDefs = append(scriptDefs, scriptLibrary.Scripts...)
 	}
 
-	contents, shouldReturn, r1, err := ResolveContents(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, kdexPage.Spec.ContentEntries, r.RequeueDelay)
+	contents, shouldReturn, r1, err := ResolveContents(ctx, r.Client, &page, &page.Status.Conditions, page.Spec.ContentEntries, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
 
-	contentsMap := map[string]page.PackedContent{}
+	contentsMap := map[string]pages.PackedContent{}
 	for slot, content := range contents {
 		contentsMap[slot] = content.Content
 
 		if content.App != nil {
 			CollectBackend(defaultBackendServerImage, &backendRefs, content.AppObj)
 
-			kdexPage.Status.Attributes[slot+".content.generation"] = content.Content.AppGeneration
+			page.Status.Attributes[slot+".content.generation"] = content.Content.AppGeneration
 
 			switch v := content.AppObj.(type) {
 			case *kdexv1alpha1.KDexApp:
@@ -192,17 +192,17 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	footerContent := ""
-	footerRef := kdexPage.Spec.OverrideFooterRef
+	footerRef := page.Spec.OverrideFooterRef
 	if footerRef == nil {
 		footerRef = pageArchetypeSpec.DefaultFooterRef
 	}
-	footerObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, footerRef, r.RequeueDelay)
+	footerObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, footerRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
 
 	if footerObj != nil {
-		kdexPage.Status.Attributes["footer.generation"] = fmt.Sprintf("%d", footerObj.GetGeneration())
+		page.Status.Attributes["footer.generation"] = fmt.Sprintf("%d", footerObj.GetGeneration())
 
 		var footerSpec kdexv1alpha1.KDexPageFooterSpec
 		switch v := footerObj.(type) {
@@ -214,7 +214,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 			footerSpec = v.Spec
 		}
 
-		footerScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, footerSpec.ScriptLibraryRef, r.RequeueDelay)
+		footerScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, footerSpec.ScriptLibraryRef, r.RequeueDelay)
 		if shouldReturn {
 			return r1, err
 		}
@@ -222,7 +222,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		if footerScriptLibraryObj != nil {
 			CollectBackend(defaultBackendServerImage, &backendRefs, footerScriptLibraryObj)
 
-			kdexPage.Status.Attributes["footer.scriptLibrary.generation"] = fmt.Sprintf("%d", footerScriptLibraryObj.GetGeneration())
+			page.Status.Attributes["footer.scriptLibrary.generation"] = fmt.Sprintf("%d", footerScriptLibraryObj.GetGeneration())
 
 			var scriptLibrary kdexv1alpha1.KDexScriptLibrarySpec
 
@@ -241,17 +241,17 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	headerContent := ""
-	headerRef := kdexPage.Spec.OverrideHeaderRef
+	headerRef := page.Spec.OverrideHeaderRef
 	if headerRef == nil {
 		headerRef = pageArchetypeSpec.DefaultHeaderRef
 	}
-	headerObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, headerRef, r.RequeueDelay)
+	headerObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, headerRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
 
 	if headerObj != nil {
-		kdexPage.Status.Attributes["header.generation"] = fmt.Sprintf("%d", headerObj.GetGeneration())
+		page.Status.Attributes["header.generation"] = fmt.Sprintf("%d", headerObj.GetGeneration())
 
 		var headerSpec kdexv1alpha1.KDexPageHeaderSpec
 		switch v := headerObj.(type) {
@@ -263,7 +263,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 			headerSpec = v.Spec
 		}
 
-		headerScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, headerSpec.ScriptLibraryRef, r.RequeueDelay)
+		headerScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, headerSpec.ScriptLibraryRef, r.RequeueDelay)
 		if shouldReturn {
 			return r1, err
 		}
@@ -271,7 +271,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		if headerScriptLibraryObj != nil {
 			CollectBackend(defaultBackendServerImage, &backendRefs, headerScriptLibraryObj)
 
-			kdexPage.Status.Attributes["header.scriptLibrary.generation"] = fmt.Sprintf("%d", headerScriptLibraryObj.GetGeneration())
+			page.Status.Attributes["header.scriptLibrary.generation"] = fmt.Sprintf("%d", headerScriptLibraryObj.GetGeneration())
 
 			var scriptLibrary kdexv1alpha1.KDexScriptLibrarySpec
 
@@ -290,13 +290,13 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	navigationRefs := maps.Clone(pageArchetypeSpec.DefaultNavigationRefs)
-	if len(kdexPage.Spec.OverrideNavigationRefs) > 0 {
+	if len(page.Spec.OverrideNavigationRefs) > 0 {
 		if navigationRefs == nil {
 			navigationRefs = make(map[string]*kdexv1alpha1.KDexObjectReference)
 		}
-		maps.Copy(navigationRefs, kdexPage.Spec.OverrideNavigationRefs)
+		maps.Copy(navigationRefs, page.Spec.OverrideNavigationRefs)
 	}
-	navigations, shouldReturn, r1, err := ResolvePageNavigations(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, navigationRefs, r.RequeueDelay)
+	navigations, shouldReturn, r1, err := ResolvePageNavigations(ctx, r.Client, &page, &page.Status.Conditions, navigationRefs, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
@@ -305,9 +305,9 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	for slot, navigation := range navigations {
 		navigationsMap[slot] = navigation.Spec.Content
 
-		kdexPage.Status.Attributes[slot+".navigation.generation"] = fmt.Sprintf("%d", navigation.Generation)
+		page.Status.Attributes[slot+".navigation.generation"] = fmt.Sprintf("%d", navigation.Generation)
 
-		navigationScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, navigation.Spec.ScriptLibraryRef, r.RequeueDelay)
+		navigationScriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, navigation.Spec.ScriptLibraryRef, r.RequeueDelay)
 		if shouldReturn {
 			return r1, err
 		}
@@ -315,7 +315,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		if navigationScriptLibraryObj != nil {
 			CollectBackend(defaultBackendServerImage, &backendRefs, navigationScriptLibraryObj)
 
-			kdexPage.Status.Attributes[slot+".navigation.scriptLibrary.generation"] = fmt.Sprintf("%d", navigationScriptLibraryObj.GetGeneration())
+			page.Status.Attributes[slot+".navigation.scriptLibrary.generation"] = fmt.Sprintf("%d", navigationScriptLibraryObj.GetGeneration())
 
 			var scriptLibrary kdexv1alpha1.KDexScriptLibrarySpec
 
@@ -333,16 +333,16 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
-	parentPageObj, shouldReturn, r1, err := ResolvePage(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, kdexPage.Spec.ParentPageRef, r.RequeueDelay)
+	parentPageObj, shouldReturn, r1, err := ResolvePage(ctx, r.Client, &page, &page.Status.Conditions, page.Spec.ParentPageRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
 
 	if parentPageObj != nil {
-		kdexPage.Status.Attributes["parent.page.generation"] = fmt.Sprintf("%d", parentPageObj.GetGeneration())
+		page.Status.Attributes["parent.page.generation"] = fmt.Sprintf("%d", parentPageObj.GetGeneration())
 	}
 
-	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &kdexPage, &kdexPage.Status.Conditions, kdexPage.Spec.ScriptLibraryRef, r.RequeueDelay)
+	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, page.Spec.ScriptLibraryRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}
@@ -350,7 +350,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if scriptLibraryObj != nil {
 		CollectBackend(defaultBackendServerImage, &backendRefs, scriptLibraryObj)
 
-		kdexPage.Status.Attributes["scriptLibrary.generation"] = fmt.Sprintf("%d", scriptLibraryObj.GetGeneration())
+		page.Status.Attributes["scriptLibrary.generation"] = fmt.Sprintf("%d", scriptLibraryObj.GetGeneration())
 
 		var scriptLibrary kdexv1alpha1.KDexScriptLibrarySpec
 
@@ -378,21 +378,21 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		"uniqueScriptDefs", uniqueScriptDefs,
 	)
 
-	r.HostHandler.Pages.Set(page.PageHandler{
+	r.HostHandler.Pages.Set(pages.PageHandler{
 		Content:           contentsMap,
 		Footer:            footerContent,
 		Header:            headerContent,
 		MainTemplate:      pageArchetypeSpec.Content,
-		Name:              kdexPage.Name,
+		Name:              page.Name,
 		Navigations:       navigationsMap,
 		PackageReferences: uniquePackageRefs,
-		Page:              &kdexPage.Spec,
+		Page:              &page.Spec,
 		RequiredBackends:  uniqueBackendRefs,
 		Scripts:           uniqueScriptDefs,
 	})
 
 	kdexv1alpha1.SetConditions(
-		&kdexPage.Status.Conditions,
+		&page.Status.Conditions,
 		kdexv1alpha1.ConditionStatuses{
 			Degraded:    metav1.ConditionFalse,
 			Progressing: metav1.ConditionFalse,

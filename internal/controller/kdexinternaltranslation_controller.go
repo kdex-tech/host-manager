@@ -23,6 +23,7 @@ import (
 
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/host"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -67,9 +68,13 @@ func (r *KDexInternalTranslationReconciler) Reconcile(ctx context.Context, req c
 	// Defer status update
 	defer func() {
 		translation.Status.ObservedGeneration = translation.Generation
-		if updateErr := r.Status().Update(ctx, &translation); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, &translation)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+			}
 		}
 
 		log.V(3).Info("status", "status", translation.Status, "err", err, "res", res)

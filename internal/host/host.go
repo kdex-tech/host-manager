@@ -405,6 +405,17 @@ func (hh *HostHandler) RebuildMux() {
 	hh.Mux = mux
 }
 
+func (hh *HostHandler) RemovePage(name string) {
+	hh.mu.Lock()
+	defer func() {
+		hh.mu.Unlock()
+		hh.RebuildMux()
+	}()
+
+	hh.log.V(1).Info("delete page", "name", name)
+	hh.Pages.Delete(name)
+}
+
 func (hh *HostHandler) RemoveTranslation(name string) {
 	hh.mu.Lock()
 	defer func() {

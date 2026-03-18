@@ -33,6 +33,7 @@ import (
 	kjob "github.com/kdex-tech/host-manager/internal/job"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -81,9 +82,13 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Defer status update
 	defer func() {
 		function.Status.ObservedGeneration = function.Generation
-		if updateErr := r.Status().Update(ctx, &function); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, &function)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+			}
 		}
 
 		log.V(3).Info("status", "status", function.Status, "err", err, "res", res)

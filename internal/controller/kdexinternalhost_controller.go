@@ -43,7 +43,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -110,24 +110,16 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Defer status update
 	defer func() {
 		internalHost.Status.ObservedGeneration = internalHost.Generation
-		if updateErr := r.Status().Update(ctx, &internalHost); updateErr != nil {
-			if errors.IsConflict(updateErr) {
-				err = nil
-				res = ctrl.Result{RequeueAfter: r.RequeueDelay}
-				return
+		updateErr := r.Status().Update(ctx, &internalHost)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
 			}
-
-			err = updateErr
-			res = ctrl.Result{}
 		}
 
 		log.V(3).Info("status", "status", internalHost.Status, "err", err, "res", res)
-
-		if errors.IsConflict(err) {
-			log.V(3).Info("status conflict, requeuing")
-			err = nil
-			res = ctrl.Result{RequeueAfter: r.RequeueDelay}
-		}
 	}()
 
 	kdexv1alpha1.SetConditions(

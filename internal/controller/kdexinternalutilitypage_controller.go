@@ -24,7 +24,7 @@ import (
 
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/page"
-	"k8s.io/apimachinery/pkg/api/meta"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -79,13 +79,13 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 	// Defer status update
 	defer func() {
 		internalUtilityPage.Status.ObservedGeneration = internalUtilityPage.Generation
-		if updateErr := r.Status().Update(ctx, &internalUtilityPage); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
-		}
-
-		if meta.IsStatusConditionFalse(internalUtilityPage.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-			r.HostHandler.RemoveUtilityPage(internalUtilityPage.Name)
+		updateErr := r.Status().Update(ctx, &internalUtilityPage)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+			}
 		}
 
 		log.V(3).Info("status", "status", internalUtilityPage.Status, "err", err, "res", res)
