@@ -24,6 +24,7 @@ import (
 
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/host"
+	pages "github.com/kdex-tech/host-manager/internal/page"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,8 +77,8 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 
 	// Defer status update
 	defer func() {
-		kdexPage.Status.ObservedGeneration = kdexPage.Generation
-		updateErr := r.Status().Update(ctx, &kdexPage)
+		page.Status.ObservedGeneration = page.Generation
+		updateErr := r.Status().Update(ctx, &page)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
 				err = nil
@@ -88,8 +89,8 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 			}
 		}
 
-		if meta.IsStatusConditionFalse(kdexPage.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-			r.HostHandler.Pages.Delete(kdexPage.Name)
+		if meta.IsStatusConditionFalse(page.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
+			r.HostHandler.Pages.Delete(page.Name)
 		}
 
 		log.V(3).Info("status", "status", page.Status, "err", err, "res", res)
@@ -105,7 +106,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	} else {
 		if controllerutil.ContainsFinalizer(&page, internal.PAGE_FINALIZER) {
-			r.HostHandler.RemovePage(page.Name)
+			r.HostHandler.Pages.Delete(page.Name)
 
 			controllerutil.RemoveFinalizer(&page, internal.PAGE_FINALIZER)
 			if err := r.Update(ctx, &page); err != nil {
