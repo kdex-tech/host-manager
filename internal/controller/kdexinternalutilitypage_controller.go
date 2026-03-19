@@ -82,9 +82,11 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 		updateErr := r.Status().Update(ctx, &internalUtilityPage)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
+				err = nil
 				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
 			} else {
 				err = updateErr
+				res = ctrl.Result{}
 			}
 		}
 

@@ -71,9 +71,11 @@ func (r *KDexInternalTranslationReconciler) Reconcile(ctx context.Context, req c
 		updateErr := r.Status().Update(ctx, &translation)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
+				err = nil
 				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
 			} else {
 				err = updateErr
+				res = ctrl.Result{}
 			}
 		}
 

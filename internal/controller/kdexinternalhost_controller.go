@@ -113,9 +113,11 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		updateErr := r.Status().Update(ctx, &internalHost)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
+				err = nil
 				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
 			} else {
 				err = updateErr
+				res = ctrl.Result{}
 			}
 		}
 

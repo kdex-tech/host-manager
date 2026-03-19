@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -56,11 +57,18 @@ func (r *MockPageArchetypeReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Defer status update
 	defer func() {
 		status.ObservedGeneration = om.Generation
-		if updateErr := r.Status().Update(ctx, o); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, o)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+				res = ctrl.Result{}
+			}
 		}
-		log.Info("print status", "status", status, "err", err, "res", res)
+
+		log.V(3).Info("print status", "status", status, "err", err, "res", res)
 	}()
 
 	footerObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, o, &status.Conditions, spec.DefaultFooterRef, r.RequeueDelay)
@@ -200,11 +208,18 @@ func (r *MockPageFooterReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Defer status update
 	defer func() {
 		status.ObservedGeneration = om.Generation
-		if updateErr := r.Status().Update(ctx, o); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, o)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+				res = ctrl.Result{}
+			}
 		}
-		log.Info("print status", "status", status, "err", err, "res", res)
+
+		log.V(3).Info("print status", "status", status, "err", err, "res", res)
 	}()
 
 	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, o, &status.Conditions, spec.ScriptLibraryRef, r.RequeueDelay)
@@ -287,11 +302,18 @@ func (r *MockPageHeaderReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// Defer status update
 	defer func() {
 		status.ObservedGeneration = om.Generation
-		if updateErr := r.Status().Update(ctx, o); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, o)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+				res = ctrl.Result{}
+			}
 		}
-		log.Info("print status", "status", status, "err", err, "res", res)
+
+		log.V(3).Info("print status", "status", status, "err", err, "res", res)
 	}()
 
 	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, o, &status.Conditions, spec.ScriptLibraryRef, r.RequeueDelay)
@@ -374,11 +396,18 @@ func (r *MockPageNavigationReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Defer status update
 	defer func() {
 		status.ObservedGeneration = om.Generation
-		if updateErr := r.Status().Update(ctx, o); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, o)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+				res = ctrl.Result{}
+			}
 		}
-		log.Info("print status", "status", status, "err", err, "res", res)
+
+		log.V(3).Info("print status", "status", status, "err", err, "res", res)
 	}()
 
 	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, o, &status.Conditions, spec.ScriptLibraryRef, r.RequeueDelay)
@@ -458,11 +487,18 @@ func (r *MockScriptLibraryReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	// Defer status update
 	defer func() {
 		status.ObservedGeneration = om.Generation
-		if updateErr := r.Status().Update(ctx, o); updateErr != nil {
-			err = updateErr
-			res = ctrl.Result{}
+		updateErr := r.Status().Update(ctx, o)
+		if updateErr != nil {
+			if kerrors.IsConflict(updateErr) {
+				err = nil
+				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+			} else {
+				err = updateErr
+				res = ctrl.Result{}
+			}
 		}
-		log.Info("print status", "status", status, "err", err, "res", res)
+
+		log.V(3).Info("print status", "status", status, "err", err, "res", res)
 	}()
 
 	kdexv1alpha1.SetConditions(

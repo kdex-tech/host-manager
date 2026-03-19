@@ -82,9 +82,11 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		updateErr := r.Status().Update(ctx, &ipr)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
+				err = nil
 				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
 			} else {
 				err = updateErr
+				res = ctrl.Result{}
 			}
 		}
 
