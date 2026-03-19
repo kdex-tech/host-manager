@@ -23,6 +23,9 @@ EOF
 Run the workflow:
 
 ```shell
+## Just run the base CI
+act .github/workflows/ci.yml
+
 export GITHUB_TOKEN=ghp_...
 
 act -e ci_push_tag_test.json -s "GITHUB_TOKEN=${GITHUB_TOKEN}" --workflows .github/workflows/ci.yml

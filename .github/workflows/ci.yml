@@ -14,9 +14,6 @@ on:
     - "**"
     - "!docs/**"
 
-env:
-  LC_ALL: en_US.UTF-8
-
 defaults:
   run:
     shell: bash
@@ -47,6 +44,89 @@ jobs:
       run: |
         go mod tidy
         make test
+
+  test-chart:
+    name: Test Chart
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+    - name: Clone the code
+      uses: actions/checkout@v6
+
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: go.mod
+
+    - name: Install the latest version of kind
+      run: |
+        curl -sLo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+
+    - name: Verify kind installation
+      run: kind version
+
+    - name: Create kind cluster
+      run: kind create cluster
+
+    - name: Run Go mod tidy
+      run: |
+        go mod tidy
+
+    - name: Install kubectl
+      run: |
+        OS=$(go env GOOS)
+        ARCH=$(go env GOARCH)
+        VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+        echo "Downloading kubectl $VERSION for $OS/$ARCH..."
+        curl -sLO "https://dl.k8s.io/release/$VERSION/bin/$OS/$ARCH/kubectl"
+        chmod +x ./kubectl
+        sudo mv ./kubectl /usr/local/bin/kubectl
+        kubectl version --client
+
+    - name: Install Helm
+      run: |
+        curl -sL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash
+
+    - name: Verify Helm installation
+      run: helm version
+
+    - name: Lint Helm Chart
+      run: |
+        helm lint ./chart
+
+    - name: Build and load host-manager image
+      run: |
+        make docker-build TAG=ci
+        kind load docker-image kdex-tech/host-manager:ci
+
+    - name: Install the KDex CRDs
+      run: |
+        make install-crds
+
+    - name: Install Helm chart for project
+      run: |
+        helm dependency update ./chart
+        helm install ci ./chart \
+          --create-namespace \
+          --namespace ci \
+          --set fullnameOverride=ci \
+          --set focalHost=ci \
+          --set image.repository=kdex-tech/host-manager \
+          --set image.tag=ci \
+          --set image.pullPolicy=IfNotPresent \
+          --set roleRef.apiGroup=rbac.authorization.k8s.io \
+          --set roleRef.kind=ClusterRole \
+          --set roleRef.name=sim-host-controller
+
+    - name: Check Helm release status
+      run: |
+        helm status ci --namespace ci
+
+    - name: Verify controller manager is READY
+      run: |
+        kubectl -n ci rollout status deployment ci
 
   publish-image:
     name: Publish Docker Image

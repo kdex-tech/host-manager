@@ -151,6 +151,13 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${REPOSITORY}${IMG}${TAG} --tag ${REPOSITORY}${IMG}:latest -f Dockerfile.cross .
 	rm Dockerfile.cross
 
+CRDS_DIR = $(shell go list -m -f '{{.Dir}}' kdex.dev/crds)
+
+.PHONY: install-crds
+install-crds: ## Install CRDs from the kdex-crds module.
+	kubectl apply -f $(CRDS_DIR)/config/crd/bases/
+
+##@ Helm
 
 .PHONY: lint-chart
 lint-chart: ## Lint chart.
@@ -158,29 +165,18 @@ lint-chart: ## Lint chart.
 
 .PHONY: deploy-chart
 deploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	$(HELM) upgrade host-controller ./chart \
+	$(HELM) upgrade sim ./chart \
 		--create-namespace \
 		--install \
-		--namespace kdex-nexus-system \
-		--set "config.backendDefault.serverImage=${REPOSITORY}kdex-tech/backend-static:latest" \
-		--set "config.backendDefault.serverImagePullPolicy=Always" \
-		--set "config.hostDefault.deployment.template.spec.containers[0].image=${REPOSITORY}kdex-tech/host-manager:latest" \
-		--set "config.hostDefault.deployment.template.spec.containers[0].imagePullPolicy=Always" \
-		--set "config.packages.packagerImage=${REPOSITORY}kdex-tech/cli-tools:latest" \
-		--set "config.packages.packagerImagePullPolicy=Always" \
-		--set "config.packages.toolsImage=${REPOSITORY}kdex-tech/node-tools:latest" \
-		--set "config.packages.toolsImagePullPolicy=Always" \
-		--set "controllerManager.container.image.repository=${REPOSITORY}${IMG}" \
-		--set "controllerManager.container.image.tag=latest" \
-		--set "controllerManager.container.imagePullPolicy=Always" \
-		--set "controllerManager.container.args[3]=--zap-log-level=info" \
-		--set "controllerManager.container.args[4]=--named-log-level=helm=3" \
-		--set "controllerManager.container.args[5]=--named-log-level=kdexhost=3" \
-		--set "controllerManager.container.args[6]=--named-log-level=kdexhost.translation=info" \
-		--set "controllerManager.container.args[7]=--named-log-level=kdexhost.utilitypage=info" \
-		--set "controllerManager.container.args[8]=--named-log-level=kdexhost.watch=info" \
-		--set "controllerManager.container.args[9]=--named-log-level=npm-registry=2"
-
+		--namespace sim \
+		--set fullnameOverride=sim \
+		--set focalHost=sim \
+		--set "image.repository=${REPOSITORY}${IMG}" \
+		--set "image.tag=latest" \
+		--set "image.pullPolicy=Always" \
+		--set "roleRef.apiGroup=rbac.authorization.k8s.io" \
+		--set "roleRef.kind=ClusterRole" \
+		--set "roleRef.name=kcnas-operator-host-controller"
 
 .PHONY: undeploy-chart
 undeploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.

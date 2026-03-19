@@ -183,8 +183,8 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 
 							Command:         []string{"get_modules"},
 							Env:             env,
-							Image:           "k3d-registry:5000/kdex-tech/node-tools:latest",
-							ImagePullPolicy: corev1.PullAlways,
+							Image:           p.Packages.ToolsImage,
+							ImagePullPolicy: p.Packages.ToolsImagePullPolicy,
 							VolumeMounts:    volumeMounts,
 						},
 						{
@@ -192,8 +192,8 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 
 							Command:         []string{"importmap_generator"},
 							Env:             env,
-							Image:           "k3d-registry:5000/kdex-tech/node-tools:latest",
-							ImagePullPolicy: corev1.PullAlways,
+							Image:           p.Packages.ToolsImage,
+							ImagePullPolicy: p.Packages.ToolsImagePullPolicy,
 							VolumeMounts:    volumeMounts,
 						},
 					},

@@ -35,7 +35,7 @@ spec:
             - --health-probe-bind-address=:8081
             - --webserver-bind-address=:8090
             - --focal-host={{ .Values.focalHost }}
-            - --service-name={{ include "host-manager.serviceAccountName" . }}
+            - --service-name={{ include "host-manager.fullname" . }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

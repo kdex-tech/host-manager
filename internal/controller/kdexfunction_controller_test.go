@@ -157,6 +157,9 @@ var _ = Describe("KDexFunction Controller", func() {
 
 			faasAdaptor := &kdexv1alpha1.KDexClusterFaaSAdaptor{
 				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"kdex.dev/default": "true",
+					},
 					Name:      "kdex-default-faas-adaptor-knative",
 					Namespace: namespace,
 				},
@@ -263,6 +266,9 @@ var _ = Describe("KDexFunction Controller", func() {
 
 			faasAdaptor := &kdexv1alpha1.KDexClusterFaaSAdaptor{
 				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"kdex.dev/default": "true",
+					},
 					Name:      "kdex-default-faas-adaptor-knative",
 					Namespace: namespace,
 				},
@@ -390,6 +396,9 @@ var _ = Describe("KDexFunction Controller", func() {
 
 			faasAdaptor := &kdexv1alpha1.KDexClusterFaaSAdaptor{
 				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"kdex.dev/default": "true",
+					},
 					Name:      "kdex-default-faas-adaptor-knative",
 					Namespace: namespace,
 				},
@@ -507,6 +516,9 @@ var _ = Describe("KDexFunction Controller", func() {
 
 			faasAdaptor := &kdexv1alpha1.KDexClusterFaaSAdaptor{
 				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"kdex.dev/default": "true",
+					},
 					Name:      "kdex-default-faas-adaptor-knative",
 					Namespace: namespace,
 				},
@@ -609,6 +621,9 @@ var _ = Describe("KDexFunction Controller", func() {
 
 			faasAdaptor := &kdexv1alpha1.KDexClusterFaaSAdaptor{
 				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"kdex.dev/default": "true",
+					},
 					Name:      "kdex-default-faas-adaptor-knative",
 					Namespace: namespace,
 				},
