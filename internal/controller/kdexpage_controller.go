@@ -24,8 +24,8 @@ import (
 
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/host"
-	pages "github.com/kdex-tech/host-manager/internal/page"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -76,8 +76,8 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 
 	// Defer status update
 	defer func() {
-		page.Status.ObservedGeneration = page.Generation
-		updateErr := r.Status().Update(ctx, &page)
+		kdexPage.Status.ObservedGeneration = kdexPage.Generation
+		updateErr := r.Status().Update(ctx, &kdexPage)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
 				err = nil
@@ -86,6 +86,10 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 				err = updateErr
 				res = ctrl.Result{}
 			}
+		}
+
+		if meta.IsStatusConditionFalse(kdexPage.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
+			r.HostHandler.Pages.Delete(kdexPage.Name)
 		}
 
 		log.V(3).Info("status", "status", page.Status, "err", err, "res", res)
