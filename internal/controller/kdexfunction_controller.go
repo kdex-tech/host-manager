@@ -278,15 +278,6 @@ func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 
 	scheme := hc.host.Spec.Routing.Scheme
 	hc.function.Status.OpenAPISchemaURL = fmt.Sprintf("%s://%s/-/openapi?type=function&tag=%s", scheme, hc.host.Spec.Routing.Domains[0], hc.function.Name)
-	port := ""
-	for _, p := range r.Configuration.HostDefault.Service.Ports {
-		if p.Name == "server" {
-			port = fmt.Sprintf(":%d", p.Port)
-			break
-		}
-	}
-	hc.function.Status.Attributes["openapi.schema.url.internal"] = fmt.Sprintf("%s://%s/-/openapi?type=function&tag=%s", "http", hc.host.Name+"."+hc.host.Namespace+".svc.cluster.local"+port, hc.function.Name)
-
 	hc.function.Status.State = kdexv1alpha1.KDexFunctionStateOpenAPIValid
 	hc.function.Status.Detail = fmt.Sprintf("%v: %s", kdexv1alpha1.KDexFunctionStateOpenAPIValid, hc.function.Status.OpenAPISchemaURL)
 

@@ -85,7 +85,7 @@ coverage: test ## Generate and view test coverage report.
 	@echo "--> Coverage report generated at file://$$(pwd)/cover.html"
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: golangci-lint lint-chart ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
@@ -151,6 +151,42 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${REPOSITORY}${IMG}${TAG} --tag ${REPOSITORY}${IMG}:latest -f Dockerfile.cross .
 	rm Dockerfile.cross
 
+
+.PHONY: lint-chart
+lint-chart: ## Lint chart.
+	$(HELM) lint ./chart
+
+.PHONY: deploy-chart
+deploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+	$(HELM) upgrade host-controller ./chart \
+		--create-namespace \
+		--install \
+		--namespace kdex-nexus-system \
+		--set "config.backendDefault.serverImage=${REPOSITORY}kdex-tech/backend-static:latest" \
+		--set "config.backendDefault.serverImagePullPolicy=Always" \
+		--set "config.hostDefault.deployment.template.spec.containers[0].image=${REPOSITORY}kdex-tech/host-manager:latest" \
+		--set "config.hostDefault.deployment.template.spec.containers[0].imagePullPolicy=Always" \
+		--set "config.packages.packagerImage=${REPOSITORY}kdex-tech/cli-tools:latest" \
+		--set "config.packages.packagerImagePullPolicy=Always" \
+		--set "config.packages.toolsImage=${REPOSITORY}kdex-tech/node-tools:latest" \
+		--set "config.packages.toolsImagePullPolicy=Always" \
+		--set "controllerManager.container.image.repository=${REPOSITORY}${IMG}" \
+		--set "controllerManager.container.image.tag=latest" \
+		--set "controllerManager.container.imagePullPolicy=Always" \
+		--set "controllerManager.container.args[3]=--zap-log-level=info" \
+		--set "controllerManager.container.args[4]=--named-log-level=helm=3" \
+		--set "controllerManager.container.args[5]=--named-log-level=kdexhost=3" \
+		--set "controllerManager.container.args[6]=--named-log-level=kdexhost.translation=info" \
+		--set "controllerManager.container.args[7]=--named-log-level=kdexhost.utilitypage=info" \
+		--set "controllerManager.container.args[8]=--named-log-level=kdexhost.watch=info" \
+		--set "controllerManager.container.args[9]=--named-log-level=npm-registry=2"
+
+
+.PHONY: undeploy-chart
+undeploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+	$(HELM) uninstall host-controller \
+		--namespace kdex-nexus-system
+
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -162,6 +198,7 @@ $(LOCALBIN):
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+HELM ?= helm
 
 ## Tool Versions
 # https://github.com/kubernetes-sigs/controller-tools/releases/latest
