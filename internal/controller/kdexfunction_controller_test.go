@@ -331,9 +331,17 @@ var _ = Describe("KDexFunction Controller", func() {
 					},
 					Origin: kdexv1alpha1.FunctionOrigin{
 						Source: &kdexv1alpha1.Source{
+							Builder: &kdexv1alpha1.Builder{
+								Languages: []string{"go"},
+								Name:      "tiny",
+								BuilderRef: kdexv1alpha1.KDexObjectReference{
+									Kind: "ClusterBuilder",
+									Name: "tiny",
+								},
+							},
+							Path:       "baz",
 							Repository: "foo",
 							Revision:   "bar",
-							Path:       "baz",
 						},
 					},
 				},

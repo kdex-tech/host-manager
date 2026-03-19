@@ -580,12 +580,36 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 	if hc.function.Spec.Origin.Executable != nil {
 		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
 	} else {
+		source := hc.function.Status.Source
+		if hc.function.Spec.Origin.Source != nil {
+			source = hc.function.Spec.Origin.Source
+		}
+
+		if source == nil {
+			err := fmt.Errorf(
+				"spec.origin.source and status.source are nil for %s/%s",
+				hc.function.Namespace,
+				hc.function.Name,
+			)
+			kdexv1alpha1.SetConditions(
+				&hc.function.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionTrue,
+					Progressing: metav1.ConditionFalse,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileError,
+				err.Error(),
+			)
+			return ctrl.Result{}, err
+		}
+
 		builder := build.Builder{
 			Client:         r.Client,
 			ImageRegistry:  hc.host.Spec.Registries.ImageRegistry,
 			Scheme:         r.Scheme,
 			ServiceAccount: hc.serviceAccount,
-			Source:         *hc.function.Status.Source,
+			Source:         *source,
 		}
 
 		op, imgUnstruct, err := builder.GetOrCreateKPackImage(hc.ctx, hc.function)
