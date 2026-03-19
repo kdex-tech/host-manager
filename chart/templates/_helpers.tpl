@@ -1,7 +1,7 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "kdex-host-manager.name" -}}
+{{- define "host-manager.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
@@ -10,7 +10,7 @@ Create a default fully qualified app name.
 We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
 If release name contains chart name it will be used as a full name.
 */}}
-{{- define "kdex-host-manager.fullname" -}}
+{{- define "host-manager.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -26,21 +26,21 @@ If release name contains chart name it will be used as a full name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "kdex-host-manager.chart" -}}
+{{- define "host-manager.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels
 */}}
-{{- define "kdex-host-manager.labels" -}}
+{{- define "host-manager.labels" -}}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/name: {{ include "kdex-host-manager.name" . }}
+app.kubernetes.io/name: {{ include "host-manager.name" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
-helm.sh/chart: {{ include "kdex-host-manager.chart" . }}
+helm.sh/chart: {{ include "host-manager.chart" . }}
 {{- if .Values.extraChartLabels }}
 {{- range $key, $value := .Values.extraChartLabels }}
 {{ $key }}: {{ $value }}
@@ -51,17 +51,17 @@ helm.sh/chart: {{ include "kdex-host-manager.chart" . }}
 {{/*
 Selector labels
 */}}
-{{- define "kdex-host-manager.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "kdex-host-manager.name" . }}
+{{- define "host-manager.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "host-manager.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 Create the name of the service account to use
 */}}
-{{- define "kdex-host-manager.serviceAccountName" -}}
+{{- define "host-manager.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
-{{- default (include "kdex-host-manager.fullname" .) .Values.serviceAccount.name }}
+{{- default (include "host-manager.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}

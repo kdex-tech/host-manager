@@ -2,8 +2,8 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    {{- include "kdex-host-manager.labels" . | nindent 4 }}
-  name: {{ include "kdex-host-manager.fullname" . }}
+    {{- include "host-manager.labels" . | nindent 4 }}
+  name: {{ include "host-manager.fullname" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
@@ -11,7 +11,7 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      {{- include "kdex-host-manager.selectorLabels" . | nindent 6 }}
+      {{- include "host-manager.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       {{- with .Values.podAnnotations }}
@@ -19,7 +19,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "kdex-host-manager.labels" . | nindent 8 }}
+        {{- include "host-manager.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -35,14 +35,14 @@ spec:
             - --health-probe-bind-address=:8081
             - --webserver-bind-address=:8090
             - --focal-host={{ .Values.focalHost }}
-            - --service-name={{ include "kdex-host-manager.serviceAccountName" . }}
+            - --service-name={{ include "host-manager.serviceAccountName" . }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
             {{- if .Values.valkey.enabled }}
             - name: CACHE_ADDRESS
-              value: {{ include "kdex-host-manager.fullname" . }}-valkey:6379
+              value: {{ include "host-manager.fullname" . }}-valkey:6379
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -80,9 +80,9 @@ spec:
           - |
               trap "echo 'Received signal to terminate.'; exit 0" SIGINT SIGTERM
 
-              until timeout 2 bash -c '</dev/tcp/{{ include "kdex-host-manager.fullname" . }}-valkey/6379' 2>/dev/null
+              until timeout 2 bash -c '</dev/tcp/{{ include "host-manager.fullname" . }}-valkey/6379' 2>/dev/null
               do
-                  echo "Waiting for {{ include "kdex-host-manager.fullname" . }}-valkey..."
+                  echo "Waiting for {{ include "host-manager.fullname" . }}-valkey..."
 
                   sleep 2
               done
@@ -102,7 +102,7 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      serviceAccountName: {{ include "kdex-host-manager.serviceAccountName" . }}
+      serviceAccountName: {{ include "host-manager.serviceAccountName" . }}
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
@@ -110,7 +110,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "kdex-host-manager.fullname" . }}
+            name: {{ include "host-manager.fullname" . }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

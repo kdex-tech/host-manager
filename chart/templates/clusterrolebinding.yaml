@@ -2,14 +2,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
-    {{- include "kdex-host-manager.labels" . | nindent 4 }}
-  name: {{ include "kdex-host-manager.fullname" . }}-{{ .Release.Namespace }}
-  namespace: {{ .Release.Namespace }}
+    {{- include "host-manager.labels" . | nindent 4 }}
+  name: {{ include "host-manager.fullname" . }}-{{ .Release.Namespace }}
 roleRef:
   apiGroup: {{ .Values.roleRef.apiGroup }}
   kind: {{ .Values.roleRef.kind }}
   name: {{ .Values.roleRef.name }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "kdex-host-manager.serviceAccountName" . }}
+    name: {{ include "host-manager.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}

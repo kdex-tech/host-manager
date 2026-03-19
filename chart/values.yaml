@@ -1,4 +1,4 @@
-# Default values for kdex-host-manager.
+# Default values for host-manager.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
@@ -33,7 +33,7 @@ extraVolumeMounts: []
 #   mountPath: "/etc/foo"
 #   readOnly: true
 
-# kdex-host-manager specific config
+# host-manager specific config
 focalHost: ""
 
 fullnameOverride: ""

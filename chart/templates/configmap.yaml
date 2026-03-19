@@ -2,8 +2,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   labels:
-    {{- include "kdex-host-manager.labels" . | nindent 4 }}
-  name: {{ include "kdex-host-manager.fullname" . }}
+    {{- include "host-manager.labels" . | nindent 4 }}
+  name: {{ include "host-manager.fullname" . }}
   namespace: {{ .Release.Namespace }}
 data:
   config.yaml: |
