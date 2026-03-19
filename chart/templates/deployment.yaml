@@ -42,7 +42,7 @@ spec:
           env:
             {{- if .Values.valkey.enabled }}
             - name: CACHE_ADDRESS
-              value: {{ include "kdex-host-manager.fullname" . }}-valkey-master:6379
+              value: {{ include "kdex-host-manager.fullname" . }}-valkey:6379
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -71,6 +71,24 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.valkey.enabled }}
+      initContainers:
+        - command:
+          - bash
+          - -c
+          - |
+              trap "echo 'Received signal to terminate.'; exit 0" SIGINT SIGTERM
+
+              until timeout 2 bash -c '</dev/tcp/{{ include "kdex-host-manager.fullname" . }}-valkey/6379' 2>/dev/null
+              do
+                  echo "Waiting for {{ include "kdex-host-manager.fullname" . }}-valkey..."
+
+                  sleep 2
+              done
+          image: ghcr.io/kdex-tech/cli-tools:0.3.9
+          imagePullPolicy: IfNotPresent
+          name: wait-on-valkey
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
