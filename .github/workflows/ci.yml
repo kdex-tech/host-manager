@@ -130,7 +130,7 @@ jobs:
 
   publish-image:
     name: Publish Docker Image
-    needs: ci
+    needs: [ci, test-chart]
     runs-on: ubuntu-latest
     if: (github.repository == 'kdex-tech/host-manager') && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'pull_request')
     steps:
