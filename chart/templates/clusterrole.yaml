@@ -1,0 +1,173 @@
+{{- if not .Values.roleRef.name }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    {{- include "host-manager.labels" . | nindent 4 }}
+  name: {{ include "host-manager.fullname" . }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - httproutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexapps
+  - kdexclusterapps
+  - kdexclusterfaasadaptors
+  - kdexclusterpagearchetypes
+  - kdexclusterpagefooters
+  - kdexclusterpageheaders
+  - kdexclusterpagenavigations
+  - kdexclusterscriptlibraries
+  - kdexclusterthemes
+  - kdexfaasadaptors
+  - kdexpagearchetypes
+  - kdexpagefooters
+  - kdexpageheaders
+  - kdexpagenavigations
+  - kdexrolebindings
+  - kdexroles
+  - kdexscriptlibraries
+  - kdexthemes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexfunctions
+  - kdexinternalhosts
+  - kdexinternalpackagereferences
+  - kdexinternaltranslations
+  - kdexinternalutilitypages
+  - kdexpages
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexfunctions/finalizers
+  - kdexinternalhosts/finalizers
+  - kdexinternalpackagereferences/finalizers
+  - kdexinternaltranslations/finalizers
+  - kdexinternalutilitypages/finalizers
+  - kdexpages/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexfunctions/status
+  - kdexinternalhosts/status
+  - kdexinternalpackagereferences/status
+  - kdexinternaltranslations/status
+  - kdexinternalutilitypages/status
+  - kdexpages/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - kpack.io
+  resources:
+  - images
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - kpack.io
+  resources:
+  - images/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - kpack.io
+  resources:
+  - images/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+{{- end -}}

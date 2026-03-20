@@ -5,9 +5,15 @@ metadata:
     {{- include "host-manager.labels" . | nindent 4 }}
   name: {{ include "host-manager.fullname" . }}-{{ .Release.Namespace }}
 roleRef:
+  {{- if not .Values.roleRef.name }}
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "host-manager.fullname" . }}
+  {{- else }}
   apiGroup: {{ .Values.roleRef.apiGroup }}
   kind: {{ .Values.roleRef.kind }}
   name: {{ .Values.roleRef.name }}
+  {{- end }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "host-manager.serviceAccountName" . }}

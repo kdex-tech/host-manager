@@ -83,10 +83,11 @@ resources:
     cpu: 10m
     memory: 64Mi
 
+# If no name is specified a ClusterRole will be created and used. Otherwise, the specified role will be used
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: host-controller-role
+  name: ""
 
 schedulingGates: []
 
