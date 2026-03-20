@@ -33,6 +33,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -236,6 +237,8 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 					function.Status.State = kdexv1alpha1.KDexFunctionStateSourceAvailable
 				}
 			}
+		} else if !kerrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -276,11 +279,21 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	kPackUn := &unstructured.Unstructured{}
 	kPackUn.SetGroupVersionKind(internal.KPackImageGVK)
-	return ctrl.NewControllerManagedBy(mgr).
+
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&kdexv1alpha1.KDexFunction{}).
 		Owns(&batchv1.Job{}).
-		Owns(&batchv1.CronJob{}).
-		Owns(kPackUn).
+		Owns(&batchv1.CronJob{})
+
+	ok, err := CRDExists(mgr, internal.KPackImageGVK)
+	if err != nil {
+		return err
+	}
+	if ok {
+		builder = builder.Owns(kPackUn)
+	}
+
+	return builder.
 		Watches(
 			&kdexv1alpha1.KDexInternalHost{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexFunction{}, &kdexv1alpha1.KDexFunctionList{}, "{.Spec.HostRef}")).

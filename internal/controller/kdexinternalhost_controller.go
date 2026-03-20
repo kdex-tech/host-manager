@@ -47,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
@@ -647,13 +648,26 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&kdexv1alpha1.KDexInternalHost{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		Owns(&gatewayv1.HTTPRoute{}).
 		Owns(&kdexv1alpha1.KDexInternalPackageReferences{}).
-		Owns(&networkingv1.Ingress{}).
+		Owns(&networkingv1.Ingress{})
+
+	ok, err := CRDExists(mgr, schema.GroupVersionKind{
+		Group:   "gateway.networking.k8s.io",
+		Version: "v1",
+		Kind:    "HTTPRoute",
+	})
+	if err != nil {
+		return err
+	}
+	if ok {
+		builder = builder.Owns(&gatewayv1.HTTPRoute{})
+	}
+
+	return builder.
 		Watches(
 			&kdexv1alpha1.KDexFunction{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {

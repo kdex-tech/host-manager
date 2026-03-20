@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/jsonpath"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -24,6 +25,17 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+func CRDExists(mgr ctrl.Manager, gvk schema.GroupVersionKind) (bool, error) {
+	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
 
 func CollectBackend(defaultServerImage string, requiredBackends *[]kdexv1alpha1.KDexObjectReference, obj client.Object) {
 	if obj == nil {
