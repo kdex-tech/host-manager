@@ -115,10 +115,7 @@ jobs:
           --set focalHost=ci \
           --set image.repository=kdex-tech/host-manager \
           --set image.tag=ci \
-          --set image.pullPolicy=IfNotPresent \
-          --set roleRef.apiGroup=rbac.authorization.k8s.io \
-          --set roleRef.kind=ClusterRole \
-          --set roleRef.name=sim-host-controller
+          --set image.pullPolicy=IfNotPresent
 
     - name: Check Helm release status
       run: |

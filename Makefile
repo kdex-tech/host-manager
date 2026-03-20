@@ -173,10 +173,7 @@ deploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/confi
 		--set focalHost=sim \
 		--set "image.repository=${REPOSITORY}${IMG}" \
 		--set "image.tag=latest" \
-		--set "image.pullPolicy=Always" \
-		--set "roleRef.apiGroup=rbac.authorization.k8s.io" \
-		--set "roleRef.kind=ClusterRole" \
-		--set "roleRef.name=kcnas-operator-host-controller"
+		--set "image.pullPolicy=Always"
 
 .PHONY: undeploy-chart
 undeploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
