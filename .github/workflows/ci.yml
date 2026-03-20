@@ -121,9 +121,11 @@ jobs:
       run: |
         helm status ci --namespace ci
 
-    - name: Verify controller manager is READY
+    - name: Verify
       run: |
         kubectl -n ci rollout status deployment ci
+        kubectl -n ci apply -f test/fixtures/ci-host.yaml
+        kubectl -n ci wait --for=condition=Ready kdex-i-h/ci --timeout=20s
 
   publish-image:
     name: Publish Docker Image

@@ -1,0 +1,11 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexInternalHost
+metadata:
+  name: ci
+spec:
+  brandName: CI Host
+  devMode: true
+  organization: CI Inc.
+  routing:
+    domains:
+    - ci-host.test
