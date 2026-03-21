@@ -132,7 +132,7 @@ func TestGetParam(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			got, err := setupHandler(
-				g, tt.pattern, tt.parameterNames, tt.path, tt.supportedLangs, tt.headers, tt.expectError)
+				g, tt.pattern, tt.parameterNames, tt.path, tt.supportedLangs, tt.headers)
 			if tt.expectError {
 				g.Expect(err).To(HaveOccurred())
 			} else {
@@ -155,7 +155,6 @@ func setupHandler(
 	url string,
 	languages *[]language.Tag,
 	headers *map[string]string,
-	expectError bool,
 ) (Results, error) {
 	server := MockServer(
 		func(mux *http.ServeMux) {
