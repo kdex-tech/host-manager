@@ -162,6 +162,10 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
+	if internalHost.Spec.Registries.NpmRegistry == "" {
+		internalHost.Spec.Registries.NpmRegistry = r.Configuration.DefaultNpmRegistry
+	}
+
 	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, internalHost.Spec.Registries.NpmRegistry, internalHost.Spec.ServiceAccountSecrets)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
