@@ -148,12 +148,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
 		serviceAccountName = internalHost.Spec.ServiceAccountRef.Name
 	}
-	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
-
-	internalHost.Spec.ServiceAccountSecrets = secrets
 
 	themeObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &internalHost, &internalHost.Status.Conditions, internalHost.Spec.ThemeRef, r.RequeueDelay)
 	if shouldReturn {

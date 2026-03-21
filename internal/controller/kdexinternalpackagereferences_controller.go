@@ -113,7 +113,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
 		serviceAccount = internalHost.Spec.ServiceAccountRef.Name
 	}
-	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, serviceAccount)
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, serviceAccount)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -128,8 +128,6 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 
 		return ctrl.Result{}, err
 	}
-
-	internalHost.Spec.ServiceAccountSecrets = secrets
 
 	imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(
 		func(s corev1.Secret) bool {

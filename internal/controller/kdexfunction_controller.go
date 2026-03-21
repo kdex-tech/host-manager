@@ -184,7 +184,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
 		serviceAccount = internalHost.Spec.ServiceAccountRef.Name
 	}
-	secrets, err := ResolveServiceAccountSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, serviceAccount)
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, serviceAccount)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&function.Status.Conditions,
@@ -199,8 +199,6 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 		return ctrl.Result{}, err
 	}
-
-	internalHost.Spec.ServiceAccountSecrets = secrets
 
 	imagePullSecretRefs := []corev1.LocalObjectReference{}
 	imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(
