@@ -180,6 +180,15 @@ undeploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/con
 	$(HELM) uninstall host-controller \
 		--namespace kdex-nexus-system
 
+CHART_VERSION = 0.0.1-local
+
+.PHONE: publish-chart-local
+publish-chart-local: ## Publish the chart to a local insecure registry
+	mkdir -p dist; \
+	$(HELM) dependency update chart; \
+	$(HELM) package --app-version $(CHART_VERSION) --version $(CHART_VERSION) -d dist chart; \
+	$(HELM) push --plain-http dist/host-manager-$(CHART_VERSION).tgz oci://${REPOSITORY}kdex-tech
+
 ##@ Dependencies
 
 ## Location to install dependencies to
