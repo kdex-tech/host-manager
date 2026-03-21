@@ -3,7 +3,9 @@ package host
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/kdex-tech/entitlements"
@@ -34,8 +36,36 @@ func (hh *HostHandler) BuildMenuEntries(
 	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
 }
 
-func (hh *HostHandler) buildMenuEntriesRecursive(
-	entry *render.PageEntry,
+func (hh *HostHandler) firstAuthorizedPage(
+	ctx context.Context,
+	l *language.Tag,
+	isDefaultLanguage bool,
+) string {
+	rootEntry := &render.PageEntry{}
+	hh.BuildMenuEntries(ctx, rootEntry, l, isDefaultLanguage, nil)
+
+	if rootEntry.Children != nil {
+		se := maps.Values(*rootEntry.Children)
+		values := slices.Collect(se)
+		slices.SortFunc(values, func(a, b any) int {
+			aPE, aOk := a.(render.PageEntry)
+			bPE, bOk := b.(render.PageEntry)
+			if !aOk || !bOk {
+				return 0
+			}
+			return aPE.Weight.Cmp(bPE.Weight)
+		})
+		pe, ok := values[0].(render.PageEntry)
+		if !ok {
+			return ""
+		}
+		return pe.BasePath
+	}
+
+	return ""
+}
+
+func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
 	parent *page.PageHandler,

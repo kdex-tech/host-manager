@@ -3,9 +3,11 @@ package host
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -24,6 +26,12 @@ func (hh *HostHandler) pageHandlerFunc(
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 
+		l, err := kdexhttp.GetLang(r, hh.defaultLanguage, translations.Languages())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		if hh.IsAuthEnabled() && hh.authChecker != nil && ph.ParsedRequirements != nil {
 			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
@@ -36,30 +44,35 @@ func (hh *HostHandler) pageHandlerFunc(
 			}
 
 			if !authorized {
-				log.V(1).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath())
+				log.V(2).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
 
-				// TODO: find the next page that is public and redirect there.
-				// If there are no public pages, redirect to the login page if
-				// it exists. If there is no loging page, throw the error
-
-				_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
-				if r.URL.Path == "/" || r.URL.Path == "" && hasLoginPage {
-					http.Redirect(w, r, "/-/login", http.StatusSeeOther)
+				log.V(2).Info("attempt discovery of first accessible page", "l10n", l.String())
+				first := hh.firstAuthorizedPage(r.Context(), &l, l.String() == hh.defaultLanguage)
+				if first != "" {
+					if l.String() != hh.defaultLanguage {
+						first = "/" + l.String() + first
+					}
+					log.V(2).Info("first accessible page", "page", first, "l10n", l.String())
+					http.Redirect(w, r, first, http.StatusSeeOther)
 					return
 				}
 
+				_, authenticated := auth.GetAuthContext(r.Context())
+				if !authenticated {
+					_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
+					if hasLoginPage {
+						log.V(2).Info("no accessible pages, redirecting to login")
+						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+						return
+					}
+				}
+
+				log.V(2).Info("no accessible pages, send 404")
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}
 		}
-
 		if hh.applyCachingHeaders(w, r, hh.pageRequirements(&ph), hh.reconcileTime) {
-			return
-		}
-
-		l, err := kdexhttp.GetLang(r, hh.defaultLanguage, translations.Languages())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
