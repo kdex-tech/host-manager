@@ -52,7 +52,7 @@ spec:
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:
-            - name: http
+            - name: server
               containerPort: 8090
               protocol: TCP
           readinessProbe:
