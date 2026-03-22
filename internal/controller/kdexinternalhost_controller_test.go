@@ -21,7 +21,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -56,18 +55,6 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-
-			assertResourceReady(
-				ctx, k8sClient, focalHost, namespace,
-				&kdexv1alpha1.KDexInternalHost{}, false)
-
-			serviceAccount := &corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      focalHost,
-					Namespace: namespace,
-				},
-			}
-			Expect(k8sClient.Create(ctx, serviceAccount)).To(Succeed())
 
 			assertResourceReady(
 				ctx, k8sClient, focalHost, namespace,

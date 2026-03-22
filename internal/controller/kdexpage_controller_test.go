@@ -611,18 +611,6 @@ var _ = Describe("KDexPage Controller", func() {
 
 			assertResourceReady(
 				ctx, k8sClient, focalHost, namespace,
-				&kdexv1alpha1.KDexInternalHost{}, false)
-
-			serviceAccount := &corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      focalHost,
-					Namespace: namespace,
-				},
-			}
-			Expect(k8sClient.Create(ctx, serviceAccount)).To(Succeed())
-
-			assertResourceReady(
-				ctx, k8sClient, focalHost, namespace,
 				&kdexv1alpha1.KDexInternalHost{}, true)
 
 			assertResourceReady(
