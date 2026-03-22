@@ -180,11 +180,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	function.Status.Attributes["faasAdaptor.generation"] = currentGen
 
-	serviceAccount := internalHost.Name
-	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
-		serviceAccount = internalHost.Spec.ServiceAccountRef.Name
-	}
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, serviceAccount)
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&function.Status.Conditions,
@@ -219,7 +215,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		host:             *internalHost,
 		imagePullSecrets: imagePullSecretRefs,
 		req:              req,
-		serviceAccount:   serviceAccount,
+		serviceAccount:   internalHost.Spec.ServiceAccountRef.Name,
 	}
 
 	// Pick up asynchronous builder updates (e.g. from KPack git polling)

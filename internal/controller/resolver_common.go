@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -116,6 +117,14 @@ func ResolveHost(
 			return nil, true, r1, err
 		}
 	}
+
+	serviceAccountRef := host.Spec.ServiceAccountRef
+	if serviceAccountRef == nil || serviceAccountRef.Name == "" {
+		serviceAccountRef = &corev1.LocalObjectReference{
+			Name: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
+		}
+	}
+	host.Spec.ServiceAccountRef = serviceAccountRef
 
 	return &host, false, ctrl.Result{}, nil
 }

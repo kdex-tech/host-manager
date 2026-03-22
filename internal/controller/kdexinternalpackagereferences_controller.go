@@ -109,11 +109,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return r1, err
 	}
 
-	serviceAccount := internalHost.Name
-	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
-		serviceAccount = internalHost.Spec.ServiceAccountRef.Name
-	}
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, serviceAccount)
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -190,13 +186,6 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		"secretOperation", secretOp,
 	)
 
-	serviceAccountRef := internalHost.Spec.ServiceAccountRef
-	if serviceAccountRef == nil || serviceAccountRef.Name == "" {
-		serviceAccountRef = &corev1.LocalObjectReference{
-			Name: internalHost.Name,
-		}
-	}
-
 	builder := packref.PackRef{
 		Client:            r.Client,
 		ConfigMap:         configMap,
@@ -208,7 +197,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		NPMSecret:         *secret,
 		Packages:          &r.Configuration.Packages,
 		Scheme:            r.Scheme,
-		ServiceAccountRef: *serviceAccountRef,
+		ServiceAccountRef: *internalHost.Spec.ServiceAccountRef,
 	}
 
 	job, err := builder.GetOrCreatePackRefJob(ctx, &ipr)

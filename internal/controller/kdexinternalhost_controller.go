@@ -25,6 +25,7 @@ import (
 	"io"
 	"maps"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -144,11 +145,14 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	seenPaths := map[string]bool{}
 	themeAssets := []kdexv1alpha1.Asset{}
 
-	serviceAccountName := internalHost.Name
-	if internalHost.Spec.ServiceAccountRef != nil && internalHost.Spec.ServiceAccountRef.Name != "" {
-		serviceAccountName = internalHost.Spec.ServiceAccountRef.Name
+	serviceAccountRef := internalHost.Spec.ServiceAccountRef
+	if serviceAccountRef == nil || serviceAccountRef.Name == "" {
+		serviceAccountRef = &corev1.LocalObjectReference{
+			Name: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
+		}
 	}
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, serviceAccountName)
+	internalHost.Spec.ServiceAccountRef = serviceAccountRef
+	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
