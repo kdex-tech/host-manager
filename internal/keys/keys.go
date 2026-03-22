@@ -52,7 +52,7 @@ func (p *KeyPairs) ActiveKey() *KeyPair {
 // LoadOrGenerateKeyPair loads a key pair from a Kubernetes Secret.
 // If the secret doesn't exist or is invalid, it generates a new key pair.
 func LoadOrGenerateKeyPair(
-	secrets kdexv1alpha1.ServiceAccountSecrets,
+	secrets kdexv1alpha1.Secrets,
 	devMode bool,
 ) (*KeyPairs, error) {
 	filtered := secrets.Filter(func(s corev1.Secret) bool {

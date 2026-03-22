@@ -53,7 +53,7 @@ func TestNewRoleProvider(t *testing.T) {
 		c                   client.Client
 		focalHost           string
 		controllerNamespace string
-		secrets             kdexv1alpha1.ServiceAccountSecrets
+		secrets             kdexv1alpha1.Secrets
 		assertions          func(t *testing.T, got InternalIdentityProvider, gotErr error)
 	}{
 		{
@@ -156,7 +156,7 @@ func TestNewRoleProvider(t *testing.T) {
 			).Build(),
 			focalHost:           "foo",
 			controllerNamespace: "foo",
-			secrets: kdexv1alpha1.ServiceAccountSecrets{
+			secrets: kdexv1alpha1.Secrets{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
@@ -215,7 +215,7 @@ func TestNewRoleProvider(t *testing.T) {
 			).Build(),
 			focalHost:           "foo",
 			controllerNamespace: "foo",
-			secrets: kdexv1alpha1.ServiceAccountSecrets{
+			secrets: kdexv1alpha1.Secrets{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
@@ -429,7 +429,7 @@ func TestNewRoleProvider(t *testing.T) {
 			).Build(),
 			focalHost:           "foo",
 			controllerNamespace: "foo",
-			secrets: kdexv1alpha1.ServiceAccountSecrets{
+			secrets: kdexv1alpha1.Secrets{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",
@@ -487,7 +487,7 @@ func TestNewRoleProvider(t *testing.T) {
 			).Build(),
 			focalHost:           "foo",
 			controllerNamespace: "foo",
-			secrets: kdexv1alpha1.ServiceAccountSecrets{
+			secrets: kdexv1alpha1.Secrets{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "foo",

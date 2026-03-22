@@ -19,16 +19,16 @@ import (
 
 type PackRef struct {
 	client.Client
-	ConfigMap         *corev1.ConfigMap
-	InternalHost      *kdexv1alpha1.KDexInternalHost
-	ImageRegistry     string
-	ImagePushSecret   *corev1.Secret
-	ImagePullSecrets  []corev1.LocalObjectReference
-	Log               logr.Logger
-	NPMSecret         corev1.Secret
-	Packages          *configuration.Packages
-	Scheme            *runtime.Scheme
-	ServiceAccountRef corev1.LocalObjectReference
+	ConfigMap        *corev1.ConfigMap
+	InternalHost     *kdexv1alpha1.KDexInternalHost
+	ImageRegistry    string
+	ImagePushSecret  *corev1.Secret
+	ImagePullSecrets []corev1.LocalObjectReference
+	Log              logr.Logger
+	NPMSecret        corev1.Secret
+	Packages         *configuration.Packages
+	Scheme           *runtime.Scheme
+	ServiceAccount   string
 }
 
 func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.KDexInternalPackageReferences) (*batchv1.Job, error) {
@@ -198,7 +198,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 						},
 					},
 					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: p.ServiceAccountRef.Name,
+					ServiceAccountName: p.ServiceAccount,
 					Volumes:            volumes,
 				},
 			},

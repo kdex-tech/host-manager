@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/generate"
 	"github.com/kdex-tech/host-manager/internal/host"
 	kjob "github.com/kdex-tech/host-manager/internal/job"
+	"github.com/kdex-tech/host-manager/internal/utils"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -60,8 +62,9 @@ type handlerContext struct {
 	ctx              context.Context
 	faasAdaptorSpec  kdexv1alpha1.KDexFaaSAdaptorSpec
 	function         *kdexv1alpha1.KDexFunction
+	gitSecret        *corev1.Secret
 	host             kdexv1alpha1.KDexInternalHost
-	imagePullSecrets []corev1.LocalObjectReference
+	imagePullSecrets []corev1.Secret
 	req              ctrl.Request
 	serviceAccount   string
 }
@@ -180,7 +183,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	function.Status.Attributes["faasAdaptor.generation"] = currentGen
 
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
+	secrets, err := ResolveSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, internalHost.Spec.Secrets)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&function.Status.Conditions,
@@ -196,26 +199,23 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	imagePullSecretRefs := []corev1.LocalObjectReference{}
-	imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(
-		func(s corev1.Secret) bool {
-			return s.Type == corev1.SecretTypeDockerConfigJson
-		},
-	)
-	for _, secret := range imagePullSecrets {
-		imagePullSecretRefs = append(imagePullSecretRefs, corev1.LocalObjectReference{
-			Name: secret.Name,
-		})
-	}
-
 	hc := handlerContext{
-		ctx:              ctx,
-		faasAdaptorSpec:  *faasAdaptorSpec,
-		function:         &function,
-		host:             *internalHost,
-		imagePullSecrets: imagePullSecretRefs,
-		req:              req,
-		serviceAccount:   internalHost.Spec.ServiceAccountRef.Name,
+		ctx:             ctx,
+		faasAdaptorSpec: *faasAdaptorSpec,
+		function:        &function,
+		gitSecret: secrets.Find(
+			func(s corev1.Secret) bool {
+				return s.Annotations["kdex.dev/secret-type"] == "git"
+			},
+		),
+		host: *internalHost,
+		imagePullSecrets: secrets.Filter(
+			func(s corev1.Secret) bool {
+				return s.Type == corev1.SecretTypeDockerConfigJson
+			},
+		),
+		req:            req,
+		serviceAccount: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
 	}
 
 	// Pick up asynchronous builder updates (e.g. from KPack git polling)
@@ -399,12 +399,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 	if hc.function.Spec.Origin.Source != nil {
 		hc.function.Status.Source = hc.function.Spec.Origin.Source
 	} else {
-		gitSecret := hc.host.Spec.ServiceAccountSecrets.Find(
-			func(s corev1.Secret) bool {
-				return s.Annotations["kdex.dev/secret-type"] == "git"
-			},
-		)
-		if gitSecret == nil {
+		if hc.gitSecret == nil {
 			err := fmt.Errorf(
 				"git secret not found for host %s/%s",
 				hc.host.Namespace,
@@ -427,13 +422,17 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 			Client: r.Client,
 			Config: *hc.function.Status.Generator,
 			GitSecret: corev1.LocalObjectReference{
-				Name: gitSecret.Name,
+				Name: hc.gitSecret.Name,
 			},
-			ImagePullSecrets: hc.imagePullSecrets,
-			OpenAPIBuilder:   r.HostHandler.GetOpenAPIBuilder(),
-			Scheme:           r.Scheme,
-			ServerUrl:        fmt.Sprintf("%s://%s", hc.host.Spec.Routing.Scheme, hc.host.Spec.Routing.Domains[0]),
-			ServiceAccount:   hc.serviceAccount,
+			ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
+				return corev1.LocalObjectReference{
+					Name: s.Name,
+				}
+			}),
+			OpenAPIBuilder: r.HostHandler.GetOpenAPIBuilder(),
+			Scheme:         r.Scheme,
+			ServerUrl:      fmt.Sprintf("%s://%s", hc.host.Spec.Routing.Scheme, hc.host.Spec.Routing.Domains[0]),
+			ServiceAccount: hc.serviceAccount,
 		}
 
 		job, err := generator.GetOrCreateGenerateJob(hc.ctx, hc.function)
@@ -754,12 +753,16 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 	log := logf.FromContext(hc.ctx)
 
 	deployer := deploy.Deployer{
-		Client:           r.Client,
-		FaaSAdaptor:      hc.faasAdaptorSpec,
-		Host:             hc.host,
-		ImagePullSecrets: hc.imagePullSecrets,
-		Scheme:           r.Scheme,
-		ServiceAccount:   hc.serviceAccount,
+		Client:      r.Client,
+		FaaSAdaptor: hc.faasAdaptorSpec,
+		Host:        hc.host,
+		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
+			return corev1.LocalObjectReference{
+				Name: s.Name,
+			}
+		}),
+		Scheme:         r.Scheme,
+		ServiceAccount: hc.serviceAccount,
 	}
 
 	job, err := deployer.Deploy(hc.ctx, hc.function)
@@ -894,12 +897,16 @@ func (r *KDexFunctionReconciler) handleFunctionDeployed(hc handlerContext) (ctrl
 	log := logf.FromContext(hc.ctx)
 
 	deployer := deploy.Deployer{
-		Client:           r.Client,
-		FaaSAdaptor:      hc.faasAdaptorSpec,
-		Host:             hc.host,
-		ImagePullSecrets: hc.imagePullSecrets,
-		ServiceAccount:   hc.serviceAccount,
-		Scheme:           r.Scheme,
+		Client:      r.Client,
+		FaaSAdaptor: hc.faasAdaptorSpec,
+		Host:        hc.host,
+		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
+			return corev1.LocalObjectReference{
+				Name: s.Name,
+			}
+		}),
+		ServiceAccount: hc.serviceAccount,
+		Scheme:         r.Scheme,
 	}
 
 	_, err := deployer.Observe(hc.ctx, hc.function)
@@ -946,12 +953,16 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	}
 
 	deployer := deploy.Deployer{
-		Client:           r.Client,
-		FaaSAdaptor:      hc.faasAdaptorSpec,
-		Host:             hc.host,
-		ImagePullSecrets: hc.imagePullSecrets,
-		ServiceAccount:   hc.serviceAccount,
-		Scheme:           r.Scheme,
+		Client:      r.Client,
+		FaaSAdaptor: hc.faasAdaptorSpec,
+		Host:        hc.host,
+		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
+			return corev1.LocalObjectReference{
+				Name: s.Name,
+			}
+		}),
+		ServiceAccount: hc.serviceAccount,
+		Scheme:         r.Scheme,
 	}
 
 	_, err := deployer.Observe(hc.ctx, hc.function)

@@ -339,12 +339,12 @@ func (ll *ldapLookup) Type() string {
 }
 
 type secretLookup struct {
-	secrets kdexv1alpha1.ServiceAccountSecrets
+	secrets kdexv1alpha1.Secrets
 }
 
 var _ Lookup = (*secretLookup)(nil)
 
-func NewSecretLookup(secrets kdexv1alpha1.ServiceAccountSecrets) *secretLookup {
+func NewSecretLookup(secrets kdexv1alpha1.Secrets) *secretLookup {
 	return &secretLookup{
 		secrets: secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "subject" }),
 	}

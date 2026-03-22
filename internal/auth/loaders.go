@@ -8,7 +8,7 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
-func AuthClientLoader(secrets kdexv1alpha1.ServiceAccountSecrets) (map[string]AuthClient, error) {
+func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, error) {
 	clients := make(map[string]AuthClient)
 
 	authClientSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "auth-client" })
@@ -94,7 +94,7 @@ type OIDCClientConfig struct {
 	Name         string
 }
 
-func OIDCConfigLoader(secrets kdexv1alpha1.ServiceAccountSecrets, devMode bool) (*OIDCClientConfig, error) {
+func OIDCConfigLoader(secrets kdexv1alpha1.Secrets, devMode bool) (*OIDCClientConfig, error) {
 	oidcSecret := secrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "oidc-client" })
 	if oidcSecret == nil {
 		return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")

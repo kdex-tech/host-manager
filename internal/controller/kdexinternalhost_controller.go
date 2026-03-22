@@ -25,7 +25,6 @@ import (
 	"io"
 	"maps"
 	"net/url"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -145,14 +144,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	seenPaths := map[string]bool{}
 	themeAssets := []kdexv1alpha1.Asset{}
 
-	serviceAccountRef := internalHost.Spec.ServiceAccountRef
-	if serviceAccountRef == nil || serviceAccountRef.Name == "" {
-		serviceAccountRef = &corev1.LocalObjectReference{
-			Name: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
-		}
-	}
-	internalHost.Spec.ServiceAccountRef = serviceAccountRef
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
+	secrets, err := ResolveSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.Secrets)
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
@@ -396,7 +388,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, &internalHost, uniquePackageRefs)
+	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, &internalHost, uniquePackageRefs, secrets)
 	if shouldReturn {
 		if r1.RequeueAfter > 0 {
 			return r1, err
@@ -412,7 +404,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	for _, backend := range requiredBackends {
 		name := fmt.Sprintf("%s-%s", internalHost.Name, backend.Name)
 
-		_, dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend)
+		_, dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend, secrets)
 		if err != nil {
 			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
@@ -437,7 +429,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
 	} else {
-		_, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends)
+		_, err = r.createOrUpdateIngress(ctx, &internalHost, requiredBackends, secrets)
 		if err != nil {
 			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
@@ -448,20 +440,20 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	authConfigBuilder := auth.NewConfigBuilder().WithAuthClientLoader(
 		func() (map[string]auth.AuthClient, error) {
 			return auth.AuthClientLoader(
-				internalHost.Spec.ServiceAccountSecrets,
+				secrets,
 			)
 		},
 	).WithKeyLoader(
 		func() (*keys.KeyPairs, error) {
 			return keys.LoadOrGenerateKeyPair(
-				internalHost.Spec.ServiceAccountSecrets,
+				secrets,
 				internalHost.Spec.DevMode,
 			)
 		},
 	).WithOIDCClientConfigLoader(
 		func() (*auth.OIDCClientConfig, error) {
 			return auth.OIDCConfigLoader(
-				internalHost.Spec.ServiceAccountSecrets,
+				secrets,
 				internalHost.Spec.DevMode,
 			)
 		},
@@ -469,7 +461,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		func() (*apitoken.TokenManager, error) {
 			return apitoken.APITokenManagerLoader(
 				issuer,
-				internalHost.Spec.ServiceAccountSecrets,
+				secrets,
 				internalHost.Spec.DevMode,
 			)
 		},
@@ -489,10 +481,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	authLookups := []auth.Lookup{
-		auth.NewSecretLookup(internalHost.Spec.ServiceAccountSecrets),
+		auth.NewSecretLookup(secrets),
 	}
 
-	ldapSecret := internalHost.Spec.ServiceAccountSecrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "ldap" })
+	ldapSecret := secrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "ldap" })
 	if ldapSecret != nil {
 		// Put ldap lookup first
 		authLookups = append([]auth.Lookup{auth.NewLDAPLookup(*ldapSecret)}, authLookups...)
@@ -980,6 +972,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 	ctx context.Context,
 	internalHost *kdexv1alpha1.KDexInternalHost,
 	backends []resolvedBackend,
+	secrets kdexv1alpha1.Secrets,
 ) (controllerutil.OperationResult, error) {
 	ingress := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1067,7 +1060,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 			ingress.Spec.Rules = append(r.getMemoizedIngress().Rules, rules...)
 
 			if internalHost.Spec.Routing.Scheme == "https" {
-				tlsSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeTLS })
+				tlsSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeTLS })
 				if len(tlsSecrets) > 0 {
 					ingress.Spec.TLS = append(ingress.Spec.TLS, networkingv1.IngressTLS{
 						Hosts:      internalHost.Spec.Routing.Domains,
@@ -1126,6 +1119,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 	internalHost *kdexv1alpha1.KDexInternalHost,
 	name string,
 	resolvedBackend resolvedBackend,
+	secrets kdexv1alpha1.Secrets,
 ) (controllerutil.OperationResult, *appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1197,7 +1191,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 				})
 			}
 
-			imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
+			imagePullSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
 			if len(imagePullSecrets) > 0 {
 				for _, sec := range imagePullSecrets {
 					deployment.Spec.Template.Spec.ImagePullSecrets = append(
@@ -1458,6 +1452,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	ctx context.Context,
 	internalHost *kdexv1alpha1.KDexInternalHost,
 	uniquePackageRefs []kdexv1alpha1.PackageReference,
+	secrets kdexv1alpha1.Secrets,
 ) (*resolvedBackend, string, bool, ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -1465,7 +1460,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	// There should be a configuration that holds the default image reference.
 
 	if internalHost.Spec.PackagesImage != "" {
-		importMap, err := r.PullImportMap(ctx, internalHost.Spec.PackagesImage, internalHost.Spec.ServiceAccountSecrets)
+		importMap, err := r.PullImportMap(ctx, internalHost.Spec.PackagesImage, secrets)
 		if err != nil {
 			return nil, "", true, ctrl.Result{}, fmt.Errorf("failed to pull importmap from %s: %w", internalHost.Spec.PackagesImage, err)
 		}
@@ -1541,7 +1536,7 @@ func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.K
 	return err
 }
 
-func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef string, secrets kdexv1alpha1.ServiceAccountSecrets) (string, error) {
+func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef string, secrets kdexv1alpha1.Secrets) (string, error) {
 	log := logf.FromContext(ctx)
 
 	repo, err := remote.NewRepository(imageRef)
@@ -1669,7 +1664,7 @@ func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef
 	return string(blobData), nil
 }
 
-func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.ServiceAccountSecrets) remoteauth.Credential {
+func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.Secrets) remoteauth.Credential {
 	dockerSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
 	if len(dockerSecrets) == 0 {
 		return remoteauth.EmptyCredential

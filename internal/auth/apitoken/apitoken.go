@@ -69,7 +69,7 @@ type TokenManager struct {
 
 func APITokenManagerLoader(
 	issuer string,
-	secrets kdexv1alpha1.ServiceAccountSecrets,
+	secrets kdexv1alpha1.Secrets,
 	devMode bool,
 ) (*TokenManager, error) {
 	filtered := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "api-key" })

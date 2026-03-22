@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -117,14 +116,6 @@ func ResolveHost(
 			return nil, true, r1, err
 		}
 	}
-
-	serviceAccountRef := host.Spec.ServiceAccountRef
-	if serviceAccountRef == nil || serviceAccountRef.Name == "" {
-		serviceAccountRef = &corev1.LocalObjectReference{
-			Name: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
-		}
-	}
-	host.Spec.ServiceAccountRef = serviceAccountRef
 
 	return &host, false, ctrl.Result{}, nil
 }
@@ -320,26 +311,22 @@ func ResolveSecret(
 	return &secret, false, ctrl.Result{}, nil
 }
 
-func ResolveServiceAccountSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1alpha1.KDexObjectStatus, namespace string, saName string) ([]corev1.Secret, error) {
-	var sa corev1.ServiceAccount
-	if err := c.Get(ctx, types.NamespacedName{Name: saName, Namespace: namespace}, &sa); err != nil {
-		return nil, fmt.Errorf("failed to get service account %s/%s: %w", namespace, saName, err)
+func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1alpha1.KDexObjectStatus, namespace string, secretNames []string) (kdexv1alpha1.Secrets, error) {
+	if len(secretNames) == 0 {
+		return kdexv1alpha1.Secrets{}, nil
 	}
 
-	objectStatus.Attributes["serviceAccount.generation"] = fmt.Sprintf("%d", sa.GetGeneration())
-
-	secrets := []corev1.Secret{}
-	for _, secretRef := range sa.Secrets {
+	secrets := kdexv1alpha1.Secrets{}
+	for _, secretName := range secretNames {
 		var secret corev1.Secret
-		// corev1.ObjectReference but in ServiceAccount context usually LocalObjectReference semantics but typed as ObjectReference
-		// Check the type: ServiceAccount.Secrets is []ObjectReference.
-		if err := c.Get(ctx, types.NamespacedName{Name: secretRef.Name, Namespace: namespace}, &secret); err != nil {
+		if err := c.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
 			// log a warning and skip this secret
-			logf.FromContext(ctx).V(1).Info("failed to get secret", "namespace", namespace, "name", secretRef.Name, "error", err)
+			logf.FromContext(ctx).V(1).Info("failed to get secret", "namespace", namespace, "name", secretName, "error", err)
 			continue
 		}
 
 		secrets = append(secrets, secret)
+		objectStatus.Attributes[secretName+".secret.generation"] = fmt.Sprintf("%d", secret.GetGeneration())
 	}
 	return secrets, nil
 }

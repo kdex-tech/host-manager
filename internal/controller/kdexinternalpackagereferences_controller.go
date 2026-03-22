@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -109,7 +110,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return r1, err
 	}
 
-	internalHost.Spec.ServiceAccountSecrets, err = ResolveServiceAccountSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.ServiceAccountRef.Name)
+	secrets, err := ResolveSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.Secrets)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -125,7 +126,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
-	imagePullSecrets := internalHost.Spec.ServiceAccountSecrets.Filter(
+	imagePullSecrets := secrets.Filter(
 		func(s corev1.Secret) bool {
 			return s.Type == corev1.SecretTypeDockerConfigJson
 		},
@@ -136,7 +137,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		imagePullSecretRefs = append(imagePullSecretRefs, corev1.LocalObjectReference{Name: s.Name})
 	}
 
-	imagePushSecret := internalHost.Spec.ServiceAccountSecrets.Find(
+	imagePushSecret := secrets.Find(
 		func(s corev1.Secret) bool {
 			return s.Type == corev1.SecretTypeDockerConfigJson && s.Annotations["kdex.dev/secret-type"] == "docker-push"
 		},
@@ -162,7 +163,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		internalHost.Spec.Registries.NpmRegistry = r.Configuration.DefaultNpmRegistry
 	}
 
-	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, internalHost.Spec.Registries.NpmRegistry, internalHost.Spec.ServiceAccountSecrets)
+	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, internalHost.Spec.Registries.NpmRegistry, secrets)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -187,17 +188,17 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	)
 
 	builder := packref.PackRef{
-		Client:            r.Client,
-		ConfigMap:         configMap,
-		InternalHost:      internalHost,
-		ImageRegistry:     internalHost.Spec.Registries.ImageRegistry,
-		ImagePushSecret:   imagePushSecret,
-		ImagePullSecrets:  imagePullSecretRefs,
-		Log:               log,
-		NPMSecret:         *secret,
-		Packages:          &r.Configuration.Packages,
-		Scheme:            r.Scheme,
-		ServiceAccountRef: *internalHost.Spec.ServiceAccountRef,
+		Client:           r.Client,
+		ConfigMap:        configMap,
+		InternalHost:     internalHost,
+		ImageRegistry:    internalHost.Spec.Registries.ImageRegistry,
+		ImagePushSecret:  imagePushSecret,
+		ImagePullSecrets: imagePullSecretRefs,
+		Log:              log,
+		NPMSecret:        *secret,
+		Packages:         &r.Configuration.Packages,
+		Scheme:           r.Scheme,
+		ServiceAccount:   os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
 	}
 
 	job, err := builder.GetOrCreatePackRefJob(ctx, &ipr)
@@ -441,7 +442,7 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 	ctx context.Context,
 	ipr *kdexv1alpha1.KDexInternalPackageReferences,
 	npmRegistry string,
-	secrets kdexv1alpha1.ServiceAccountSecrets,
+	secrets kdexv1alpha1.Secrets,
 ) (controllerutil.OperationResult, *corev1.Secret, error) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

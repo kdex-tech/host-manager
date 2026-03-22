@@ -26,7 +26,7 @@ func TestNewConfig(t *testing.T) {
 		auth      *kdexv1alpha1.Auth
 		namespace string
 		devMode   bool
-		secrets   kdexv1alpha1.ServiceAccountSecrets
+		secrets   kdexv1alpha1.Secrets
 	}
 
 	tests := []struct {
@@ -100,7 +100,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -144,7 +144,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -175,7 +175,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -203,7 +203,7 @@ func TestNewConfig(t *testing.T) {
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -235,7 +235,7 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXufwXet+BRiqMQDn
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -270,7 +270,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -325,7 +325,7 @@ ZMtAm8mrV+h0ef/lr6zdJffz/EmM5MZrRAu2/dcK6S6qSEkwCTZ4
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:              "foo",
@@ -400,7 +400,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -477,7 +477,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 				},
 				namespace: "foo",
 				devMode:   true,
-				secrets: kdexv1alpha1.ServiceAccountSecrets{
+				secrets: kdexv1alpha1.Secrets{
 					{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      "foo",
@@ -541,7 +541,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 		auth      *kdexv1alpha1.Auth
 		namespace string
 		devMode   bool
-		secrets   kdexv1alpha1.ServiceAccountSecrets
+		secrets   kdexv1alpha1.Secrets
 	}
 
 	tests := []struct {
