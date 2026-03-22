@@ -74,17 +74,23 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 
 	issuer := fmt.Sprintf("%s://%s", d.Host.Spec.Routing.Scheme, d.Host.Spec.Routing.Domains[0])
 
-	env := d.FaaSAdaptor.Deployer.Env
+	env := []corev1.EnvVar{}
 
+	// Function environment variables
+	if len(function.Spec.Env) != 0 {
+		// {
+		// 	Name:  "ANONYMOUS_ENTITLEMENTS",
+		// 	Value: "", // TODO: make this configurable, set by Function
+		// },
+		// {
+		// 	Name:  "DEFAULT_SECURITY_SCHEME",
+		// 	Value: "bearer", // TODO: make this configurable, set by Function
+		// },
+		env = append(env, function.Spec.Env...)
+	}
+
+	// Common environment variables
 	env = append(env, []corev1.EnvVar{
-		{
-			Name:  "ANONYMOUS_ENTITLEMENTS",
-			Value: "", // TODO: make this configurable, set by Function
-		},
-		{
-			Name:  "DEFAULT_SECURITY_SCHEME",
-			Value: "bearer", // TODO: make this configurable, set by Function
-		},
 		{
 			Name:  "AUDIENCE",
 			Value: function.Status.URL,
@@ -131,6 +137,22 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		},
 	}...)
 
+	var forwardedEnvVars strings.Builder
+	sep := ""
+	for _, e := range env {
+		fmt.Fprintf(&forwardedEnvVars, "%s%s", sep, e.Name)
+		sep = ","
+	}
+
+	env = append(env, corev1.EnvVar{
+		Name:  "FORWARDED_ENV_VARS",
+		Value: forwardedEnvVars.String(),
+	})
+
+	// FaaS adaptor environment variables
+	env = append(env, d.FaaSAdaptor.Deployer.Env...)
+
+	// Scaling environment variables
 	if function.Status.Executable.Scaling != nil {
 		env = append(env, []corev1.EnvVar{
 			{
@@ -183,18 +205,6 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			},
 		}...)
 	}
-
-	var forwardedEnvVars strings.Builder
-	sep := ""
-	for _, e := range env {
-		fmt.Fprintf(&forwardedEnvVars, "%s%s", sep, e.Name)
-		sep = ","
-	}
-
-	env = append(env, corev1.EnvVar{
-		Name:  "FORWARDED_ENV_VARS",
-		Value: forwardedEnvVars.String(),
-	})
 
 	job = &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
