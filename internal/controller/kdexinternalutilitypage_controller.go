@@ -129,7 +129,7 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 	packageRefs := []kdexv1alpha1.PackageReference{}
 	scriptDefs := []kdexv1alpha1.ScriptDef{}
 
-	archetypeObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &internalUtilityPage, &internalUtilityPage.Status.Conditions, &internalUtilityPage.Spec.PageArchetypeRef, r.RequeueDelay)
+	archetypeObj, shouldReturn, r1, err := ResolveOrDefaultPageArchetype(ctx, r.Client, &internalUtilityPage, &internalUtilityPage.Status.Conditions, internalUtilityPage.Spec.PageArchetypeRef, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
 	}

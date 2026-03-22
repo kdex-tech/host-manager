@@ -121,34 +121,9 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	function.Status.Attributes["host.generation"] = fmt.Sprintf("%d", internalHost.GetGeneration())
 
-	faasAdaptorObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &function, &function.Status.Conditions, internalHost.Spec.FaaSAdaptorRef, r.RequeueDelay)
+	faasAdaptorObj, shouldReturn, r1, err := ResolveOrDefaultFaaSAdaptor(ctx, r.Client, &function, &function.Status.Conditions, internalHost, r.RequeueDelay)
 	if shouldReturn {
 		return r1, err
-	}
-
-	if faasAdaptorObj == nil {
-		var clusterFaaSAdaptorList kdexv1alpha1.KDexClusterFaaSAdaptorList
-		if err = r.List(ctx, &clusterFaaSAdaptorList, client.MatchingLabels{"kdex.dev/default": "true"}); err != nil {
-			kdexv1alpha1.SetConditions(
-				&function.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileSuccess,
-				err.Error(),
-			)
-			return ctrl.Result{}, err
-		}
-
-		if len(clusterFaaSAdaptorList.Items) != 0 {
-			slices.SortFunc(clusterFaaSAdaptorList.Items, func(a, b kdexv1alpha1.KDexClusterFaaSAdaptor) int {
-				return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
-			})
-
-			faasAdaptorObj = &clusterFaaSAdaptorList.Items[0]
-		}
 	}
 
 	if faasAdaptorObj == nil {

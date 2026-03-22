@@ -49,7 +49,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: "non-existent-host",
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -81,7 +81,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: "non-existent-host",
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -113,7 +113,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -201,7 +201,7 @@ var _ = Describe("KDexPage Controller", func() {
 							Name: "non-existent-navigation",
 						},
 					},
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -309,7 +309,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -380,7 +380,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -420,7 +420,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Kind: "KDexPageHeader",
 						Name: "non-existent-header",
 					},
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -533,7 +533,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
@@ -668,7 +668,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind:      "KDexPageArchetype",
 						Name:      "non-existent-page-archetype",
 						Namespace: secondNamespace,
@@ -726,7 +726,7 @@ var _ = Describe("KDexPage Controller", func() {
 						Name: focalHost,
 					},
 					Label: "foo",
-					PageArchetypeRef: kdexv1alpha1.KDexObjectReference{
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
 						Kind: "KDexClusterPageArchetype",
 						Name: "non-existent-page-archetype",
 					},
