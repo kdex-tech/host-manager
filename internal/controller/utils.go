@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -173,6 +174,24 @@ func MakeHandlerByReferencePath(
 						log.V(level).Info("struct", "interface", theReferenceStruct, "object", item.GetName(), "node", idx)
 
 						switch v := theReferenceStruct.(type) {
+						case string:
+							if v == o.GetName() {
+								requests = append(requests, reconcile.Request{
+									NamespacedName: types.NamespacedName{
+										Name:      item.GetName(),
+										Namespace: item.GetNamespace(),
+									},
+								})
+							}
+						case []string:
+							if slices.Contains(v, o.GetName()) {
+								requests = append(requests, reconcile.Request{
+									NamespacedName: types.NamespacedName{
+										Name:      item.GetName(),
+										Namespace: item.GetNamespace(),
+									},
+								})
+							}
 						case corev1.LocalObjectReference:
 							if v.Name == o.GetName() && item.GetNamespace() == o.GetNamespace() {
 								requests = append(requests, reconcile.Request{
