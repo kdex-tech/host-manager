@@ -106,6 +106,8 @@ serviceAccount:
   # The name of the service account to use.
   # If not set and create is true, a name is generated using the fullname template
   name: ""
+  # Secrets to be added to the service account
+  secrets: []
 
 service:
   port: 8090

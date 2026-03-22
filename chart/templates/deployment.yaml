@@ -40,6 +40,10 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            - name: KUBERNETES_SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
             {{- if .Values.valkey.enabled }}
             - name: CACHE_ADDRESS
               value: {{ include "host-manager.fullname" . }}-valkey:6379
