@@ -216,7 +216,7 @@ func ResolveKDexObjectReference(
 
 	t := reflect.TypeOf(referrer)
 
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
@@ -340,7 +340,7 @@ func isReady(
 	if t == nil {
 		return false, ctrl.Result{}, fmt.Errorf("referred is nil")
 	}
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 
