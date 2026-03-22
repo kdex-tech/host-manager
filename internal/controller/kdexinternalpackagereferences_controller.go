@@ -59,7 +59,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	log := logf.FromContext(ctx)
 
 	if req.Namespace != r.ControllerNamespace {
-		log.V(3).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
+		log.V(4).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
 		return ctrl.Result{}, nil
 	}
 
@@ -69,7 +69,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	}
 
 	if ipr.Spec.HostRef.Name != r.FocalHost {
-		log.V(3).Info("skipping reconcile", "host", ipr.Spec.HostRef.Name, "focalHost", r.FocalHost)
+		log.V(4).Info("skipping reconcile", "host", ipr.Spec.HostRef.Name, "focalHost", r.FocalHost)
 		return ctrl.Result{}, nil
 	}
 

@@ -351,11 +351,13 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.KDexFunctionReconciler{
-		Client:        mgr.GetClient(),
-		Configuration: conf,
-		HostHandler:   hostHandler,
-		RequeueDelay:  requeueDelay,
-		Scheme:        mgr.GetScheme(),
+		Client:              mgr.GetClient(),
+		Configuration:       conf,
+		ControllerNamespace: controllerNamespace,
+		FocalHost:           focalHost,
+		HostHandler:         hostHandler,
+		RequeueDelay:        requeueDelay,
+		Scheme:              mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KDexFunction")
 		os.Exit(1)

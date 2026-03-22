@@ -261,11 +261,13 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	functionReconciler := &KDexFunctionReconciler{
-		Client:        k8sManager.GetClient(),
-		Configuration: configuration,
-		HostHandler:   hostHandler,
-		RequeueDelay:  requeueDelay,
-		Scheme:        k8sManager.GetScheme(),
+		Client:              k8sManager.GetClient(),
+		Configuration:       configuration,
+		ControllerNamespace: namespace,
+		FocalHost:           focalHost,
+		HostHandler:         hostHandler,
+		RequeueDelay:        requeueDelay,
+		Scheme:              k8sManager.GetScheme(),
 	}
 	err = functionReconciler.SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())

@@ -90,12 +90,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log := logf.FromContext(ctx)
 
 	if req.Namespace != r.ControllerNamespace {
-		log.V(1).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
+		log.V(4).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
 		return ctrl.Result{}, nil
 	}
 
 	if req.Name != r.FocalHost {
-		log.V(1).Info("skipping reconcile", "name", req.Name, "focalHost", r.FocalHost)
+		log.V(4).Info("skipping reconcile", "name", req.Name, "focalHost", r.FocalHost)
 		return ctrl.Result{}, nil
 	}
 

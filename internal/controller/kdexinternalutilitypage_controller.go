@@ -55,7 +55,7 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 	log := logf.FromContext(ctx)
 
 	if req.Namespace != r.ControllerNamespace {
-		log.V(1).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
+		log.V(4).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
 		return ctrl.Result{}, nil
 	}
 
@@ -66,9 +66,7 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 
 	// Only process utility pages for the focal host
 	if internalUtilityPage.Spec.HostRef.Name != r.FocalHost {
-		log.V(1).Info("skipping utility page for non-focal host",
-			"hostRef", internalUtilityPage.Spec.HostRef.Name,
-			"focalHost", r.FocalHost)
+		log.V(4).Info("skipping reconcile", "host", internalUtilityPage.Spec.HostRef.Name, "focalHost", r.FocalHost)
 		return ctrl.Result{}, nil
 	}
 

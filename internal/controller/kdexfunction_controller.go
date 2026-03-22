@@ -52,10 +52,12 @@ import (
 // KDexFunctionReconciler reconciles a KDexFunction object
 type KDexFunctionReconciler struct {
 	client.Client
-	Configuration configuration.NexusConfiguration
-	HostHandler   *host.HostHandler
-	RequeueDelay  time.Duration
-	Scheme        *runtime.Scheme
+	Configuration       configuration.NexusConfiguration
+	ControllerNamespace string
+	FocalHost           string
+	HostHandler         *host.HostHandler
+	RequeueDelay        time.Duration
+	Scheme              *runtime.Scheme
 }
 
 type handlerContext struct {
@@ -73,9 +75,19 @@ type handlerContext struct {
 func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, err error) {
 	log := logf.FromContext(ctx)
 
+	if req.Namespace != r.ControllerNamespace {
+		log.V(4).Info("skipping reconcile", "namespace", req.Namespace, "controllerNamespace", r.ControllerNamespace)
+		return ctrl.Result{}, nil
+	}
+
 	var function kdexv1alpha1.KDexFunction
 	if err := r.Get(ctx, req.NamespacedName, &function); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if function.Spec.HostRef.Name != r.FocalHost {
+		log.V(4).Info("skipping reconcile", "name", function.Spec.HostRef.Name, "focalHost", r.FocalHost)
+		return ctrl.Result{}, nil
 	}
 
 	if function.Status.Attributes == nil {
