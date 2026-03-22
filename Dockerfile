@@ -14,7 +14,7 @@ RUN go mod download
 # Copy the go source
 COPY cmd/main.go cmd/main.go
 COPY internal/ internal/
-COPY key-cli/ key-cli/
+COPY cli/ cli/
 
 # Build
 # the GOARCH has no default value to allow the binary to be built according to the host where the command
@@ -22,18 +22,22 @@ COPY key-cli/ key-cli/
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager cmd/main.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ecdsa-key-gen key-cli/ecdsa/cli.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o paseto-key-gen key-cli/paseto/cli.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o rsa-key-gen key-cli/rsa/cli.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ecdsa-key-gen cli/ecdsa/cli.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o paseto-key-gen cli/paseto/cli.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o rsa-key-gen cli/rsa/cli.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o env cli/env/env.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
+
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/ecdsa-key-gen .
 COPY --from=builder /workspace/paseto-key-gen .
 COPY --from=builder /workspace/rsa-key-gen .
+COPY --from=builder /workspace/env .
+
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]
