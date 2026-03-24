@@ -307,6 +307,11 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Ref: "#/components/responses/InternalServerError",
 							}),
 						),
+						Security: &openapi.SecurityRequirements{
+							openapi.SecurityRequirement{
+								"bearer": {"apitokens:mint"},
+							},
+						},
 						Summary: "Mint PASETO API Token",
 						Tags:    []string{"system", "apitoken", "auth"},
 					},
