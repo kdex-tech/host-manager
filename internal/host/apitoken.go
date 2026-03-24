@@ -104,7 +104,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 
 	authorized, err := hh.authChecker.CheckAccess(
 		r.Context(),
-		"tokens",
+		"apitokens",
 		subject,
 		[]kdexv1alpha1.SecurityRequirement{requirement},
 		"mint",
