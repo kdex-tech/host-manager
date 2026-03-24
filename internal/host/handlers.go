@@ -712,9 +712,70 @@ func (hh *HostHandler) openapiHandler(mux *http.ServeMux, registeredPaths map[st
 }
 
 func (hh *HostHandler) schemaHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	// TODO: Add support to just list all known schemas in an HTML list with links to each schema.
-	const path = "/-/schema/{path...}"
+	const listPath = "/-/schemas"
+	mux.HandleFunc("GET "+listPath, hh.SchemaListGet)
+
+	const path = "/-/schemas/{path...}"
 	mux.HandleFunc("GET "+path, hh.SchemaGet)
+
+	// Register the schemas list path so it appears in the spec
+	hh.registerPath(listPath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: listPath,
+			Paths: map[string]ko.PathItem{
+				listPath: {
+					Description: "Lists all registered JSON schemas and their URLs.",
+					Get: &openapi.Operation{
+						Description: "List all schemas",
+						OperationID: "schema-list",
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"items": &openapi.SchemaRef{
+												Value: &openapi.Schema{
+													Items: &openapi.SchemaRef{
+														Value: &openapi.Schema{
+															Properties: openapi.Schemas{
+																"name": &openapi.SchemaRef{
+																	Value: &openapi.Schema{
+																		Type: &openapi.Types{openapi.TypeString},
+																	},
+																},
+																"urls": &openapi.SchemaRef{
+																	Value: &openapi.Schema{
+																		Items: openapi.NewSchemaRef("", openapi.NewStringSchema()),
+																		Type:  &openapi.Types{openapi.TypeArray},
+																	},
+																},
+															},
+															Type: &openapi.Types{openapi.TypeObject},
+														},
+													},
+													Type: &openapi.Types{openapi.TypeArray},
+												},
+											},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("Schema list"),
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Schema List",
+						Tags:    []string{"system", "jsonschema", "schema", "openapi"},
+					},
+					Summary: "List all schemas",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
 
 	// Register the path itself so it appears in the spec
 	hh.registerPath(path, ko.PathInfo{
@@ -722,7 +783,7 @@ func (hh *HostHandler) schemaHandler(mux *http.ServeMux, registeredPaths map[str
 			BasePath: path,
 			Paths: map[string]ko.PathItem{
 				path: {
-					Description: "Serves individual JSONschema from the registered OpenAPI specifications. The path should be in the format /-/schema/{basePath}/{schemaName} (e.g., /-/schema/v1/users/User) or simply /-/schema/{schemaName} for a global lookup.",
+					Description: "Serves individual JSONschema from the registered OpenAPI specifications. The path should be in the format /-/schemas/{basePath}/{schemaName} (e.g., /-/schemas/v1/users/User) or simply /-/schemas/{schemaName} for a global lookup.",
 					Get: &openapi.Operation{
 						Description: "GET JSONschema",
 						OperationID: "schema-get",

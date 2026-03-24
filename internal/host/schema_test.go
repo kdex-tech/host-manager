@@ -83,36 +83,36 @@ func TestHostHandler_SchemaHandler(t *testing.T) {
 	}{
 		{
 			name:       "global lookup - unique",
-			path:       "/-/schema/Address",
+			path:       "/-/schemas/Address",
 			wantCode:   http.StatusOK,
 			wantSchema: addrSchema,
 		},
 		{
 			name:       "global lookup - first win",
-			path:       "/-/schema/User",
+			path:       "/-/schemas/User",
 			wantCode:   http.StatusOK,
 			wantSchema: addrSchema, // sorting order guarantees common schema will return first
 		},
 		{
 			name:       "namespaced lookup - User in v1/users",
-			path:       "/-/schema/v1/users/User",
+			path:       "/-/schemas/v1/users/User",
 			wantCode:   http.StatusOK,
 			wantSchema: userSchema,
 		},
 		{
 			name:       "namespaced lookup - User in v1/common",
-			path:       "/-/schema/v1/common/User",
+			path:       "/-/schemas/v1/common/User",
 			wantCode:   http.StatusOK,
 			wantSchema: addrSchema,
 		},
 		{
 			name:     "not found",
-			path:     "/-/schema/NonExistent",
+			path:     "/-/schemas/NonExistent",
 			wantCode: http.StatusNotFound,
 		},
 		{
 			name:     "namespaced not found",
-			path:     "/-/schema/v1/users/Address",
+			path:     "/-/schemas/v1/users/Address",
 			wantCode: http.StatusNotFound,
 		},
 	}
@@ -138,5 +138,97 @@ func TestHostHandler_SchemaHandler(t *testing.T) {
 				assert.Equal(t, wantBytes, gotBytes)
 			}
 		})
+	}
+}
+
+func TestHostHandler_SchemaListHandler(t *testing.T) {
+	// Setup HostHandler
+	cacheManager, _ := cache.NewCacheManager("", "", nil)
+	th := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+
+	// Define some schemas
+	userSchema := &openapi.SchemaRef{
+		Value: &openapi.Schema{
+			Type: &openapi.Types{openapi.TypeObject},
+		},
+	}
+
+	addrSchema := &openapi.SchemaRef{
+		Value: &openapi.Schema{
+			Type: &openapi.Types{openapi.TypeObject},
+		},
+	}
+
+	// Register paths with schemas
+	registeredPaths := map[string]ko.PathInfo{
+		"/v1/users": {
+			API: ko.OpenAPI{
+				BasePath: "/v1/users",
+				Schemas: map[string]*openapi.SchemaRef{
+					"User": userSchema,
+				},
+			},
+			Type: ko.FunctionPathType,
+		},
+		"/v1/common": {
+			API: ko.OpenAPI{
+				BasePath: "/v1/common",
+				Schemas: map[string]*openapi.SchemaRef{
+					"Address": addrSchema,
+					"User":    addrSchema,
+				},
+			},
+			Type: ko.FunctionPathType,
+		},
+	}
+
+	th.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "en",
+	}, nil, nil, nil, nil, "", registeredPaths, nil, nil, nil, "http", nil, time.Now())
+
+	req := httptest.NewRequest("GET", "/-/schemas", nil)
+	w := httptest.NewRecorder()
+
+	th.Mux.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	type schemaListItem struct {
+		Name string   `json:"name"`
+		URLs []string `json:"urls"`
+	}
+
+	type schemaListResponse struct {
+		Items []schemaListItem `json:"items"`
+	}
+
+	var response schemaListResponse
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+
+	// We expect:
+	// 1. Address from /v1/common (global lookup hits it because it's first by name and only one by name)
+	// 2. User from /v1/common (global lookup hits it because it's first by name and path order)
+	// 3. User from /v1/users (namespaced lookup ONLY because it's second)
+
+	expected := []schemaListItem{
+		{
+			Name: "Address",
+			URLs: []string{"/-/schemas/Address", "/-/schemas/v1/common/Address"},
+		},
+		{
+			Name: "User",
+			URLs: []string{"/-/schemas/User", "/-/schemas/v1/common/User"},
+		},
+		{
+			Name: "User",
+			URLs: []string{"/-/schemas/v1/users/User"},
+		},
+	}
+
+	assert.Equal(t, len(expected), len(response.Items))
+	for i, item := range response.Items {
+		assert.Equal(t, expected[i].Name, item.Name)
+		assert.Equal(t, expected[i].URLs, item.URLs)
 	}
 }
