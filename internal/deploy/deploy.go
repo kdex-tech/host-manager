@@ -83,6 +83,10 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		// 	Value: "", // TODO: make this configurable, set by Function
 		// },
 		// {
+		// 	Name:  "DEBUG",
+		// 	Value: "false", // TODO: make this configurable, set by Function
+		// },
+		// {
 		// 	Name:  "DEFAULT_SECURITY_SCHEME",
 		// 	Value: "bearer", // TODO: make this configurable, set by Function
 		// },
@@ -94,10 +98,6 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		{
 			Name:  "AUDIENCE",
 			Value: function.Status.URL,
-		},
-		{
-			Name:  "DEBUG",
-			Value: "false", // TODO: make this configurable, set by Function
 		},
 		{
 			Name:  "FUNCTION_BASEPATH",
