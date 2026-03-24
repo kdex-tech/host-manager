@@ -119,11 +119,15 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 		return nil, fmt.Errorf("invalid credentials '%s'", subject)
 	}
 
-	roles, entitlements, err := rp.FindInternalRolesAndEntitlements(subject)
+	subjectForRoles := subject
+	if sub, ok := localIdentity["sub"].(string); ok && sub != "" {
+		subjectForRoles = sub
+	}
+
+	roles, entitlements, err := rp.FindInternalRolesAndEntitlements(subjectForRoles)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve scopes: %w", err)
 	}
-
 	localIdentity["roles"] = roles
 	localIdentity["entitlements"] = entitlements
 
@@ -352,7 +356,9 @@ func NewSecretLookup(secrets kdexv1alpha1.Secrets) *secretLookup {
 
 func (sl *secretLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {
 	for _, secret := range sl.secrets {
-		if subBytes, ok := secret.Data["sub"]; ok && string(subBytes) == subject {
+		subBytes, hasSub := secret.Data["sub"]
+		emailBytes, hasEmail := secret.Data["email"]
+		if (hasSub && string(subBytes) == subject) || (hasEmail && string(emailBytes) == subject) {
 			if passBytes, ok := secret.Data["password"]; ok {
 				if string(passBytes) == password || bcrypt.CompareHashAndPassword(passBytes, []byte(password)) == nil {
 					current := map[string]any{}
@@ -370,13 +376,12 @@ func (sl *secretLookup) FindInternal(subject string, password string) (bool, jwt
 					return true, current, nil
 				}
 			}
-			return false, nil, fmt.Errorf("invalid password for subject '%s'", subject)
+			return false, nil, fmt.Errorf("invalid password for subject/email '%s'", subject)
 		}
 	}
 
 	return false, nil, nil
 }
-
 func (sl *secretLookup) Type() string {
 	return "secret"
 }
