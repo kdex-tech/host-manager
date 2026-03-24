@@ -73,7 +73,7 @@ func APITokenManagerLoader(
 	devMode bool,
 ) (*TokenManager, error) {
 	filtered := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "api-key" })
-	if len(filtered) == 0 {
+	if !devMode && len(filtered) == 0 {
 		return nil, nil
 	}
 
