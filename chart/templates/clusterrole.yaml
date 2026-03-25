@@ -23,6 +23,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumeclaims
   - pods
   - serviceaccounts
   verbs:

@@ -116,7 +116,9 @@ tolerations: []
 
 valkey:
   enabled: true
+
   # Valkey chart values
-  # For example, to disable persistence for dev:
-  # persistence:
-  #   enabled: false
+  dataStorage:
+    enabled: true
+    keepPvc: true
+    requestedSize: "5Gi"
