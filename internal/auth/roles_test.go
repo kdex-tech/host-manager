@@ -449,61 +449,61 @@ func TestNewRoleProvider(t *testing.T) {
 				assert.Nil(t, gotErr)
 				_, err := got.FindInternal("username", "password")
 				assert.NotNil(t, err)
-				},
-				},
-				{
-				name: "VerifyLocalIdentity - login by email",
-				c: cb().WithObjects(
+			},
+		},
+		{
+			name: "VerifyLocalIdentity - login by email",
+			c: cb().WithObjects(
 				&kdexv1alpha1.KDexRole{
-				        ObjectMeta: metav1.ObjectMeta{
-				                Name:      "role-1",
-				                Namespace: "foo",
-				        },
-				        Spec: kdexv1alpha1.KDexRoleSpec{
-				                HostRef: v1.LocalObjectReference{
-				                        Name: "foo",
-				                },
-				                Rules: []kdexv1alpha1.PolicyRule{
-				                        {
-				                                Resources: []string{"page"},
-				                                Verbs:     []string{"read", "write"},
-				                        },
-				                },
-				        },
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "role-1",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleSpec{
+						HostRef: v1.LocalObjectReference{
+							Name: "foo",
+						},
+						Rules: []kdexv1alpha1.PolicyRule{
+							{
+								Resources: []string{"page"},
+								Verbs:     []string{"read", "write"},
+							},
+						},
+					},
 				},
 				&kdexv1alpha1.KDexRoleBinding{
-				        ObjectMeta: metav1.ObjectMeta{
-				                Name:      "role-binging-1",
-				                Namespace: "foo",
-				        },
-				        Spec: kdexv1alpha1.KDexRoleBindingSpec{
-				                HostRef: v1.LocalObjectReference{
-				                        Name: "foo",
-				                },
-				                Subject: "username",
-				                Roles:   []string{"role-1"},
-				        },
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "role-binging-1",
+						Namespace: "foo",
+					},
+					Spec: kdexv1alpha1.KDexRoleBindingSpec{
+						HostRef: v1.LocalObjectReference{
+							Name: "foo",
+						},
+						Subject: "username",
+						Roles:   []string{"role-1"},
+					},
 				},
-				).Build(),
-				focalHost:           "foo",
-				controllerNamespace: "foo",
-				secrets: kdexv1alpha1.Secrets{
+			).Build(),
+			focalHost:           "foo",
+			controllerNamespace: "foo",
+			secrets: kdexv1alpha1.Secrets{
 				{
-				        ObjectMeta: metav1.ObjectMeta{
-				                Name:      "foo",
-				                Namespace: "foo",
-				                Annotations: map[string]string{
-				                        "kdex.dev/secret-type": "subject",
-				                },
-				        },
-				        Data: map[string][]byte{
-				                "sub":      []byte("username"),
-				                "password": []byte("passw0rd"),
-				                "email":    []byte("username@email.foo"),
-				        },
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "foo",
+						Namespace: "foo",
+						Annotations: map[string]string{
+							"kdex.dev/secret-type": "subject",
+						},
+					},
+					Data: map[string][]byte{
+						"sub":      []byte("username"),
+						"password": []byte("passw0rd"),
+						"email":    []byte("username@email.foo"),
+					},
 				},
-				},
-				assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
+			},
+			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
 				ident, err := got.FindInternal("username@email.foo", "passw0rd")
 				assert.Nil(t, err)
@@ -511,10 +511,10 @@ func TestNewRoleProvider(t *testing.T) {
 				assert.Equal(t, "username", ident["sub"])
 				assert.Equal(t, "username@email.foo", ident["email"])
 				assert.Equal(t, []string{"page::read", "page::write"}, ident["entitlements"])
-				},
-				},
-				{
-				name: "VerifyLocalIdentity - correct password",
+			},
+		},
+		{
+			name: "VerifyLocalIdentity - correct password",
 
 			c: cb().WithObjects(
 				&kdexv1alpha1.KDexRole{

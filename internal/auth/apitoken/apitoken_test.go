@@ -122,7 +122,7 @@ func TestKeyPairs(t *testing.T) {
 	kps := &KeyPairs{kp1, kp2}
 
 	assert.Equal(t, kp1, kps.ActiveKey())
-	
+
 	k, ok := kps.GetKey("k1")
 	assert.True(t, ok)
 	assert.Equal(t, kp1, k)
@@ -162,7 +162,7 @@ func TestTokenManager_RevokeToken_Errors(t *testing.T) {
 
 func TestAPITokenManagerLoader(t *testing.T) {
 	issuer := "test-issuer"
-	
+
 	// Dev mode
 	tm, err := APITokenManagerLoader(issuer, kdexv1alpha1.Secrets{}, nil, true)
 	require.NoError(t, err)
@@ -179,18 +179,18 @@ func TestAPITokenManagerLoader(t *testing.T) {
 func TestLoadKeysFromSecret(t *testing.T) {
 	sk := paseto.NewV4AsymmetricSecretKey()
 	pk := sk.Public()
-	
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-secret",
 			Annotations: map[string]string{
 				"kdex.dev/secret-type": "api-key",
-				"kdex.dev/active-key": "true",
+				"kdex.dev/active-key":  "true",
 			},
 		},
 		Data: map[string][]byte{
 			"private-key": sk.ExportBytes(),
-			"public-key": pk.ExportBytes(),
+			"public-key":  pk.ExportBytes(),
 		},
 	}
 
@@ -208,18 +208,18 @@ func TestLoadKeysFromSecret(t *testing.T) {
 func TestAPITokenManagerLoader_WithSecrets(t *testing.T) {
 	sk := paseto.NewV4AsymmetricSecretKey()
 	pk := sk.Public()
-	
+
 	secret := corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-secret",
 			Annotations: map[string]string{
 				"kdex.dev/secret-type": "api-key",
-				"kdex.dev/active-key": "true",
+				"kdex.dev/active-key":  "true",
 			},
 		},
 		Data: map[string][]byte{
 			"private-key": sk.ExportBytes(),
-			"public-key": pk.ExportBytes(),
+			"public-key":  pk.ExportBytes(),
 		},
 	}
 
