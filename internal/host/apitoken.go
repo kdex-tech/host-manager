@@ -169,7 +169,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 		tokenString = after
 	}
 
-	data, err := hh.authConfig.TokenManager.ValidateToken(tokenString)
+	data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), tokenString)
 	if err != nil {
 		log.Error(err, "Token verification failed")
 		http.Error(w, "Invalid token", http.StatusUnauthorized)

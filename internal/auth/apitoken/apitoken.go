@@ -2,6 +2,7 @@ package apitoken
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -71,6 +72,7 @@ type TokenManager struct {
 func APITokenManagerLoader(
 	issuer string,
 	secrets kdexv1alpha1.Secrets,
+	revocationCache cache.Cache,
 	devMode bool,
 ) (*TokenManager, error) {
 	filtered := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "api-key" })
@@ -117,11 +119,11 @@ func APITokenManagerLoader(
 			(*pairs)[0].ActiveKey = true
 		}
 
-		return NewTokenManager(issuer, pairs, nil)
+		return NewTokenManager(issuer, pairs, revocationCache)
 	}
 
 	if devMode {
-		return NewTokenManager(issuer, GenerateDevmodeKeyPair(), nil)
+		return NewTokenManager(issuer, GenerateDevmodeKeyPair(), revocationCache)
 	}
 
 	return nil, nil
@@ -138,6 +140,68 @@ func NewTokenManager(issuer string, keyPairs *KeyPairs, revocationCache cache.Ca
 
 func (tm *TokenManager) KeyPairs() KeyPairs {
 	return tm.keyPairs
+}
+
+func (tm *TokenManager) RevokeByMetadata(ctx context.Context, aud, sub, act string, ttl time.Duration) error {
+	if tm.revocationCache == nil {
+		return fmt.Errorf("revocation cache not configured")
+	}
+
+	jti := GenerateJTI(aud, sub, act)
+
+	return tm.revocationCache.Set(ctx, jti, "revoked", cache.WithTTL(ttl))
+}
+
+func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
+	if tm.revocationCache == nil {
+		return fmt.Errorf("revocation cache not configured")
+	}
+
+	// 1. Peek at the footer to get the KID
+	parser := paseto.NewParser()
+	footerBytes, err := parser.UnsafeParseFooter(paseto.V4Public, signed)
+	if err != nil {
+		return err
+	}
+
+	var footerData struct {
+		KID string `json:"kid"`
+	}
+	if err := json.Unmarshal(footerBytes, &footerData); err != nil {
+		return err
+	}
+
+	// 2. Lookup the public key
+	keyPair, exists := tm.keyPairs.GetKey(footerData.KID)
+	if !exists {
+		return fmt.Errorf("key not found: %s", footerData.KID)
+	}
+
+	// 3. Parse the token to get JTI and expiration
+	// We don't use tm.ValidateToken because it might perform a revocation check
+	// and we want to be able to revoke a token even if it's already revoked (idempotency).
+	token, err := parser.ParseV4Public(*keyPair.PublicKey, signed, nil)
+	if err != nil {
+		return err
+	}
+
+	jti, err := token.GetJti()
+	if err != nil {
+		return err
+	}
+
+	exp, err := token.GetExpiration()
+	if err != nil {
+		return err
+	}
+
+	ttl := time.Until(exp)
+	if ttl <= 0 {
+		// Already expired, no need to revoke in cache
+		return nil
+	}
+
+	return tm.revocationCache.Set(ctx, jti, "revoked", cache.WithTTL(ttl))
 }
 
 func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, scope string, ttl time.Duration) (string, error) {
@@ -164,7 +228,7 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 	return signed, nil
 }
 
-func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
+func (tm *TokenManager) ValidateToken(ctx context.Context, signed string) (*TokenData, error) {
 	// 1. Peek at the footer without verifying the signature
 	// This is safe because the footer is always in the clear (Base64)
 	parser := paseto.NewParser()
@@ -194,6 +258,22 @@ func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
 	token, err := parser.ParseV4Public(*keyPair.PublicKey, signed, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// 4. Revocation check
+	if tm.revocationCache != nil {
+		jti, err := token.GetJti()
+		if err != nil {
+			return nil, err
+		}
+
+		_, found, _, err := tm.revocationCache.Get(ctx, jti)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check revocation status: %w", err)
+		}
+		if found {
+			return nil, fmt.Errorf("token revoked")
+		}
 	}
 
 	subject, err := token.GetSubject()

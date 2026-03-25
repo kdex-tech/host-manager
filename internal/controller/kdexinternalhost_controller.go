@@ -34,8 +34,10 @@ import (
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/keys"
+
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/sniffer"
 	"github.com/opencontainers/go-digest"
@@ -462,6 +464,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return apitoken.APITokenManagerLoader(
 				issuer,
 				secrets,
+				r.HostHandler.GetCacheManager().GetCache("apitoken-revocation", cache.CacheOptions{}),
 				internalHost.Spec.DevMode,
 			)
 		},
