@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"aidanwoods.dev/go-paseto"
-	"github.com/google/uuid"
 
+	"github.com/kdex-tech/host-manager/internal/cache"
 	corev1 "k8s.io/api/core/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -62,9 +62,10 @@ func (p *KeyPairs) GetKey(kid string) (*KeyPair, bool) {
 }
 
 type TokenManager struct {
-	activeKey KeyPair
-	issuer    string
-	keyPairs  KeyPairs
+	activeKey       KeyPair
+	issuer          string
+	keyPairs        KeyPairs
+	revocationCache cache.Cache
 }
 
 func APITokenManagerLoader(
@@ -116,21 +117,22 @@ func APITokenManagerLoader(
 			(*pairs)[0].ActiveKey = true
 		}
 
-		return NewTokenManager(issuer, pairs)
+		return NewTokenManager(issuer, pairs, nil)
 	}
 
 	if devMode {
-		return NewTokenManager(issuer, GenerateDevmodeKeyPair())
+		return NewTokenManager(issuer, GenerateDevmodeKeyPair(), nil)
 	}
 
 	return nil, nil
 }
 
-func NewTokenManager(issuer string, keyPairs *KeyPairs) (*TokenManager, error) {
+func NewTokenManager(issuer string, keyPairs *KeyPairs, revocationCache cache.Cache) (*TokenManager, error) {
 	return &TokenManager{
-		issuer:    issuer,
-		activeKey: *keyPairs.ActiveKey(),
-		keyPairs:  *keyPairs,
+		issuer:          issuer,
+		activeKey:       *keyPairs.ActiveKey(),
+		keyPairs:        *keyPairs,
+		revocationCache: revocationCache,
 	}, nil
 }
 
@@ -148,7 +150,7 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 	token.SetExpiration(exp)
 	token.SetIssuedAt(now)
 	token.SetIssuer(tm.issuer)
-	token.SetJti(uuid.New().String())
+	token.SetJti(GenerateJTI(aud, sub, action))
 	token.SetNotBefore(now)
 	token.SetSubject(sub)
 
@@ -214,6 +216,12 @@ func (tm *TokenManager) ValidateToken(signed string) (*TokenData, error) {
 		Scope:   scope,
 		Subject: subject,
 	}, nil
+}
+
+func GenerateJTI(aud, sub, act string) string {
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%s", aud, sub, act)))
+
+	return hex.EncodeToString(hash[:])
 }
 
 func GenerateKID(pubBytes []byte) string {
