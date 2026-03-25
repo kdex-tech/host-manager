@@ -264,8 +264,7 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 				return
 			}
 
-			if result.Function == nil {
-				// Analysis yielded nothing (maybe pattern mismatch), serve 404 as usual
+			if result == nil || result.Function == nil {
 				hh.serveError(w, r, ew.statusCode, ew.statusMsg)
 				hh.mu.RUnlock()
 				return
