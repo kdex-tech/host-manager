@@ -267,6 +267,7 @@ func TestInMemoryCacheManager_GetCache(t *testing.T) {
 			},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cacheManager, err := NewCacheManager("", "foo", new(100*time.Millisecond))
@@ -279,4 +280,68 @@ func TestInMemoryCacheManager_GetCache(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestInMemoryCache_LRU(t *testing.T) {
+	ctx := context.Background()
+	maxItems := 3
+	mgr, _ := NewCacheManager("", "foo", nil)
+	c := mgr.GetCache("lru", CacheOptions{MaxItems: &maxItems})
+
+	// Add 3 items
+	c.Set(ctx, "k1", "v1")
+	c.Set(ctx, "k2", "v2")
+	c.Set(ctx, "k3", "v3")
+
+	// Verify all are present
+	v, ok, _, _ := c.Get(ctx, "k1")
+	assert.True(t, ok)
+	assert.Equal(t, "v1", v)
+
+	// k1 is now most recently used. LRU is k2.
+
+	// Add 4th item, should evict k2
+	c.Set(ctx, "k4", "v4")
+
+	_, ok, _, _ = c.Get(ctx, "k2")
+	assert.False(t, ok, "k2 should have been evicted")
+
+	// Verify others are still there
+	_, ok, _, _ = c.Get(ctx, "k1")
+	assert.True(t, ok)
+	_, ok, _, _ = c.Get(ctx, "k3")
+	assert.True(t, ok)
+	_, ok, _, _ = c.Get(ctx, "k4")
+	assert.True(t, ok)
+}
+
+func TestInMemoryCache_IndividualTTL(t *testing.T) {
+	ctx := context.Background()
+	defaultTTL := 1 * time.Hour
+	mgr, _ := NewCacheManager("", "foo", &defaultTTL)
+	c := mgr.GetCache("ttl", CacheOptions{})
+
+	// Set with short TTL
+	shortTTL := 10 * time.Millisecond
+	c.Set(ctx, "short", "val", WithTTL(shortTTL))
+
+	// Set with default TTL
+	c.Set(ctx, "default", "val")
+
+	// Verify both present
+	_, ok, _, _ := c.Get(ctx, "short")
+	assert.True(t, ok)
+	_, ok, _, _ = c.Get(ctx, "default")
+	assert.True(t, ok)
+
+	// Wait for short TTL to expire
+	time.Sleep(50 * time.Millisecond)
+
+	// short should be gone (lazy delete in Get)
+	_, ok, _, _ = c.Get(ctx, "short")
+	assert.False(t, ok, "item with short TTL should have expired")
+
+	// default should still be there
+	_, ok, _, _ = c.Get(ctx, "default")
+	assert.True(t, ok)
 }

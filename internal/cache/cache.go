@@ -16,14 +16,27 @@ type Cache interface {
 	Delete(ctx context.Context, key string) error
 	Get(ctx context.Context, key string) (value string, exists bool, isCurrent bool, err error)
 	Host() string
-	Set(ctx context.Context, key string, value string) error
+	Set(ctx context.Context, key string, value string, opts ...SetOption) error
 	TTL() time.Duration
 	Uncycled() bool
 }
 
 type CacheOptions struct {
+	MaxItems *int
 	TTL      *time.Duration
 	Uncycled bool
+}
+
+type SetOption func(*SetOptions)
+
+type SetOptions struct {
+	TTL *time.Duration
+}
+
+func WithTTL(ttl time.Duration) SetOption {
+	return func(o *SetOptions) {
+		o.TTL = &ttl
+	}
 }
 
 type CacheManager interface {

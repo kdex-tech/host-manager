@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"container/list"
 	"context"
 	"sync"
 	"time"
@@ -10,6 +11,8 @@ type InMemoryCache struct {
 	class           string
 	currentChecksum string
 	host            string
+	lru             *list.List
+	maxItems        int
 	mu              sync.RWMutex
 	segments        map[string]map[string]memoryCacheEntry
 	ttl             time.Duration
@@ -34,7 +37,12 @@ func (c *InMemoryCache) Delete(ctx context.Context, key string) error {
 	defer c.mu.Unlock()
 
 	for _, seg := range c.segments {
-		delete(seg, key)
+		if entry, ok := seg[key]; ok {
+			if entry.element != nil {
+				c.lru.Remove(entry.element)
+			}
+			delete(seg, key)
+		}
 	}
 	return nil
 }
@@ -52,8 +60,8 @@ func (c *InMemoryCache) Uncycled() bool {
 }
 
 func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	// 1. Try Current Generation
 	if seg, ok := c.segments[c.currentChecksum]; ok {
@@ -62,6 +70,9 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool
 			if time.Now().After(entry.expiry) {
 				// Just pretend it's not found. The reaper will get it later.
 				return "", false, true, nil
+			}
+			if entry.element != nil {
+				c.lru.MoveToFront(entry.element)
 			}
 			return entry.value, true, true, nil // Found in current version
 		}
@@ -79,6 +90,9 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool
 				// Just pretend it's not found. The reaper will get it later.
 				return "", false, true, nil
 			}
+			if entry.element != nil {
+				c.lru.MoveToFront(entry.element)
+			}
 			return entry.value, true, false, nil // Found, but it's the old version
 		}
 	}
@@ -87,7 +101,12 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool
 }
 
 // Set stores a rendered page in the cache.
-func (c *InMemoryCache) Set(ctx context.Context, key string, value string) error {
+func (c *InMemoryCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
+	options := SetOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -95,9 +114,39 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value string) error
 		c.segments[c.currentChecksum] = make(map[string]memoryCacheEntry)
 	}
 
-	c.segments[c.currentChecksum][key] = memoryCacheEntry{
-		expiry: time.Now().Add(c.ttl),
-		value:  value,
+	ttl := c.ttl
+	if options.TTL != nil {
+		ttl = *options.TTL
+	}
+
+	// LRU logic
+	if entry, found := c.segments[c.currentChecksum][key]; found {
+		entry.value = value
+		entry.expiry = time.Now().Add(ttl)
+		if entry.element != nil {
+			c.lru.MoveToFront(entry.element)
+		}
+		c.segments[c.currentChecksum][key] = entry
+	} else {
+		if c.maxItems > 0 && c.lru.Len() >= c.maxItems {
+			// Evict LRU
+			element := c.lru.Back()
+			if element != nil {
+				evictKey := element.Value.(string)
+				c.lru.Remove(element)
+				for _, seg := range c.segments {
+					delete(seg, evictKey)
+				}
+			}
+		}
+
+		element := c.lru.PushFront(key)
+		c.segments[c.currentChecksum][key] = memoryCacheEntry{
+			element: element,
+			expiry:  time.Now().Add(ttl),
+			key:     key,
+			value:   value,
+		}
 	}
 	return nil
 }
@@ -110,6 +159,9 @@ func (c *InMemoryCache) reap() {
 	for _, seg := range c.segments {
 		for key, entry := range seg {
 			if now.After(entry.expiry) {
+				if entry.element != nil {
+					c.lru.Remove(entry.element)
+				}
 				delete(seg, key)
 			}
 		}
@@ -195,7 +247,13 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	if ok {
 		mCache := cache.(*InMemoryCache)
 		mCache.mu.Lock()
+		if mCache.lru == nil {
+			mCache.lru = list.New()
+		}
 		mCache.uncycled = opts.Uncycled
+		if opts.MaxItems != nil {
+			mCache.maxItems = *opts.MaxItems
+		}
 		var newTTL *time.Duration
 		if opts.TTL != nil && mCache.ttl != *opts.TTL && *opts.TTL >= minTTL {
 			newTTL = opts.TTL
@@ -225,10 +283,16 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	if opts.TTL != nil && *opts.TTL >= minTTL {
 		ttl = *opts.TTL
 	}
+	maxItems := 1000
+	if opts.MaxItems != nil {
+		maxItems = *opts.MaxItems
+	}
 	cache = &InMemoryCache{
 		class:           class,
 		currentChecksum: m.currentChecksum,
 		host:            m.host,
+		lru:             list.New(),
+		maxItems:        maxItems,
 		uncycled:        opts.Uncycled,
 		segments:        make(map[string]map[string]memoryCacheEntry),
 		ttl:             ttl,
@@ -239,6 +303,8 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 }
 
 type memoryCacheEntry struct {
-	expiry time.Time
-	value  string
+	element *list.Element
+	expiry  time.Time
+	key     string
+	value   string
 }

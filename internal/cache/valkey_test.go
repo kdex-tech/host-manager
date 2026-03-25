@@ -255,3 +255,40 @@ func TestValkeyCacheManager_GetCache(t *testing.T) {
 		})
 	}
 }
+
+func TestValkeyCache_IndividualTTL(t *testing.T) {
+	s, err := miniredis.Run()
+	if err != nil {
+		t.Error(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	defaultTTL := 1 * time.Hour
+	mgr, _ := NewCacheManager(s.Addr(), "foo", &defaultTTL)
+	c := mgr.GetCache("ttl", CacheOptions{})
+
+	// Set with short TTL
+	shortTTL := 10 * time.Millisecond
+	c.Set(ctx, "short", "val", WithTTL(shortTTL))
+
+	// Set with default TTL
+	c.Set(ctx, "default", "val")
+
+	// Verify both present
+	_, ok, _, _ := c.Get(ctx, "short")
+	assert.True(t, ok)
+	_, ok, _, _ = c.Get(ctx, "default")
+	assert.True(t, ok)
+
+	// Wait for short TTL to expire
+	s.FastForward(50 * time.Millisecond)
+
+	// short should be gone
+	_, ok, _, _ = c.Get(ctx, "short")
+	assert.False(t, ok, "item with short TTL should have expired")
+
+	// default should still be there
+	_, ok, _, _ = c.Get(ctx, "default")
+	assert.True(t, ok)
+}

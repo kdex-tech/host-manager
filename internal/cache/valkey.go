@@ -14,6 +14,7 @@ type ValkeyCache struct {
 	class           string
 	currentChecksum string
 	host            string
+	maxItems        int
 	uncycled        bool
 	mu              sync.RWMutex
 	prefix          string // e.g. "{host:class:generation}:"
@@ -89,11 +90,20 @@ func (s *ValkeyCache) Get(ctx context.Context, key string) (string, bool, bool, 
 	return "", false, true, nil // Not found in either version
 }
 
-func (s *ValkeyCache) Set(ctx context.Context, key string, value string) error {
+func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
+	options := SetOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	s.mu.RLock()
 	prefix := s.prefix
+	ttl := s.ttl
+	if options.TTL != nil {
+		ttl = *options.TTL
+	}
 	s.mu.RUnlock()
-	cmd := s.client.B().Set().Key(prefix + key).Value(value).Px(s.ttl).Build()
+	cmd := s.client.B().Set().Key(prefix + key).Value(value).Px(ttl).Build()
 	return s.client.Do(ctx, cmd).Error()
 }
 
@@ -148,6 +158,9 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		vCache := cache.(*ValkeyCache)
 		vCache.mu.Lock()
 		vCache.uncycled = opts.Uncycled
+		if opts.MaxItems != nil {
+			vCache.maxItems = *opts.MaxItems
+		}
 		if opts.TTL != nil && vCache.ttl != *opts.TTL && *opts.TTL >= minTTL {
 			vCache.ttl = *opts.TTL
 		}
@@ -163,11 +176,16 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	if opts.TTL != nil && *opts.TTL >= minTTL {
 		ttl = *opts.TTL
 	}
+	maxItems := 1000
+	if opts.MaxItems != nil {
+		maxItems = *opts.MaxItems
+	}
 	cache := &ValkeyCache{
 		client:          m.client,
 		class:           class,
 		currentChecksum: m.currentChecksum,
 		host:            m.host,
+		maxItems:        maxItems,
 		uncycled:        opts.Uncycled,
 		prefix:          fmt.Sprintf("{%s:%s:%s}:", m.host, class, m.currentChecksum),
 		ttl:             ttl,
