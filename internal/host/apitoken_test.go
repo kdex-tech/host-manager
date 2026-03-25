@@ -12,6 +12,7 @@ import (
 	"github.com/kdex-tech/entitlements"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	. "github.com/onsi/gomega"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -42,6 +43,7 @@ func TestHostHandler_ApitokenRevokeHandler_NotImplemented(t *testing.T) {
 
 	hh.apitokenRevokeHandler(rr, req)
 
+	// Since authConfig is nil, it returns 501
 	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
 }
 
@@ -89,7 +91,9 @@ func TestHostHandler_ApitokenRevokeHandler_Forbidden(t *testing.T) {
 
 func TestHostHandler_ApitokenRevokeHandler_AuthorizedOwner(t *testing.T) {
 	g := NewWithT(t)
-	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	cm, _ := cache.NewCacheManager("", "host", nil)
+	c := cm.GetCache("revocation", cache.CacheOptions{})
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), c)
 	hh := &HostHandler{
 		authConfig: &auth.Config{TokenManager: tm},
 	}
@@ -107,13 +111,14 @@ func TestHostHandler_ApitokenRevokeHandler_AuthorizedOwner(t *testing.T) {
 
 	hh.apitokenRevokeHandler(rr, req)
 
-	// Should be NotImplemented for now as it passed auth but isn't implemented
-	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
 }
 
 func TestHostHandler_ApitokenRevokeHandler_AuthorizedAdmin(t *testing.T) {
 	g := NewWithT(t)
-	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	cm, _ := cache.NewCacheManager("", "host", nil)
+	c := cm.GetCache("revocation", cache.CacheOptions{})
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), c)
 	hh := &HostHandler{
 		authConfig: &auth.Config{TokenManager: tm},
 		authChecker: &mockApitokenAuthChecker{
@@ -137,7 +142,77 @@ func TestHostHandler_ApitokenRevokeHandler_AuthorizedAdmin(t *testing.T) {
 
 	hh.apitokenRevokeHandler(rr, req)
 
-	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_SuccessToken(t *testing.T) {
+	g := NewWithT(t)
+	cm, _ := cache.NewCacheManager("", "host", nil)
+	c := cm.GetCache("revocation", cache.CacheOptions{})
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), c)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+	}
+
+	// Token for 'test-user'
+	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+
+	var resp RevokeResponse
+	json.NewDecoder(rr.Body).Decode(&resp)
+	g.Expect(resp.Status).To(Equal("revoked"))
+
+	// Verify token is now invalid
+	_, err := tm.ValidateToken(context.Background(), token)
+	g.Expect(err).To(HaveOccurred())
+}
+
+func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
+	g := NewWithT(t)
+	cm, _ := cache.NewCacheManager("", "host", nil)
+	c := cm.GetCache("revocation", cache.CacheOptions{})
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), c)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+	}
+
+	// Token for 'test-user'
+	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+
+	reqBody, _ := json.Marshal(RevokeRequest{
+		Audience: "aud",
+		Sub:      "test-user",
+		Action:   "act",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+
+	var resp RevokeResponse
+	json.NewDecoder(rr.Body).Decode(&resp)
+	g.Expect(resp.Status).To(Equal("revoked"))
+
+	// Verify token is now invalid
+	_, err := tm.ValidateToken(context.Background(), token)
+	g.Expect(err).To(HaveOccurred())
 }
 
 type mockApitokenAuthChecker struct {

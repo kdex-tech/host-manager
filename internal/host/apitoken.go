@@ -129,8 +129,33 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Phase 3: TokenManager Integration & Implementation
-	http.Error(w, "Not implemented", http.StatusNotImplemented)
+	if req.Token != "" {
+		if err := hh.authConfig.TokenManager.RevokeToken(r.Context(), req.Token); err != nil {
+			log.Error(err, "Failed to revoke token")
+			http.Error(w, "Failed to revoke token", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		ttl := 24 * time.Hour
+		if req.TTL != "" {
+			if t, err := time.ParseDuration(req.TTL); err == nil {
+				ttl = t
+			}
+		}
+
+		if err := hh.authConfig.TokenManager.RevokeByMetadata(r.Context(), req.Audience, req.Sub, req.Action, ttl); err != nil {
+			log.Error(err, "Failed to revoke tokens by metadata")
+			http.Error(w, "Failed to revoke tokens by metadata", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(RevokeResponse{Status: "revoked"}); err != nil {
+		log.Error(err, "Failed to encode response")
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
