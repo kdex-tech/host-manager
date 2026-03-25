@@ -15,11 +15,17 @@ import (
 )
 
 type MintRequest struct {
-	Action   string `json:"action"`
+	// Action is the action of the tokens to mint (metadata-based revocation).
+	Action string `json:"act"`
+	// Audience is the audience of the tokens to mint (metadata-based revocation).
 	Audience string `json:"aud"`
-	Scope    string `json:"scope"`
-	Sub      string `json:"sub"`
-	TTL      string `json:"ttl"`
+	// Scope is the scope of the tokens to mint (metadata-based revocation).
+	Scope string `json:"scp"`
+	// Sub is the subject of the tokens to mint (metadata-based revocation).
+	Sub string `json:"sub"`
+	// TTL is the duration for which the tokens should be valid (metadata-based revocation).
+	// Default: 24h.
+	TTL string `json:"ttl"`
 }
 
 type MintResponse struct {
@@ -330,6 +336,10 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 	apitokenVerifyHandler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.apitokenVerifyHandler), hh.authExchanger)
 	mux.Handle("POST "+verifyPath, apitokenVerifyHandler)
 
+	revokePath := "/-/apitokens/revoke"
+	apitokenRevokeHandler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.apitokenRevokeHandler), hh.authExchanger)
+	mux.Handle("POST "+revokePath, apitokenRevokeHandler)
+
 	hh.registerPath(discoveryPath, ko.PathInfo{
 		API: ko.OpenAPI{
 			BasePath: discoveryPath,
@@ -396,11 +406,11 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 										Schema: &openapi.SchemaRef{
 											Value: &openapi.Schema{
 												Properties: openapi.Schemas{
-													"action": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"aud":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"scope":  &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"sub":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"ttl":    &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"act": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"aud": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"scp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"sub": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 												},
 												Required: []string{"aud", "sub"},
 												Type:     &openapi.Types{openapi.TypeObject},
@@ -483,9 +493,16 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Content: openapi.NewContentWithSchema(
 									&openapi.Schema{
 										Properties: openapi.Schemas{
-											"Action":  &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-											"Scope":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-											"Subject": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"act": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"aud": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"exp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeInteger}}},
+											"iat": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeInteger}}},
+											"iss": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"jti": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"kid": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"nbf": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeInteger}}},
+											"scp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"sub": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 										},
 										Type: &openapi.Types{openapi.TypeObject},
 									},
@@ -507,6 +524,76 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 						Tags:    []string{"system", "apitoken", "auth"},
 					},
 					Summary: "Verify PASETO API token",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+
+	hh.registerPath(revokePath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: revokePath,
+			Paths: map[string]ko.PathItem{
+				revokePath: {
+					Description: "Revokes PASETO API tokens by their signed string or metadata.",
+					Post: &openapi.Operation{
+						Description: "POST to revoke PASETO API tokens",
+						OperationID: "apitoken-revoke-post",
+						RequestBody: &openapi.RequestBodyRef{
+							Value: &openapi.RequestBody{
+								Content: openapi.Content{
+									"application/json": &openapi.MediaType{
+										Schema: &openapi.SchemaRef{
+											Value: &openapi.Schema{
+												Properties: openapi.Schemas{
+													"act":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"aud":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"sub":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"ttl":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+												},
+												Type: &openapi.Types{openapi.TypeObject},
+											},
+										},
+									},
+								},
+								Description: "Revoke request body",
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"status": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("Revocation Confirmation"),
+							}),
+							openapi.WithStatus(400, &openapi.ResponseRef{
+								Ref: "#/components/responses/BadRequest",
+							}),
+							openapi.WithStatus(403, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Description: new("Forbidden"),
+								},
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Security: &openapi.SecurityRequirements{
+							openapi.SecurityRequirement{
+								"bearer": {"apitokens:revoke"},
+							},
+						},
+						Summary: "Revoke PASETO API Token",
+						Tags:    []string{"system", "apitoken", "auth"},
+					},
+					Summary: "Revoke PASETO API token",
 				},
 			},
 		},

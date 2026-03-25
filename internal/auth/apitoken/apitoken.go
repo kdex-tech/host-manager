@@ -24,9 +24,16 @@ var (
 )
 
 type TokenData struct {
-	Action  string
-	Scope   string
-	Subject string
+	Action     string `json:"act"`
+	Audience   string `json:"aud"`
+	Expiration int64  `json:"exp"`
+	IssuedAt   int64  `json:"iat"`
+	Issuer     string `json:"iss"`
+	JTI        string `json:"jti"`
+	KID        string `json:"kid"`
+	NotBefore  int64  `json:"nbf"`
+	Scope      string `json:"scp"`
+	Subject    string `json:"sub"`
 }
 
 type KeyPair struct {
@@ -291,10 +298,47 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed string) (*Toke
 		return nil, err
 	}
 
+	audience, err := token.GetAudience()
+	if err != nil {
+		return nil, err
+	}
+
+	exp, err := token.GetExpiration()
+	if err != nil {
+		return nil, err
+	}
+
+	iat, err := token.GetIssuedAt()
+	if err != nil {
+		return nil, err
+	}
+
+	issuer, err := token.GetIssuer()
+	if err != nil {
+		return nil, err
+	}
+
+	jti, err := token.GetJti()
+	if err != nil {
+		return nil, err
+	}
+
+	nbf, err := token.GetNotBefore()
+	if err != nil {
+		return nil, err
+	}
+
 	return &TokenData{
-		Action:  action,
-		Scope:   scope,
-		Subject: subject,
+		Audience:   audience,
+		Expiration: exp.Unix(),
+		IssuedAt:   iat.Unix(),
+		Issuer:     issuer,
+		JTI:        jti,
+		KID:        footerData.KID,
+		NotBefore:  nbf.Unix(),
+		Subject:    subject,
+		Action:     action,
+		Scope:      scope,
 	}, nil
 }
 
