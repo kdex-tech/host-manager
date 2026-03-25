@@ -2,12 +2,18 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/kdex-tech/entitlements"
+	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	. "github.com/onsi/gomega"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 func TestHostHandler_ApitokenRevokeHandler_MethodNotAllowed(t *testing.T) {
@@ -30,7 +36,127 @@ func TestHostHandler_ApitokenRevokeHandler_NotImplemented(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
 	rr := httptest.NewRecorder()
 
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
 	hh.apitokenRevokeHandler(rr, req)
 
 	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_Unauthorized(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{}
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: "some-token"})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// No AuthContext in context
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusUnauthorized))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_Forbidden(t *testing.T) {
+	g := NewWithT(t)
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+		authChecker: &mockApitokenAuthChecker{
+			CheckAccessFn: func(ctx context.Context, s1, s2 string, sr []kdexv1alpha1.SecurityRequirement, s3 ...string) (bool, error) {
+				return false, nil // Not authorized
+			},
+		},
+	}
+
+	// Token for 'other-user'
+	token, _ := tm.MintStatelessKey("aud", "other-user", "act", "scope", time.Hour)
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusForbidden))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_AuthorizedOwner(t *testing.T) {
+	g := NewWithT(t)
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+	}
+
+	// Token for 'test-user'
+	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	// Should be NotImplemented for now as it passed auth but isn't implemented
+	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_AuthorizedAdmin(t *testing.T) {
+	g := NewWithT(t)
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+		authChecker: &mockApitokenAuthChecker{
+			CheckAccessFn: func(ctx context.Context, s1, s2 string, sr []kdexv1alpha1.SecurityRequirement, s3 ...string) (bool, error) {
+				// Admin check
+				return true, nil
+			},
+		},
+	}
+
+	// Token for 'other-user'
+	token, _ := tm.MintStatelessKey("aud", "other-user", "act", "scope", time.Hour)
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'admin-user'
+	ac := auth.AuthContext{"sub": "admin-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusNotImplemented))
+}
+
+type mockApitokenAuthChecker struct {
+	CalculateRequirementsFn func(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error)
+	CheckAccessFn           func(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error)
+}
+
+func (m *mockApitokenAuthChecker) CalculateRequirements(s1, s2 string, sr []kdexv1alpha1.SecurityRequirement, s3 ...string) ([]kdexv1alpha1.SecurityRequirement, error) {
+	return m.CalculateRequirementsFn(s1, s2, sr, s3...)
+}
+func (m *mockApitokenAuthChecker) CheckAccess(ctx context.Context, s1, s2 string, sr []kdexv1alpha1.SecurityRequirement, s3 ...string) (bool, error) {
+	return m.CheckAccessFn(ctx, s1, s2, sr, s3...)
+}
+func (m *mockApitokenAuthChecker) GetParsedEntitlements(ctx context.Context) entitlements.ParsedEntitlements {
+	return entitlements.ParsedEntitlements{}
+}
+func (m *mockApitokenAuthChecker) ParseRequirements(sr []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+	return entitlements.ParsedRequirements{}
+}
+func (m *mockApitokenAuthChecker) VerifyResourceParsedEntitlements(s1, s2 string, pe entitlements.ParsedEntitlements, pr entitlements.ParsedRequirements, s3 ...string) (bool, error) {
+	return false, nil
 }

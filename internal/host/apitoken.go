@@ -8,6 +8,7 @@ import (
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -62,7 +63,72 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Phase 2: Authorization & Entitlement Logic
+	ac, ok := auth.GetAuthContext(r.Context())
+	if !ok {
+		log.Error(nil, "Unauthorized: No auth context found")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	requestingSub, err := ac.GetSubject()
+	if err != nil || requestingSub == "" {
+		log.Error(err, "Unauthorized: No subject found in auth context")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req RevokeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Error(err, "Failed to decode request body")
+		http.Error(w, "Failed to decode request body", http.StatusBadRequest)
+		return
+	}
+
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
+	if hh.authConfig == nil || hh.authConfig.TokenManager == nil {
+		log.Error(nil, "Token manager not configured")
+		http.Error(w, "Token manager not configured", http.StatusNotImplemented)
+		return
+	}
+
+	targetSub := ""
+	if req.Token != "" {
+		data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), req.Token)
+		if err != nil {
+			log.Error(err, "Invalid token provided for revocation")
+			http.Error(w, "Invalid token", http.StatusBadRequest)
+			return
+		}
+		targetSub = data.Subject
+	} else if req.Audience != "" && req.Sub != "" && req.Action != "" {
+		targetSub = req.Sub
+	} else {
+		log.Error(nil, "Neither token nor full metadata provided for revocation")
+		http.Error(w, "Neither token nor full metadata provided", http.StatusBadRequest)
+		return
+	}
+
+	if targetSub != requestingSub {
+		requirement := kdexv1alpha1.SecurityRequirement{
+			"bearer": []string{"apitokens:revoke"},
+		}
+
+		authorized, err := hh.authChecker.CheckAccess(
+			r.Context(),
+			"apitokens",
+			requestingSub,
+			[]kdexv1alpha1.SecurityRequirement{requirement},
+			"revoke",
+		)
+		if err != nil || !authorized {
+			log.Error(err, "Forbidden: User not authorized to revoke tokens for another subject")
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+	}
+
 	// Phase 3: TokenManager Integration & Implementation
 	http.Error(w, "Not implemented", http.StatusNotImplemented)
 }
