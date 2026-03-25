@@ -29,6 +29,44 @@ type VerifyRequest struct {
 	Token string `json:"token"`
 }
 
+// RevokeRequest is the request body for the token revocation endpoint.
+type RevokeRequest struct {
+	// Action is the action of the tokens to revoke (metadata-based revocation).
+	Action string `json:"act"`
+	// Audience is the audience of the tokens to revoke (metadata-based revocation).
+	Audience string `json:"aud"`
+	// Sub is the subject of the tokens to revoke (metadata-based revocation).
+	Sub string `json:"sub"`
+	// TTL is the duration for which the revocation should be persisted in the cache (metadata-based revocation).
+	// Default: 24h.
+	TTL string `json:"ttl"`
+	// Token is the full signed token to revoke.
+	Token string `json:"token"`
+}
+
+// RevokeResponse is the response body for the token revocation endpoint.
+type RevokeResponse struct {
+	// Status is the result of the revocation request.
+	Status string `json:"status"`
+}
+
+// apitokenRevokeHandler handles token revocation requests.
+// It allows users to revoke their own tokens or for authorized administrators
+// (with the "apitokens:revoke" entitlement) to revoke any token.
+func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Request) {
+	log := logf.FromContext(r.Context())
+
+	if r.Method != http.MethodPost {
+		log.Error(nil, "Method not allowed")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Phase 2: Authorization & Entitlement Logic
+	// Phase 3: TokenManager Integration & Implementation
+	http.Error(w, "Not implemented", http.StatusNotImplemented)
+}
+
 func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
