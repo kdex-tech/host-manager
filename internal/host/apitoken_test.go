@@ -61,6 +61,38 @@ func TestHostHandler_ApitokenRevokeHandler_Unauthorized(t *testing.T) {
 	g.Expect(rr.Code).To(Equal(http.StatusUnauthorized))
 }
 
+func TestHostHandler_ApitokenRevokeHandler_NoSubject(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{}
+
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", nil)
+	rr := httptest.NewRecorder()
+
+	// AuthContext WITHOUT 'sub'
+	ac := auth.AuthContext{"foo": "bar"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusUnauthorized))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_InvalidJSON(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{}
+
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBufferString("invalid json"))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusBadRequest))
+}
+
 func TestHostHandler_ApitokenRevokeHandler_Forbidden(t *testing.T) {
 	g := NewWithT(t)
 	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
@@ -87,6 +119,26 @@ func TestHostHandler_ApitokenRevokeHandler_Forbidden(t *testing.T) {
 	hh.apitokenRevokeHandler(rr, req)
 
 	g.Expect(rr.Code).To(Equal(http.StatusForbidden))
+}
+
+func TestHostHandler_ApitokenRevokeHandler_InvalidToken(t *testing.T) {
+	g := NewWithT(t)
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+	}
+
+	reqBody, _ := json.Marshal(RevokeRequest{Token: "invalid.token.here"})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusBadRequest))
 }
 
 func TestHostHandler_ApitokenRevokeHandler_AuthorizedOwner(t *testing.T) {
@@ -194,6 +246,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 		Audience: "aud",
 		Sub:      "test-user",
 		Action:   "act",
+		TTL:      "invalid", // Test invalid TTL duration fallback
 	})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
 	rr := httptest.NewRecorder()
@@ -213,6 +266,29 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 	// Verify token is now invalid
 	_, err := tm.ValidateToken(context.Background(), token)
 	g.Expect(err).To(HaveOccurred())
+}
+
+func TestHostHandler_ApitokenRevokeHandler_MissingMetadata(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: &apitoken.TokenManager{}},
+	}
+
+	reqBody, _ := json.Marshal(RevokeRequest{
+		Audience: "aud",
+		// Sub missing
+		Action: "act",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	// AuthContext for 'test-user'
+	ac := auth.AuthContext{"sub": "test-user"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), ac))
+
+	hh.apitokenRevokeHandler(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusBadRequest))
 }
 
 type mockApitokenAuthChecker struct {
