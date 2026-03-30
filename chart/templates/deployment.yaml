@@ -1,6 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    checksum/config: {{ .Values.config | toJson | sha256sum }}
   labels:
     {{- include "host-manager.labels" . | nindent 4 }}
   name: {{ include "host-manager.fullname" . }}
@@ -14,10 +16,11 @@ spec:
       {{- include "host-manager.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/config: {{ .Values.config | toJson | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "host-manager.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
