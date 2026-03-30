@@ -160,11 +160,11 @@ install-crds: ## Install CRDs from the kdex-crds module.
 ##@ Helm
 
 .PHONY: lint-chart
-lint-chart: ## Lint chart.
+lint-chart: helm ## Lint chart.
 	$(HELM) lint ./chart
 
 .PHONY: deploy-chart
-deploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+deploy-chart: helm ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	$(HELM) upgrade sim ./chart \
 		--create-namespace \
 		--install \
@@ -176,14 +176,14 @@ deploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/confi
 		--set "image.pullPolicy=Always"
 
 .PHONY: undeploy-chart
-undeploy-chart: ## Deploy controller to the K8s cluster specified in ~/.kube/config.
+undeploy-chart: helm ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	$(HELM) uninstall host-controller \
 		--namespace kdex-nexus-system
 
 CHART_VERSION = 0.0.1-local
 
-.PHONE: publish-chart-local
-publish-chart-local: ## Publish the chart to a local insecure registry
+.PHONY: publish-chart-local
+publish-chart-local: helm ## Publish the chart to a local insecure registry
 	mkdir -p dist; \
 	$(HELM) dependency update chart; \
 	$(HELM) package --app-version $(CHART_VERSION) --version $(CHART_VERSION) -d dist chart; \
@@ -200,13 +200,15 @@ $(LOCALBIN):
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
-HELM ?= helm
+HELM ?= $(LOCALBIN)/helm
 
 ## Tool Versions
 # https://github.com/kubernetes-sigs/controller-tools/releases/latest
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
 # https://github.com/golangci/golangci-lint/releases/latest
 GOLANGCI_LINT_VERSION ?= v2.10.1
+# https://github.com/helm/helm/releases/latest
+HELM_VERSION ?= v4.1.3
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
@@ -235,6 +237,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: helm
+helm: $(HELM) ## Download helm locally if necessary.
+$(HELM): $(LOCALBIN)
+	$(call go-install-tool,$(HELM),helm.sh/helm/v4/cmd/helm,$(HELM_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
