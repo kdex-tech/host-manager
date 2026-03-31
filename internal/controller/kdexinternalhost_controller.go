@@ -989,12 +989,16 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 		r.Client,
 		ingress,
 		func() error {
-			if ingress.CreationTimestamp.IsZero() {
+			if ingress.Annotations == nil {
 				ingress.Annotations = make(map[string]string)
-				maps.Copy(ingress.Annotations, internalHost.Annotations)
+			}
+			maps.Copy(ingress.Annotations, internalHost.Annotations)
+			if ingress.Labels == nil {
 				ingress.Labels = make(map[string]string)
-				maps.Copy(ingress.Labels, internalHost.Labels)
+			}
+			maps.Copy(ingress.Labels, internalHost.Labels)
 
+			if ingress.CreationTimestamp.IsZero() {
 				ingress.Labels["kdex.dev/ingress"] = ingress.Name
 
 				ingress.Spec = *r.getMemoizedIngress().DeepCopy()
@@ -1068,6 +1072,16 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 					ingress.Spec.TLS = append(ingress.Spec.TLS, networkingv1.IngressTLS{
 						Hosts:      internalHost.Spec.Routing.Domains,
 						SecretName: tlsSecrets[0].Name,
+					})
+				} else if issuer, ok := internalHost.Annotations["cert-manager.io/cluster-issuer"]; ok && issuer != "" {
+					ingress.Spec.TLS = append(ingress.Spec.TLS, networkingv1.IngressTLS{
+						Hosts:      internalHost.Spec.Routing.Domains,
+						SecretName: internalHost.Name + "-tls",
+					})
+				} else if issuer, ok := internalHost.Annotations["cert-manager.io/issuer"]; ok && issuer != "" {
+					ingress.Spec.TLS = append(ingress.Spec.TLS, networkingv1.IngressTLS{
+						Hosts:      internalHost.Spec.Routing.Domains,
+						SecretName: internalHost.Name + "-tls",
 					})
 				}
 			}
