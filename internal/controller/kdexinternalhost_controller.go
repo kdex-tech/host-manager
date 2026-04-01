@@ -1013,7 +1013,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 
 				ingress.Spec.DefaultBackend.Service.Name = r.ServiceName
 
-				ingress.Spec.DefaultBackend.Service.Port.Name = internalHost.Name
+				ingress.Spec.DefaultBackend.Service.Port.Name = "server"
 				ingress.Spec.IngressClassName = internalHost.Spec.Routing.IngressClassName
 			}
 
