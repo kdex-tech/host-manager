@@ -1064,7 +1064,14 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 				}
 			}
 
-			ingress.Spec.Rules = append(r.getMemoizedIngress().Rules, rules...)
+			memoizedRules := r.getMemoizedIngress().Rules
+			ingress.Spec.Rules = make([]networkingv1.IngressRule, len(memoizedRules), len(memoizedRules)+len(rules))
+			copy(ingress.Spec.Rules, memoizedRules)
+			ingress.Spec.Rules = append(ingress.Spec.Rules, rules...)
+
+			memoizedTLS := r.getMemoizedIngress().TLS
+			ingress.Spec.TLS = make([]networkingv1.IngressTLS, len(memoizedTLS))
+			copy(ingress.Spec.TLS, memoizedTLS)
 
 			if internalHost.Spec.Routing.Scheme == "https" {
 				tlsSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeTLS })
