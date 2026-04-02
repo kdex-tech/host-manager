@@ -576,7 +576,11 @@ func (hh *HostHandler) SetHost(
 	hh.log.V(3).Info("[SetHost] obtained lock")
 
 	hh.checksum = ""
-	hh.defaultLanguage = host.DefaultLang
+	if host.DefaultLang != "" {
+		hh.defaultLanguage = host.DefaultLang
+	} else {
+		hh.defaultLanguage = "en"
+	}
 	hh.functions = functions
 	hh.host = host
 	hh.importmap = importmap

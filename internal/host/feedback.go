@@ -259,13 +259,21 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			if err != nil {
 				log.Error(err, "failed to analyze request", "path", r.URL.Path)
 				// Fallback to standard error serving if analysis fails
-				hh.serveError(w, r, http.StatusBadRequest, err.Error())
+				if p == "" {
+					hh.serveError(w, r, http.StatusNotFound, "not found")
+				} else {
+					hh.serveError(w, r, http.StatusBadRequest, err.Error())
+				}
 				hh.mu.RUnlock()
 				return
 			}
 
 			if result == nil || result.Function == nil {
-				hh.serveError(w, r, ew.statusCode, ew.statusMsg)
+				if p == "" {
+					hh.serveError(w, r, http.StatusNotFound, "not found")
+				} else {
+					hh.serveError(w, r, ew.statusCode, ew.statusMsg)
+				}
 				hh.mu.RUnlock()
 				return
 			}
