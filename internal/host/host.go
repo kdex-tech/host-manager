@@ -604,7 +604,11 @@ func (hh *HostHandler) SetHost(
 	favicon.SetReconcileTime(hh.reconcileTime)
 	hh.favicon = favicon
 
-	hh.sniffer = snif
+	if snif != nil {
+		hh.sniffer = snif
+	} else {
+		hh.sniffer = nil
+	}
 
 	hh.log.V(3).Info("[SetHost] authConfig has been set")
 
