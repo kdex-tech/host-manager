@@ -43,7 +43,7 @@ func TestHostHandler_EmptyHostBehavior(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		w := httptest.NewRecorder()
 		hh.ServeHTTP(w, req)
-		
+
 		// Should be 404 because no announcement page is registered.
 		// If it were 400, it would mean GetLang failed due to empty default language.
 		g.Expect(w.Code).To(G.Equal(http.StatusNotFound))
@@ -61,7 +61,7 @@ func TestHostHandler_EmptyHostBehavior(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		w := httptest.NewRecorder()
 		hh.ServeHTTP(w, req)
-		
+
 		g.Expect(w.Code).To(G.Equal(http.StatusOK))
 		g.Expect(w.Body.String()).To(G.ContainSubstring("ANNOUNCEMENT_CONTENT"))
 	})
@@ -70,7 +70,7 @@ func TestHostHandler_EmptyHostBehavior(t *testing.T) {
 		req := httptest.NewRequest("GET", "/a/b/c", nil)
 		w := httptest.NewRecorder()
 		hh.ServeHTTP(w, req)
-		
+
 		// Unmatched paths should be 404.
 		g.Expect(w.Code).To(G.Equal(http.StatusNotFound))
 	})
@@ -85,7 +85,7 @@ func TestHostHandler_EmptyHostBehavior(t *testing.T) {
 		req := httptest.NewRequest("GET", "/a/b/c/d", nil)
 		w := httptest.NewRecorder()
 		hh.ServeHTTP(w, req)
-		
+
 		// Should be 404 because /a/b/c/d didn't match any route AND sniffer failed (path doesn't start with /v1/).
 		// Before the fix, this would return 400.
 		g.Expect(w.Code).To(G.Equal(http.StatusNotFound))
