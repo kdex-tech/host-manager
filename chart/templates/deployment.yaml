@@ -96,6 +96,8 @@ spec:
           image: ghcr.io/kdex-tech/cli-tools:0.3.9
           imagePullPolicy: IfNotPresent
           name: wait-on-valkey
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
