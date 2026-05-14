@@ -83,6 +83,7 @@ type KDexInternalHostReconciler struct {
 
 	mu                 sync.RWMutex
 	memoizedDeployment *appsv1.DeploymentSpec
+	memoizedHTTPRoute  *gatewayv1.HTTPRouteSpec
 	memoizedIngress    *networkingv1.IngressSpec
 	memoizedService    *corev1.ServiceSpec
 }
@@ -1117,10 +1118,12 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 		separator := ""
 		for _, ing := range ingress.Status.LoadBalancer.Ingress {
 			if ing.IP != "" {
-				addresses.WriteString(separator + ing.IP)
+				addresses.WriteString(separator)
+				addresses.WriteString(ing.IP)
 				separator = ","
 			} else if ing.Hostname != "" {
-				addresses.WriteString(separator + ing.Hostname)
+				addresses.WriteString(separator)
+				addresses.WriteString(ing.Hostname)
 				separator = ","
 			}
 		}
@@ -1130,12 +1133,178 @@ func (r *KDexInternalHostReconciler) createOrUpdateIngress(
 	return op, nil
 }
 
+// createOrUpdateHTTPRoute is the Gateway API counterpart to createOrUpdateIngress.
+// It produces an HTTPRoute attached to platform-provisioned Gateway(s), with the
+// same routing surface as the Ingress builder: a catch-all "/" route to the
+// host-manager Service and one route per resolved backend mounted at its
+// IngressPath. TLS is intentionally not handled here - HTTPRoute does not
+// terminate TLS; that is the Gateway listener's responsibility.
+//
+// ParentRefs precedence (CR override > chart default):
+//  1. KDexInternalHost.Spec.Routing.ParentRefs when non-empty
+//  2. BackendDefault.HttpRoute.ParentRefs from the controller's loaded
+//     configuration (chart-supplied via /config.yaml)
+//
+// When neither is set, the HTTPRoute is created without parentRefs; the route
+// will be orphaned and the Gateway API status will surface the misconfiguration
+// rather than reconciliation failing here.
 func (r *KDexInternalHostReconciler) createOrUpdateHTTPRoute(
-	_ context.Context,
-	_ *kdexv1alpha1.KDexInternalHost,
-	_ []resolvedBackend,
+	ctx context.Context,
+	internalHost *kdexv1alpha1.KDexInternalHost,
+	backends []resolvedBackend,
 ) (controllerutil.OperationResult, error) {
-	return controllerutil.OperationResultNone, nil
+	httpRoute := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      internalHost.Name,
+			Namespace: internalHost.Namespace,
+		},
+	}
+
+	op, err := ctrl.CreateOrUpdate(
+		ctx,
+		r.Client,
+		httpRoute,
+		func() error {
+			if httpRoute.Annotations == nil {
+				httpRoute.Annotations = make(map[string]string)
+			}
+			maps.Copy(httpRoute.Annotations, internalHost.Annotations)
+			if httpRoute.Labels == nil {
+				httpRoute.Labels = make(map[string]string)
+			}
+			maps.Copy(httpRoute.Labels, internalHost.Labels)
+
+			if httpRoute.CreationTimestamp.IsZero() {
+				httpRoute.Labels["kdex.dev/httproute"] = httpRoute.Name
+				httpRoute.Spec = *r.getMemoizedHTTPRoute().DeepCopy()
+			}
+
+			// Hostnames mirror routing.domains 1:1. The Routing.Scheme field is
+			// not consulted here - Gateway API hostnames are scheme-agnostic;
+			// the listener on the parent Gateway determines TLS/HTTP.
+			hostnames := make([]gatewayv1.Hostname, len(internalHost.Spec.Routing.Domains))
+			for i, domain := range internalHost.Spec.Routing.Domains {
+				hostnames[i] = gatewayv1.Hostname(domain)
+			}
+			httpRoute.Spec.Hostnames = hostnames
+
+			// ParentRefs: CR-level override beats chart default.
+			if len(internalHost.Spec.Routing.ParentRefs) > 0 {
+				httpRoute.Spec.ParentRefs = internalHost.Spec.Routing.ParentRefs
+			} else {
+				httpRoute.Spec.ParentRefs = r.getMemoizedHTTPRoute().ParentRefs
+			}
+
+			pathPrefix := gatewayv1.PathMatchPathPrefix
+			controllerServiceName := gatewayv1.ObjectName(r.ServiceName)
+			// gatewayv1.PortNumber is a type alias for int32 in gateway-api
+			// v1.5.0, so r.Port (int32) and r.backendServicePort()'s return
+			// value are directly usable as *gatewayv1.PortNumber without
+			// explicit conversion.
+			controllerPort := r.Port
+			backendPort := r.backendServicePort()
+			rootPath := "/"
+
+			// Per-backend rules come first so the controller-runtime serialized
+			// rule order matches user expectations (most specific paths first).
+			// Gateway API also tie-breaks identical PathPrefix matches by rule
+			// order, so this is the safe ordering for paths like "/-/app" vs "/".
+			rules := make([]gatewayv1.HTTPRouteRule, 0, 1+len(backends))
+
+			for _, rb := range backends {
+				backendName := gatewayv1.ObjectName(fmt.Sprintf("%s-%s", internalHost.Name, rb.Name))
+				path := rb.Backend.IngressPath
+				rules = append(rules, gatewayv1.HTTPRouteRule{
+					Matches: []gatewayv1.HTTPRouteMatch{
+						{
+							Path: &gatewayv1.HTTPPathMatch{
+								Type:  &pathPrefix,
+								Value: &path,
+							},
+						},
+					},
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: backendName,
+									Port: &backendPort,
+								},
+							},
+						},
+					},
+				})
+			}
+
+			// Catch-all "/" → controller service. Last so backend-specific
+			// prefixes win on ties.
+			rules = append(rules, gatewayv1.HTTPRouteRule{
+				Matches: []gatewayv1.HTTPRouteMatch{
+					{
+						Path: &gatewayv1.HTTPPathMatch{
+							Type:  &pathPrefix,
+							Value: &rootPath,
+						},
+					},
+				},
+				BackendRefs: []gatewayv1.HTTPBackendRef{
+					{
+						BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Name: controllerServiceName,
+								Port: &controllerPort,
+							},
+						},
+					},
+				},
+			})
+
+			// Prepend memoized system rules (BackendDefault.HttpRoute.Rules)
+			// the same way the Ingress builder treats memoized rules.
+			memoizedRules := r.getMemoizedHTTPRoute().Rules
+			httpRoute.Spec.Rules = make([]gatewayv1.HTTPRouteRule, len(memoizedRules), len(memoizedRules)+len(rules))
+			copy(httpRoute.Spec.Rules, memoizedRules)
+			httpRoute.Spec.Rules = append(httpRoute.Spec.Rules, rules...)
+
+			return ctrl.SetControllerReference(internalHost, httpRoute, r.Scheme)
+		},
+	)
+
+	if err != nil {
+		kdexv1alpha1.SetConditions(
+			&internalHost.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionTrue,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileError,
+			err.Error(),
+		)
+
+		return controllerutil.OperationResultNone, err
+	}
+
+	// Surface the attached parents in Status.Attributes["httproute"] - mirrors
+	// the "ingress" attribute used by the Ingress branch (which records LB IPs).
+	// For HTTPRoute the analogous human-readable signal is which Gateway(s)
+	// accepted the route.
+	if len(httpRoute.Status.Parents) > 0 {
+		var parents strings.Builder
+		separator := ""
+		for _, p := range httpRoute.Status.Parents {
+			parents.WriteString(separator)
+			if p.ParentRef.Namespace != nil {
+				parents.WriteString(string(*p.ParentRef.Namespace))
+				parents.WriteByte('/')
+			}
+			parents.WriteString(string(p.ParentRef.Name))
+			separator = ","
+		}
+		internalHost.Status.Attributes["httproute"] = parents.String()
+	}
+
+	return op, nil
 }
 
 func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
@@ -1453,6 +1622,41 @@ func (r *KDexInternalHostReconciler) getMemoizedIngress() *networkingv1.IngressS
 	r.memoizedIngress = r.Configuration.BackendDefault.Ingress.DeepCopy()
 
 	return r.memoizedIngress
+}
+
+func (r *KDexInternalHostReconciler) getMemoizedHTTPRoute() *gatewayv1.HTTPRouteSpec {
+	r.mu.RLock()
+
+	if r.memoizedHTTPRoute != nil {
+		r.mu.RUnlock()
+		return r.memoizedHTTPRoute
+	}
+
+	r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.memoizedHTTPRoute = r.Configuration.BackendDefault.HttpRoute.DeepCopy()
+
+	return r.memoizedHTTPRoute
+}
+
+// backendServicePort returns the numeric port to address backend Services on.
+// Gateway API BackendObjectReference takes a *PortNumber (no named-port support
+// in v1), so we resolve from the BackendDefault.Service template: prefer the
+// port named "server" (matches the Ingress builder's convention), fall back to
+// the first port, default to 80 if neither is available.
+func (r *KDexInternalHostReconciler) backendServicePort() gatewayv1.PortNumber {
+	ports := r.Configuration.BackendDefault.Service.Ports
+	for _, p := range ports {
+		if p.Name == "server" {
+			return p.Port
+		}
+	}
+	if len(ports) > 0 {
+		return ports[0].Port
+	}
+	return 80
 }
 
 func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {

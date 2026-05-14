@@ -12,8 +12,18 @@ autoscaling:
   # targetMemoryUtilizationPercentage: 80
 
 config:
-  # Default configuration for KDex Nexus Manager
-  # leave blank to use the default configuration
+  # Default configuration for KDex Nexus Manager.
+  # Leave blank to use the built-in defaults.
+  #
+  # Set backendDefault.httpRoute.parentRefs to attach generated HTTPRoutes to
+  # a cluster-level Gateway when KDexHost.spec.routing.strategy is HTTPRoute.
+  # KDexHost.spec.routing.parentRefs (if any) takes precedence over these.
+  # Example:
+  #   backendDefault:
+  #     httpRoute:
+  #       parentRefs:
+  #       - name: rsi-gateway
+  #         namespace: traefik
 
 env: []
 
