@@ -18,7 +18,6 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func ResolveContents(
@@ -380,26 +379,31 @@ func ResolveSecret(
 	return &secret, false, ctrl.Result{}, nil
 }
 
-func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1alpha1.KDexObjectStatus, namespace string, secretNames []string) (kdexv1alpha1.Secrets, error) {
-	if len(secretNames) == 0 {
+func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1alpha1.KDexObjectStatus, namespace string, selector *metav1.LabelSelector) (kdexv1alpha1.Secrets, error) {
+	if selector == nil {
 		return kdexv1alpha1.Secrets{}, nil
 	}
 
-	secrets := kdexv1alpha1.Secrets{}
-	for _, secretName := range secretNames {
-		var secret corev1.Secret
-		if err := c.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
-			// NotFound is expected steady-state for Secret types documented as
-			// (multiple) in KDexHostSpec (e.g. rotation slots not yet minted),
-			// so don't log it. Surface any other error (RBAC, timeouts, ...).
-			if !errors.IsNotFound(err) {
-				logf.FromContext(ctx).V(1).Info("failed to get secret", "namespace", namespace, "name", secretName, "error", err)
-			}
-			continue
-		}
+	sel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		return nil, fmt.Errorf("invalid secretSelector: %w", err)
+	}
 
+	var list corev1.SecretList
+	if err := c.List(ctx, &list, client.InNamespace(namespace), client.MatchingLabelsSelector{Selector: sel}); err != nil {
+		return nil, err
+	}
+
+	// Sort by name for deterministic ordering — List order is not guaranteed
+	// and downstream Filter/Find helpers re-sort by creationTimestamp.
+	slices.SortFunc(list.Items, func(a, b corev1.Secret) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	secrets := make(kdexv1alpha1.Secrets, 0, len(list.Items))
+	for _, secret := range list.Items {
 		secrets = append(secrets, secret)
-		objectStatus.Attributes[secretName+".secret.generation"] = fmt.Sprintf("%d", secret.GetGeneration())
+		objectStatus.Attributes[secret.Name+".secret.generation"] = fmt.Sprintf("%d", secret.GetGeneration())
 	}
 	return secrets, nil
 }

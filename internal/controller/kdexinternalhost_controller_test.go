@@ -21,9 +21,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -131,6 +133,143 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			Expect(httpRoute.OwnerReferences).To(HaveLen(1))
 			Expect(httpRoute.OwnerReferences[0].Name).To(Equal(focalHost))
 			Expect(httpRoute.OwnerReferences[0].Kind).To(Equal("KDexInternalHost"))
+		})
+	})
+})
+
+var _ = Describe("KDexInternalHost SecretSelector", func() {
+	Context("When spec.secretSelector matches Secrets", func() {
+		const namespace = "default"
+
+		ctx := context.Background()
+
+		AfterEach(func() {
+			cleanupResources(namespace)
+			// also delete any test Secrets
+			secretList := &corev1.SecretList{}
+			Expect(k8sClient.List(ctx, secretList, &client.ListOptions{Namespace: namespace})).To(Succeed())
+			for i := range secretList.Items {
+				_ = k8sClient.Delete(ctx, &secretList.Items[i])
+			}
+		})
+
+		It("resolves Secrets that carry the host's label", func() {
+			By("creating a labeled Secret in the host's namespace")
+			matched := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "matched-secret",
+					Namespace: namespace,
+					Labels:    map[string]string{"kdex.dev/host": focalHost},
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{"k": []byte("v")},
+			}
+			Expect(k8sClient.Create(ctx, matched)).To(Succeed())
+
+			By("creating an unlabeled Secret in the same namespace")
+			ignored := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ignored-secret",
+					Namespace: namespace,
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{"k": []byte("v")},
+			}
+			Expect(k8sClient.Create(ctx, ignored)).To(Succeed())
+
+			By("creating the KDexInternalHost with the matching selector")
+			resource := &kdexv1alpha1.KDexInternalHost{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      focalHost,
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexInternalHostSpec{
+					KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+						BrandName:    "KDex Tech",
+						DevMode:      true,
+						ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+						Organization: "KDex Tech Inc.",
+						Routing: kdexv1alpha1.Routing{
+							Domains: []string{"foo.bar"},
+						},
+						SecretSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kdex.dev/host": focalHost},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			assertResourceReady(ctx, k8sClient, focalHost, namespace,
+				&kdexv1alpha1.KDexInternalHost{}, true)
+
+			By("populating status.attributes for the matched Secret only")
+			Eventually(func(g Gomega) {
+				ih := &kdexv1alpha1.KDexInternalHost{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, ih)).To(Succeed())
+				g.Expect(ih.Status.Attributes).To(HaveKey("matched-secret.secret.generation"))
+				g.Expect(ih.Status.Attributes).NotTo(HaveKey("ignored-secret.secret.generation"))
+			}, "5s").Should(Succeed())
+		})
+
+		It("re-reconciles when a Secret is labeled to match", func() {
+			By("creating an initially-unlabeled Secret")
+			s := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "rotated-secret",
+					Namespace: namespace,
+				},
+				Type: corev1.SecretTypeOpaque,
+				Data: map[string][]byte{"k": []byte("v")},
+			}
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+
+			By("creating the host with a selector that doesn't yet match")
+			resource := &kdexv1alpha1.KDexInternalHost{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      focalHost,
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexInternalHostSpec{
+					KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+						BrandName:    "KDex Tech",
+						DevMode:      true,
+						ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+						Organization: "KDex Tech Inc.",
+						Routing: kdexv1alpha1.Routing{
+							Domains: []string{"foo.bar"},
+						},
+						SecretSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"kdex.dev/host": focalHost},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			assertResourceReady(ctx, k8sClient, focalHost, namespace,
+				&kdexv1alpha1.KDexInternalHost{}, true)
+
+			By("confirming the Secret is not initially in status.attributes")
+			ih := &kdexv1alpha1.KDexInternalHost{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, ih)).To(Succeed())
+			Expect(ih.Status.Attributes).NotTo(HaveKey("rotated-secret.secret.generation"))
+
+			By("labeling the Secret to match the host's selector")
+			updated := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rotated-secret", Namespace: namespace}, updated)).To(Succeed())
+			if updated.Labels == nil {
+				updated.Labels = map[string]string{}
+			}
+			updated.Labels["kdex.dev/host"] = focalHost
+			Expect(k8sClient.Update(ctx, updated)).To(Succeed())
+
+			By("expecting the Secret watch to trigger a reconcile that picks the Secret up")
+			Eventually(func(g Gomega) {
+				ih := &kdexv1alpha1.KDexInternalHost{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, ih)).To(Succeed())
+				g.Expect(ih.Status.Attributes).To(HaveKey("rotated-secret.secret.generation"))
+			}, "5s").Should(Succeed())
 		})
 	})
 })

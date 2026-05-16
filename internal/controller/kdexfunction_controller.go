@@ -170,7 +170,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	function.Status.Attributes["faasAdaptor.generation"] = currentGen
 
-	secrets, err := ResolveSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, internalHost.Spec.Secrets)
+	secrets, err := ResolveSecrets(ctx, r.Client, &function.Status.KDexObjectStatus, internalHost.Namespace, internalHost.Spec.SecretSelector)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&function.Status.Conditions,

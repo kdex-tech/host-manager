@@ -27,7 +27,6 @@ import (
 	"maps"
 	"net/url"
 	"path"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +49,7 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -149,7 +149,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	seenPaths := map[string]bool{}
 	themeAssets := []kdexv1alpha1.Asset{}
 
-	secrets, err := ResolveSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.Secrets)
+	secrets, err := ResolveSecrets(ctx, r.Client, &internalHost.Status, internalHost.Namespace, internalHost.Spec.SecretSelector)
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
@@ -784,7 +784,14 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					return nil
 				}
 
-				if !slices.Contains(internalHost.Spec.Secrets, secret.Name) {
+				if internalHost.Spec.SecretSelector == nil {
+					return nil
+				}
+				sel, err := metav1.LabelSelectorAsSelector(internalHost.Spec.SecretSelector)
+				if err != nil {
+					return nil
+				}
+				if !sel.Matches(labels.Set(secret.Labels)) {
 					return nil
 				}
 

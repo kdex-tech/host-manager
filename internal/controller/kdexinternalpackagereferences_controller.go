@@ -110,7 +110,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return r1, err
 	}
 
-	secrets, err := ResolveSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.Secrets)
+	secrets, err := ResolveSecrets(ctx, r.Client, &ipr.Status, internalHost.Namespace, internalHost.Spec.SecretSelector)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
