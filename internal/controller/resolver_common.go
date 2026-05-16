@@ -290,7 +290,7 @@ func ResolveOrDefaultFaaSAdaptor(ctx context.Context, c client.Client, referrer 
 					Progressing: metav1.ConditionFalse,
 					Ready:       metav1.ConditionFalse,
 				},
-				kdexv1alpha1.ConditionReasonReconcileSuccess,
+				kdexv1alpha1.ConditionReasonReconcileError,
 				err.Error(),
 			)
 			return nil, true, ctrl.Result{}, err
@@ -324,7 +324,7 @@ func ResolveOrDefaultPageArchetype(ctx context.Context, c client.Client, referre
 					Progressing: metav1.ConditionFalse,
 					Ready:       metav1.ConditionFalse,
 				},
-				kdexv1alpha1.ConditionReasonReconcileSuccess,
+				kdexv1alpha1.ConditionReasonReconcileError,
 				err.Error(),
 			)
 			return nil, true, ctrl.Result{}, err
