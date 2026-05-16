@@ -9,10 +9,15 @@ import (
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// maxAPITokenRequestBytes caps API-token request bodies (mint, verify,
+// revoke). These payloads are short metadata-only documents.
+const maxAPITokenRequestBytes = 64 << 10
 
 type MintRequest struct {
 	// Action is the action of the tokens to mint (metadata-based revocation).
@@ -84,7 +89,7 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req RevokeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := kdexhttp.DecodeJSONBody(w, r, maxAPITokenRequestBytes, &req); err != nil {
 		log.Error(err, "Failed to decode request body")
 		http.Error(w, "Failed to decode request body", http.StatusBadRequest)
 		return
@@ -209,7 +214,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req MintRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := kdexhttp.DecodeJSONBody(w, r, maxAPITokenRequestBytes, &req); err != nil {
 		log.Error(err, "Failed to decode request body")
 		http.Error(w, "Failed to decode request body", http.StatusBadRequest)
 		return
@@ -286,7 +291,7 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req VerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := kdexhttp.DecodeJSONBody(w, r, maxAPITokenRequestBytes, &req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}

@@ -7,11 +7,47 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
 	"golang.org/x/text/language"
 )
+
+func TestDecodeJSONBody(t *testing.T) {
+	type Thing struct {
+		Name string `json:"name"`
+	}
+
+	tests := []struct {
+		name    string
+		body    string
+		max     int64
+		wantErr bool
+		want    string
+	}{
+		{name: "valid under limit", body: `{"name":"alice"}`, max: 1024, want: "alice"},
+		{name: "empty body fails", body: "", max: 1024, wantErr: true},
+		{name: "malformed JSON fails", body: `{name:`, max: 1024, wantErr: true},
+		{name: "unknown field fails", body: `{"name":"a","extra":1}`, max: 1024, wantErr: true},
+		{name: "exceeds limit fails", body: `{"name":"` + strings.Repeat("a", 200) + `"}`, max: 64, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			req := httptest.NewRequest("POST", "/", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			var got Thing
+			err := DecodeJSONBody(rec, req, tt.max, &got)
+			if tt.wantErr {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(got.Name).To(Equal(tt.want))
+		})
+	}
+}
 
 func TestSafeReturnPath(t *testing.T) {
 	tests := []struct {

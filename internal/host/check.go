@@ -6,9 +6,15 @@ import (
 	"strings"
 
 	"github.com/kdex-tech/entitlements"
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// maxCheckRequestBytes caps /check request bodies. CheckRequest is a short
+// slice of strings; 64 KiB is far more than needed and bounds the
+// memory-exhaustion DoS surface.
+const maxCheckRequestBytes = 64 << 10
 
 type CheckRequest struct {
 	Checks []string `json:"checks"`
@@ -25,7 +31,7 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CheckRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := kdexhttp.DecodeJSONBody(w, r, maxCheckRequestBytes, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}

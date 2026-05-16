@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -107,6 +108,17 @@ func GetLang(r *http.Request, defaultLanguage string, languages []language.Tag) 
 	}
 
 	return matchedTag, nil
+}
+
+// DecodeJSONBody reads a JSON document from r.Body into dst, refusing bodies
+// larger than maxBytes and rejecting unknown fields. Use this everywhere
+// instead of a bare json.NewDecoder(r.Body).Decode to avoid memory-exhaustion
+// DoS from untrusted clients.
+func DecodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	return dec.Decode(dst)
 }
 
 // SafeReturnPath returns p if it is safe to use as a same-origin redirect
