@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 )
 
 type CookieIDTokenStore struct {
@@ -24,7 +26,7 @@ func (c *CookieIDTokenStore) Set(w http.ResponseWriter, r *http.Request, rawIDTo
 	options := &http.Cookie{
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.URL.Scheme == "https",
+		Secure:   kdexhttp.IsSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(c.TTL.Seconds()),
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -82,7 +83,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							Value:    ts.AccessToken,
 							Path:     "/",
 							HttpOnly: true,
-							Secure:   r.URL.Scheme == HTTPS,
+							Secure:   kdexhttp.IsSecure(r),
 							SameSite: http.SameSiteLaxMode,
 						})
 						if ts.RefreshToken != "" {
@@ -91,7 +92,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 								Value:    ts.RefreshToken,
 								Path:     "/",
 								HttpOnly: true,
-								Secure:   r.URL.Scheme == HTTPS,
+								Secure:   kdexhttp.IsSecure(r),
 								SameSite: http.SameSiteLaxMode,
 							})
 						}
@@ -124,7 +125,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 						Path:     "/",
 						MaxAge:   -1,
 						HttpOnly: true,
-						Secure:   r.URL.Scheme == HTTPS,
+						Secure:   kdexhttp.IsSecure(r),
 						SameSite: http.SameSiteLaxMode,
 					})
 					// Also clear refresh token if present
@@ -134,7 +135,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 						Path:     "/",
 						MaxAge:   -1,
 						HttpOnly: true,
-						Secure:   r.URL.Scheme == HTTPS,
+						Secure:   kdexhttp.IsSecure(r),
 						SameSite: http.SameSiteLaxMode,
 					})
 
@@ -161,7 +162,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 								Value:    ts.AccessToken,
 								Path:     "/",
 								HttpOnly: true,
-								Secure:   r.URL.Scheme == HTTPS,
+								Secure:   kdexhttp.IsSecure(r),
 								SameSite: http.SameSiteLaxMode,
 							})
 							if ts.RefreshToken != "" {
@@ -170,7 +171,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 									Value:    ts.RefreshToken,
 									Path:     "/",
 									HttpOnly: true,
-									Secure:   r.URL.Scheme == HTTPS,
+									Secure:   kdexhttp.IsSecure(r),
 									SameSite: http.SameSiteLaxMode,
 								})
 							}

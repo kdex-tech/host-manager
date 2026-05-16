@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"golang.org/x/text/language"
@@ -106,6 +107,55 @@ func GetLang(r *http.Request, defaultLanguage string, languages []language.Tag) 
 	}
 
 	return matchedTag, nil
+}
+
+// SafeReturnPath returns p if it is safe to use as a same-origin redirect
+// target, otherwise "/". Anything that a browser would resolve to a different
+// origin (absolute URLs, scheme-relative "//evil.com" forms, backslash
+// variants used to evade naive prefix checks, non-http schemes) collapses to
+// "/". This is the guard for ?return=… / state= values that get fed into
+// http.Redirect.
+func SafeReturnPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	// Must start with a single forward slash. Reject leading whitespace,
+	// backslashes, schemes, and anything else that browsers might resolve
+	// to a different origin.
+	if !strings.HasPrefix(p, "/") {
+		return "/"
+	}
+	// Reject scheme-relative URLs and backslash variants. Browsers treat "\"
+	// like "/" in the authority component, so "/\evil.com" resolves to
+	// "//evil.com" → "https://evil.com".
+	if strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
+		return "/"
+	}
+	// Reject anything url.Parse considers absolute or carrying a host/scheme.
+	u, err := url.Parse(p)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Scheme != "" {
+		return "/"
+	}
+	return p
+}
+
+// IsSecure reports whether the request reached us over HTTPS. It returns true
+// when the request hit Go's TLS terminator directly, or when a trusted proxy
+// signals it via X-Forwarded-Proto. Use this — not r.URL.Scheme — when
+// deciding whether to set the Secure attribute on outgoing cookies, because
+// r.URL.Scheme is empty for server-received requests.
+func IsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		return false
+	}
+	// Multi-hop proxies append: "https, http" — the first entry is the
+	// original client connection.
+	first, _, _ := strings.Cut(proto, ",")
+	return strings.EqualFold(strings.TrimSpace(first), "https")
 }
 
 func GetParam(name string, defaultValue string, r *http.Request) string {

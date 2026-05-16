@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 )
 
 type CacheIDTokenStore struct {
@@ -24,7 +25,7 @@ func (c *CacheIDTokenStore) Set(w http.ResponseWriter, r *http.Request, rawIDTok
 		Value:    oidcSessionId,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.URL.Scheme == "https",
+		Secure:   kdexhttp.IsSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(c.cache.TTL().Seconds()),
 	}

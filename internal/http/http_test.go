@@ -1,6 +1,7 @@
 package http
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,97 @@ import (
 	. "github.com/onsi/gomega"
 	"golang.org/x/text/language"
 )
+
+func TestSafeReturnPath(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty defaults to /", in: "", want: "/"},
+		{name: "root", in: "/", want: "/"},
+		{name: "absolute path", in: "/foo", want: "/foo"},
+		{name: "absolute path with query", in: "/foo?bar=baz", want: "/foo?bar=baz"},
+		{name: "absolute path with fragment", in: "/foo#section", want: "/foo#section"},
+
+		// Open-redirect attempts:
+		{name: "absolute URL", in: "https://evil.com", want: "/"},
+		{name: "absolute URL with path", in: "https://evil.com/path", want: "/"},
+		{name: "scheme-relative", in: "//evil.com", want: "/"},
+		{name: "scheme-relative with path", in: "//evil.com/foo", want: "/"},
+		{name: "backslash trick", in: "/\\evil.com", want: "/"},
+		{name: "leading backslash", in: "\\evil.com", want: "/"},
+		{name: "double backslash", in: "\\\\evil.com", want: "/"},
+		{name: "javascript scheme", in: "javascript:alert(1)", want: "/"},
+		{name: "data scheme", in: "data:text/html,<script>", want: "/"},
+		{name: "relative path", in: "foo/bar", want: "/"},
+		{name: "whitespace-prefixed scheme-relative", in: " //evil.com", want: "/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			g.Expect(SafeReturnPath(tt.in)).To(Equal(tt.want))
+		})
+	}
+}
+
+func TestIsSecure(t *testing.T) {
+	tests := []struct {
+		name    string
+		tls     bool
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name: "plain http, no proxy headers",
+			want: false,
+		},
+		{
+			name: "direct TLS connection",
+			tls:  true,
+			want: true,
+		},
+		{
+			name:    "X-Forwarded-Proto https",
+			headers: map[string]string{"X-Forwarded-Proto": "https"},
+			want:    true,
+		},
+		{
+			name:    "X-Forwarded-Proto http",
+			headers: map[string]string{"X-Forwarded-Proto": "http"},
+			want:    false,
+		},
+		{
+			name:    "X-Forwarded-Proto HTTPS (uppercase)",
+			headers: map[string]string{"X-Forwarded-Proto": "HTTPS"},
+			want:    true,
+		},
+		{
+			name:    "X-Forwarded-Proto multi-hop, first is https",
+			headers: map[string]string{"X-Forwarded-Proto": "https, http"},
+			want:    true,
+		},
+		{
+			name:    "X-Forwarded-Proto multi-hop, first is http",
+			headers: map[string]string{"X-Forwarded-Proto": "http, https"},
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			req, err := http.NewRequest("GET", "/", nil)
+			g.Expect(err).NotTo(HaveOccurred())
+			if tt.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			g.Expect(IsSecure(req)).To(Equal(tt.want))
+		})
+	}
+}
 
 func TestGetParam(t *testing.T) {
 	tests := []struct {

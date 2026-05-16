@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -196,17 +197,14 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 		Value:    localToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.URL.Scheme == HTTPS,
+		Secure:   kdexhttp.IsSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// Validate state/redirect
-	redirectURL := state
-	if redirectURL == "" || !strings.HasPrefix(redirectURL, "/") {
-		redirectURL = "/"
-	}
-
-	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+	// Validate state/redirect. state is attacker-controlled (it's the
+	// upstream IdP echo of whatever we passed in as our state param), so
+	// constrain it to a same-origin path.
+	http.Redirect(w, r, kdexhttp.SafeReturnPath(state), http.StatusSeeOther)
 }
 
 func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {

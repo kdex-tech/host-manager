@@ -18,11 +18,7 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 
 	log := logf.FromContext(r.Context())
 
-	query := r.URL.Query()
-	returnURL := query.Get("return")
-	if returnURL == "" {
-		returnURL = "/"
-	}
+	returnURL := kdexhttp.SafeReturnPath(r.URL.Query().Get("return"))
 
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
@@ -74,11 +70,7 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	returnURL := r.FormValue("return")
-
-	if returnURL == "" {
-		returnURL = "/"
-	}
+	returnURL := kdexhttp.SafeReturnPath(r.FormValue("return"))
 
 	log := logf.FromContext(r.Context())
 
