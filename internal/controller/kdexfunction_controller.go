@@ -285,6 +285,18 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// parseBuilderGenerator splits a FaaSAdaptor DefaultBuilderGenerator string
+// "<builder>/<language>" into its two parts. Returns an error if the value
+// is empty or contains no "/" separator, so callers don't index a 1-element
+// slice and panic.
+func parseBuilderGenerator(s string) (builder, language string, err error) {
+	builder, language, ok := strings.Cut(s, "/")
+	if !ok {
+		return "", "", fmt.Errorf("invalid defaultBuilderGenerator %q: expected '<builder>/<language>'", s)
+	}
+	return builder, language, nil
+}
+
 func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 	log := logf.FromContext(hc.ctx)
 
@@ -325,9 +337,23 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 	} else {
 		var g *kdexv1alpha1.Generator
 
-		parts := strings.SplitN(hc.faasAdaptorSpec.DefaultBuilderGenerator, "/", 2)
+		_, defaultLanguage, err := parseBuilderGenerator(hc.faasAdaptorSpec.DefaultBuilderGenerator)
+		if err != nil {
+			kdexv1alpha1.SetConditions(
+				&hc.function.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionTrue,
+					Progressing: metav1.ConditionFalse,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileError,
+				err.Error(),
+			)
+			return ctrl.Result{}, err
+		}
+
 		for _, generator := range hc.faasAdaptorSpec.Generators {
-			if generator.Language == parts[1] {
+			if generator.Language == defaultLanguage {
 				g = &generator
 				break
 			}
@@ -336,7 +362,7 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 		if g == nil {
 			err := fmt.Errorf(
 				"generator %s not found for function %s/%s",
-				parts[1],
+				defaultLanguage,
 				hc.function.Namespace,
 				hc.function.Name,
 			)
@@ -536,9 +562,23 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 				Path:       res.Path,
 			}
 
-			defaultParts := strings.SplitN(hc.faasAdaptorSpec.DefaultBuilderGenerator, "/", 2)
-			defaultLanguage := defaultParts[1]
-			defaultBuilderName := defaultParts[0]
+			defaultBuilderName, defaultLanguage, err := parseBuilderGenerator(hc.faasAdaptorSpec.DefaultBuilderGenerator)
+			if err != nil {
+				kdexv1alpha1.SetConditions(
+					&hc.function.Status.Conditions,
+					kdexv1alpha1.ConditionStatuses{
+						Degraded:    metav1.ConditionTrue,
+						Progressing: metav1.ConditionFalse,
+						Ready:       metav1.ConditionFalse,
+					},
+					kdexv1alpha1.ConditionReasonReconcileError,
+					err.Error(),
+				)
+				if delErr := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil {
+					return ctrl.Result{}, delErr
+				}
+				return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			}
 			sourceLanguage := generator.Config.Language
 			builderName := ""
 			if sourceLanguage == defaultLanguage {
