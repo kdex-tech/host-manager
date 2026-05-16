@@ -543,8 +543,11 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wrappedMux := hh.authConfig.AddAuthentication(mux, hh.authExchanger)
-	wrappedMux = hh.DesignMiddleware(wrappedMux)
+	// The sniffer (DesignMiddleware) inspects authenticated identity to decide
+	// whether the caller may auto-generate KDexFunctions, so authentication must
+	// resolve first and place the AuthContext on the request context.
+	wrappedMux := hh.DesignMiddleware(mux)
+	wrappedMux = hh.authConfig.AddAuthentication(wrappedMux, hh.authExchanger)
 	wrappedMux.ServeHTTP(w, r)
 }
 

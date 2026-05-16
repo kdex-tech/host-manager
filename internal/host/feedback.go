@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/sniffer"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -246,6 +248,11 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Create a wrapper to capture the status code
+		if invokeSniffer && !hh.canGenerateSniffer(r.Context()) {
+			log.V(1).Info("sniffer suppressed: caller lacks functions:create entitlement", "path", r.URL.Path)
+			invokeSniffer = false
+		}
+
 		if invokeSniffer {
 			// Body Persistence: Read body so we can restore it for the next handler AND the sniffer
 			var bodyBytes []byte
@@ -347,6 +354,38 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 func isMutable(matchedFunction *kdexv1alpha1.KDexFunction) bool {
 	return matchedFunction.Spec.Origin.Executable == nil ||
 		matchedFunction.Spec.Origin.Source == nil
+}
+
+// canGenerateSniffer reports whether the caller is permitted to auto-generate
+// KDexFunctions via the Request Sniffer. The caller must be logged in (have an
+// AuthContext with a subject) and hold the `functions:create` entitlement. When
+// no authChecker is wired (e.g. a host with auth disabled) the check is skipped
+// so the sniffer keeps working in dev contexts that never configured auth.
+func (hh *HostHandler) canGenerateSniffer(ctx context.Context) bool {
+	if hh.authChecker == nil {
+		return true
+	}
+
+	authContext, ok := auth.GetAuthContext(ctx)
+	if !ok {
+		return false
+	}
+	sub, _ := authContext.GetSubject()
+	if sub == "" {
+		return false
+	}
+
+	requirement := kdexv1alpha1.SecurityRequirement{
+		"bearer": []string{"functions:create"},
+	}
+	authorized, err := hh.authChecker.CheckAccess(
+		ctx,
+		"functions",
+		"*",
+		[]kdexv1alpha1.SecurityRequirement{requirement},
+		"create",
+	)
+	return err == nil && authorized
 }
 
 // InspectHandler serves the feedback UI
