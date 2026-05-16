@@ -342,43 +342,6 @@ func ResolveOrDefaultPageArchetype(ctx context.Context, c client.Client, referre
 	return pageArchetypeObj, false, ctrl.Result{}, nil
 }
 
-func ResolveSecret(
-	ctx context.Context,
-	c client.Client,
-	object client.Object,
-	objectConditions *[]metav1.Condition,
-	secretRef *corev1.LocalObjectReference,
-	requeueDelay time.Duration,
-) (*corev1.Secret, bool, ctrl.Result, error) {
-	if secretRef == nil {
-		return nil, false, ctrl.Result{}, nil
-	}
-
-	var secret corev1.Secret
-	secretName := types.NamespacedName{
-		Name:      secretRef.Name,
-		Namespace: object.GetNamespace(),
-	}
-	if err := c.Get(ctx, secretName, &secret); err != nil {
-		if errors.IsNotFound(err) {
-			kdexv1alpha1.SetConditions(
-				objectConditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			return nil, true, ctrl.Result{RequeueAfter: requeueDelay}, nil
-		}
-	}
-
-	return &secret, false, ctrl.Result{}, nil
-}
-
 func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1alpha1.KDexObjectStatus, namespace string, selector *metav1.LabelSelector) (kdexv1alpha1.Secrets, error) {
 	if selector == nil {
 		return kdexv1alpha1.Secrets{}, nil
