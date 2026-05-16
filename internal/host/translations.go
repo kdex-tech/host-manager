@@ -13,9 +13,15 @@ import (
 )
 
 func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha1.KDexTranslationSpec) (*Translations, error) {
-	catalogBuilder := catalog.NewBuilder()
+	// Register defaultLanguage as the catalog's Fallback so that
+	// Languages() returns it first instead of in alphabetical order. Without
+	// this, a host with "de"/"en"/"fr" translations returns [de, en, fr],
+	// and any matcher fallback (e.g. plain curl with no Accept-Language)
+	// resolves to "de" rather than the configured default.
+	defaultTag := language.Make(defaultLanguage)
+	catalogBuilder := catalog.NewBuilder(catalog.Fallback(defaultTag))
 
-	if err := catalogBuilder.SetString(language.Make(defaultLanguage), "_", "_"); err != nil {
+	if err := catalogBuilder.SetString(defaultTag, "_", "_"); err != nil {
 		return nil, fmt.Errorf("failed to set default translation %s %s", defaultLanguage, "_")
 	}
 
