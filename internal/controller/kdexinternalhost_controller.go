@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1894,24 +1895,41 @@ func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef
 
 func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.Secrets) remoteauth.Credential {
 	dockerSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
-	if len(dockerSecrets) == 0 {
-		return remoteauth.EmptyCredential
-	}
 
-	var config struct {
-		Auths map[string]struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		} `json:"auths"`
-	}
+	for _, s := range dockerSecrets {
+		var config struct {
+			Auths map[string]struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+				Auth     string `json:"auth"`
+			} `json:"auths"`
+		}
 
-	if err := json.Unmarshal(dockerSecrets[0].Data[corev1.DockerConfigJsonKey], &config); err != nil {
-		return remoteauth.EmptyCredential
-	}
+		if err := json.Unmarshal(s.Data[corev1.DockerConfigJsonKey], &config); err != nil {
+			continue
+		}
 
-	if a, ok := config.Auths[registry]; ok {
+		a, ok := config.Auths[registry]
+		if !ok {
+			continue
+		}
+
+		if a.Username == "" && a.Password == "" && a.Auth != "" {
+			decoded, err := base64.StdEncoding.DecodeString(a.Auth)
+			if err != nil {
+				continue
+			}
+			i := strings.IndexByte(string(decoded), ':')
+			if i < 0 {
+				continue
+			}
+			a.Username = string(decoded[:i])
+			a.Password = string(decoded[i+1:])
+		}
+
 		return remoteauth.Credential{Username: a.Username, Password: a.Password}
 	}
+
 	return remoteauth.EmptyCredential
 }
 
