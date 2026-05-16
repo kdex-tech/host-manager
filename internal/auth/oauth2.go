@@ -29,18 +29,18 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		if callbackURL != nil {
 			callbackURLStr = callbackURL.String()
 		}
-		log.Info(
+		// Intentionally omitted from the log: code, code_challenge, state — these are
+		// either live secrets (auth code) or attacker-controlled values we don't want
+		// echoed into logs (#11).
+		log.V(1).Info(
 			"OAuth2 authorization",
 			"callback_url", callbackURLStr,
 			"client_id", clientId,
-			"code", code,
-			"code_challenge", codeChallenge,
 			"code_challenge_method", codeChallengeMethod,
 			"error", err,
 			"redirect_uri", redirectURI,
 			"response_type", responseType,
 			"scope", scope,
-			"state", state,
 			"subject", subject)
 	}()
 
@@ -214,16 +214,18 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	log := logf.FromContext(r.Context())
 	defer func() {
-		log.Info(
+		// Intentionally omitted from the log: client_secret, code, code_verifier,
+		// id_token, password. These are secrets or live credentials and must never
+		// appear in logs (#11). Log only structural metadata.
+		log.V(1).Info(
 			"OAuth2 token exchange",
 			"client_id", clientId,
-			"client_secret", clientSecret,
-			"code", code,
-			"code_verifier", codeVerifier,
+			"client_secret_present", clientSecret != "",
+			"code_verifier_present", codeVerifier != "",
 			"error", err,
 			"grant_type", grantType,
-			"id_token", ts.IDToken,
-			"password", password,
+			"id_token_issued", ts.IDToken != "",
+			"password_present", password != "",
 			"redirect_uri", redirectURI,
 			"scope", scope,
 			"subject", ts.Subject,
