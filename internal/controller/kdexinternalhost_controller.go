@@ -1353,49 +1353,34 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 
 			deployment.Spec.Template.Spec.Containers[0].Name = "backend"
 
-			if len(resolvedBackend.Backend.Env) > 0 {
-				for _, env := range resolvedBackend.Backend.Env {
-					foundEnv := false
-					for idx, value := range deployment.Spec.Template.Spec.Containers[0].Env {
-						if value.Name == env.Name {
-							foundEnv = true
-							deployment.Spec.Template.Spec.Containers[0].Env[idx].Value = env.Value
-							break
-						}
-					}
-					if !foundEnv {
-						deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, env)
-					}
-				}
+			// Rebuild env, imagePullSecrets, volumes, and volumeMounts from scratch
+			// each reconcile so removals in the desired spec propagate to the live
+			// Deployment and so per-reconcile entries can't accumulate. Start from
+			// the memoized template defaults (POD_NAME/POD_NAMESPACE/POD_IP env,
+			// the scratch volume + mount) so those baseline entries are preserved.
+			defaultSpec := r.getMemoizedBackendDeployment().DeepCopy().Template.Spec
+
+			var defaultContainerEnv []corev1.EnvVar
+			var defaultContainerMounts []corev1.VolumeMount
+			if len(defaultSpec.Containers) > 0 {
+				defaultContainerEnv = defaultSpec.Containers[0].Env
+				defaultContainerMounts = defaultSpec.Containers[0].VolumeMounts
 			}
 
-			foundPathPrefixEnv := false
-			for idx, value := range deployment.Spec.Template.Spec.Containers[0].Env {
-				if value.Name == "PATH_PREFIX" {
-					foundPathPrefixEnv = true
-					deployment.Spec.Template.Spec.Containers[0].Env[idx].Value = resolvedBackend.Backend.IngressPath
-					break
-				}
-			}
+			env := append([]corev1.EnvVar{}, defaultContainerEnv...)
+			env = append(env, resolvedBackend.Backend.Env...)
+			env = append(env, corev1.EnvVar{
+				Name:  "PATH_PREFIX",
+				Value: resolvedBackend.Backend.IngressPath,
+			})
+			deployment.Spec.Template.Spec.Containers[0].Env = env
 
-			if !foundPathPrefixEnv {
-				deployment.Spec.Template.Spec.Containers[0].Env = append(deployment.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
-					Name:  "PATH_PREFIX",
-					Value: resolvedBackend.Backend.IngressPath,
-				})
+			dockerSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
+			imagePullSecretRefs := make([]corev1.LocalObjectReference, 0, len(dockerSecrets))
+			for _, sec := range dockerSecrets {
+				imagePullSecretRefs = append(imagePullSecretRefs, corev1.LocalObjectReference{Name: sec.Name})
 			}
-
-			imagePullSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
-			if len(imagePullSecrets) > 0 {
-				for _, sec := range imagePullSecrets {
-					deployment.Spec.Template.Spec.ImagePullSecrets = append(
-						deployment.Spec.Template.Spec.ImagePullSecrets,
-						corev1.LocalObjectReference{
-							Name: sec.Name,
-						},
-					)
-				}
-			}
+			deployment.Spec.Template.Spec.ImagePullSecrets = imagePullSecretRefs
 
 			if resolvedBackend.Backend.Replicas != nil {
 				deployment.Spec.Replicas = resolvedBackend.Backend.Replicas
@@ -1417,48 +1402,26 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 				deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy = r.Configuration.BackendDefault.ServerImagePullPolicy
 			}
 
+			volumes := append([]corev1.Volume{}, defaultSpec.Volumes...)
+			volumeMounts := append([]corev1.VolumeMount{}, defaultContainerMounts...)
 			if resolvedBackend.Backend.StaticImage != "" {
-				foundOCIVolume := false
-				for idx, value := range deployment.Spec.Template.Spec.Volumes {
-					if value.Name == internal.OCI_IMAGE {
-						foundOCIVolume = true
-						deployment.Spec.Template.Spec.Volumes[idx].Image.Reference = resolvedBackend.Backend.StaticImage
-						deployment.Spec.Template.Spec.Volumes[idx].Image.PullPolicy = resolvedBackend.Backend.StaticImagePullPolicy
-						break
-					}
-				}
-
-				if !foundOCIVolume {
-					deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, corev1.Volume{
-						Name: internal.OCI_IMAGE,
-						VolumeSource: corev1.VolumeSource{
-							Image: &corev1.ImageVolumeSource{
-								Reference:  resolvedBackend.Backend.StaticImage,
-								PullPolicy: resolvedBackend.Backend.StaticImagePullPolicy,
-							},
+				volumes = append(volumes, corev1.Volume{
+					Name: internal.OCI_IMAGE,
+					VolumeSource: corev1.VolumeSource{
+						Image: &corev1.ImageVolumeSource{
+							Reference:  resolvedBackend.Backend.StaticImage,
+							PullPolicy: resolvedBackend.Backend.StaticImagePullPolicy,
 						},
-					})
-				}
-
-				foundOCIVolumeMount := false
-				for idx, value := range deployment.Spec.Template.Spec.Containers[0].VolumeMounts {
-					if value.Name == internal.OCI_IMAGE {
-						foundOCIVolumeMount = true
-						deployment.Spec.Template.Spec.Containers[0].VolumeMounts[idx].MountPath = "/public"
-						deployment.Spec.Template.Spec.Containers[0].VolumeMounts[idx].Name = internal.OCI_IMAGE
-						deployment.Spec.Template.Spec.Containers[0].VolumeMounts[idx].ReadOnly = true
-						break
-					}
-				}
-
-				if !foundOCIVolumeMount {
-					deployment.Spec.Template.Spec.Containers[0].VolumeMounts = append(deployment.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-						Name:      internal.OCI_IMAGE,
-						MountPath: "/public",
-						ReadOnly:  true,
-					})
-				}
+					},
+				})
+				volumeMounts = append(volumeMounts, corev1.VolumeMount{
+					Name:      internal.OCI_IMAGE,
+					MountPath: "/public",
+					ReadOnly:  true,
+				})
 			}
+			deployment.Spec.Template.Spec.Volumes = volumes
+			deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volumeMounts
 
 			return ctrl.SetControllerReference(internalHost, deployment, r.Scheme)
 		},
