@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kdex-tech/host-manager/internal"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -231,6 +232,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 				},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(true),
+					SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
 					Containers: []corev1.Container{
 						{
 							Args:    d.FaaSAdaptor.Deployer.Args,
@@ -242,7 +244,8 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 							// TODO: implement the Google Cloud Functions deployer image
 							// TODO: implement the Azure Functions deployer image
 
-							Name: "deployer",
+							Name:            "deployer",
+							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 						},
 					},
 					ImagePullSecrets:   d.ImagePullSecrets,
@@ -333,13 +336,15 @@ func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunct
 					Template: corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							AutomountServiceAccountToken: new(true),
+							SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
 							Containers: []corev1.Container{
 								{
-									Args:    d.FaaSAdaptor.Observer.Args,
-									Command: d.FaaSAdaptor.Observer.Command,
-									Env:     env,
-									Image:   d.FaaSAdaptor.Observer.Image,
-									Name:    "observer",
+									Args:            d.FaaSAdaptor.Observer.Args,
+									Command:         d.FaaSAdaptor.Observer.Command,
+									Env:             env,
+									Image:           d.FaaSAdaptor.Observer.Image,
+									Name:            "observer",
+									SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 								},
 							},
 							ImagePullSecrets:   d.ImagePullSecrets,

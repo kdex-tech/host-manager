@@ -165,6 +165,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 				},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(true),
+					SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
 					Containers: []corev1.Container{
 						{
 							Name: "packager",
@@ -173,6 +174,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 							Env:             env,
 							Image:           p.Packages.PackagerImage,
 							ImagePullPolicy: p.Packages.PackagerImagePullPolicy,
+							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 							VolumeMounts:    volumeMounts,
 						},
 					},
@@ -185,6 +187,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 							Env:             env,
 							Image:           p.Packages.ToolsImage,
 							ImagePullPolicy: p.Packages.ToolsImagePullPolicy,
+							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 							VolumeMounts:    volumeMounts,
 						},
 						{
@@ -194,6 +197,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 							Env:             env,
 							Image:           p.Packages.ToolsImage,
 							ImagePullPolicy: p.Packages.ToolsImagePullPolicy,
+							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 							VolumeMounts:    volumeMounts,
 						},
 					},
