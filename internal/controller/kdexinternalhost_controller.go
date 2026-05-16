@@ -27,6 +27,7 @@ import (
 	"maps"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -770,6 +771,32 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.ServiceAccount{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.ServiceAccountRef}")).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				secret, ok := obj.(*corev1.Secret)
+				if !ok || secret.Namespace != r.ControllerNamespace {
+					return nil
+				}
+
+				var internalHost kdexv1alpha1.KDexInternalHost
+				if err := r.Get(ctx, types.NamespacedName{Name: r.FocalHost, Namespace: r.ControllerNamespace}, &internalHost); err != nil {
+					return nil
+				}
+
+				if !slices.Contains(internalHost.Spec.Secrets, secret.Name) {
+					return nil
+				}
+
+				return []reconcile.Request{
+					{
+						NamespacedName: types.NamespacedName{
+							Name:      r.FocalHost,
+							Namespace: r.ControllerNamespace,
+						},
+					},
+				}
+			})).
 		WithEventFilter(enabledFilter).
 		WithOptions(
 			controller.TypedOptions[reconcile.Request]{

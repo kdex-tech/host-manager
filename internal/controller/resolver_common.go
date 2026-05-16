@@ -389,8 +389,12 @@ func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1al
 	for _, secretName := range secretNames {
 		var secret corev1.Secret
 		if err := c.Get(ctx, types.NamespacedName{Name: secretName, Namespace: namespace}, &secret); err != nil {
-			// log a warning and skip this secret
-			logf.FromContext(ctx).V(1).Info("failed to get secret", "namespace", namespace, "name", secretName, "error", err)
+			// NotFound is expected steady-state for Secret types documented as
+			// (multiple) in KDexHostSpec (e.g. rotation slots not yet minted),
+			// so don't log it. Surface any other error (RBAC, timeouts, ...).
+			if !errors.IsNotFound(err) {
+				logf.FromContext(ctx).V(1).Info("failed to get secret", "namespace", namespace, "name", secretName, "error", err)
+			}
 			continue
 		}
 
