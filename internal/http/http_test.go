@@ -14,6 +14,23 @@ import (
 	"golang.org/x/text/language"
 )
 
+func TestGetLang_NoHeaderFallsBackToDefault(t *testing.T) {
+	// With languages = [de, en, fr] (alphabetical, as catalog.Builder
+	// returns them) and no Accept-Language header, GetLang must return the
+	// configured defaultLanguage ("en"), not whichever tag happened to sort
+	// first.
+	supported := []language.Tag{
+		language.Make("de"),
+		language.Make("en"),
+		language.Make("fr"),
+	}
+	g := NewGomegaWithT(t)
+	req := httptest.NewRequest("GET", "/", nil)
+	got, err := GetLang(req, "en", supported)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(got).To(Equal(language.Make("en")))
+}
+
 func TestDecodeJSONBody(t *testing.T) {
 	type Thing struct {
 		Name string `json:"name"`

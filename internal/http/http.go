@@ -94,6 +94,15 @@ func GetLang(r *http.Request, defaultLanguage string, languages []language.Tag) 
 		preferredLanguages = append(preferredLanguages, tag)
 	}
 
+	// No client preference (no Accept-Language, no l10n param) — honor the
+	// configured defaultLanguage rather than whatever sorts first in
+	// `languages`. language.Matcher.Match() with no preferences returns its
+	// first registered tag, which is alphabetical for catalog.Builder, so
+	// without this short-circuit `curl` users would get "de" instead of "en".
+	if len(preferredLanguages) == 0 && defaultLanguage != "" {
+		return language.Parse(defaultLanguage)
+	}
+
 	_, index, _ := matcher.Match(preferredLanguages...)
 
 	matchedTag := languages[index]
