@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/kdex-tech/entitlements/go"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"

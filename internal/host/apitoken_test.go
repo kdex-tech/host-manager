@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kdex-tech/entitlements/go"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/cache"

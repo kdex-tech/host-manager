@@ -8,7 +8,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/kdex-tech/entitlements/go"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
