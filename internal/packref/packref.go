@@ -151,6 +151,21 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Name:  "IMAGE_PUSH_SECRET_PATH",
 			Value: internal.WORKDIR + "/config.json",
 		})
+		// oras (and any docker/containerd client) resolves registry
+		// auth from $DOCKER_CONFIG/config.json (then $HOME/.docker/
+		// config.json). The image-push-secret volume mounts the
+		// dockerconfigjson at <WORKDIR>/config.json, so point
+		// DOCKER_CONFIG at WORKDIR and oras finds it. Without this the
+		// packager container's oras push hits the registry without
+		// auth and the AR replies "denied: Unauthenticated request" -
+		// the rsi-<env>-docker Secret may be fresh and valid, but oras
+		// never consults it because the file path doesn't match its
+		// default search order. Only emitted when an ImagePushSecret
+		// is present so non-push setups don't trip the env.
+		env = append(env, corev1.EnvVar{
+			Name:  "DOCKER_CONFIG",
+			Value: internal.WORKDIR,
+		})
 	}
 
 	job = &batchv1.Job{
