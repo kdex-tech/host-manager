@@ -1,7 +1,7 @@
 package page
 
 import (
-	"github.com/kdex-tech/entitlements"
+	"github.com/kdex-tech/entitlements/go"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

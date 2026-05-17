@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/go-logr/logr"
-	"github.com/kdex-tech/entitlements"
+	"github.com/kdex-tech/entitlements/go"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 

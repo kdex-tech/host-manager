@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
-	"github.com/kdex-tech/entitlements"
+	"github.com/kdex-tech/entitlements/go"
 )
 
 type PageStore struct {
