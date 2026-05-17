@@ -131,6 +131,19 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Name:  "WORKDIR",
 			Value: internal.WORKDIR,
 		},
+		{
+			// Force HOME into the writable EmptyDir mount so npm,
+			// kaniko, oras, and anything else that resolves a default
+			// state directory from $HOME (npm: $HOME/.npm, kaniko:
+			// $HOME/.docker, etc.) writes inside the shared volume
+			// instead of attempting /.npm or /.docker on the container's
+			// root-owned read-write rootfs - those mkdirs fail with
+			// EACCES under runAsUser=65532 even without
+			// readOnlyRootFilesystem, since the image's `/` is owned by
+			// root and lacks world-write.
+			Name:  "HOME",
+			Value: internal.WORKDIR,
+		},
 	}
 
 	if p.ImagePushSecret != nil {
