@@ -203,3 +203,82 @@ func TestHTTPLookup_FindInternal_Success(t *testing.T) {
 		t.Errorf("timestamp %d is %v old; expected fresh", ts, age)
 	}
 }
+
+func TestHTTPLookup_FindInternal_OKFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok": false, "reason": "invalid_credentials"}`))
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	ok, claims, err := lookup.FindInternal("alice", "wrong")
+	if ok {
+		t.Error("expected ok=false")
+	}
+	if claims != nil {
+		t.Error("expected nil claims on failure")
+	}
+	if err == nil {
+		t.Fatal("expected error on ok:false (chain must stop, not fall through)")
+	}
+	if !strings.Contains(err.Error(), "invalid_credentials") {
+		t.Errorf("error %q should include the reason", err.Error())
+	}
+}
+
+func TestHTTPLookup_FindInternal_5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	_, _, err := lookup.FindInternal("alice", "x")
+	if err == nil {
+		t.Fatal("expected error on 5xx")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error %q should mention status 500", err.Error())
+	}
+}
+
+func TestHTTPLookup_FindInternal_MalformedJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{not json`))
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	_, _, err := lookup.FindInternal("alice", "x")
+	if err == nil {
+		t.Fatal("expected decode error")
+	}
+}
+
+func TestHTTPLookup_FindInternal_Timeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	// Set timeout to 50ms - server sleeps 500ms - request must fail
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "50", make([]byte, 32)))
+	_, _, err := lookup.FindInternal("alice", "x")
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+}
+
+func TestHTTPLookup_FindInternal_NetworkError(t *testing.T) {
+	// Point at a closed port
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t,
+		"http://127.0.0.1:1/", // port 1 is reserved + closed
+		"500",
+		make([]byte, 32),
+	))
+	_, _, err := lookup.FindInternal("alice", "x")
+	if err == nil {
+		t.Fatal("expected network error")
+	}
+}
