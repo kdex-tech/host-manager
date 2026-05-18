@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -585,4 +587,68 @@ func TestNewRoleProvider(t *testing.T) {
 			tt.assertions(t, got, gotErr)
 		})
 	}
+}
+
+func TestScopeProvider_ChainOrdering_SecretBeforeHTTP(t *testing.T) {
+	// Mock HTTP server that always succeeds with a different sub
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "from-http", "email": "x@y"}}`))
+	}))
+	defer srv.Close()
+
+	// SecretLookup carrying a "bootstrap" subject
+	bootstrapSecret := v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "bootstrap-admin",
+			Annotations: map[string]string{"kdex.dev/secret-type": "subject"},
+		},
+		Data: map[string][]byte{
+			"sub":      []byte("bootstrap-admin"),
+			"password": []byte("admin-pw"),
+		},
+	}
+	secrets := kdexv1alpha1.Secrets{bootstrapSecret}
+
+	httpLookup, err := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "1000", make([]byte, 32)))
+	if err != nil {
+		t.Fatalf("NewHTTPLookup: %v", err)
+	}
+
+	// Chain ordering matches controller wiring: [SecretLookup, HTTPLookup]
+	chain := []Lookup{NewSecretLookup(secrets), httpLookup}
+
+	// Bootstrap subject must resolve via SecretLookup (not via HTTPLookup)
+	for _, l := range chain {
+		ok, claims, _ := l.FindInternal("bootstrap-admin", "admin-pw")
+		if ok {
+			if claims["sub"] != "bootstrap-admin" {
+				t.Errorf("bootstrap resolution went to wrong lookup; claims[sub]=%v", claims["sub"])
+			}
+			return // first match wins
+		}
+	}
+	t.Fatal("bootstrap-admin was not matched by any lookup")
+}
+
+func TestScopeProvider_ChainOrdering_HTTPFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "01950ea5-..."}}`))
+	}))
+	defer srv.Close()
+
+	// Empty SecretLookup (no bootstrap subject)
+	secrets := kdexv1alpha1.Secrets{}
+	httpLookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "1000", make([]byte, 32)))
+	chain := []Lookup{NewSecretLookup(secrets), httpLookup}
+
+	for _, l := range chain {
+		ok, claims, _ := l.FindInternal("alice@knowdrive.example", "hunter2")
+		if ok {
+			if claims["sub"] != "01950ea5-..." {
+				t.Errorf("expected HTTP resolution, got claims[sub]=%v", claims["sub"])
+			}
+			return
+		}
+	}
+	t.Fatal("KnowDrive user was not matched")
 }
