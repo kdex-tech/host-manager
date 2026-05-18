@@ -84,3 +84,14 @@ func TestNewHTTPLookup_DefaultTimeout(t *testing.T) {
 		t.Errorf("default timeout = %v ms; want 2000", lookup.timeout.Milliseconds())
 	}
 }
+
+func TestNewHTTPLookup_InvalidTimeoutMS(t *testing.T) {
+	sec := makeHTTPLookupSecret(t, "http://example/", "not-a-number", make([]byte, 32))
+	_, err := NewHTTPLookup(sec)
+	if err == nil {
+		t.Fatal("expected error for non-integer timeout-ms, got nil")
+	}
+	if !strings.Contains(err.Error(), "timeout-ms") {
+		t.Errorf("error %q should mention 'timeout-ms'", err.Error())
+	}
+}
