@@ -39,10 +39,10 @@ type credentialCheckRequest struct {
 }
 
 type credentialCheckResponse struct {
-	OK       bool                   `json:"ok"`
-	Claims   map[string]interface{} `json:"claims,omitempty"`
-	Reason   string                 `json:"reason,omitempty"`
-	NextStep *string                `json:"next_step,omitempty"`
+	OK       bool           `json:"ok"`
+	Claims   map[string]any `json:"claims,omitempty"`
+	Reason   string         `json:"reason,omitempty"`
+	NextStep *string        `json:"next_step,omitempty"`
 }
 
 // NewHTTPLookup constructs a Lookup that POSTs credentials to an external HTTP
