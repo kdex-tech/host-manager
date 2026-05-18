@@ -490,6 +490,18 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		auth.NewSecretLookup(secrets),
 	}
 
+	httpLookupSecret := secrets.Find(func(s corev1.Secret) bool {
+		return s.Annotations["kdex.dev/secret-type"] == auth.HTTPLookupSecretType &&
+			s.Annotations["kdex.dev/active-key"] == "true"
+	})
+	if httpLookupSecret != nil {
+		httpLookup, err := auth.NewHTTPLookup(*httpLookupSecret)
+		if err != nil {
+			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
+		}
+		authLookups = append(authLookups, httpLookup)
+	}
+
 	ldapSecret := secrets.Find(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "ldap" })
 	if ldapSecret != nil {
 		// Put ldap lookup first
