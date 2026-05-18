@@ -334,3 +334,10 @@ func TestHTTPLookup_FindInternal_NextStepEmptyString(t *testing.T) {
 		t.Errorf("claims should not contain next_step when response sends empty string; got %v", claims["next_step"])
 	}
 }
+
+func TestHTTPLookupSecretType_Constant(t *testing.T) {
+	if HTTPLookupSecretType != "http-lookup-auth" {
+		t.Errorf("HTTPLookupSecretType = %q; want %q (downstream tooling pins on this string)",
+			HTTPLookupSecretType, "http-lookup-auth")
+	}
+}
