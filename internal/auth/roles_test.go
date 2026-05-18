@@ -589,7 +589,7 @@ func TestNewRoleProvider(t *testing.T) {
 	}
 }
 
-func TestScopeProvider_ChainOrdering_SecretBeforeHTTP(t *testing.T) {
+func TestLookupChain_SecretBeforeHTTP(t *testing.T) {
 	// Mock HTTP server that always succeeds with a different sub
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "from-http", "email": "x@y"}}`))
@@ -630,7 +630,7 @@ func TestScopeProvider_ChainOrdering_SecretBeforeHTTP(t *testing.T) {
 	t.Fatal("bootstrap-admin was not matched by any lookup")
 }
 
-func TestScopeProvider_ChainOrdering_HTTPFallback(t *testing.T) {
+func TestLookupChain_HTTPFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "01950ea5-..."}}`))
 	}))
