@@ -128,7 +128,7 @@ func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.M
 	if claims == nil {
 		claims = jwt.MapClaims{}
 	}
-	if parsed.NextStep != nil {
+	if parsed.NextStep != nil && *parsed.NextStep != "" {
 		claims["next_step"] = *parsed.NextStep
 	}
 	return true, claims, nil
