@@ -282,3 +282,55 @@ func TestHTTPLookup_FindInternal_NetworkError(t *testing.T) {
 		t.Fatal("expected network error")
 	}
 }
+
+func TestHTTPLookup_FindInternal_NextStepPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"claims": {"sub": "abc"},
+			"next_step": "mfa-totp"
+		}`))
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	ok, claims, err := lookup.FindInternal("a", "b")
+	if err != nil || !ok {
+		t.Fatalf("expected success, got ok=%v err=%v", ok, err)
+	}
+	if claims["next_step"] != "mfa-totp" {
+		t.Errorf("claims[next_step] = %v; want \"mfa-totp\"", claims["next_step"])
+	}
+}
+
+func TestHTTPLookup_FindInternal_NextStepAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "abc"}}`))
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	_, claims, _ := lookup.FindInternal("a", "b")
+	if _, present := claims["next_step"]; present {
+		t.Errorf("claims should not contain next_step when absent in response")
+	}
+}
+
+func TestHTTPLookup_FindInternal_NextStepEmptyString(t *testing.T) {
+	// Per code review on Task 3: a server bug returning next_step:"" should
+	// be treated the same as next_step absent — never propagate empty strings.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"claims": {"sub": "abc"},
+			"next_step": ""
+		}`))
+	}))
+	defer srv.Close()
+
+	lookup, _ := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)))
+	_, claims, _ := lookup.FindInternal("a", "b")
+	if _, present := claims["next_step"]; present {
+		t.Errorf("claims should not contain next_step when response sends empty string; got %v", claims["next_step"])
+	}
+}
