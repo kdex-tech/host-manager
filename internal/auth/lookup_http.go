@@ -105,7 +105,7 @@ func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.M
 	if err != nil {
 		return false, nil, fmt.Errorf("httpLookup: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return false, nil, fmt.Errorf("httpLookup: server returned status %d", resp.StatusCode)
