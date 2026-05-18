@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -231,7 +232,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 
 		log.V(2).Info(message)
 
-		if err := r.cleanupJobs(ctx, &ipr, "packages"); err != nil {
+		if err := r.cleanupJobs(ctx, &ipr); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -283,6 +284,10 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 				return ctrl.Result{}, err
 			}
 
+			if err := r.cleanupJobs(ctx, &ipr); err != nil {
+				return ctrl.Result{}, err
+			}
+
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
@@ -305,6 +310,10 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
 		)
 		ipr.Status.Attributes["importmap"] = importmap
+	}
+
+	if err := r.cleanupJobs(ctx, &ipr); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	kdexv1alpha1.SetConditions(
@@ -364,23 +373,35 @@ func (r *KDexInternalPackageReferencesReconciler) SetupWithManager(mgr ctrl.Mana
 		Complete(r)
 }
 
-func (r *KDexInternalPackageReferencesReconciler) cleanupJobs(ctx context.Context, ipr *kdexv1alpha1.KDexInternalPackageReferences, appLabel string) error {
+// cleanupJobs deletes packager Jobs from generations strictly older than
+// ipr.Generation, regardless of whether they have terminated. This supersedes
+// in-flight prior-gen Jobs when a burst of IPR generation bumps would otherwise
+// spawn parallel packager runs that all but the latest are guaranteed to be
+// discarded (see kdex-tech/host-manager#19).
+func (r *KDexInternalPackageReferencesReconciler) cleanupJobs(ctx context.Context, ipr *kdexv1alpha1.KDexInternalPackageReferences) error {
 	log := logf.FromContext(ctx)
 	var jobList batchv1.JobList
 	if err := r.List(ctx, &jobList, client.InNamespace(ipr.Namespace), client.MatchingLabels{
-		"app":      appLabel,
+		"app":      "packages",
 		"packages": ipr.Name,
 	}); err != nil {
 		return err
 	}
 
-	currentGen := fmt.Sprintf("%d", ipr.Generation)
 	for _, job := range jobList.Items {
-		if job.Labels["kdex.dev/generation"] != currentGen && (job.Status.Succeeded > 0 || job.Status.Failed > 0) {
-			log.V(2).Info("Cleaning up obsolete job from previous generation", "job", job.Name, "jobGen", job.Labels["kdex.dev/generation"], "app", appLabel)
-			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-				return err
-			}
+		genLabel := job.Labels["kdex.dev/generation"]
+		jobGen, parseErr := strconv.ParseInt(genLabel, 10, 64)
+		if parseErr != nil {
+			log.V(2).Info("Skipping job with missing or unparseable generation label", "job", job.Name, "label", genLabel)
+			continue
+		}
+		if jobGen >= ipr.Generation {
+			continue
+		}
+
+		log.V(2).Info("Deleting superseded packager job", "job", job.Name, "jobGen", jobGen, "currentGen", ipr.Generation)
+		if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
+			return err
 		}
 	}
 	return nil
