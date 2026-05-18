@@ -4,8 +4,14 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -125,5 +131,75 @@ func TestComputeSignature_DifferentSecretsDiffer(t *testing.T) {
 	b := computeSignature([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), ts, body)
 	if a == b {
 		t.Error("signatures should differ for different secrets")
+	}
+}
+
+func TestHTTPLookup_FindInternal_Success(t *testing.T) {
+	secret := []byte("12345678901234567890123456789012")
+	var receivedBody []byte
+	var receivedSig, receivedTS string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		receivedSig = r.Header.Get("X-K-CNAS-Lookup-Signature")
+		receivedTS = r.Header.Get("X-K-CNAS-Lookup-Timestamp")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"ok": true,
+			"claims": {
+				"sub": "01950ea5-7c41-7a16-9c7c-c8e1e0d8f8a3",
+				"email": "alice@example.com",
+				"email_verified": true,
+				"given_name": "Alice",
+				"amr": ["pwd"],
+				"acr": "1"
+			},
+			"next_step": null
+		}`))
+	}))
+	defer srv.Close()
+
+	lookup, err := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "2000", secret))
+	if err != nil {
+		t.Fatalf("NewHTTPLookup: %v", err)
+	}
+
+	ok, claims, err := lookup.FindInternal("alice@example.com", "hunter2")
+	if err != nil {
+		t.Fatalf("FindInternal: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if claims["sub"] != "01950ea5-7c41-7a16-9c7c-c8e1e0d8f8a3" {
+		t.Errorf("claims[sub] = %v; want UUID", claims["sub"])
+	}
+	if claims["email"] != "alice@example.com" {
+		t.Errorf("claims[email] = %v", claims["email"])
+	}
+
+	// Verify the server actually received what we promised
+	var sent struct {
+		Subject  string `json:"subject"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(receivedBody, &sent); err != nil {
+		t.Fatalf("could not parse received body: %v", err)
+	}
+	if sent.Subject != "alice@example.com" || sent.Password != "hunter2" {
+		t.Errorf("received body unexpected: %s", receivedBody)
+	}
+
+	// Verify signature matches
+	want := computeSignature(secret, receivedTS, receivedBody)
+	if receivedSig != want {
+		t.Errorf("server-received signature %q does not match HMAC over body+ts (%q)", receivedSig, want)
+	}
+
+	// Verify timestamp is recent
+	ts, _ := strconv.ParseInt(receivedTS, 10, 64)
+	age := time.Since(time.UnixMilli(ts))
+	if age < 0 || age > 5*time.Second {
+		t.Errorf("timestamp %d is %v old; expected fresh", ts, age)
 	}
 }

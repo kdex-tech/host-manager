@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,6 +32,18 @@ type httpLookup struct {
 }
 
 var _ Lookup = (*httpLookup)(nil)
+
+type credentialCheckRequest struct {
+	Subject  string `json:"subject"`
+	Password string `json:"password"`
+}
+
+type credentialCheckResponse struct {
+	OK       bool                   `json:"ok"`
+	Claims   map[string]interface{} `json:"claims,omitempty"`
+	Reason   string                 `json:"reason,omitempty"`
+	NextStep *string                `json:"next_step,omitempty"`
+}
 
 // NewHTTPLookup constructs a Lookup that POSTs credentials to an external HTTP
 // endpoint identified by the Secret's data.url field, signing requests with
@@ -66,9 +81,57 @@ func (hl *httpLookup) Type() string {
 	return "http"
 }
 
-// FindInternal is implemented in a subsequent task. Stub for now.
 func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {
-	return false, nil, errors.New("not implemented")
+	body, err := json.Marshal(credentialCheckRequest{Subject: subject, Password: password})
+	if err != nil {
+		return false, nil, fmt.Errorf("httpLookup: marshal request: %w", err)
+	}
+
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	sig := computeSignature(hl.sharedSecret, ts, body)
+
+	ctx, cancel := context.WithTimeout(context.Background(), hl.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hl.url, bytes.NewReader(body))
+	if err != nil {
+		return false, nil, fmt.Errorf("httpLookup: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-K-CNAS-Lookup-Timestamp", ts)
+	req.Header.Set("X-K-CNAS-Lookup-Signature", sig)
+
+	resp, err := hl.client.Do(req)
+	if err != nil {
+		return false, nil, fmt.Errorf("httpLookup: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil, fmt.Errorf("httpLookup: server returned status %d", resp.StatusCode)
+	}
+
+	var parsed credentialCheckResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return false, nil, fmt.Errorf("httpLookup: decode response: %w", err)
+	}
+
+	if !parsed.OK {
+		reason := parsed.Reason
+		if reason == "" {
+			reason = "invalid_credentials"
+		}
+		return false, nil, fmt.Errorf("httpLookup: credential check failed: %s", reason)
+	}
+
+	claims := jwt.MapClaims(parsed.Claims)
+	if claims == nil {
+		claims = jwt.MapClaims{}
+	}
+	if parsed.NextStep != nil {
+		claims["next_step"] = *parsed.NextStep
+	}
+	return true, claims, nil
 }
 
 // computeSignature returns hex(hmac-sha256(secret, timestamp + "." + body)).
