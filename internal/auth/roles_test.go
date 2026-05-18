@@ -599,7 +599,7 @@ func TestScopeProvider_ChainOrdering_SecretBeforeHTTP(t *testing.T) {
 	// SecretLookup carrying a "bootstrap" subject
 	bootstrapSecret := v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "bootstrap-admin",
+			Name:        "bootstrap-admin",
 			Annotations: map[string]string{"kdex.dev/secret-type": "subject"},
 		},
 		Data: map[string][]byte{
