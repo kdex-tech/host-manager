@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -93,5 +96,34 @@ func TestNewHTTPLookup_InvalidTimeoutMS(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "timeout-ms") {
 		t.Errorf("error %q should mention 'timeout-ms'", err.Error())
+	}
+}
+
+func TestComputeSignature_Deterministic(t *testing.T) {
+	secret := []byte("12345678901234567890123456789012") // 32 bytes
+	body := []byte(`{"subject":"alice","password":"hunter2"}`)
+	timestamp := "1715000000000"
+
+	sig := computeSignature(secret, timestamp, body)
+
+	// Recompute independently to verify the format
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	want := hex.EncodeToString(mac.Sum(nil))
+
+	if sig != want {
+		t.Errorf("computeSignature = %q; want %q", sig, want)
+	}
+}
+
+func TestComputeSignature_DifferentSecretsDiffer(t *testing.T) {
+	body := []byte(`x`)
+	ts := "1"
+	a := computeSignature([]byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), ts, body)
+	b := computeSignature([]byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), ts, body)
+	if a == b {
+		t.Error("signatures should differ for different secrets")
 	}
 }

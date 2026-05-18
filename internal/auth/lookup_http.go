@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -66,4 +69,14 @@ func (hl *httpLookup) Type() string {
 // FindInternal is implemented in a subsequent task. Stub for now.
 func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {
 	return false, nil, errors.New("not implemented")
+}
+
+// computeSignature returns hex(hmac-sha256(secret, timestamp + "." + body)).
+// The format is mirrored by the credential-check function for verification.
+func computeSignature(secret []byte, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
 }
