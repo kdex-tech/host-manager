@@ -138,6 +138,17 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		},
 	}...)
 
+	// FUNCTION_SERVICE_ACCOUNT_NAME is set only when the CR opts in.
+	// knative-deployer applies it to the generated Knative Service's
+	// spec.template.spec.serviceAccountName, letting the runtime pod use
+	// a non-default KSA (e.g. for Workload Identity bindings).
+	if function.Spec.ServiceAccountName != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "FUNCTION_SERVICE_ACCOUNT_NAME",
+			Value: function.Spec.ServiceAccountName,
+		})
+	}
+
 	var forwardedEnvVars strings.Builder
 	sep := ""
 	for _, e := range env {
