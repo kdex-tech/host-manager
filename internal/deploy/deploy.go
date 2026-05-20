@@ -328,6 +328,23 @@ func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunct
 		},
 	}...)
 
+	// Forward the kpack-Build auto-recovery policy knobs to the
+	// observer's runtime (see kdex-knative-deployer cmd/retry.go).
+	// Optional on the CRD; observer falls back to compiled-in defaults
+	// (3 retries, 20m cooldown) when these env vars are unset.
+	if d.FaaSAdaptor.Observer.MaxBuildRetries != nil {
+		env = append(env, corev1.EnvVar{
+			Name:  "MAX_BUILD_RETRIES",
+			Value: fmt.Sprintf("%d", *d.FaaSAdaptor.Observer.MaxBuildRetries),
+		})
+	}
+	if d.FaaSAdaptor.Observer.RetryCooldown != nil {
+		env = append(env, corev1.EnvVar{
+			Name:  "RETRY_COOLDOWN",
+			Value: d.FaaSAdaptor.Observer.RetryCooldown.Duration.String(),
+		})
+	}
+
 	env = append(env, d.FaaSAdaptor.Observer.Env...)
 
 	cronJob = &batchv1.CronJob{
