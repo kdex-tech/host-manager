@@ -63,6 +63,45 @@ func (b *Builder) GetOrCreateKPackImage(
 			return err
 		}
 
+		// Forward pod-scheduling fields from the CR's Builder onto the
+		// kpack.io/Image's spec.build.{tolerations,nodeSelector,resources}.
+		// kpack passes these onto the per-Build Pod, letting CR authors
+		// land BUILD pods on tainted node pools (e.g. GKE Spot) and cap
+		// build-time CPU/memory for compile-heavy languages.
+		if len(b.Source.Builder.Tolerations) > 0 {
+			tols := make([]any, 0, len(b.Source.Builder.Tolerations))
+			for i := range b.Source.Builder.Tolerations {
+				m, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(&b.Source.Builder.Tolerations[i])
+				if convErr != nil {
+					return fmt.Errorf("convert builder.tolerations[%d]: %w", i, convErr)
+				}
+				tols = append(tols, m)
+			}
+			if err := unstructured.SetNestedSlice(kImage.Object, tols, "spec", "build", "tolerations"); err != nil {
+				return err
+			}
+		}
+
+		if len(b.Source.Builder.NodeSelector) > 0 {
+			ns := make(map[string]any, len(b.Source.Builder.NodeSelector))
+			for k, v := range b.Source.Builder.NodeSelector {
+				ns[k] = v
+			}
+			if err := unstructured.SetNestedMap(kImage.Object, ns, "spec", "build", "nodeSelector"); err != nil {
+				return err
+			}
+		}
+
+		if b.Source.Builder.Resources != nil {
+			res, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(b.Source.Builder.Resources)
+			if convErr != nil {
+				return fmt.Errorf("convert builder.resources: %w", convErr)
+			}
+			if err := unstructured.SetNestedMap(kImage.Object, res, "spec", "build", "resources"); err != nil {
+				return err
+			}
+		}
+
 		kImage.SetLabels(map[string]string{
 			"app":           "builder",
 			"function":      function.Name,

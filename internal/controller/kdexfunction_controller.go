@@ -297,6 +297,28 @@ func parseBuilderGenerator(s string) (builder, language string, err error) {
 	return builder, language, nil
 }
 
+// resolveDefaultBuilder looks up the FaaSAdaptor's DefaultBuilderGenerator
+// in the spec.Builders list and returns a Builder pointer suitable for
+// constructing a kpack Image. Used by handleSourceAvailable when the
+// source carries no inline Builder (the generator-mode happy path:
+// codegen Jobs populate function.Status.Source.{Repository,Revision,Path}
+// but not Builder). Returns an error if the default's name + language
+// doesn't match any Builder in faas.Builders, so the caller can fail
+// cleanly instead of nil-dereffing in build.GetOrCreateKPackImage.
+func resolveDefaultBuilder(faas *kdexv1alpha1.KDexFaaSAdaptorSpec) (*kdexv1alpha1.Builder, error) {
+	name, language, err := parseBuilderGenerator(faas.DefaultBuilderGenerator)
+	if err != nil {
+		return nil, err
+	}
+	for i := range faas.Builders {
+		b := &faas.Builders[i]
+		if b.Name == name && slices.Contains(b.Languages, language) {
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("no Builder named %q supporting language %q found in FaaSAdaptor.spec.builders (defaultBuilderGenerator=%q)", name, language, faas.DefaultBuilderGenerator)
+}
+
 func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 	log := logf.FromContext(hc.ctx)
 
@@ -648,6 +670,33 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			return ctrl.Result{}, err
 		}
 
+		// If the source carries no inline Builder, resolve it from the
+		// FaaSAdaptor's defaultBuilderGenerator. This is the
+		// generator-mode happy path: codegen Jobs set
+		// function.Status.Source.{Repository,Revision,Path} but not
+		// Builder, and the kpack-Image construction below derefs the
+		// Builder fields unconditionally. Resolving up front lets the
+		// caller see a clean degraded condition instead of a panic
+		// from build.GetOrCreateKPackImage.
+		sourceForBuild := *source
+		if sourceForBuild.Builder == nil {
+			resolved, err := resolveDefaultBuilder(&hc.faasAdaptorSpec)
+			if err != nil {
+				kdexv1alpha1.SetConditions(
+					&hc.function.Status.Conditions,
+					kdexv1alpha1.ConditionStatuses{
+						Degraded:    metav1.ConditionTrue,
+						Progressing: metav1.ConditionFalse,
+						Ready:       metav1.ConditionFalse,
+					},
+					kdexv1alpha1.ConditionReasonReconcileError,
+					err.Error(),
+				)
+				return ctrl.Result{}, err
+			}
+			sourceForBuild.Builder = resolved
+		}
+
 		// The build pod's ServiceAccount governs git-source clone and
 		// registry push credentials (via the SA's .secrets[] and
 		// imagePullSecrets[], or Workload Identity annotations). Honor
@@ -655,8 +704,8 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 		// back to host-manager's own SA so prior behavior is preserved
 		// for CRs that don't specify a build SA.
 		buildSA := hc.serviceAccount
-		if source.Builder != nil && source.Builder.ServiceAccountName != "" {
-			buildSA = source.Builder.ServiceAccountName
+		if sourceForBuild.Builder.ServiceAccountName != "" {
+			buildSA = sourceForBuild.Builder.ServiceAccountName
 		}
 
 		builder := build.Builder{
@@ -664,7 +713,7 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			ImageRegistry:  hc.host.Spec.Registries.ImageRegistry,
 			Scheme:         r.Scheme,
 			ServiceAccount: buildSA,
-			Source:         *source,
+			Source:         sourceForBuild,
 		}
 
 		op, imgUnstruct, err := builder.GetOrCreateKPackImage(hc.ctx, hc.function)
