@@ -2,7 +2,7 @@ module github.com/kdex-tech/host-manager
 
 go 1.26.0
 
-replace kdex.dev/crds => github.com/kdex-tech/kdex-crds v0.14.212
+replace kdex.dev/crds => github.com/kdex-tech/kdex-crds v0.14.213
 
 require (
 	aidanwoods.dev/go-paseto v1.6.0
@@ -33,7 +33,7 @@ require (
 	k8s.io/api v0.35.2
 	k8s.io/apimachinery v0.35.2
 	k8s.io/client-go v0.35.2
-	kdex.dev/crds v0.14.212
+	kdex.dev/crds v0.14.213
 	oras.land/oras-go/v2 v2.6.0
 	sigs.k8s.io/controller-runtime v0.23.1
 	sigs.k8s.io/gateway-api v1.5.0

@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -16,6 +17,33 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// resolveTolerations applies the REPLACE semantics documented in
+// kdex-crds#7: the per-function spec override (if non-empty) replaces
+// the FaaSAdaptor.Deployer default; an empty result means "emit no
+// FUNCTION_TOLERATIONS env var and let knative-deployer leave the
+// Knative Service podspec unchanged."
+func resolveTolerations(
+	function *kdexv1alpha1.KDexFunction,
+	faas kdexv1alpha1.KDexFaaSAdaptorSpec,
+) []corev1.Toleration {
+	if len(function.Spec.Tolerations) > 0 {
+		return function.Spec.Tolerations
+	}
+	return faas.Deployer.Tolerations
+}
+
+// resolveNodeSelector is the NodeSelector counterpart of
+// resolveTolerations, with the same REPLACE semantics.
+func resolveNodeSelector(
+	function *kdexv1alpha1.KDexFunction,
+	faas kdexv1alpha1.KDexFaaSAdaptorSpec,
+) map[string]string {
+	if len(function.Spec.NodeSelector) > 0 {
+		return function.Spec.NodeSelector
+	}
+	return faas.Deployer.NodeSelector
+}
 
 type Deployer struct {
 	Client           client.Client
@@ -146,6 +174,35 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		env = append(env, corev1.EnvVar{
 			Name:  "FUNCTION_SERVICE_ACCOUNT_NAME",
 			Value: function.Spec.ServiceAccountName,
+		})
+	}
+
+	// FUNCTION_TOLERATIONS / FUNCTION_NODE_SELECTOR forward runtime-pod
+	// scheduling onto the deployer Job. knative-deployer (v0.1.11+)
+	// JSON-decodes them and sets the Knative Service's
+	// spec.template.spec.{tolerations,nodeSelector} so function pods
+	// can land on a tainted node pool (e.g. arm64 spot). REPLACE
+	// resolution: per-function override (KDexFunctionSpec.{...}) wins
+	// over the FaaSAdaptor.Deployer default; empty wins are no-ops
+	// (the env var is omitted, deployer keeps the prior podspec).
+	if tols := resolveTolerations(function, d.FaaSAdaptor); len(tols) > 0 {
+		body, err := json.Marshal(tols)
+		if err != nil {
+			return nil, fmt.Errorf("marshal function tolerations: %w", err)
+		}
+		env = append(env, corev1.EnvVar{
+			Name:  "FUNCTION_TOLERATIONS",
+			Value: string(body),
+		})
+	}
+	if ns := resolveNodeSelector(function, d.FaaSAdaptor); len(ns) > 0 {
+		body, err := json.Marshal(ns)
+		if err != nil {
+			return nil, fmt.Errorf("marshal function nodeSelector: %w", err)
+		}
+		env = append(env, corev1.EnvVar{
+			Name:  "FUNCTION_NODE_SELECTOR",
+			Value: string(body),
 		})
 	}
 
