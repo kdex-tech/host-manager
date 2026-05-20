@@ -648,11 +648,22 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			return ctrl.Result{}, err
 		}
 
+		// The build pod's ServiceAccount governs git-source clone and
+		// registry push credentials (via the SA's .secrets[] and
+		// imagePullSecrets[], or Workload Identity annotations). Honor
+		// spec.origin.source.builder.serviceAccountName when set; fall
+		// back to host-manager's own SA so prior behavior is preserved
+		// for CRs that don't specify a build SA.
+		buildSA := hc.serviceAccount
+		if source.Builder != nil && source.Builder.ServiceAccountName != "" {
+			buildSA = source.Builder.ServiceAccountName
+		}
+
 		builder := build.Builder{
 			Client:         r.Client,
 			ImageRegistry:  hc.host.Spec.Registries.ImageRegistry,
 			Scheme:         r.Scheme,
-			ServiceAccount: hc.serviceAccount,
+			ServiceAccount: buildSA,
 			Source:         *source,
 		}
 
