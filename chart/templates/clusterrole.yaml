@@ -179,4 +179,24 @@ rules:
   - patch
   - update
   - watch
+# The deployer Job spawned by handleExecutableAvailable runs as this
+# same SA (internal/deploy/deploy.go sets Spec.ServiceAccountName to
+# d.ServiceAccount) and applies a serving.knative.dev/Service via
+# kdex-knative-deployer's runDeploy. Without these verbs the Job's
+# pod crash-loops with "services.serving.knative.dev <name> is
+# forbidden: User <sa> cannot patch resource services in API group
+# serving.knative.dev". Observer Job (runObserve) reads the same
+# resource to track Ready status.
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 {{- end -}}

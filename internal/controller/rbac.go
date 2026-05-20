@@ -50,3 +50,4 @@ package controller
 // +kubebuilder:rbac:groups=kpack.io,resources=images/finalizers,                       verbs=update
 // +kubebuilder:rbac:groups=kpack.io,resources=images/status,                           verbs=get;update;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,                      verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=services,                     verbs=get;list;watch;create;update;patch;delete

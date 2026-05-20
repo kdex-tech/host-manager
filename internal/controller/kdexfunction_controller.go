@@ -347,6 +347,11 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 	log := logf.FromContext(hc.ctx)
 
 	if hc.function.Spec.Origin.Executable != nil {
+		// Populate Status.Executable at the same point we transition
+		// state, so the invariant "state=ExecutableAvailable ⇒
+		// status.executable != nil" holds for downstream handlers.
+		// Deploy() depends on this in handleExecutableAvailable.
+		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateExecutableAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	} else if hc.function.Spec.Origin.Source != nil {
@@ -427,6 +432,9 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 	log := logf.FromContext(hc.ctx)
 
 	if hc.function.Spec.Origin.Executable != nil {
+		// Pair Status.Executable with the state transition — see
+		// handleOpenAPIValid for the rationale.
+		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateExecutableAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}

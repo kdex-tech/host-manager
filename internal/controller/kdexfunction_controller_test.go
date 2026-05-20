@@ -812,6 +812,16 @@ var _ = Describe("KDexFunction Controller", func() {
 				err := k8sClient.Get(ctx, client.ObjectKey{Name: resource.Name, Namespace: namespace}, fetched)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(fetched.Status.State).To(Equal(kdexv1alpha1.KDexFunctionStateExecutableAvailable))
+				// Regression: state=ExecutableAvailable must imply
+				// status.executable is populated so the deployer Job
+				// path (which reads Status.Executable, not Spec.Origin)
+				// can resolve the image. Bug filed as kdex-tech/
+				// host-manager#24 — handleOpenAPIValid + handleBuildValid
+				// used to short-circuit the state transition without
+				// copying Spec.Origin.Executable into Status.Executable.
+				g.Expect(fetched.Status.Executable).NotTo(BeNil(),
+					"Status.Executable must be populated when state=ExecutableAvailable")
+				g.Expect(fetched.Status.Executable.Image).To(Equal("foo"))
 			}, "10s", "1s").Should(Succeed())
 		})
 
