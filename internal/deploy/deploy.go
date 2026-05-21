@@ -120,15 +120,23 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	// have by default.
 	internalHost := fmt.Sprintf("http://%s.%s.svc.cluster.local:8090", d.Host.Name, d.Host.Namespace)
 
-	// Function audience: the cluster-local URL the runtime pod will be
-	// reachable at. The Knative Service we're about to create uses the
-	// function's name as the Service name and lives in the function's
-	// namespace, so the URL is deterministic. We can NOT use
-	// function.Status.URL here — that field is only populated after the
-	// deployer Job finishes (kdexfunction_controller.go:969), so on the
-	// first deploy AUDIENCE would resolve to "" and any function with
-	// JWT validation crashes on startup with "AUDIENCE environment
-	// variable is required for security".
+	// Function audience: equals the function's Knative cluster-local
+	// URL. The reverse proxy (host/proxy.go:47-54) creates a per-
+	// function Signer with audience=fn.Status.URL and uses it to mint
+	// the downscoped Function Access Token (FAT) it forwards to the
+	// function in the Authorization header. So the function MUST
+	// validate JWTs against its own URL — not the host's issuer URL
+	// (which is what the broader host-side validator uses for the
+	// upstream session cookie, not the per-function FAT).
+	//
+	// We can NOT use function.Status.URL here directly — that field
+	// is only populated after the deployer Job finishes
+	// (kdexfunction_controller.go:969), so on the first deploy
+	// AUDIENCE would resolve to "" and any function with JWT
+	// validation crashes with "AUDIENCE environment variable is
+	// required for security". The Knative Service we're about to
+	// create uses the function's name as the Service name and lives
+	// in the function's namespace, so the URL is deterministic:
 	audience := fmt.Sprintf("http://%s.%s.svc.cluster.local", function.Name, function.Namespace)
 
 	env := []corev1.EnvVar{}
