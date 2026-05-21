@@ -101,7 +101,24 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		return nil, err
 	}
 
+	// `issuer` is the externally-routable URL of the host, used as the
+	// `iss` claim in minted JWTs — function pods compare it against
+	// `token.iss` during validation, so it MUST match what the host's
+	// signer uses at mint time. Stays public because the JWT carries
+	// this value as-is.
 	issuer := fmt.Sprintf("%s://%s", d.Host.Spec.Routing.Scheme, d.Host.Spec.Routing.Domains[0])
+
+	// `internalHost` is the host's in-cluster Service URL — used for
+	// JWKS_URL and PKS_URL so the function pod fetches keys without
+	// leaving the cluster. The cnas-operator names the host's
+	// host-manager Service after the KDexHost.metadata.name in the
+	// host's namespace; webserver-bind-address defaults to :8090 (see
+	// host-manager/cmd/main.go). Going via the external URL works on
+	// permissive networks but (a) burns a public LB round-trip and
+	// (b) requires explicit egress NetworkPolicy allowance in
+	// strict-default-deny namespaces, which the function pod doesn't
+	// have by default.
+	internalHost := fmt.Sprintf("http://%s.%s.svc.cluster.local:8090", d.Host.Name, d.Host.Namespace)
 
 	// Function audience: the cluster-local URL the runtime pod will be
 	// reachable at. The Knative Service we're about to create uses the
@@ -169,11 +186,11 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		},
 		{
 			Name:  "JWKS_URL",
-			Value: issuer + "/.well-known/jwks.json",
+			Value: internalHost + "/.well-known/jwks.json",
 		},
 		{
 			Name:  "PKS_URL",
-			Value: issuer + "/.well-known/pks.json",
+			Value: internalHost + "/.well-known/pks.json",
 		},
 	}...)
 
