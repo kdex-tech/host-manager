@@ -103,6 +103,17 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 
 	issuer := fmt.Sprintf("%s://%s", d.Host.Spec.Routing.Scheme, d.Host.Spec.Routing.Domains[0])
 
+	// Function audience: the cluster-local URL the runtime pod will be
+	// reachable at. The Knative Service we're about to create uses the
+	// function's name as the Service name and lives in the function's
+	// namespace, so the URL is deterministic. We can NOT use
+	// function.Status.URL here — that field is only populated after the
+	// deployer Job finishes (kdexfunction_controller.go:969), so on the
+	// first deploy AUDIENCE would resolve to "" and any function with
+	// JWT validation crashes on startup with "AUDIENCE environment
+	// variable is required for security".
+	audience := fmt.Sprintf("http://%s.%s.svc.cluster.local", function.Name, function.Namespace)
+
 	env := []corev1.EnvVar{}
 
 	// Function environment variables
@@ -126,7 +137,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	env = append(env, []corev1.EnvVar{
 		{
 			Name:  "AUDIENCE",
-			Value: function.Status.URL,
+			Value: audience,
 		},
 		{
 			Name:  "FUNCTION_BASEPATH",
