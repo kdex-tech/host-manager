@@ -63,19 +63,21 @@ func (s *Signer) Sign(signingContext jwt.MapClaims) (string, error) {
 		return "", fmt.Errorf("failed to get subject from claims: %w", err)
 	}
 
-	aud, err := signingContext.GetAudience()
-	if err != nil {
-		// If aud is not a string array or string, or not present, we use default
-		aud = []string{s.audience}
-	} else if len(aud) == 0 {
-		aud = []string{s.audience}
-	}
+	// The signer's audience is the AUTHORITATIVE outbound aud: Sign is always
+	// called to re-issue a token for a SPECIFIC downstream target (the
+	// per-function FAT path in proxy.go), and re-using the inbound aud would
+	// make the issued token transferable to a different audience than the
+	// signer was configured for. Concretely: a user logs in at the host
+	// (aud=["https://<host>"]) and then calls a function; proxy.go builds a
+	// signer with audience=fn.Status.URL, but the previous logic reused the
+	// inbound host aud, so the function rejected the FAT with "token has
+	// invalid audience". Always use s.audience.
 
 	outboundClaims := jwt.MapClaims{
 		// registered claims
 		"sub": sub,
 		"iss": s.issuer,
-		"aud": aud,
+		"aud": []string{s.audience},
 		"exp": time.Now().Add(s.duration).Unix(),
 		"iat": time.Now().Unix(),
 		"jti": rand.Text(),
