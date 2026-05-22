@@ -293,23 +293,19 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 
 		imageDigest := terminationMessage
 
-		var importmap string
-		for _, containerStatus := range pod.Status.InitContainerStatuses {
-			if containerStatus.Name == "importmap-generator" && containerStatus.State.Terminated != nil {
-				importmap = containerStatus.State.Terminated.Message
-				break
-			}
-		}
-
-		if imageDigest == "" || importmap == "" {
-			// Job reported success but we can't find the outputs yet? Wait a bit.
+		if imageDigest == "" {
+			// Job reported success but we can't find the image digest yet? Wait a bit.
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
+		// The importmap is NOT stored on this resource any longer — it lives in
+		// the OCI artifact built by the packager Job as a layer with media type
+		// application/vnd.kdex.importmap+json. The KDexInternalHost reconciler
+		// pulls it from the image when reconciling, side-stepping the
+		// terminationMessage 4 KiB ceiling that bit us at scale.
 		ipr.Status.Attributes["image"] = fmt.Sprintf(
 			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
 		)
-		ipr.Status.Attributes["importmap"] = importmap
 	}
 
 	if err := r.cleanupJobs(ctx, &ipr); err != nil {
