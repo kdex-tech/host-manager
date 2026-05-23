@@ -1751,27 +1751,12 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 		return nil, "", true, ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	packagesImage := internalPackageReferences.Status.Attributes["image"]
-	internalHost.Status.Attributes["packages.image"] = packagesImage
+	internalHost.Status.Attributes["packages.image"] = internalPackageReferences.Status.Attributes["image"]
+	internalHost.Status.Attributes["packages.importmap"] = internalPackageReferences.Status.Attributes["importmap"]
 
-	// Pull the importmap from the OCI artifact layer (media type
-	// application/vnd.kdex.importmap+json) rather than the
-	// KDexInternalPackageReferences status attribute. The status
-	// attribute is populated from the importmap-generator init
-	// container's termination message, which Kubernetes caps at 4096
-	// bytes — fine for small importmaps but truncates the head once
-	// a host's package graph grows past a handful of bare-specifier
-	// entries. The artifact has no such limit and is the same source
-	// of truth the explicit-PackagesImage path uses above.
-	importMap, err := r.PullImportMap(ctx, packagesImage, secrets)
-	if err != nil {
-		return nil, "", true, ctrl.Result{}, fmt.Errorf("failed to pull importmap from %s: %w", packagesImage, err)
-	}
-	internalHost.Status.Attributes["packages.importmap"] = importMap
+	packagesBackend := r.createIPRBackend(internalHost, internalPackageReferences.Status.Attributes["image"])
 
-	packagesBackend := r.createIPRBackend(internalHost, packagesImage)
-
-	return &packagesBackend, importMap, false, ctrl.Result{}, nil
+	return &packagesBackend, internalPackageReferences.Status.Attributes["importmap"], false, ctrl.Result{}, nil
 }
 
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {
