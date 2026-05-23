@@ -17,8 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -26,7 +24,6 @@ import (
 	"io"
 	"maps"
 	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -1751,12 +1748,27 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 		return nil, "", true, ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	internalHost.Status.Attributes["packages.image"] = internalPackageReferences.Status.Attributes["image"]
-	internalHost.Status.Attributes["packages.importmap"] = internalPackageReferences.Status.Attributes["importmap"]
+	packagesImage := internalPackageReferences.Status.Attributes["image"]
+	internalHost.Status.Attributes["packages.image"] = packagesImage
 
-	packagesBackend := r.createIPRBackend(internalHost, internalPackageReferences.Status.Attributes["image"])
+	// Pull the importmap from the OCI artifact's importmap layer
+	// rather than the importmap-generator container's
+	// terminationMessage (which kubelet caps at 4096 bytes — see
+	// importmap_truncation_test.go for the reproducer). The packager
+	// already emits a dedicated importmap layer alongside the
+	// node_modules layer; PullImportMap delegates to
+	// FindImportmapInLayers which picks the smallest tar+gzip layer
+	// first and falls through on a missing importmap.json — both
+	// behaviours covered by importmap_select_test.go.
+	importMap, err := r.PullImportMap(ctx, packagesImage, secrets)
+	if err != nil {
+		return nil, "", true, ctrl.Result{}, fmt.Errorf("failed to pull importmap from %s: %w", packagesImage, err)
+	}
+	internalHost.Status.Attributes["packages.importmap"] = importMap
 
-	return &packagesBackend, internalPackageReferences.Status.Attributes["importmap"], false, ctrl.Result{}, nil
+	packagesBackend := r.createIPRBackend(internalHost, packagesImage)
+
+	return &packagesBackend, importMap, false, ctrl.Result{}, nil
 }
 
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {
@@ -1838,68 +1850,31 @@ func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef
 		return "", fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	// 3. Find our importmap layer
-	var layerDescriptor ocispec.Descriptor
-	for _, layer := range manifest.Layers {
-		// Accept both tar+gzip (the new correct format) and raw json (legacy/direct)
-		if layer.MediaType == "application/json" ||
-			layer.MediaType == "application/vnd.kdex.importmap+json" ||
-			layer.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip" {
-			layerDescriptor.MediaType = layer.MediaType
-			layerDescriptor.Digest = digest.Digest(layer.Digest)
-			layerDescriptor.Size = layer.Size
-			break
-		}
+	// Project the parsed manifest into the layer descriptors
+	// FindImportmapInLayers operates on, then defer to its tested
+	// selection algorithm (importmap_select.go).
+	layers := make([]ImportmapLayer, 0, len(manifest.Layers))
+	for _, l := range manifest.Layers {
+		layers = append(layers, ImportmapLayer{
+			MediaType: l.MediaType,
+			Digest:    digest.Digest(l.Digest),
+			Size:      l.Size,
+		})
 	}
 
-	if layerDescriptor.Digest == "" {
-		return "", fmt.Errorf("could not find importmap layer in image %s", imageRef)
+	fetch := func(ctx context.Context, l ImportmapLayer) (io.ReadCloser, error) {
+		return repo.Fetch(ctx, ocispec.Descriptor{
+			MediaType: l.MediaType,
+			Digest:    l.Digest,
+			Size:      l.Size,
+		})
 	}
 
-	// 4. Fetch the Blob
-	rc, err = repo.Fetch(ctx, layerDescriptor)
+	body, err := FindImportmapInLayers(ctx, layers, fetch)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch importmap blob: %w", err)
+		return "", fmt.Errorf("find importmap in %s: %w", imageRef, err)
 	}
-	defer func() { _ = rc.Close() }()
-
-	// If it's a tarball, we need to extract the json file
-	if strings.Contains(layerDescriptor.MediaType, "tar") {
-		gr, err := gzip.NewReader(rc)
-		if err != nil {
-			return "", fmt.Errorf("failed to create gzip reader: %w", err)
-		}
-		defer func() { _ = gr.Close() }()
-
-		tr := tar.NewReader(gr)
-		for {
-			header, err := tr.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return "", fmt.Errorf("failed to read tar: %w", err)
-			}
-			// Clean the path to handle potential './' prefixes or other variations
-			cleanName := path.Clean(header.Name)
-			if cleanName == "importmap.json" || strings.HasSuffix(cleanName, "/importmap.json") {
-				data, err := io.ReadAll(tr)
-				if err != nil {
-					return "", fmt.Errorf("failed to read file from tar: %w", err)
-				}
-				return string(data), nil
-			}
-		}
-		return "", fmt.Errorf("importmap.json not found in tarball layer")
-	}
-
-	// Otherwise, assume it's raw data
-	blobData, err := io.ReadAll(rc)
-	if err != nil {
-		return "", fmt.Errorf("failed to read importmap blob: %w", err)
-	}
-
-	return string(blobData), nil
+	return body, nil
 }
 
 func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.Secrets) remoteauth.Credential {
