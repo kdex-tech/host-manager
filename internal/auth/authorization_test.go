@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"testing"
+	"unsafe"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -415,4 +416,45 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthorizationChecker_ParseRequirements_RecoversFromCorruptedSlice
+// reproduces the {data=nil, len=1, cap=20} slice header observed in the
+// panic from kdex-tech/host-manager#26. A range over such a header
+// segfaults on the first iteration; the recover guard now turns that
+// into an empty ParsedRequirements instead of unwinding through
+// RebuildMux's RLock.
+func TestAuthorizationChecker_ParseRequirements_RecoversFromCorruptedSlice(t *testing.T) {
+	checker := NewAuthorizationChecker(nil, logr.Logger{})
+
+	// Forge the exact slice header from the issue's panic: data=nil,
+	// len=1, cap=20. unsafe.Slice validates ptr=nil/len>0 at runtime, so
+	// we reinterpret the slice header directly via unsafe.Pointer.
+	var corrupted []v1alpha1.SecurityRequirement
+	hdr := (*struct {
+		data unsafe.Pointer
+		len  int
+		cap  int
+	})(unsafe.Pointer(&corrupted))
+	hdr.data = nil
+	hdr.len = 1
+	hdr.cap = 20
+
+	assert.NotPanics(t, func() {
+		_ = checker.ParseRequirements(corrupted)
+	})
+}
+
+// TestAuthorizationChecker_ParseRequirements_NilAndEmpty pins the
+// happy-path nil/empty behavior so the recover guard added for #26
+// can't silently start masking real bugs on normal inputs.
+func TestAuthorizationChecker_ParseRequirements_NilAndEmpty(t *testing.T) {
+	checker := NewAuthorizationChecker(nil, logr.Logger{})
+
+	assert.NotPanics(t, func() {
+		_ = checker.ParseRequirements(nil)
+	})
+	assert.NotPanics(t, func() {
+		_ = checker.ParseRequirements([]v1alpha1.SecurityRequirement{})
+	})
 }

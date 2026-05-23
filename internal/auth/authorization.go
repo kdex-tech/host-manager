@@ -98,7 +98,21 @@ func (ac *AuthorizationChecker) ParseEntitlements(e entitlements.Entitlements) e
 	return ac.ec.ParseEntitlements(e)
 }
 
-func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+// ParseRequirements converts a CRD-shaped SecurityRequirement slice into the
+// entitlements package's Requirements form. It recovers from any panic
+// (e.g. a JSON-decoded or DeepCopy-corrupted slice header reaching the
+// range loop) and returns an empty ParsedRequirements rather than
+// propagating, because in callers like host.RebuildMux a panic here would
+// unwind through a non-deferred RLock and deadlock every subsequent
+// reconcile. See kdex-tech/host-manager#26.
+func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) (result entitlements.ParsedRequirements) {
+	defer func() {
+		if r := recover(); r != nil {
+			ac.log.Error(fmt.Errorf("%v", r), "recovered from panic in ParseRequirements; returning empty requirements", "len", len(kdexreqs))
+			result = ac.ec.ParseRequirements(entitlements.Requirements{})
+		}
+	}()
+
 	requirements := entitlements.Requirements{}
 	for _, v := range kdexreqs {
 		requirements = append(requirements, v)

@@ -302,24 +302,78 @@ func (hh *HostHandler) MetaToString(handler page.PageHandler, l language.Tag) st
 	return buffer.String()
 }
 
+// rebuildSnapshot carries the result of the RLock'd read phase of
+// RebuildMux into the Lock'd write phase. Splitting the two phases lets
+// each be wrapped in a single deferred unlock, so a panic in either half
+// (e.g. a malformed SecurityRequirements value reaching ParseRequirements)
+// releases its lock instead of orphaning a reader and deadlocking every
+// subsequent reconcile.
+type rebuildSnapshot struct {
+	mux              *http.ServeMux
+	newTranslations  *Translations
+	registeredPaths  map[string]ko.PathInfo
+	renderedPages    map[string]pageRender
+	functionHandlers []functionHandler
+	actualHandlers   map[string]*KDexFunctionHandler
+	// empty is true when there are no pages and no functions; the write
+	// phase only installs Translations/registeredPaths/Mux in that case,
+	// matching the prior early-return behavior.
+	empty bool
+}
+
 func (hh *HostHandler) RebuildMux() {
 	hh.log.V(3).Info("rebuilding mux")
-	hh.mu.RLock()
 
-	if hh.host == nil {
-		hh.mu.RUnlock()
+	snap, ok := hh.readForRebuild()
+	if !ok {
 		return
 	}
 
-	// copy fields that we need while under RLock
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+
+	if snap.empty {
+		hh.Translations = *snap.newTranslations
+		hh.registeredPaths = snap.registeredPaths
+		hh.Mux = snap.mux
+		return
+	}
+
+	for _, pr := range snap.renderedPages {
+		if err := hh.addHandlerAndRegister(snap.mux, pr, snap.registeredPaths, snap.newTranslations); err != nil {
+			hh.log.Error(err, "skipping")
+		}
+	}
+	for _, fh := range snap.functionHandlers {
+		// Register both the exact path and the prefix path (with trailing slash)
+		// to ensure all sub-paths are proxied correctly.
+		snap.mux.Handle(fh.basePath, fh.handler)
+		if !strings.HasSuffix(fh.basePath, "/") {
+			snap.mux.Handle(fh.basePath+"/", fh.handler)
+		}
+	}
+
+	hh.Translations = *snap.newTranslations
+	hh.registeredPaths = snap.registeredPaths
+	hh.functionHandlers = snap.actualHandlers
+	hh.Mux = snap.mux
+}
+
+func (hh *HostHandler) readForRebuild() (rebuildSnapshot, bool) {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
+	if hh.host == nil {
+		return rebuildSnapshot{}, false
+	}
+
 	defaultLanguageResource := hh.defaultLanguage
 	translationResources := maps.Clone(hh.translationResources)
 
 	newTranslations, err := NewTranslations(defaultLanguageResource, translationResources)
 	if err != nil {
 		hh.log.Error(err, "failed to rebuild translations")
-		hh.mu.RUnlock()
-		return
+		return rebuildSnapshot{}, false
 	}
 
 	registeredPaths := map[string]ko.PathInfo{}
@@ -332,15 +386,12 @@ func (hh *HostHandler) RebuildMux() {
 	if len(pageHandlers) == 0 && len(hh.functions) == 0 {
 		mux.HandleFunc("GET /{$}", hh.notReadyHandler)
 		mux.HandleFunc("GET /{l10n}/{$}", hh.notReadyHandler)
-
-		hh.mu.RUnlock()
-		hh.mu.Lock()
-		defer hh.mu.Unlock()
-		hh.Translations = *newTranslations
-		hh.registeredPaths = registeredPaths
-		hh.Mux = mux
-
-		return
+		return rebuildSnapshot{
+			mux:             mux,
+			newTranslations: newTranslations,
+			registeredPaths: registeredPaths,
+			empty:           true,
+		}, true
 	}
 
 	renderedPages := map[string]pageRender{}
@@ -380,29 +431,14 @@ func (hh *HostHandler) RebuildMux() {
 		}
 	}
 
-	hh.mu.RUnlock()
-	hh.mu.Lock()
-	defer hh.mu.Unlock()
-
-	for _, pr := range renderedPages {
-		err = hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations)
-		if err != nil {
-			hh.log.Error(err, "skipping")
-		}
-	}
-	for _, fh := range functionHandlers {
-		// Register both the exact path and the prefix path (with trailing slash)
-		// to ensure all sub-paths are proxied correctly.
-		mux.Handle(fh.basePath, fh.handler)
-		if !strings.HasSuffix(fh.basePath, "/") {
-			mux.Handle(fh.basePath+"/", fh.handler)
-		}
-	}
-
-	hh.Translations = *newTranslations
-	hh.registeredPaths = registeredPaths
-	hh.functionHandlers = actualHandlers
-	hh.Mux = mux
+	return rebuildSnapshot{
+		mux:              mux,
+		newTranslations:  newTranslations,
+		registeredPaths:  registeredPaths,
+		renderedPages:    renderedPages,
+		functionHandlers: functionHandlers,
+		actualHandlers:   actualHandlers,
+	}, true
 }
 
 func (hh *HostHandler) RemovePage(name string) {
