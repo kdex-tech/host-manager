@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -88,4 +89,46 @@ func TestProxy_KnativeFunction_PassesPathThrough(t *testing.T) {
 
 	got := runProxy(t, fn, "/v1/docs/find")
 	assert.Equal(t, "/v1/docs/find", got, "Knative path must be preserved")
+}
+
+func TestProxy_ServiceBacked_StripsBasePathAndPrependsBackendPath(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-knowdb", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/docs"},
+			Backend: &kdexv1alpha1.FunctionBackend{
+				Type:    kdexv1alpha1.FunctionBackendTypeService,
+				Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080), Path: "/api"},
+			},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{
+			URL: "http://knowdb.default.svc.cluster.local:8080/api",
+		},
+	}
+
+	// /v1/docs stripped, /api prepended -> /api/find
+	got := runProxy(t, fn, "/v1/docs/find")
+	assert.Equal(t, "/api/find", got)
+}
+
+func TestProxy_ServiceBacked_NoBackendPath_DefaultsToRoot(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-knowdb-root", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/docs"},
+			Backend: &kdexv1alpha1.FunctionBackend{
+				Type:    kdexv1alpha1.FunctionBackendTypeService,
+				Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080)},
+			},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{
+			URL: "http://knowdb.default.svc.cluster.local:8080/",
+		},
+	}
+
+	// /v1/docs stripped, / from backend defaults -> /find
+	got := runProxy(t, fn, "/v1/docs/find")
+	assert.Equal(t, "/find", got)
 }

@@ -71,9 +71,19 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			preq.Out.Host = target.Host // Essential for FaaS routing
 
 			// 2. Precise Path Joining
-			// Note: We do NOT strip the BasePath because KDex functions are
-			// implemented using the full paths defined in their OpenAPI spec.
-			preq.Out.URL.Path = path.Join(target.Path, preq.In.URL.Path)
+			// For Knative-deployed functions (no Backend), we preserve the full
+			// incoming path because the generated function code expects to see
+			// the BasePath. For Service-backed functions, the upstream service
+			// is unaware of the BasePath, so we strip it before prepending the
+			// backend's mount path.
+			upstreamPath := preq.In.URL.Path
+			if fn.Spec.Backend != nil {
+				upstreamPath = strings.TrimPrefix(upstreamPath, fn.Spec.API.BasePath)
+				if !strings.HasPrefix(upstreamPath, "/") {
+					upstreamPath = "/" + upstreamPath
+				}
+			}
+			preq.Out.URL.Path = path.Join(target.Path, upstreamPath)
 			if strings.HasSuffix(preq.In.URL.Path, "/") && !strings.HasSuffix(preq.Out.URL.Path, "/") {
 				preq.Out.URL.Path += "/"
 			}
