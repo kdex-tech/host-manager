@@ -1301,4 +1301,29 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))).To(BeTrue())
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("marks Ready=False with reason=NoEndpoints when no slice has ready endpoints", func() {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc-noeps", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 8080}},
+				Selector: map[string]string{"app": "x"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+		// Intentionally do not create an EndpointSlice.
+
+		fn := makeServiceBacked("fn-noeps", "svc-noeps", "")
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(Equal("NoEndpoints"))
+			g.Expect(fetched.Status.URL).To(BeEmpty())
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
