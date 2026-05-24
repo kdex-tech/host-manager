@@ -1214,4 +1214,91 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(fetched.Status.URL).To(BeEmpty())
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("resolves a named port to its numeric value in Status.URL", func() {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "knowdb-named", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "api", Port: 9090, TargetPort: intstr.FromInt(9090)}},
+				Selector: map[string]string{"app": "knowdb-named"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+
+		ready := true
+		es := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "knowdb-named-1",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "knowdb-named"},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.2"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+		}
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+
+		fn := &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-named", Namespace: namespace},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: focalHost},
+				API: kdexv1alpha1.API{
+					BasePath: "/v1/docs",
+					Paths:    map[string]kdexv1alpha1.PathItem{"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}}},
+				},
+				Backend: &kdexv1alpha1.FunctionBackend{
+					Type: kdexv1alpha1.FunctionBackendTypeService,
+					Service: &kdexv1alpha1.ServiceBackend{
+						Name: "knowdb-named",
+						Port: intstr.FromString("api"),
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			g.Expect(fetched.Status.URL).To(Equal("http://knowdb-named.default.svc.cluster.local:9090/"))
+		}, "10s", "500ms").Should(Succeed())
+	})
+
+	It("rejects an unknown named port with reason=InvalidPort", func() {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc-noname", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 80}},
+				Selector: map[string]string{"app": "x"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+
+		fn := &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-badport", Namespace: namespace},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: focalHost},
+				API: kdexv1alpha1.API{
+					BasePath: "/v1/docs",
+					Paths:    map[string]kdexv1alpha1.PathItem{"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}}},
+				},
+				Backend: &kdexv1alpha1.FunctionBackend{
+					Type: kdexv1alpha1.FunctionBackendTypeService,
+					Service: &kdexv1alpha1.ServiceBackend{
+						Name: "svc-noname",
+						Port: intstr.FromString("does-not-exist"),
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal("InvalidPort"))
+			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))).To(BeTrue())
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
