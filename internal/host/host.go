@@ -365,7 +365,11 @@ func (hh *HostHandler) RebuildMux() {
 
 	functionHandlers := []functionHandler{}
 	actualHandlers := map[string]*KDexFunctionHandler{}
-	if hh.issuerAddress() != "" {
+	// reverseProxyHandler dereferences hh.authConfig.ActivePair to construct
+	// the signing key for FAT minting; without a fully built authConfig the
+	// call panics. Skip the function loop entirely when auth isn't set up
+	// (envtest fixtures with empty spec.auth, or pre-SetHost startup).
+	if hh.issuerAddress() != "" && hh.authConfig != nil && hh.authConfig.ActivePair != nil {
 		for _, f := range hh.functions {
 			if f.Status.State != kdexv1alpha1.KDexFunctionStateReady {
 				continue

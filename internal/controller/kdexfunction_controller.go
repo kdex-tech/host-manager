@@ -34,12 +34,14 @@ import (
 	"github.com/kdex-tech/host-manager/internal/utils"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -93,6 +95,13 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if function.Status.Attributes == nil {
 		function.Status.Attributes = make(map[string]string)
 	}
+
+	// Dispatch by backend type. Service-backed functions bypass the FaaS
+	// build/deploy pipeline and resolve directly to an existing Service URL.
+	if function.Spec.Backend != nil {
+		return r.reconcileServiceBacked(ctx, &function)
+	}
+	// Origin path (existing build/deploy state machine) continues below.
 
 	// Defer status update
 	defer func() {
@@ -254,6 +263,136 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	log.V(1).Info("reconciled")
 
 	return ctrl.Result{}, nil
+}
+
+func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn *kdexv1alpha1.KDexFunction) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	svcRef := fn.Spec.Backend.Service
+	if svcRef == nil {
+		// CEL prevents this, but defend.
+		return ctrl.Result{}, nil
+	}
+	ns := svcRef.Namespace
+	if ns == "" {
+		ns = fn.Namespace
+	}
+
+	// 1. Resolve the Service.
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, client.ObjectKey{Name: svcRef.Name, Namespace: ns}, svc); err != nil {
+		if kerrors.IsNotFound(err) {
+			return r.markBackendUnready(ctx, fn, "ServiceNotFound", fmt.Sprintf("Service %s/%s not found", ns, svcRef.Name), true)
+		}
+		return ctrl.Result{}, err
+	}
+
+	// 2. Resolve port (numeric pass-through or named-port lookup).
+	port, ok := resolveServicePort(svc, svcRef.Port)
+	if !ok {
+		return r.markBackendUnready(ctx, fn, "InvalidPort", fmt.Sprintf("port %s not found in Service %s/%s", svcRef.Port.String(), ns, svcRef.Name), false)
+	}
+
+	// 3. Check endpoints.
+	hasReady, err := r.hasReadyEndpoint(ctx, ns, svcRef.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !hasReady {
+		return r.markBackendUnready(ctx, fn, "NoEndpoints", fmt.Sprintf("Service %s/%s has no ready endpoints", ns, svcRef.Name), true)
+	}
+
+	// 4. Build URL and mark Ready.
+	scheme := svcRef.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	path := svcRef.Path
+	if path == "" {
+		path = "/"
+	}
+	url := fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d%s", scheme, svcRef.Name, ns, port, path)
+
+	fn.Status.URL = url
+	fn.Status.State = kdexv1alpha1.KDexFunctionStateReady
+	fn.Status.ObservedGeneration = fn.Generation
+	meta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+		Type:    string(kdexv1alpha1.ConditionTypeReady),
+		Status:  metav1.ConditionTrue,
+		Reason:  "BackendResolved",
+		Message: fmt.Sprintf("Backend Service %s/%s resolved to %s", ns, svcRef.Name, url),
+	})
+	meta.RemoveStatusCondition(&fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
+	if err := r.Status().Update(ctx, fn); err != nil {
+		return ctrl.Result{}, err
+	}
+	log.Info("Service-backed function ready", "function", fn.Name, "url", url)
+	return ctrl.Result{}, nil
+}
+
+func resolveServicePort(svc *corev1.Service, ref intstr.IntOrString) (int32, bool) {
+	if ref.Type == intstr.Int {
+		return int32(ref.IntValue()), true
+	}
+	for _, p := range svc.Spec.Ports {
+		if p.Name == ref.StrVal {
+			return p.Port, true
+		}
+	}
+	return 0, false
+}
+
+func (r *KDexFunctionReconciler) hasReadyEndpoint(ctx context.Context, ns, svcName string) (bool, error) {
+	var slices discoveryv1.EndpointSliceList
+	if err := r.List(ctx, &slices,
+		client.InNamespace(ns),
+		client.MatchingLabels{discoveryv1.LabelServiceName: svcName},
+	); err != nil {
+		return false, err
+	}
+	for _, s := range slices.Items {
+		for _, ep := range s.Endpoints {
+			if ep.Conditions.Ready != nil && *ep.Conditions.Ready {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// markBackendUnready sets Ready=False with the given reason. If retainURL is
+// true, Status.URL is left as-is so the proxy keeps the route mounted
+// (transient drops yield 503s instead of 404s). If false, Status.URL is
+// cleared and State degrades back to OpenAPIValid.
+func (r *KDexFunctionReconciler) markBackendUnready(ctx context.Context, fn *kdexv1alpha1.KDexFunction, reason, msg string, retainURL bool) (ctrl.Result, error) {
+	meta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+		Type:    string(kdexv1alpha1.ConditionTypeReady),
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: msg,
+	})
+	if retainURL {
+		meta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+			Type:    string(kdexv1alpha1.ConditionTypeProgressing),
+			Status:  metav1.ConditionTrue,
+			Reason:  reason,
+			Message: msg,
+		})
+	} else {
+		fn.Status.URL = ""
+		fn.Status.State = kdexv1alpha1.KDexFunctionStateOpenAPIValid
+		meta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
+			Type:    string(kdexv1alpha1.ConditionTypeDegraded),
+			Status:  metav1.ConditionTrue,
+			Reason:  reason,
+			Message: msg,
+		})
+	}
+	fn.Status.ObservedGeneration = fn.Generation
+	if err := r.Status().Update(ctx, fn); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

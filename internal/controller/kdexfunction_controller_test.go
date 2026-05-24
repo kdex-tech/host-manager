@@ -7,14 +7,40 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// ensureFocalHost creates the focal KDexInternalHost so the function
+// reconciler can resolve hostRef. It uses addOrUpdateInternalHost with a
+// minimal valid KDexHostSpec (the Required fields on KDexHostSpec mean an
+// empty Spec is rejected at admission).
+func ensureFocalHost(ctx context.Context, ns, name string) {
+	addOrUpdateInternalHost(
+		ctx, k8sClient,
+		kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: kdexv1alpha1.KDexInternalHostSpec{
+				KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+					BrandName:    "KDex Tech",
+					DevMode:      true,
+					ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+					Organization: "KDex Tech Inc.",
+					Routing: kdexv1alpha1.Routing{
+						Domains: []string{"kdex.dev"},
+					},
+				},
+			},
+		},
+	)
+}
 
 var _ = Describe("KDexFunction Controller", func() {
 	Context("When reconciling a KDexFunction", func() {
@@ -1083,5 +1109,94 @@ var _ = Describe("KDexFunction CEL validation", func() {
 			}
 			Expect(k8sClient.Create(ctx, fn)).To(Succeed())
 		})
+	})
+})
+
+var _ = Describe("Service-backed KDexFunction", func() {
+	ctx := context.Background()
+
+	BeforeEach(func() {
+		// Ensure focalHost KDexInternalHost exists so the reconciler can find it.
+		ensureFocalHost(ctx, namespace, focalHost)
+	})
+
+	AfterEach(func() {
+		// cleanupResources doesn't know about Service/EndpointSlice — drain them
+		// here so backend objects don't leak into sibling Describe blocks.
+		Expect(k8sClient.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace(namespace))).To(Succeed())
+		Expect(k8sClient.DeleteAllOf(ctx, &discoveryv1.EndpointSlice{}, client.InNamespace(namespace))).To(Succeed())
+		Eventually(func(g Gomega) {
+			var svcs corev1.ServiceList
+			g.Expect(k8sClient.List(ctx, &svcs, client.InNamespace(namespace))).To(Succeed())
+			g.Expect(svcs.Items).To(HaveLen(0))
+			var slices discoveryv1.EndpointSliceList
+			g.Expect(k8sClient.List(ctx, &slices, client.InNamespace(namespace))).To(Succeed())
+			g.Expect(slices.Items).To(HaveLen(0))
+		}, "5s", "200ms").Should(Succeed())
+		cleanupResources(namespace)
+	})
+
+	makeServiceBacked := func(name string, svcName string, svcNs string) *kdexv1alpha1.KDexFunction {
+		return &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: focalHost},
+				API: kdexv1alpha1.API{
+					BasePath: "/v1/docs",
+					Paths: map[string]kdexv1alpha1.PathItem{
+						"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+					},
+				},
+				Backend: &kdexv1alpha1.FunctionBackend{
+					Type: kdexv1alpha1.FunctionBackendTypeService,
+					Service: &kdexv1alpha1.ServiceBackend{
+						Name:      svcName,
+						Namespace: svcNs,
+						Port:      intstr.FromInt(8080),
+						Scheme:    "http",
+						Path:      "/api",
+					},
+				},
+			},
+		}
+	}
+	_ = makeServiceBacked // used by future tests (C3+); referenced now for compile
+
+	It("becomes Ready when the Service and a ready endpoint exist", func() {
+		// Create the backend Service.
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "knowdb", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 8080, TargetPort: intstr.FromInt(8080)}},
+				Selector: map[string]string{"app": "knowdb"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+
+		// Create an EndpointSlice with one ready endpoint.
+		ready := true
+		es := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "knowdb-1",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "knowdb"},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.1"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+			Ports:       []discoveryv1.EndpointPort{{Name: ptr.To("http"), Port: ptr.To[int32](8080)}},
+		}
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+
+		// Create the KDexFunction.
+		fn := makeServiceBacked("fn-knowdb", "knowdb", "")
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			g.Expect(fetched.Status.State).To(Equal(kdexv1alpha1.KDexFunctionStateReady))
+			g.Expect(fetched.Status.URL).To(Equal("http://knowdb.default.svc.cluster.local:8080/api"))
+			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))).To(BeTrue())
+		}, "10s", "500ms").Should(Succeed())
 	})
 })
