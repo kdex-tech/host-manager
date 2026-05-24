@@ -301,7 +301,9 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, client.ObjectKey{Name: svcRef.Name, Namespace: ns}, svc); err != nil {
 		if kerrors.IsNotFound(err) {
-			return r.markBackendUnready(ctx, fn, "ServiceNotFound", fmt.Sprintf("Service %s/%s not found", ns, svcRef.Name), false /*hard: clear URL*/)
+			// ServiceNotFound is a hard failure: clear Status.URL so the
+			// host-handler tears down the route on the next refresh.
+			return r.markBackendUnready(ctx, fn, "ServiceNotFound", fmt.Sprintf("Service %s/%s not found", ns, svcRef.Name), false)
 		}
 		return ctrl.Result{}, err
 	}
@@ -367,14 +369,14 @@ func resolveServicePort(svc *corev1.Service, ref intstr.IntOrString) (int32, boo
 }
 
 func (r *KDexFunctionReconciler) hasReadyEndpoint(ctx context.Context, ns, svcName string) (bool, error) {
-	var slices discoveryv1.EndpointSliceList
-	if err := r.List(ctx, &slices,
+	var sliceList discoveryv1.EndpointSliceList
+	if err := r.List(ctx, &sliceList,
 		client.InNamespace(ns),
 		client.MatchingLabels{discoveryv1.LabelServiceName: svcName},
 	); err != nil {
 		return false, err
 	}
-	for _, s := range slices.Items {
+	for _, s := range sliceList.Items {
 		for _, ep := range s.Endpoints {
 			if ep.Conditions.Ready != nil && *ep.Conditions.Ready {
 				return true, nil
