@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"time"
 
 	"github.com/kdex-tech/host-manager/internal"
 	. "github.com/onsi/ginkgo/v2"
@@ -1446,10 +1445,6 @@ var _ = Describe("Service-backed KDexFunction", func() {
 		fetched.Status.Executable = &kdexv1alpha1.Executable{Image: "stale:image"}
 		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
 
-		// Brief pause to let any in-flight reconciles settle before we update the spec.
-		// This avoids a race condition where the reconciler updates status while we're updating the object.
-		time.Sleep(100 * time.Millisecond)
-
 		// Create the new backend Service and slice.
 		svc := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{Name: "switched-svc", Namespace: namespace},
@@ -1471,16 +1466,19 @@ var _ = Describe("Service-backed KDexFunction", func() {
 		}
 		Expect(k8sClient.Create(ctx, es)).To(Succeed())
 
-		// Switch spec: drop origin, set backend.
-		// Refetch to get the latest resourceVersion after the status update.
-		updated := &kdexv1alpha1.KDexFunction{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, updated)).To(Succeed())
-		updated.Spec.Origin = kdexv1alpha1.FunctionOrigin{} // empty; Origin is a value type, so we zero its subfields
-		updated.Spec.Backend = &kdexv1alpha1.FunctionBackend{
-			Type:    kdexv1alpha1.FunctionBackendTypeService,
-			Service: &kdexv1alpha1.ServiceBackend{Name: "switched-svc", Port: intstr.FromInt(8080)},
-		}
-		Expect(k8sClient.Update(ctx, updated)).To(Succeed())
+		// Switch spec: drop origin, set backend. The reconciler may concurrently bump
+		// the resourceVersion via its own status updates, so retry on conflict using
+		// Eventually instead of a fixed sleep.
+		Eventually(func(g Gomega) {
+			updated := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, updated)).NotTo(HaveOccurred())
+			updated.Spec.Origin = kdexv1alpha1.FunctionOrigin{} // empty; Origin is a value type, so we zero its subfields
+			updated.Spec.Backend = &kdexv1alpha1.FunctionBackend{
+				Type:    kdexv1alpha1.FunctionBackendTypeService,
+				Service: &kdexv1alpha1.ServiceBackend{Name: "switched-svc", Port: intstr.FromInt(8080)},
+			}
+			g.Expect(k8sClient.Update(ctx, updated)).NotTo(HaveOccurred())
+		}, "5s", "100ms").Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			final := &kdexv1alpha1.KDexFunction{}
