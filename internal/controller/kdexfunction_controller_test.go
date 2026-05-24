@@ -1440,10 +1440,13 @@ var _ = Describe("Service-backed KDexFunction", func() {
 		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
 
 		// Inject stale build status (mirroring what the Origin-based reconciler would set).
-		fetched := &kdexv1alpha1.KDexFunction{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).To(Succeed())
-		fetched.Status.Executable = &kdexv1alpha1.Executable{Image: "stale:image"}
-		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+		// The reconciler may race us on its own status updates, so retry on conflict.
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			fetched.Status.Executable = &kdexv1alpha1.Executable{Image: "stale:image"}
+			g.Expect(k8sClient.Status().Update(ctx, fetched)).NotTo(HaveOccurred())
+		}, "5s", "100ms").Should(Succeed())
 
 		// Create the new backend Service and slice.
 		svc := &corev1.Service{
