@@ -47,9 +47,28 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
+
+// BackendServiceIndexKey indexes KDexFunctions by the namespaced name of the
+// Service referenced in spec.backend.service. Used by Service/EndpointSlice
+// watches to enqueue dependent functions when a backend Service or its
+// EndpointSlices change.
+const BackendServiceIndexKey = "spec.backend.service.namespacedName"
+
+func backendServiceIndexer(o client.Object) []string {
+	fn, ok := o.(*kdexv1alpha1.KDexFunction)
+	if !ok || fn.Spec.Backend == nil || fn.Spec.Backend.Service == nil {
+		return nil
+	}
+	ns := fn.Spec.Backend.Service.Namespace
+	if ns == "" {
+		ns = fn.Namespace
+	}
+	return []string{ns + "/" + fn.Spec.Backend.Service.Name}
+}
 
 // KDexFunctionReconciler reconciles a KDexFunction object
 type KDexFunctionReconciler struct {
@@ -413,15 +432,66 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		builder = builder.Owns(kPackUn)
 	}
 
-	return builder.
+	// Index KDexFunctions by their backend Service ref so Service /
+	// EndpointSlice watches can map an event back to dependent functions
+	// in O(1). Indexer returns nil for non-Backend functions, so Origin
+	// functions don't show up in any lookup and don't get spurious
+	// enqueues.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&kdexv1alpha1.KDexFunction{},
+		BackendServiceIndexKey,
+		backendServiceIndexer,
+	); err != nil {
+		return err
+	}
+
+	mapServiceToFunctions := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		key := obj.GetNamespace() + "/" + obj.GetName()
+		var list kdexv1alpha1.KDexFunctionList
+		if err := r.List(ctx, &list, client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
+			return nil
+		}
+		reqs := make([]reconcile.Request, 0, len(list.Items))
+		for _, fn := range list.Items {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKey{Name: fn.Name, Namespace: fn.Namespace}})
+		}
+		return reqs
+	}
+
+	mapEndpointSliceToFunctions := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		es, ok := obj.(*discoveryv1.EndpointSlice)
+		if !ok {
+			return nil
+		}
+		svcName, ok := es.Labels[discoveryv1.LabelServiceName]
+		if !ok {
+			return nil
+		}
+		key := es.Namespace + "/" + svcName
+		var list kdexv1alpha1.KDexFunctionList
+		if err := r.List(ctx, &list, client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
+			return nil
+		}
+		reqs := make([]reconcile.Request, 0, len(list.Items))
+		for _, fn := range list.Items {
+			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKey{Name: fn.Name, Namespace: fn.Namespace}})
+		}
+		return reqs
+	}
+
+	builder = builder.
 		Watches(
 			&kdexv1alpha1.KDexInternalHost{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexFunction{}, &kdexv1alpha1.KDexFunctionList{}, "{.Spec.HostRef}")).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapServiceToFunctions)).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(mapEndpointSliceToFunctions)).
 		WithOptions(controller.TypedOptions[reconcile.Request]{
 			LogConstructor: LogConstructor("kdexfunction", mgr),
 		}).
-		Named("kdexfunction").
-		Complete(r)
+		Named("kdexfunction")
+
+	return builder.Complete(r)
 }
 
 // parseBuilderGenerator splits a FaaSAdaptor DefaultBuilderGenerator string
