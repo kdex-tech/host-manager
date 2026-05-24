@@ -1326,4 +1326,54 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(fetched.Status.URL).To(BeEmpty())
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("retains Status.URL when endpoints drop after the function is Ready", func() {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc-flap", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 8080}},
+				Selector: map[string]string{"app": "x"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+
+		ready := true
+		es := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "svc-flap-1",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "svc-flap"},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.3"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+		}
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+
+		fn := makeServiceBacked("fn-flap", "svc-flap", "")
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		// First become Ready.
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			g.Expect(fetched.Status.State).To(Equal(kdexv1alpha1.KDexFunctionStateReady))
+			g.Expect(fetched.Status.URL).NotTo(BeEmpty())
+		}, "10s", "500ms").Should(Succeed())
+
+		// Drop the endpoint to unready.
+		notReady := false
+		es.Endpoints[0].Conditions.Ready = &notReady
+		Expect(k8sClient.Update(ctx, es)).To(Succeed())
+
+		// URL stays; Ready flips False with reason=NoEndpoints.
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(Equal("NoEndpoints"))
+			g.Expect(fetched.Status.URL).NotTo(BeEmpty(), "URL must be retained on transient drop")
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
