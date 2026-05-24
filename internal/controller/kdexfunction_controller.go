@@ -332,6 +332,11 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 	}
 	url := fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d%s", scheme, svcRef.Name, ns, port, path)
 
+	// Clear stale build-pathway status fields when switching from origin -> backend.
+	fn.Status.Executable = nil
+	fn.Status.Generator = nil
+	fn.Status.Source = nil
+
 	fn.Status.URL = url
 	fn.Status.State = kdexv1alpha1.KDexFunctionStateReady
 	fn.Status.ObservedGeneration = fn.Generation

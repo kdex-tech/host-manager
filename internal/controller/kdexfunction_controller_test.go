@@ -1421,4 +1421,67 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))).To(BeTrue())
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("clears build-related status fields when spec switches from origin to backend", func() {
+		// Pre-seed a function with origin set and stale build status.
+		fn := &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-switch", Namespace: namespace},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: focalHost},
+				API: kdexv1alpha1.API{
+					BasePath: "/v1/docs",
+					Paths:    map[string]kdexv1alpha1.PathItem{"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}}},
+				},
+				Origin: kdexv1alpha1.FunctionOrigin{
+					Executable: &kdexv1alpha1.Executable{Image: "ghcr.io/example/initial:v1"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		// Inject stale build status (mirroring what the Origin-based reconciler would set).
+		fetched := &kdexv1alpha1.KDexFunction{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).To(Succeed())
+		fetched.Status.Executable = &kdexv1alpha1.Executable{Image: "stale:image"}
+		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+
+		// Create the new backend Service and slice.
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "switched-svc", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 8080}},
+				Selector: map[string]string{"app": "x"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+		ready := true
+		es := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "switched-svc-1",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "switched-svc"},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.5"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+		}
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+
+		// Switch spec: drop origin, set backend.
+		updated := &kdexv1alpha1.KDexFunction{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, updated)).To(Succeed())
+		updated.Spec.Origin = kdexv1alpha1.FunctionOrigin{} // empty; Origin is a value type, so we zero its subfields
+		updated.Spec.Backend = &kdexv1alpha1.FunctionBackend{
+			Type:    kdexv1alpha1.FunctionBackendTypeService,
+			Service: &kdexv1alpha1.ServiceBackend{Name: "switched-svc", Port: intstr.FromInt(8080)},
+		}
+		Expect(k8sClient.Update(ctx, updated)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			final := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, final)).NotTo(HaveOccurred())
+			g.Expect(final.Status.State).To(Equal(kdexv1alpha1.KDexFunctionStateReady))
+			g.Expect(final.Status.URL).To(Equal("http://switched-svc.default.svc.cluster.local:8080/"))
+			g.Expect(final.Status.Executable).To(BeNil(), "Executable must be cleared after switch to Service-backed")
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
