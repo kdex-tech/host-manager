@@ -1199,4 +1199,19 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))).To(BeTrue())
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("marks Ready=False with reason=ServiceNotFound when the Service does not exist", func() {
+		fn := makeServiceBacked("fn-missing", "ghost-svc", "")
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(Equal("ServiceNotFound"))
+			g.Expect(fetched.Status.URL).To(BeEmpty())
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
