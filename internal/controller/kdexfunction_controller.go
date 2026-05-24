@@ -301,7 +301,7 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, client.ObjectKey{Name: svcRef.Name, Namespace: ns}, svc); err != nil {
 		if kerrors.IsNotFound(err) {
-			return r.markBackendUnready(ctx, fn, "ServiceNotFound", fmt.Sprintf("Service %s/%s not found", ns, svcRef.Name), true)
+			return r.markBackendUnready(ctx, fn, "ServiceNotFound", fmt.Sprintf("Service %s/%s not found", ns, svcRef.Name), false /*hard: clear URL*/)
 		}
 		return ctrl.Result{}, err
 	}

@@ -1376,4 +1376,49 @@ var _ = Describe("Service-backed KDexFunction", func() {
 			g.Expect(fetched.Status.URL).NotTo(BeEmpty(), "URL must be retained on transient drop")
 		}, "10s", "500ms").Should(Succeed())
 	})
+
+	It("clears Status.URL when the Service is deleted after Ready", func() {
+		svc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "svc-delete", Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Ports:    []corev1.ServicePort{{Name: "http", Port: 8080}},
+				Selector: map[string]string{"app": "x"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+
+		ready := true
+		es := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "svc-delete-1",
+				Namespace: namespace,
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "svc-delete"},
+			},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Endpoints:   []discoveryv1.Endpoint{{Addresses: []string{"10.0.0.4"}, Conditions: discoveryv1.EndpointConditions{Ready: &ready}}},
+		}
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+
+		fn := makeServiceBacked("fn-delete", "svc-delete", "")
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			g.Expect(fetched.Status.URL).NotTo(BeEmpty())
+		}, "10s", "500ms").Should(Succeed())
+
+		Expect(k8sClient.Delete(ctx, svc)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, es)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			fetched := &kdexv1alpha1.KDexFunction{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fn.Name, Namespace: namespace}, fetched)).NotTo(HaveOccurred())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal("ServiceNotFound"))
+			g.Expect(fetched.Status.URL).To(BeEmpty(), "URL must be cleared on hard failure")
+			g.Expect(meta.IsStatusConditionTrue(fetched.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))).To(BeTrue())
+		}, "10s", "500ms").Should(Succeed())
+	})
 })
