@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -944,6 +945,145 @@ var _ = Describe("KDexFunction Controller", func() {
 				)
 				g.Expect(cond.Message).To(Equal("Reconciliation successful"))
 			}, "10s", "1s").Should(Succeed())
+		})
+	})
+})
+
+var _ = Describe("KDexFunction CEL validation", func() {
+	const namespace = "default"
+	const focalHost = "test-host"
+
+	Context("spec.backend admission", func() {
+		ctx := context.Background()
+
+		AfterEach(func() {
+			cleanupResources(namespace)
+		})
+
+		It("rejects a function with both origin and backend set", func() {
+			fn := &kdexv1alpha1.KDexFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fn-both",
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexFunctionSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					API: kdexv1alpha1.API{
+						BasePath: "/v1/docs",
+						Paths: map[string]kdexv1alpha1.PathItem{
+							"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+						},
+					},
+					Origin: kdexv1alpha1.FunctionOrigin{
+						Executable: &kdexv1alpha1.Executable{Image: "ghcr.io/example/fn:v1"},
+					},
+					Backend: &kdexv1alpha1.FunctionBackend{
+						Type:    kdexv1alpha1.FunctionBackendTypeService,
+						Service: &kdexv1alpha1.ServiceBackend{Name: "svc", Port: intstr.FromInt(80)},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, fn)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+		})
+
+		It("rejects backend type=Service without backend.service", func() {
+			fn := &kdexv1alpha1.KDexFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fn-missing-service",
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexFunctionSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					API: kdexv1alpha1.API{
+						BasePath: "/v1/docs",
+						Paths: map[string]kdexv1alpha1.PathItem{
+							"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+						},
+					},
+					Backend: &kdexv1alpha1.FunctionBackend{
+						Type: kdexv1alpha1.FunctionBackendTypeService,
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, fn)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("service is required when type is Service"))
+		})
+
+		It("rejects service.path without leading slash", func() {
+			fn := &kdexv1alpha1.KDexFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fn-bad-path",
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexFunctionSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					API: kdexv1alpha1.API{
+						BasePath: "/v1/docs",
+						Paths: map[string]kdexv1alpha1.PathItem{
+							"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+						},
+					},
+					Backend: &kdexv1alpha1.FunctionBackend{
+						Type: kdexv1alpha1.FunctionBackendTypeService,
+						Service: &kdexv1alpha1.ServiceBackend{
+							Name: "svc",
+							Port: intstr.FromInt(80),
+							Path: "api", // missing leading slash
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, fn)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("accepts a minimal Service-backed function", func() {
+			fn := &kdexv1alpha1.KDexFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fn-minimal",
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexFunctionSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					API: kdexv1alpha1.API{
+						BasePath: "/v1/docs",
+						Paths: map[string]kdexv1alpha1.PathItem{
+							"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+						},
+					},
+					Backend: &kdexv1alpha1.FunctionBackend{
+						Type:    kdexv1alpha1.FunctionBackendTypeService,
+						Service: &kdexv1alpha1.ServiceBackend{Name: "svc", Port: intstr.FromInt(80)},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+		})
+
+		It("accepts named-port service", func() {
+			fn := &kdexv1alpha1.KDexFunction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "fn-named-port",
+					Namespace: namespace,
+				},
+				Spec: kdexv1alpha1.KDexFunctionSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					API: kdexv1alpha1.API{
+						BasePath: "/v1/docs",
+						Paths: map[string]kdexv1alpha1.PathItem{
+							"/v1/docs/find": {Get: &runtime.RawExtension{Raw: []byte("{}")}},
+						},
+					},
+					Backend: &kdexv1alpha1.FunctionBackend{
+						Type:    kdexv1alpha1.FunctionBackendTypeService,
+						Service: &kdexv1alpha1.ServiceBackend{Name: "svc", Port: intstr.FromString("http")},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, fn)).To(Succeed())
 		})
 	})
 })
