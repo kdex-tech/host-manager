@@ -950,9 +950,6 @@ var _ = Describe("KDexFunction Controller", func() {
 })
 
 var _ = Describe("KDexFunction CEL validation", func() {
-	const namespace = "default"
-	const focalHost = "test-host"
-
 	Context("spec.backend admission", func() {
 		ctx := context.Background()
 
@@ -1038,6 +1035,7 @@ var _ = Describe("KDexFunction CEL validation", func() {
 			}
 			err := k8sClient.Create(ctx, fn)
 			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.backend.service.path"))
 		})
 
 		It("accepts a minimal Service-backed function", func() {
