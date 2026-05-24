@@ -218,7 +218,7 @@ func TestFindImportmapInLayers_TwoTarGzip_BigFirst_PrefersSmaller(t *testing.T) 
 	// only need the relative order to be unambiguous.)
 	bigJunk := strings.Repeat("/* node_modules junk */ ", 4096)
 	bigFiles := map[string]string{
-		"node_modules/react/index.js": bigJunk,
+		"node_modules/react/index.js":     bigJunk,
 		"node_modules/react-dom/index.js": bigJunk,
 		"importmap.json":                  `{"imports":{"WRONG":"BIG-layer copy"}}`,
 	}
