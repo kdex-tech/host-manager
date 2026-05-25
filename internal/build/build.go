@@ -63,6 +63,29 @@ func (b *Builder) GetOrCreateKPackImage(
 			return err
 		}
 
+		// Set spec.cache.volume.size explicitly so kpack's mutating webhook
+		// can't re-default it to "2G" on every reconcile. kpack's default is
+		// too small for typical Go/Rust dep trees, and once an operator
+		// bumps the underlying PVC up by hand (k8s forbids shrinking), our
+		// own strip-and-recreate of the spec lets the webhook re-default to
+		// the small value - which then errors every reconcile with "field
+		// can not be less than status.capacity". Explicit field wins over
+		// webhook default, breaking the loop. Cache field is optional on
+		// the CR; fall back to 10Gi (matches the chart-bundled
+		// KDexClusterFaaSAdaptor.builders[].cache.volumeSize default in
+		// kdex-knative-faas-adaptor v0.1.4+).
+		cacheSize := "10Gi"
+		if b.Source.Builder.Cache != nil {
+			cacheSize = b.Source.Builder.Cache.VolumeSize.String()
+		}
+		if err := unstructured.SetNestedMap(kImage.Object, map[string]any{
+			"volume": map[string]any{
+				"size": cacheSize,
+			},
+		}, "spec", "cache"); err != nil {
+			return err
+		}
+
 		// Forward pod-scheduling fields from the CR's Builder onto the
 		// kpack.io/Image's spec.build.{tolerations,nodeSelector,resources}.
 		// kpack passes these onto the per-Build Pod, letting CR authors
