@@ -141,22 +141,17 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 
 	env := []corev1.EnvVar{}
 
-	// Function environment variables
-	if len(function.Spec.Env) != 0 {
-		// {
-		// 	Name:  "ANONYMOUS_ENTITLEMENTS",
-		// 	Value: "", // TODO: make this configurable, set by Function
-		// },
-		// {
-		// 	Name:  "DEBUG",
-		// 	Value: "false", // TODO: make this configurable, set by Function
-		// },
-		// {
-		// 	Name:  "DEFAULT_SECURITY_SCHEME",
-		// 	Value: "bearer", // TODO: make this configurable, set by Function
-		// },
-		env = append(env, function.Spec.Env...)
-	}
+	// Function-author env from KDexFunction.spec.env is NOT spliced into
+	// the deployer Job's env block here - doing so would have the kubelet
+	// dereference any valueFrom.secretKeyRef into a plain env string at
+	// deployer-pod start, and the downstream knative-deployer would then
+	// emit those resolved values as plaintext .spec.containers[0].env[].value
+	// on the Knative Service, exposing secrets to anyone with `get revision`
+	// RBAC. Instead, the whole []corev1.EnvVar is JSON-marshaled into
+	// FUNCTION_USER_ENV below and passed through opaquely; knative-deployer
+	// v0.1.21+ unmarshals it back into the Knative Service template,
+	// preserving valueFrom.secretKeyRef so the runtime pod's kubelet does
+	// the secret resolution (the right boundary).
 
 	// Common environment variables
 	env = append(env, []corev1.EnvVar{
@@ -253,6 +248,28 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		Name:  "FORWARDED_ENV_VARS",
 		Value: forwardedEnvVars.String(),
 	})
+
+	// FUNCTION_USER_ENV carries function.Spec.Env opaquely to
+	// knative-deployer (which JSON-unmarshals it back into the Knative
+	// Service template). See the comment block where this used to splice
+	// directly into env above: forwarding via env+os.Getenv lost the
+	// valueFrom.secretKeyRef shape because the kubelet resolved it before
+	// the deployer's Go code saw it. Marshaling the []corev1.EnvVar
+	// through a JSON blob preserves the full struct (value, valueFrom.*,
+	// optional, etc.) so secret resolution happens at the runtime pod's
+	// kubelet, not on the Revision YAML. Empty Spec.Env emits "null" which
+	// the deployer treats as no-op; omit the env var entirely to keep
+	// behavior identical to pre-fix for functions without Spec.Env.
+	if len(function.Spec.Env) > 0 {
+		userEnvJSON, err := json.Marshal(function.Spec.Env)
+		if err != nil {
+			return nil, fmt.Errorf("marshal function user env: %w", err)
+		}
+		env = append(env, corev1.EnvVar{
+			Name:  "FUNCTION_USER_ENV",
+			Value: string(userEnvJSON),
+		})
+	}
 
 	// FaaS adaptor environment variables
 	env = append(env, d.FaaSAdaptor.Deployer.Env...)
