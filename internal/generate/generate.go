@@ -144,6 +144,20 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 			Value: internal.WORKDIR,
 		},
 	}
+
+	// When spec.origin.source.path is set, propagate it so git_checkout
+	// (kdex-cli-tools >= 0.3.13) writes into the developer's chosen
+	// layout rather than the canonical COMMIT_SUB_DIRECTORY/HOST/NAME
+	// convention. Preserves hand-authored cmd/custom.go + custom go.mod
+	// when source has been declared by the developer; the canonical
+	// convention is still used in pure codegen mode (origin.source nil).
+	if function.Spec.Origin.Source != nil && function.Spec.Origin.Source.Path != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "SOURCE_PATH",
+			Value: function.Spec.Origin.Source.Path,
+		})
+	}
+
 	volumeMounts := []corev1.VolumeMount{
 		{
 			Name:      internal.SHARED_VOLUME,
