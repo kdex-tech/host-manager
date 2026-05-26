@@ -535,6 +535,13 @@ func resolveDefaultBuilder(faas *kdexv1alpha1.KDexFaaSAdaptorSpec) (*kdexv1alpha
 	return nil, fmt.Errorf("no Builder named %q supporting language %q found in FaaSAdaptor.spec.builders (defaultBuilderGenerator=%q)", name, language, faas.DefaultBuilderGenerator)
 }
 
+// sourceRegenerate returns true when the function's origin.source asks
+// to re-run codegen on every reconcile. Default false: source is
+// treated as authoritative and codegen is skipped.
+func sourceRegenerate(s *kdexv1alpha1.Source) bool {
+	return s != nil && s.Regenerate != nil && *s.Regenerate
+}
+
 func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 	log := logf.FromContext(hc.ctx)
 
@@ -570,10 +577,14 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateExecutableAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-	} else if hc.function.Spec.Origin.Source != nil {
+	} else if hc.function.Spec.Origin.Source != nil && !sourceRegenerate(hc.function.Spec.Origin.Source) {
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateSourceAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
+
+	// When source.regenerate=true, fall through to generator resolution
+	// + BuildValid so the codegen Job runs. The Job ends with
+	// patch_source_status writing the result into function.Status.Source.
 
 	if hc.function.Spec.Origin.Generator != nil {
 		hc.function.Status.Generator = hc.function.Spec.Origin.Generator
@@ -655,7 +666,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	if hc.function.Spec.Origin.Source != nil {
+	if hc.function.Spec.Origin.Source != nil && !sourceRegenerate(hc.function.Spec.Origin.Source) {
 		hc.function.Status.Source = hc.function.Spec.Origin.Source
 	} else {
 		if hc.gitSecret == nil {
