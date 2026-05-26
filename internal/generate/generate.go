@@ -21,6 +21,7 @@ import (
 
 type Generator struct {
 	client.Client
+	CodegenResources corev1.ResourceRequirements
 	Config           kdexv1alpha1.Generator
 	GitSecret        corev1.LocalObjectReference
 	ImagePullSecrets []corev1.LocalObjectReference
@@ -222,6 +223,14 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 							Image:           g.Config.Image,
 							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 							VolumeMounts:    volumeMounts,
+							// CodegenResources overrides the namespace LimitRange default so
+							// `go mod tidy` survives heavy-dep function trees
+							// (cloudsqlconn + grpc + opentelemetry + pgx); defaults come
+							// from NexusConfiguration.Codegen.Resources (2Gi req / 4Gi
+							// limit), mirroring the kpack builder. Without this the
+							// LimitRange default OOM-kills the step — observed on
+							// user-service-admin codegen-10 (exit 137).
+							Resources: g.CodegenResources,
 						},
 						{
 							Name: "git-push",

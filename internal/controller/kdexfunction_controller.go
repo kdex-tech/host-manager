@@ -689,8 +689,9 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 		}
 
 		generator := generate.Generator{
-			Client: r.Client,
-			Config: *hc.function.Status.Generator,
+			Client:           r.Client,
+			CodegenResources: r.Configuration.Codegen.Resources,
+			Config:           *hc.function.Status.Generator,
 			GitSecret: corev1.LocalObjectReference{
 				Name: hc.gitSecret.Name,
 			},
