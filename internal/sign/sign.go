@@ -56,91 +56,93 @@ func NewSigner(
 	}, nil
 }
 
-// Sign creates a signed JWT derived from the inbound claims.
-func (s *Signer) Sign(signingContext jwt.MapClaims) (string, error) {
+// profileClaims is the OIDC profile-scope allow-list copied through from
+// signingContext to the signed token.
+var profileClaims = []string{
+	"birthdate",
+	"family_name",
+	"gender",
+	"given_name",
+	"locale",
+	"middle_name",
+	"name",
+	"nickname",
+	"picture",
+	"preferred_username",
+	"profile",
+	"updated_at",
+	"website",
+	"zoneinfo",
+}
+
+// Project derives the deterministic claim set that will be signed for a
+// given signingContext. iat/exp/jti are deliberately omitted: they identify
+// the token, not the identity, and putting them in the projection defeats
+// the caller's ability to use the projection as a cache key.
+//
+// The signer's audience is the AUTHORITATIVE outbound aud: Project is
+// always called to re-issue a token for a SPECIFIC downstream target (the
+// per-function FAT path in proxy.go), and re-using the inbound aud would
+// make the issued token transferable to a different audience than the
+// signer was configured for. Concretely: a user logs in at the host
+// (aud=["https://<host>"]) and then calls a function; proxy.go builds a
+// signer with audience=fn.Status.URL, but the previous logic reused the
+// inbound host aud, so the function rejected the FAT with "token has
+// invalid audience". Always use s.audience.
+func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	sub, err := signingContext.GetSubject()
 	if err != nil {
-		return "", fmt.Errorf("failed to get subject from claims: %w", err)
+		return nil, fmt.Errorf("failed to get subject from claims: %w", err)
 	}
 
-	// The signer's audience is the AUTHORITATIVE outbound aud: Sign is always
-	// called to re-issue a token for a SPECIFIC downstream target (the
-	// per-function FAT path in proxy.go), and re-using the inbound aud would
-	// make the issued token transferable to a different audience than the
-	// signer was configured for. Concretely: a user logs in at the host
-	// (aud=["https://<host>"]) and then calls a function; proxy.go builds a
-	// signer with audience=fn.Status.URL, but the previous logic reused the
-	// inbound host aud, so the function rejected the FAT with "token has
-	// invalid audience". Always use s.audience.
-
-	outboundClaims := jwt.MapClaims{
-		// registered claims
+	projected := jwt.MapClaims{
 		"sub": sub,
 		"iss": s.issuer,
 		"aud": []string{s.audience},
-		"exp": time.Now().Add(s.duration).Unix(),
-		"iat": time.Now().Unix(),
-		"jti": rand.Text(),
 	}
 
 	// custom claims
-
-	if email, ok := signingContext["email"]; ok {
-		outboundClaims["email"] = email
-	}
-
-	if entitlements, ok := signingContext["entitlements"]; ok {
-		outboundClaims["entitlements"] = entitlements
-	}
-
-	idp, hasIdp := signingContext["idp"]
-	if hasIdp {
-		outboundClaims["idp"] = idp
-	}
-
-	if roles, ok := signingContext["roles"]; ok {
-		outboundClaims["roles"] = roles
-	}
-
-	if scope, ok := signingContext["scope"]; ok {
-		outboundClaims["scope"] = scope
-	}
-
-	if grantType, ok := signingContext["grant_type"]; ok {
-		outboundClaims["grant_type"] = grantType
+	for _, claim := range []string{"email", "entitlements", "idp", "roles", "scope", "grant_type"} {
+		if val, ok := signingContext[claim]; ok {
+			projected[claim] = val
+		}
 	}
 
 	// profile claims
-	profileClaims := []string{
-		"birthdate",
-		"family_name",
-		"gender",
-		"given_name",
-		"locale",
-		"middle_name",
-		"name",
-		"nickname",
-		"picture",
-		"preferred_username",
-		"profile",
-		"updated_at",
-		"website",
-		"zoneinfo",
-	}
 	for _, claim := range profileClaims {
 		if val, ok := signingContext[claim]; ok {
-			outboundClaims[claim] = val
+			projected[claim] = val
 		}
 	}
 
 	if s.mapper != nil {
 		extra, err := s.mapper.Execute(signingContext)
 		if err != nil {
-			return "", fmt.Errorf("failed to map claims: %w", err)
+			return nil, fmt.Errorf("failed to map claims: %w", err)
 		}
 
-		maps.Copy(outboundClaims, extra)
+		maps.Copy(projected, extra)
 	}
+
+	return projected, nil
+}
+
+// SignProjected attaches the per-token identifiers (iat/exp/jti) to an
+// already-projected claim set and signs it. Use this in tandem with
+// Project when caching to skip the projection step on a cache hit.
+//
+// The projection has the LAST WORD on every field — including iat/exp/jti.
+// The original Sign emitted mapper output last via maps.Copy, and several
+// call sites depend on that semantic (e.g. dev-mode tests that inject
+// exp=-1 via a ClaimMappings rule to synthesize an expired token). Default
+// iat/exp/jti are written first, then maps.Copy(outboundClaims, projected)
+// overrides anything the projection already carries.
+func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
+	outboundClaims := make(jwt.MapClaims, len(projected)+3)
+	outboundClaims["exp"] = time.Now().Add(s.duration).Unix()
+	outboundClaims["iat"] = time.Now().Unix()
+	outboundClaims["jti"] = rand.Text()
+	maps.Copy(outboundClaims, projected)
 
 	var method jwt.SigningMethod
 
@@ -160,3 +162,21 @@ func (s *Signer) Sign(signingContext jwt.MapClaims) (string, error) {
 	token.Header["typ"] = "JWT"
 	return token.SignedString(*s.privateKey)
 }
+
+// Sign is a convenience wrapper that runs Project then SignProjected.
+// Direct callers that want to cache should call the two steps separately
+// so the cache key reflects the deterministic projection rather than the
+// raw inbound context (which routinely includes per-request headers like
+// Traceparent that defeat the cache).
+func (s *Signer) Sign(signingContext jwt.MapClaims) (string, error) {
+	projected, err := s.Project(signingContext)
+	if err != nil {
+		return "", err
+	}
+	return s.SignProjected(projected)
+}
+
+// Duration returns the lifetime each signed token is valid for. Cache
+// implementations should subtract a skew from this to ensure a cached
+// token always has meaningful remaining life on hit.
+func (s *Signer) Duration() time.Duration { return s.duration }

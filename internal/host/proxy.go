@@ -46,16 +46,18 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 	signer, err := sign.NewSigner(
 		fn.Status.URL,
-		5*time.Minute,
+		signerDuration,
 		issuer,
 		&hh.authConfig.ActivePair.Private,
 		hh.authConfig.ActivePair.KeyId,
 		mapper,
 	)
 
-	// Downscoped Function Access Token (FAT) Cache
+	// Downscoped Function Access Token (FAT) Cache. TTL is slightly less
+	// than the signer duration so a cache hit always yields a token with
+	// meaningful remaining life downstream — see fatCacheTTLSkew below.
 	tokenCache := hh.cacheManager.GetCache("token", cache.CacheOptions{
-		TTL:      new(5 * time.Minute),
+		TTL:      new(signerDuration - fatCacheTTLSkew),
 		Uncycled: true,
 	})
 
@@ -109,19 +111,30 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					authContext["headers"] = headers
 				}
 
-				tokenKey := fmt.Sprintf("%s-%s", fn.Name, utils.Hash(authContext))
-
-				if token, exists, isCurrent, _ := tokenCache.Get(preq.In.Context(), tokenKey); exists && isCurrent {
-					preq.Out.Header.Set("Authorization", "Bearer "+token)
+				// Cache key derived from the DETERMINISTIC PROJECTION of the
+				// authContext (what actually ends up in the signed JWT), not the
+				// raw authContext. The raw form carries per-request headers
+				// (Traceparent, X-Request-Id, If-None-Match, …) that invalidate
+				// the cache on every call in OTel-instrumented call paths. See
+				// kdex-tech/host-manager#37.
+				projected, err := signer.Project(jwt.MapClaims(authContext))
+				if err != nil {
+					log.Error(err, "failed to project claims")
 				} else {
-					token, err := signer.Sign(jwt.MapClaims(authContext))
-					if err != nil {
-						log.Error(err, "failed to sign token")
-					} else {
-						if err := tokenCache.Set(preq.In.Context(), tokenKey, token); err != nil {
-							log.Error(err, "failed to set token in cache")
-						}
+					tokenKey := fmt.Sprintf("%s-%s", fn.Name, utils.Hash(projected))
+
+					if token, exists, isCurrent, _ := tokenCache.Get(preq.In.Context(), tokenKey); exists && isCurrent {
 						preq.Out.Header.Set("Authorization", "Bearer "+token)
+					} else {
+						token, err := signer.SignProjected(projected)
+						if err != nil {
+							log.Error(err, "failed to sign token")
+						} else {
+							if err := tokenCache.Set(preq.In.Context(), tokenKey, token); err != nil {
+								log.Error(err, "failed to set token in cache")
+							}
+							preq.Out.Header.Set("Authorization", "Bearer "+token)
+						}
 					}
 				}
 			} else {
@@ -268,6 +281,16 @@ const (
 	defaultProxyResponseHeaderTimeout = 60 * time.Second
 	defaultProxyIdleConnTimeout       = 90 * time.Second
 	defaultProxyKeepAlive             = 30 * time.Second
+
+	// signerDuration is the lifetime of every minted FAT (Function Access
+	// Token). The signer attaches exp = iat + signerDuration to each token.
+	signerDuration = 5 * time.Minute
+
+	// fatCacheTTLSkew shrinks the cache entry's lifetime below the token's
+	// own exp so a cache hit always yields a token with at least this much
+	// remaining life. Without skew, an entry served right at TTL boundary
+	// would hand out a token that expires mid-request downstream.
+	fatCacheTTLSkew = 30 * time.Second
 )
 
 // newProxyTransport builds the http.Transport used by every KDexFunction

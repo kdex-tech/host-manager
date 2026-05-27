@@ -1,6 +1,9 @@
 package host
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"net/http"
@@ -183,4 +186,78 @@ func TestHostHandler_SetProxyTimeouts(t *testing.T) {
 
 	assert.Same(t, hh, got, "SetProxyTimeouts must return the receiver for chaining")
 	assert.Equal(t, want, hh.proxyTimeouts)
+}
+
+// TestProxy_FATCacheHitsWhenOnlyVolatileHeadersVary regression-tests #37.
+// Two authenticated requests with the SAME identity but DIFFERENT volatile
+// headers (Traceparent, X-Request-Id) must produce the SAME downstream
+// Authorization header — i.e., the cache hits on the second call. Pre-fix
+// (when the cache key hashed the full request headers) the cache missed
+// and the second call minted a fresh JWT with different iat/jti.
+func TestProxy_FATCacheHitsWhenOnlyVolatileHeadersVary(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+
+	// Upstream captures the Authorization header per call.
+	var seen []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-cache", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/cache"},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
+	}
+
+	// ECDSA P-256 — faster sign than the 2048-bit RSA used elsewhere, and
+	// matches the host-manager devMode keypair shape.
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	var signerKey crypto.Signer = priv
+
+	cacheManager, _ := cache.NewCacheManager("", "fat-cache-test", nil)
+	hh := &HostHandler{
+		log:          logr.Discard(),
+		cacheManager: cacheManager,
+		authConfig: &auth.Config{
+			ActivePair: &keys.KeyPair{
+				ActiveKey: true,
+				KeyId:     "test-kid",
+				Private:   signerKey,
+			},
+		},
+	}
+
+	handler := hh.reverseProxyHandler(fn, "https://test-host.example.com")
+
+	authedCtx := auth.SetAuthContext(t.Context(), auth.AuthContext{
+		"sub":          "user-42",
+		"entitlements": []string{"functions:cache:read"},
+		"roles":        []string{"reader"},
+	})
+
+	send := func(traceparent, requestID string) {
+		req := httptest.NewRequestWithContext(authedCtx, "GET", "/v1/cache/ping", nil)
+		req.Header.Set("Traceparent", traceparent)
+		req.Header.Set("X-Request-Id", requestID)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	send("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01", "req-1")
+	// Sleep so iat would shift if the second call re-signed (iat is seconds).
+	time.Sleep(1100 * time.Millisecond)
+	send("00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01", "req-2")
+
+	require.Len(t, seen, 2, "upstream must have received exactly two requests")
+	assert.NotEmpty(t, seen[0], "first call must have an Authorization header")
+	assert.Equal(t, seen[0], seen[1],
+		"cache must hit on the second call — volatile headers (Traceparent / X-Request-Id) "+
+			"must not invalidate the FAT cache key")
 }
