@@ -667,7 +667,14 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 	}
 
 	if hc.function.Spec.Origin.Source != nil && !sourceRegenerate(hc.function.Spec.Origin.Source) {
-		hc.function.Status.Source = hc.function.Spec.Origin.Source
+		// Don't clobber a codegen-resolved SHA in Status.Source. Once codegen
+		// has populated Status.Source.Revision with a concrete SHA, that SHA
+		// is the build pin (see handleSourceAvailable below) — overwriting
+		// it back to spec's branch ref would re-arm kpack's branch-polling
+		// loop. See kdex-tech/host-manager#38.
+		if hc.function.Status.Source == nil || hc.function.Status.Source.Revision == "" {
+			hc.function.Status.Source = hc.function.Spec.Origin.Source
+		}
 	} else {
 		if hc.gitSecret == nil {
 			err := fmt.Errorf(
@@ -882,9 +889,25 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 	if hc.function.Spec.Origin.Executable != nil {
 		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
 	} else {
-		source := hc.function.Status.Source
-		if hc.function.Spec.Origin.Source != nil {
-			source = hc.function.Spec.Origin.Source
+		// spec.origin.source carries intent (which branch to scaffold from,
+		// which builder/SA/tolerations to use). status.source carries the
+		// build pin — a concrete SHA captured by the codegen Job. When
+		// status.source.revision is populated, pin the build to it so kpack
+		// stops polling the branch HEAD and rebuilding on every unrelated
+		// monorepo push. See kdex-tech/host-manager#38.
+		var sourceCopy kdexv1alpha1.Source
+		hasSpec := hc.function.Spec.Origin.Source != nil
+		if hasSpec {
+			sourceCopy = *hc.function.Spec.Origin.Source
+		}
+		if hc.function.Status.Source != nil && hc.function.Status.Source.Revision != "" {
+			sourceCopy.Repository = hc.function.Status.Source.Repository
+			sourceCopy.Revision = hc.function.Status.Source.Revision
+			sourceCopy.Path = hc.function.Status.Source.Path
+		}
+		var source *kdexv1alpha1.Source
+		if hasSpec || (hc.function.Status.Source != nil && hc.function.Status.Source.Revision != "") {
+			source = &sourceCopy
 		}
 
 		if source == nil {
