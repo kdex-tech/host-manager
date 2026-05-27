@@ -15,7 +15,7 @@ type schemaEntry struct {
 }
 
 func (hh *HostHandler) SchemaGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+	if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 		return
 	}
 
@@ -89,7 +89,7 @@ func (hh *HostHandler) SchemaGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (hh *HostHandler) SchemaListGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+	if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 		return
 	}
 

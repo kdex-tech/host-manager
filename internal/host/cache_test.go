@@ -231,7 +231,7 @@ func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
 	// genuinely independent of Accept-Language (favicon, raw OpenAPI).
 	wPlain := httptest.NewRecorder()
 	rPlain := httptest.NewRequest("GET", "/-/openapi", nil)
-	hh.applyCachingHeaders(wPlain, rPlain, nil, lastModified)
+	hh.applyCachingHeaders(wPlain, rPlain, lastModified)
 	etagPlain := wPlain.Header().Get("ETag")
 	assert.NotEmpty(t, etagPlain)
 	assert.NotContains(t, etagPlain, "en-CA")

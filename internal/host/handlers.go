@@ -308,7 +308,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 
 	const oauth2path = "/.well-known/oauth-authorization-server"
 	mux.HandleFunc("GET "+oauth2path, func(w http.ResponseWriter, r *http.Request) {
-		if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+		if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 			return
 		}
 		issuer := hh.serverAddress(r)
@@ -350,7 +350,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 
 	const oidcPath = "/.well-known/openid-configuration"
 	mux.HandleFunc("GET "+oidcPath, func(w http.ResponseWriter, r *http.Request) {
-		if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+		if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 			return
 		}
 		issuer := hh.serverAddress(r)
@@ -394,7 +394,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 func (hh *HostHandler) faviconHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/favicon.ico"
 	mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
-		if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+		if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 			return
 		}
 		hh.favicon.FaviconHandler(w, r)
@@ -441,7 +441,7 @@ func (hh *HostHandler) jwksHandler(mux *http.ServeMux, registeredPaths map[strin
 
 	const path = "/.well-known/jwks.json"
 	mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
-		if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+		if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 			return
 		}
 		auth.JWKSHandler(hh.authConfig.KeyPairs)(w, r)

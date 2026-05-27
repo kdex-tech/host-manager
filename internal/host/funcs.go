@@ -33,18 +33,18 @@ func (hh *HostHandler) convertRequirements(in *[]kdexv1alpha1.SecurityRequiremen
 	return out
 }
 
-// applyCachingHeaders is a backwards-compat shim that omits both the
-// language and per-response seed from the ETag input. Use the
-// lang-aware variants for any endpoint whose response varies by
-// Accept-Language (page renders, navigation, /-/translation/{lng},
-// login utility page).
+// applyCachingHeaders is the convenience shim for public endpoints that
+// don't gate on auth-derived requirements and don't vary by
+// Accept-Language (favicon, raw OpenAPI, schemas). Lang-varying
+// endpoints (pages, navigation, /-/translation/{lng}, login utility,
+// announcement) MUST use applyCachingHeadersWithLang or
+// applyCachingHeadersWithSeed so the ETag varies per variant.
 func (hh *HostHandler) applyCachingHeaders(
 	w http.ResponseWriter,
 	r *http.Request,
-	requirements []kdexv1alpha1.SecurityRequirement,
 	lastModified time.Time,
 ) bool {
-	return hh.applyCachingHeadersWithLang(w, r, requirements, lastModified, "")
+	return hh.applyCachingHeadersWithLang(w, r, nil, lastModified, "")
 }
 
 // applyCachingHeadersWithLang folds the resolved Accept-Language tag into

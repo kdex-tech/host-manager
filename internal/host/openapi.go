@@ -8,7 +8,7 @@ import (
 )
 
 func (hh *HostHandler) OpenAPIGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
+	if hh.applyCachingHeaders(w, r, hh.reconcileTime) {
 		return
 	}
 
