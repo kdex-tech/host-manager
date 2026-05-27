@@ -1362,9 +1362,20 @@ var _ = Describe("Service-backed KDexFunction", func() {
 		Expect(k8sClient.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace(namespace))).To(Succeed())
 		Expect(k8sClient.DeleteAllOf(ctx, &discoveryv1.EndpointSlice{}, client.InNamespace(namespace))).To(Succeed())
 		Eventually(func(g Gomega) {
+			// Exclude envtest's auto-managed "kubernetes" Service in default
+			// namespace — the API-server bootstrap controller recreates it
+			// almost immediately on delete, so DeleteAllOf can't clear it.
+			// Only test-owned Services should remain absent.
 			var svcs corev1.ServiceList
 			g.Expect(k8sClient.List(ctx, &svcs, client.InNamespace(namespace))).To(Succeed())
-			g.Expect(svcs.Items).To(HaveLen(0))
+			testSvcs := make([]corev1.Service, 0, len(svcs.Items))
+			for _, s := range svcs.Items {
+				if s.Namespace == "default" && s.Name == "kubernetes" {
+					continue
+				}
+				testSvcs = append(testSvcs, s)
+			}
+			g.Expect(testSvcs).To(HaveLen(0))
 			var slices discoveryv1.EndpointSliceList
 			g.Expect(k8sClient.List(ctx, &slices, client.InNamespace(namespace))).To(Succeed())
 			g.Expect(slices.Items).To(HaveLen(0))
