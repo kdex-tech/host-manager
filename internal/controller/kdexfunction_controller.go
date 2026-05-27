@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -542,6 +544,32 @@ func sourceRegenerate(s *kdexv1alpha1.Source) bool {
 	return s != nil && s.Regenerate != nil && *s.Regenerate
 }
 
+// Attribute keys recorded on KDexFunction.Status.Attributes after a
+// successful codegen run. handleBuildValid edge-triggers re-codegen
+// when the live values differ from these recorded ones — letting users
+// edit spec.api without manually flipping spec.origin.source.regenerate.
+// See kdex-tech/host-manager#40.
+const (
+	AttrCodegenInputAPIHash   = "kdex.dev/codegen-input-api-hash"
+	AttrCodegenInputGenerator = "kdex.dev/codegen-input-generator"
+)
+
+// codegenInputAPIHash returns a stable SHA-256 (hex) over the function's
+// spec.api, used as the edge-trigger signal for re-running codegen. The
+// json.Marshal of API produces canonical map-key ordering so semantically
+// identical specs hash identically across reconciles.
+func codegenInputAPIHash(api kdexv1alpha1.API) string {
+	b, err := json.Marshal(api)
+	if err != nil {
+		// json.Marshal of a value-type struct cannot fail in practice;
+		// return empty so the caller treats "no recorded hash" semantics
+		// uniformly rather than spuriously triggering on a phantom mismatch.
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 	log := logf.FromContext(hc.ctx)
 
@@ -666,7 +694,30 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	if hc.function.Spec.Origin.Source != nil && !sourceRegenerate(hc.function.Spec.Origin.Source) {
+	// Edge-trigger codegen on spec.api / generator changes so users don't
+	// have to manually pulse spec.origin.source.regenerate. See
+	// kdex-tech/host-manager#40.
+	//
+	// edgeMode is true once a prior codegen has recorded the inputs it ran
+	// against — that's the signal that the function is codegen-managed.
+	// Brand-new functions where the user explicitly sets spec.origin.source
+	// with regenerate omitted have edgeMode=false → take today's "skip
+	// codegen" path. Force-override via regenerate=true continues to work.
+	currentAPIHash := codegenInputAPIHash(hc.function.Spec.API)
+	currentGenerator := ""
+	if hc.function.Status.Generator != nil {
+		currentGenerator = hc.function.Status.Generator.Image
+	}
+	observedAPIHash := hc.function.Status.Attributes[AttrCodegenInputAPIHash]
+	observedGenerator := hc.function.Status.Attributes[AttrCodegenInputGenerator]
+	edgeMode := observedAPIHash != ""
+	inputsChanged := currentAPIHash != observedAPIHash || currentGenerator != observedGenerator
+
+	skipCodegen := hc.function.Spec.Origin.Source != nil &&
+		!sourceRegenerate(hc.function.Spec.Origin.Source) &&
+		!(edgeMode && inputsChanged)
+
+	if skipCodegen {
 		// Don't clobber a codegen-resolved SHA in Status.Source. Once codegen
 		// has populated Status.Source.Revision with a concrete SHA, that SHA
 		// is the build pin (see handleSourceAvailable below) — overwriting
@@ -825,6 +876,17 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 				Repository: res.Repository,
 				Revision:   res.Revision,
 				Path:       res.Path,
+			}
+
+			// Record the inputs this codegen Job ran against so subsequent
+			// reconciles can edge-trigger on input changes without needing
+			// regenerate=true. See kdex-tech/host-manager#40.
+			if hc.function.Status.Attributes == nil {
+				hc.function.Status.Attributes = map[string]string{}
+			}
+			hc.function.Status.Attributes[AttrCodegenInputAPIHash] = codegenInputAPIHash(hc.function.Spec.API)
+			if hc.function.Status.Generator != nil {
+				hc.function.Status.Attributes[AttrCodegenInputGenerator] = hc.function.Status.Generator.Image
 			}
 
 			defaultBuilderName, defaultLanguage, err := parseBuilderGenerator(hc.faasAdaptorSpec.DefaultBuilderGenerator)
