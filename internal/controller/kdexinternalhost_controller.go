@@ -24,6 +24,7 @@ import (
 	"io"
 	"maps"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -377,18 +378,47 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, r.returnDegraged(&internalHost, fmt.Errorf("failed to list functions: %w", err))
 	}
 
+	// Sort functions by CreationTimestamp ASC so the earliest-created
+	// owner of any duplicated route path is the one that survives this
+	// reconcile. Later duplicates (typically sniffer-created stragglers
+	// from kdex-tech/host-manager#31) are logged and skipped instead of
+	// aborting the whole reconcile.
+	slices.SortStableFunc(functions.Items, func(a, b kdexv1alpha1.KDexFunction) int {
+		return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
+	})
+
+	// duplicatedFunctions is reported on the host status so operators can
+	// see which sniffer-created stragglers were skipped this reconcile,
+	// without losing the rest of the routing table to a single conflict.
+	// See kdex-tech/host-manager#31.
+	duplicatedFunctions := []string{}
 	for _, function := range functions.Items {
+		var conflicted string
 		for routePath := range function.Spec.API.Paths {
 			if seenPaths[routePath] {
-				err = fmt.Errorf(
-					"duplicated path %s, paths must be unique across backends and pages, obj: %s/%s, kind: %s",
-					routePath, function.Namespace, function.Name, "KDexFunction",
-				)
-
-				return ctrl.Result{}, r.returnDegraged(&internalHost, err)
+				conflicted = routePath
+				break
 			}
+		}
+		if conflicted != "" {
+			duplicatedFunctions = append(duplicatedFunctions, fmt.Sprintf("%s/%s (path %s)", function.Namespace, function.Name, conflicted))
+			log.Info(
+				"skipping function with duplicated path; earlier-created owner wins",
+				"namespace", function.Namespace,
+				"name", function.Name,
+				"path", conflicted,
+				"kind", "KDexFunction",
+			)
+			continue
+		}
+		for routePath := range function.Spec.API.Paths {
 			seenPaths[routePath] = true
 		}
+	}
+	if len(duplicatedFunctions) > 0 {
+		internalHost.Status.Attributes["duplicatedFunctions"] = strings.Join(duplicatedFunctions, ", ")
+	} else {
+		delete(internalHost.Status.Attributes, "duplicatedFunctions")
 	}
 
 	iprBackend, importMap, shouldReturn, r1, err := r.handleInternalPackageReferences(ctx, &internalHost, uniquePackageRefs, secrets)

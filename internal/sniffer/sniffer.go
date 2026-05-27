@@ -984,6 +984,26 @@ func (s *RequestSniffer) sniff(r *http.Request) (*kdexv1alpha1.KDexFunction, err
 		functionName = existing.Name
 	}
 
+	// Path-claim guard: matchExisting matches by basePath, so it misses the
+	// case where a DIFFERENT function (different basePath, e.g. broader prefix
+	// owned by a sibling function) declares the route path we're about to
+	// claim. Creating a duplicate here produces a "duplicated path X" error
+	// in KDexInternalHost.Reconcile that aborts every subsequent mux rebuild
+	// on this host, taking down all routing. See kdex-tech/host-manager#31.
+	if existing == nil {
+		for i := range s.Functions() {
+			fn := s.Functions()[i]
+			if _, claimed := fn.Spec.API.Paths[patternPath]; claimed {
+				return nil, nil
+			}
+			if patternPath != basePath {
+				if _, claimed := fn.Spec.API.Paths[basePath]; claimed {
+					return nil, nil
+				}
+			}
+		}
+	}
+
 	pathItems, schemas, err := s.parseRequestIntoAPI(r, functionName, patternPath, operationId)
 
 	if err != nil {
