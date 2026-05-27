@@ -570,6 +570,54 @@ func codegenInputAPIHash(api kdexv1alpha1.API) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// codegenInputsChanged reports edge-trigger state for handleBuildValid.
+// edgeMode is true once a prior codegen has recorded inputs (the function
+// is codegen-managed). changed is true when the current spec.api hash or
+// resolved generator image differs from the recorded one. Callers combine
+// with sourceRegenerate / Spec.Origin.Source nil-ness to decide whether
+// to enter the codegen branch.
+func codegenInputsChanged(fn *kdexv1alpha1.KDexFunction) (edgeMode, changed bool) {
+	currentAPIHash := codegenInputAPIHash(fn.Spec.API)
+	currentGenerator := ""
+	if fn.Status.Generator != nil {
+		currentGenerator = fn.Status.Generator.Image
+	}
+	observedAPIHash := fn.Status.Attributes[AttrCodegenInputAPIHash]
+	observedGenerator := fn.Status.Attributes[AttrCodegenInputGenerator]
+	edgeMode = observedAPIHash != ""
+	changed = currentAPIHash != observedAPIHash || currentGenerator != observedGenerator
+	return
+}
+
+// shouldSkipCodegen reports whether handleBuildValid can take the
+// "copy spec to status" fast path instead of running a codegen Job.
+// Skip when: user supplied spec.origin.source AND didn't request
+// force-regen AND (we've never recorded inputs OR recorded inputs
+// match current). See kdex-tech/host-manager#40.
+func shouldSkipCodegen(fn *kdexv1alpha1.KDexFunction) bool {
+	if fn.Spec.Origin.Source == nil {
+		return false
+	}
+	if sourceRegenerate(fn.Spec.Origin.Source) {
+		return false
+	}
+	edgeMode, inputsChanged := codegenInputsChanged(fn)
+	return !edgeMode || !inputsChanged
+}
+
+// recordCodegenInputs persists the inputs a just-completed codegen Job
+// ran against, so subsequent reconciles can edge-trigger on input
+// changes without needing regenerate=true. See kdex-tech/host-manager#40.
+func recordCodegenInputs(fn *kdexv1alpha1.KDexFunction) {
+	if fn.Status.Attributes == nil {
+		fn.Status.Attributes = map[string]string{}
+	}
+	fn.Status.Attributes[AttrCodegenInputAPIHash] = codegenInputAPIHash(fn.Spec.API)
+	if fn.Status.Generator != nil {
+		fn.Status.Attributes[AttrCodegenInputGenerator] = fn.Status.Generator.Image
+	}
+}
+
 func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 	log := logf.FromContext(hc.ctx)
 
@@ -697,27 +745,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 	// Edge-trigger codegen on spec.api / generator changes so users don't
 	// have to manually pulse spec.origin.source.regenerate. See
 	// kdex-tech/host-manager#40.
-	//
-	// edgeMode is true once a prior codegen has recorded the inputs it ran
-	// against — that's the signal that the function is codegen-managed.
-	// Brand-new functions where the user explicitly sets spec.origin.source
-	// with regenerate omitted have edgeMode=false → take today's "skip
-	// codegen" path. Force-override via regenerate=true continues to work.
-	currentAPIHash := codegenInputAPIHash(hc.function.Spec.API)
-	currentGenerator := ""
-	if hc.function.Status.Generator != nil {
-		currentGenerator = hc.function.Status.Generator.Image
-	}
-	observedAPIHash := hc.function.Status.Attributes[AttrCodegenInputAPIHash]
-	observedGenerator := hc.function.Status.Attributes[AttrCodegenInputGenerator]
-	edgeMode := observedAPIHash != ""
-	inputsChanged := currentAPIHash != observedAPIHash || currentGenerator != observedGenerator
-
-	skipCodegen := hc.function.Spec.Origin.Source != nil &&
-		!sourceRegenerate(hc.function.Spec.Origin.Source) &&
-		!(edgeMode && inputsChanged)
-
-	if skipCodegen {
+	if shouldSkipCodegen(hc.function) {
 		// Don't clobber a codegen-resolved SHA in Status.Source. Once codegen
 		// has populated Status.Source.Revision with a concrete SHA, that SHA
 		// is the build pin (see handleSourceAvailable below) — overwriting
@@ -877,17 +905,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 				Revision:   res.Revision,
 				Path:       res.Path,
 			}
-
-			// Record the inputs this codegen Job ran against so subsequent
-			// reconciles can edge-trigger on input changes without needing
-			// regenerate=true. See kdex-tech/host-manager#40.
-			if hc.function.Status.Attributes == nil {
-				hc.function.Status.Attributes = map[string]string{}
-			}
-			hc.function.Status.Attributes[AttrCodegenInputAPIHash] = codegenInputAPIHash(hc.function.Spec.API)
-			if hc.function.Status.Generator != nil {
-				hc.function.Status.Attributes[AttrCodegenInputGenerator] = hc.function.Status.Generator.Image
-			}
+			recordCodegenInputs(hc.function)
 
 			defaultBuilderName, defaultLanguage, err := parseBuilderGenerator(hc.faasAdaptorSpec.DefaultBuilderGenerator)
 			if err != nil {
