@@ -53,6 +53,15 @@ func (b *Builder) GetOrCreateKPackImage(
 			"additionalTags": []any{
 				fmt.Sprintf("%s/%s/%s:%d", b.ImageRegistry, function.Spec.HostRef.Name, function.Name, function.GetGeneration()),
 			},
+			// kpack's mutating webhook defaults both history limits to 10
+			// when unspecified, which retains the last 10 success + 10 failed
+			// Builds (and their Pods) per Image. With ~4 functions and
+			// codegen-driven churn during impl iteration that's ~80 stale
+			// Pods cluttering the namespace. 3+3 keeps one current + one
+			// previous + one for race, which is enough for forensic diff
+			// while cutting Build+Pod count by 70%.
+			"successBuildHistoryLimit": int64(3),
+			"failedBuildHistoryLimit":  int64(3),
 		}
 
 		if err := unstructured.SetNestedMap(kImage.Object, spec, "spec"); err != nil {

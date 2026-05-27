@@ -878,6 +878,18 @@ var _ = Describe("KDexFunction Controller", func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(found).To(BeTrue())
 				g.Expect(sa).To(Equal(customBuildSA))
+
+				// successBuildHistoryLimit + failedBuildHistoryLimit explicit
+				// so kpack's webhook can't re-default them to 10. See
+				// internal/build/build.go for the rationale.
+				success, found, err := unstructured.NestedInt64(kImage.Object, "spec", "successBuildHistoryLimit")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(BeTrue())
+				g.Expect(success).To(Equal(int64(3)))
+				failed, found, err := unstructured.NestedInt64(kImage.Object, "spec", "failedBuildHistoryLimit")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(found).To(BeTrue())
+				g.Expect(failed).To(Equal(int64(3)))
 			}, "10s", "1s").Should(Succeed())
 		})
 
