@@ -253,6 +253,19 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// Edge-trigger re-codegen on a Ready function when spec.api (or the
+	// resolved generator image) drifted from what the last codegen run
+	// recorded. Without this regression, handleReady never compares
+	// inputs — only handleBuildValid does — and a spec.api edit on an
+	// already-Ready function silently keeps serving the old image.
+	// Mirrors the kpack-SHA regression above. See kdex-tech/host-manager#41.
+	if function.Status.State == kdexv1alpha1.KDexFunctionStateReady &&
+		function.Spec.Origin.Source != nil &&
+		!shouldSkipCodegen(&function) {
+		log.Info("Codegen inputs changed on Ready function, re-reconciling from build valid")
+		function.Status.State = kdexv1alpha1.KDexFunctionStateBuildValid
+	}
+
 	switch function.Status.State {
 	case kdexv1alpha1.KDexFunctionStatePending:
 		return r.handlePending(hc), nil
