@@ -537,7 +537,12 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux := hh.Mux
 	hh.mu.RUnlock()
 
-	if hh.GetStatus() == HostStatusInitializing {
+	// While the host is initializing we still need to honor the contracts of
+	// system endpoints (`/.well-known/*`, `/-/*`, favicon): downstream
+	// consumers fetch JWKS, OIDC discovery, OAuth, etc. as part of pod
+	// startup and expect JSON, not the HTML announcement page. The
+	// announcement only applies to page paths. See kdex-tech/host-manager#33.
+	if hh.GetStatus() == HostStatusInitializing && !isSystemPath(r.URL.Path) {
 		hh.notReadyHandler(w, r)
 		return
 	}
@@ -850,4 +855,15 @@ func toFinalPath(path string) string {
 	}
 	path = path + "{$}"
 	return path
+}
+
+// isSystemPath reports whether p is served by a built-in host-manager handler
+// rather than a user-defined KDexPage / KDexFunction. System endpoints are
+// always-on contracts (JWKS for JWT validation, OIDC/OAuth discovery, login,
+// favicon, etc.) and must keep serving even when the host has no Ready pages.
+// See kdex-tech/host-manager#33.
+func isSystemPath(p string) bool {
+	return p == "/favicon.ico" ||
+		strings.HasPrefix(p, "/.well-known/") ||
+		strings.HasPrefix(p, "/-/")
 }

@@ -396,6 +396,12 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		Page:              &page.Spec,
 		RequiredBackends:  uniqueBackendRefs,
 		Scripts:           uniqueScriptDefs,
+		// Pass Status so PageHandler.Checksum (used to compose the page-render
+		// cache key) mixes in the reference generations the controller writes
+		// to Status.Attributes. Without this the cache key collapses to just
+		// "<name>::<lang>" and never invalidates on theme/header/footer/app
+		// changes.
+		Status: &page.Status,
 	})
 
 	kdexv1alpha1.SetConditions(

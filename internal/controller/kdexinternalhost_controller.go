@@ -57,6 +57,7 @@ import (
 	remoteauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -657,8 +658,14 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	}
 
-	builder := ctrl.NewControllerManagedBy(mgr).
-		For(&kdexv1alpha1.KDexInternalHost{}).
+	b := ctrl.NewControllerManagedBy(mgr).
+		// Filter status-only updates on the KIH itself so the reconciler's
+		// own Status().Update doesn't requeue itself. Generation changes on
+		// real user edits; status bumps don't. See kdex-tech/host-manager#34.
+		For(
+			&kdexv1alpha1.KDexInternalHost{},
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&kdexv1alpha1.KDexInternalPackageReferences{}).
@@ -673,10 +680,10 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	if ok {
-		builder = builder.Owns(&gatewayv1.HTTPRoute{})
+		b = b.Owns(&gatewayv1.HTTPRoute{})
 	}
 
-	return builder.
+	return b.
 		Watches(
 			&kdexv1alpha1.KDexFunction{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {

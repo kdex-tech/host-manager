@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
@@ -14,13 +16,50 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// wildcardSegmentRe matches Go 1.22 ServeMux pattern wildcards: `{name}` or
+// `{name...}`. Used by patternRegistered to derive a probe URL.
+var wildcardSegmentRe = regexp.MustCompile(`\{[^}]+\}`)
+
+// patternRegistered reports whether pattern (in `"METHOD /path"` form) is
+// already attached to mux. It synthesizes a probe URL that resolves to that
+// pattern and inspects mux.Handler's reply. Probe URLs replace each `{...}`
+// segment with a sentinel ("__kdex_probe__") unlikely to collide with any
+// concrete prefix already registered on the mux.
+func patternRegistered(mux *http.ServeMux, pattern string) bool {
+	method, path, ok := strings.Cut(pattern, " ")
+	if !ok {
+		return false
+	}
+	// Strip the {$} end-of-path anchor so the probe URL is a concrete path.
+	probe := strings.TrimSuffix(path, "{$}")
+	probe = wildcardSegmentRe.ReplaceAllString(probe, "__kdex_probe__")
+	if !strings.HasPrefix(probe, "/") {
+		probe = "/" + probe
+	}
+	req, err := http.NewRequest(method, probe, nil)
+	if err != nil {
+		return false
+	}
+	_, matched := mux.Handler(req)
+	return matched == pattern
+}
+
 func (hh *HostHandler) addHandlerAndRegister(
 	mux *http.ServeMux,
 	pr pageRender,
 	registeredPaths map[string]ko.PathInfo,
 	translations *Translations,
 ) (err error) {
-	finalPath := toFinalPath(pr.ph.BasePath())
+	// Snapshot basePath once so every downstream use (finalPath, probe checks,
+	// error messages) reads a consistent value, even if pr.ph's underlying
+	// KDexPageSpec pointer is concurrently swapped by a reconcile.
+	basePath := pr.ph.BasePath()
+	if basePath == "" {
+		hh.log.V(1).Info("page has empty basePath, skipping", "page", pr.ph.Name)
+		return nil
+	}
+
+	finalPath := toFinalPath(basePath)
 	label := pr.ph.Label()
 
 	handler := hh.pageHandlerFunc(pr.ph, translations)
@@ -81,26 +120,44 @@ func (hh *HostHandler) addHandlerAndRegister(
 		}, registeredPaths)
 	}
 
-	// capture any panics
-	// http.NewServeMux().HandleFunc panics if the pattern is invalid.
+	// Defensive idempotency: query the mux state directly before registering,
+	// so duplicate registrations are skipped cleanly instead of panicking
+	// through the recover below. The recover is kept as a safety net for
+	// genuinely invalid patterns (mux.HandleFunc also panics on those).
+	registerIfNew := func(pattern string) bool {
+		if patternRegistered(mux, pattern) {
+			hh.log.V(1).Info(
+				"pattern already registered, skipping",
+				"pattern", pattern, "page", pr.ph.Name, "basePath", basePath,
+			)
+			return false
+		}
+		mux.HandleFunc(pattern, handler)
+		return true
+	}
+
+	// capture any panics from invalid patterns
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("error registering %s: %v", pr.ph.BasePath(), r)
+			err = fmt.Errorf("error registering %s (final %s): %v", basePath, finalPath, r)
 		}
 	}()
 
-	mux.HandleFunc("GET "+finalPath, handler)
-	mux.HandleFunc("GET /{l10n}"+finalPath, handler)
+	if registerIfNew("GET " + finalPath) {
+		regFunc(finalPath, pr.ph.Name, label, false, false)
+	}
+	if registerIfNew("GET /{l10n}" + finalPath) {
+		regFunc("/{l10n}"+finalPath, pr.ph.Name, label, false, true)
+	}
 
-	regFunc(finalPath, pr.ph.Name, label, false, false)
-	regFunc("/{l10n}"+finalPath, pr.ph.Name, label, false, true)
-
-	if pr.ph.Page.PatternPath != "" {
-		mux.HandleFunc("GET "+pr.ph.Page.PatternPath, handler)
-		mux.HandleFunc("GET /{l10n}"+pr.ph.Page.PatternPath, handler)
-
-		regFunc(pr.ph.Page.PatternPath, pr.ph.Name, label, true, false)
-		regFunc("/{l10n}"+pr.ph.Page.PatternPath, pr.ph.Name, label, true, true)
+	if pr.ph.Page != nil && pr.ph.Page.PatternPath != "" {
+		patternPath := pr.ph.Page.PatternPath
+		if registerIfNew("GET " + patternPath) {
+			regFunc(patternPath, pr.ph.Name, label, true, false)
+		}
+		if registerIfNew("GET /{l10n}" + patternPath) {
+			regFunc("/{l10n}"+patternPath, pr.ph.Name, label, true, true)
+		}
 	}
 
 	return nil

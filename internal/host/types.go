@@ -32,7 +32,7 @@ const (
 	data-path-patternpath="%s"
 	data-path-state="/-/state"
 	data-path-separator="/-/"
-	data-path-translations="/-/translations/{l10n}"
+	data-path-translations="/-/translation/{l10n}"
 	/>
 	`
 )
