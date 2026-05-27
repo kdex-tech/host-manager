@@ -72,7 +72,11 @@ func (hh *HostHandler) pageHandlerFunc(
 				return
 			}
 		}
-		if hh.applyCachingHeadersWithLang(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String()) {
+		// Per-page seed: ph.Checksum() is sha256(ObservedGeneration +
+		// sorted Status.Attributes), so the ETag invalidates only when
+		// this specific KDexPage's observed state moved — not whenever
+		// any other CR triggered a host reconcile. See #44.
+		if hh.applyCachingHeadersWithSeed(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String(), ph.Checksum()) {
 			return
 		}
 

@@ -238,6 +238,66 @@ func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
 	assert.NotContains(t, etagPlain, "fr-CA")
 }
 
+func TestApplyCachingHeaders_ETagVariesByPageSeed(t *testing.T) {
+	// kdex-tech/host-manager#44: applyCachingHeadersWithSeed folds a
+	// per-response seed (page.Checksum() — sha256 over
+	// ObservedGeneration + sorted Status.Attributes) into the ETag input
+	// so each KDexPage's ETag invalidates only when ITS observed state
+	// moves rather than on every host reconcile (which bumps
+	// hh.reconcileTime cluster-wide for every CR apply).
+	log := logr.Discard()
+	cacheManager, _ := cache.NewCacheManager("", "foo", nil)
+	hh := NewHostHandler(nil, "test-host", "default", log, cacheManager)
+	hh.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "en",
+		BrandName:   "KDex",
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
+
+	lastModified := hh.reconcileTime
+	const lang = "en-CA"
+
+	wA := httptest.NewRecorder()
+	rA := httptest.NewRequest("GET", "/page-a", nil)
+	hh.applyCachingHeadersWithSeed(wA, rA, nil, lastModified, lang, "checksum-a")
+	etagA := wA.Header().Get("ETag")
+
+	wB := httptest.NewRecorder()
+	rB := httptest.NewRequest("GET", "/page-b", nil)
+	hh.applyCachingHeadersWithSeed(wB, rB, nil, lastModified, lang, "checksum-b")
+	etagB := wB.Header().Get("ETag")
+
+	wEmpty := httptest.NewRecorder()
+	rEmpty := httptest.NewRequest("GET", "/empty-seed", nil)
+	hh.applyCachingHeadersWithSeed(wEmpty, rEmpty, nil, lastModified, lang, "")
+	etagEmpty := wEmpty.Header().Get("ETag")
+
+	assert.NotEqual(t, etagA, etagB,
+		"two pages with different Checksum() seeds must produce distinct ETags — pre-fix every page shared the cluster-wide reconcileTime")
+	assert.Contains(t, etagA, "checksum-a", "ETag should encode the per-response seed")
+	assert.Contains(t, etagB, "checksum-b", "ETag should encode the per-response seed")
+	assert.NotEqual(t, etagA, etagEmpty,
+		"empty-seed ETag must differ from non-empty-seed ETag at the same lastModified+lang")
+
+	// If-None-Match with one page's ETag must NOT 304 a different page
+	// with a different seed — that's the observable symptom of the bug
+	// (one page's edit busting another page's cache, OR worse, two pages
+	// of different content sharing the same cached representation).
+	wCross := httptest.NewRecorder()
+	rCross := httptest.NewRequest("GET", "/page-b", nil)
+	rCross.Header.Set("If-None-Match", etagA)
+	completed := hh.applyCachingHeadersWithSeed(wCross, rCross, nil, lastModified, lang, "checksum-b")
+	assert.False(t, completed, "different-seed request must not be answered as 304 against another page's ETag")
+	assert.NotEqual(t, http.StatusNotModified, wCross.Code)
+
+	// Sanity: same seed + same lang + same lastModified still 304s.
+	wSame := httptest.NewRecorder()
+	rSame := httptest.NewRequest("GET", "/page-a", nil)
+	rSame.Header.Set("If-None-Match", etagA)
+	completed = hh.applyCachingHeadersWithSeed(wSame, rSame, nil, lastModified, lang, "checksum-a")
+	assert.True(t, completed, "same-seed request with matching ETag must 304")
+	assert.Equal(t, http.StatusNotModified, wSame.Code)
+}
+
 func TestSetHost_DoesNotEvictUncycledCache(t *testing.T) {
 	// Regression for kdex-tech/host-manager#42: SetHost used to invoke
 	// cacheManager.Cycle(checksum, true) with force=true, which silently

@@ -155,10 +155,11 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// applyCachingHeadersWithLang folds the language tag into the ETag
-	// so navigation renders for different Accept-Language values get
-	// distinct ETags. See kdex-tech/host-manager#43.
-	if hh.applyCachingHeadersWithLang(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String()) {
+	// applyCachingHeadersWithSeed folds language + per-page seed
+	// (#43, #44) so en-CA / fr-CA renders get distinct ETags AND each
+	// page's nav fragment invalidates only when its own observed state
+	// moves rather than on every host reconcile.
+	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), pageHandler.Checksum()) {
 		return
 	}
 
