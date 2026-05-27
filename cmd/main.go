@@ -92,6 +92,9 @@ func main() {
 	var metricsAddr string
 	var metricsCertKey, metricsCertName, metricsCertPath string
 	var probeAddr string
+	var proxyDialTimeout time.Duration
+	var proxyResponseHeaderTimeout time.Duration
+	var proxyIdleConnTimeout time.Duration
 	var secureMetrics bool
 	var tlsOpts []func(*tls.Config)
 	var webhookCertKey, webhookCertName, webhookCertPath string
@@ -109,6 +112,14 @@ func main() {
 	flag.StringVar(&serviceName, "service-name", "", "The name of the controller service so it can self configure an "+
 		"ingress/httproute with itself as backend.")
 	flag.StringVar(&webserverAddr, "webserver-bind-address", ":8090", "The address the webserver binds to.")
+
+	flag.DurationVar(&proxyDialTimeout, "proxy-dial-timeout", 5*time.Second,
+		"Connection-establishment timeout for the KDexFunction reverse-proxy transport.")
+	flag.DurationVar(&proxyResponseHeaderTimeout, "proxy-response-header-timeout", 60*time.Second,
+		"Wait for the backend's response headers before failing. Default covers a typical Knative "+
+			"scale-from-zero cold start (gRPC + cloudsqlconn + OTel); bump higher for heavier functions.")
+	flag.DurationVar(&proxyIdleConnTimeout, "proxy-idle-conn-timeout", 90*time.Second,
+		"How long an unused keep-alive connection lingers in the proxy transport's pool.")
 
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
@@ -287,7 +298,12 @@ func main() {
 		cacheManager, _ = cache.NewCacheManager("", "", nil)
 	}
 
-	hostHandler := host.NewHostHandler(mgr.GetClient(), focalHost, controllerNamespace, logger.WithName("host"), cacheManager)
+	hostHandler := host.NewHostHandler(mgr.GetClient(), focalHost, controllerNamespace, logger.WithName("host"), cacheManager).
+		SetProxyTimeouts(host.ProxyTimeouts{
+			DialTimeout:           proxyDialTimeout,
+			ResponseHeaderTimeout: proxyResponseHeaderTimeout,
+			IdleConnTimeout:       proxyIdleConnTimeout,
+		})
 	requeueDelay := time.Duration(requeueDelaySeconds) * time.Second
 
 	if err := (&controller.KDexInternalHostReconciler{

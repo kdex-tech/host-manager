@@ -46,6 +46,17 @@ extraVolumeMounts: []
 # host-manager specific config
 focalHost: ""
 
+# Reverse-proxy transport timeouts. Apply to every KDexFunction proxied
+# through this host-manager. responseHeaderTimeout is the knob that
+# matters for Knative scale-from-zero cold starts — the default covers
+# a typical Go function with cloudsqlconn + gRPC + OpenTelemetry deps;
+# bump it for heavier workloads. Set to "0" to fall back to the binary
+# defaults (5s dial / 60s response-header / 90s idle).
+proxy:
+  dialTimeout: 5s
+  responseHeaderTimeout: 60s
+  idleConnTimeout: 90s
+
 fullnameOverride: ""
 
 image:

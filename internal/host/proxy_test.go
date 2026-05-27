@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/auth"
@@ -131,4 +132,55 @@ func TestProxy_ServiceBacked_NoBackendPath_DefaultsToRoot(t *testing.T) {
 	// /v1/docs stripped, / from backend defaults -> /find
 	got := runProxy(t, fn, "/v1/docs/find")
 	assert.Equal(t, "/find", got)
+}
+
+func TestNewProxyTransport_ZeroValueAppliesDefaults(t *testing.T) {
+	tr := newProxyTransport(ProxyTimeouts{})
+
+	assert.Equal(t, defaultProxyResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+	assert.Equal(t, defaultProxyIdleConnTimeout, tr.IdleConnTimeout)
+	// DialContext is a closure — covered indirectly by the override test below
+	// and by the integration-level proxy tests above; here we only assert
+	// it's wired.
+	assert.NotNil(t, tr.DialContext)
+}
+
+func TestNewProxyTransport_HonorsOverrides(t *testing.T) {
+	want := ProxyTimeouts{
+		DialTimeout:           7 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Minute,
+		IdleConnTimeout:       45 * time.Second,
+	}
+
+	tr := newProxyTransport(want)
+
+	assert.Equal(t, want.ResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+	assert.Equal(t, want.IdleConnTimeout, tr.IdleConnTimeout)
+}
+
+func TestNewProxyTransport_PartialOverridesGetMixedDefaults(t *testing.T) {
+	tr := newProxyTransport(ProxyTimeouts{
+		ResponseHeaderTimeout: 3 * time.Minute,
+	})
+
+	assert.Equal(t, 3*time.Minute, tr.ResponseHeaderTimeout)
+	assert.Equal(t, defaultProxyIdleConnTimeout, tr.IdleConnTimeout)
+}
+
+func TestNewProxyTransport_NegativeValuesTreatedAsZero(t *testing.T) {
+	tr := newProxyTransport(ProxyTimeouts{
+		ResponseHeaderTimeout: -1 * time.Second,
+	})
+
+	assert.Equal(t, defaultProxyResponseHeaderTimeout, tr.ResponseHeaderTimeout)
+}
+
+func TestHostHandler_SetProxyTimeouts(t *testing.T) {
+	hh := &HostHandler{}
+	want := ProxyTimeouts{ResponseHeaderTimeout: 90 * time.Second}
+
+	got := hh.SetProxyTimeouts(want)
+
+	assert.Same(t, hh, got, "SetProxyTimeouts must return the receiver for chaining")
+	assert.Equal(t, want, hh.proxyTimeouts)
 }

@@ -37,6 +37,22 @@ const (
 	`
 )
 
+// ProxyTimeouts holds the http.Transport timeout knobs used when proxying
+// to KDexFunction backends. Zero-value fields fall back to defaults at
+// transport-construction time (see newProxyTransport in proxy.go), so
+// callers can leave any subset unset.
+type ProxyTimeouts struct {
+	// DialTimeout caps the connection-establishment phase (TCP + TLS).
+	DialTimeout time.Duration
+	// ResponseHeaderTimeout caps the wait between sending the request and
+	// receiving the first response byte from the backend. This is the knob
+	// that matters for scale-from-zero Knative cold starts.
+	ResponseHeaderTimeout time.Duration
+	// IdleConnTimeout caps how long an unused keep-alive connection lingers
+	// in the transport's pool before being closed.
+	IdleConnTimeout time.Duration
+}
+
 type HostHandler struct {
 	Mux          *http.ServeMux
 	Name         string
@@ -68,6 +84,7 @@ type HostHandler struct {
 	openapiBuilder            ko.Builder
 	packageReferences         []kdexv1alpha1.PackageReference
 	pathsCollectedInReconcile map[string]ko.PathInfo
+	proxyTimeouts             ProxyTimeouts
 	reconcileTime             time.Time
 	registeredPaths           map[string]ko.PathInfo
 	scheme                    string
@@ -134,6 +151,14 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 		hh.log.WithName("pages"),
 	)
 	hh.RebuildMux()
+	return hh
+}
+
+// SetProxyTimeouts replaces the HostHandler's proxy transport timeouts.
+// Method-chain return makes it composable with NewHostHandler. Zero-valued
+// fields fall back to defaults inside newProxyTransport.
+func (hh *HostHandler) SetProxyTimeouts(t ProxyTimeouts) *HostHandler {
+	hh.proxyTimeouts = t
 	return hh
 }
 

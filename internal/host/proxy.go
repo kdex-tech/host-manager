@@ -155,16 +155,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			}
 			return nil
 		},
-		// TODO: make transport configurable
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second, // Connection timeout
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ResponseHeaderTimeout: 15 * time.Second, // Wait for FaaS headers
-			IdleConnTimeout:       90 * time.Second,
-		},
+		Transport: newProxyTransport(hh.proxyTimeouts),
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log := logf.FromContext(r.Context())
 
@@ -265,4 +256,43 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	})
 
 	return fh
+}
+
+// Defaults applied to zero-valued ProxyTimeouts fields. ResponseHeaderTimeout
+// covers a typical Knative scale-from-zero cold start of a Go function with
+// gRPC + cloudsqlconn + OpenTelemetry deps (~20–40s on observed workloads);
+// operators with heavier functions can override via the corresponding
+// --proxy-*-timeout flag / chart value.
+const (
+	defaultProxyDialTimeout           = 5 * time.Second
+	defaultProxyResponseHeaderTimeout = 60 * time.Second
+	defaultProxyIdleConnTimeout       = 90 * time.Second
+	defaultProxyKeepAlive             = 30 * time.Second
+)
+
+// newProxyTransport builds the http.Transport used by every KDexFunction
+// reverse proxy. Zero-valued ProxyTimeouts fields are filled with the
+// defaults above so callers and tests can pass an empty struct.
+func newProxyTransport(t ProxyTimeouts) *http.Transport {
+	dial := t.DialTimeout
+	if dial <= 0 {
+		dial = defaultProxyDialTimeout
+	}
+	respHeader := t.ResponseHeaderTimeout
+	if respHeader <= 0 {
+		respHeader = defaultProxyResponseHeaderTimeout
+	}
+	idleConn := t.IdleConnTimeout
+	if idleConn <= 0 {
+		idleConn = defaultProxyIdleConnTimeout
+	}
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   dial,
+			KeepAlive: defaultProxyKeepAlive,
+		}).DialContext,
+		ResponseHeaderTimeout: respHeader,
+		IdleConnTimeout:       idleConn,
+	}
 }

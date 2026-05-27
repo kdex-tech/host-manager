@@ -39,6 +39,17 @@ spec:
             - --webserver-bind-address=:8090
             - --focal-host={{ .Values.focalHost }}
             - --service-name={{ include "host-manager.fullname" . }}
+            {{- with .Values.proxy }}
+            {{- with .dialTimeout }}
+            - --proxy-dial-timeout={{ . }}
+            {{- end }}
+            {{- with .responseHeaderTimeout }}
+            - --proxy-response-header-timeout={{ . }}
+            {{- end }}
+            {{- with .idleConnTimeout }}
+            - --proxy-idle-conn-timeout={{ . }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
