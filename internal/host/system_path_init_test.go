@@ -19,20 +19,20 @@ import (
 // when the host is in HostStatusInitializing. See kdex-tech/host-manager#33.
 func TestIsSystemPath(t *testing.T) {
 	cases := map[string]bool{
-		"/":                              false,
-		"/app":                           false,
-		"/app/":                          false,
-		"/invitations/foo":               false,
-		"/.well-known/jwks.json":         true,
+		"/":                                 false,
+		"/app":                              false,
+		"/app/":                             false,
+		"/invitations/foo":                  false,
+		"/.well-known/jwks.json":            true,
 		"/.well-known/openid-configuration": true,
 		"/.well-known/oauth-authorization-server": true,
-		"/-/login":                       true,
-		"/-/logout":                      true,
-		"/-/openapi":                     true,
-		"/-/navigation/main/en-CA/":      true,
-		"/-/translation/en":              true,
-		"/-/theme/main.css":              true,
-		"/favicon.ico":                   true,
+		"/-/login":                  true,
+		"/-/logout":                 true,
+		"/-/openapi":                true,
+		"/-/navigation/main/en-CA/": true,
+		"/-/translation/en":         true,
+		"/-/theme/main.css":         true,
+		"/favicon.ico":              true,
 	}
 	for p, want := range cases {
 		t.Run(p, func(t *testing.T) {
