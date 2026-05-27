@@ -407,7 +407,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	for _, backend := range requiredBackends {
 		name := fmt.Sprintf("%s-%s", internalHost.Name, backend.Name)
 
-		_, dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend, secrets)
+		dep, err := r.createOrUpdateBackendDeployment(ctx, &internalHost, name, backend, secrets)
 		if err != nil {
 			return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 		}
@@ -1364,7 +1364,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 	name string,
 	resolvedBackend resolvedBackend,
 	secrets kdexv1alpha1.Secrets,
-) (controllerutil.OperationResult, *appsv1.Deployment, error) {
+) (*appsv1.Deployment, error) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1372,11 +1372,13 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 		},
 	}
 
-	op, err := ctrl.CreateOrUpdate(
+	_, err := ctrl.CreateOrUpdate(
 		ctx,
 		r.Client,
 		deployment,
 		func() error {
+			// Object-level annotations + labels: set from host on first create only.
+			// These are owner-side metadata; chart template changes don't carry them.
 			if deployment.CreationTimestamp.IsZero() {
 				deployment.Annotations = make(map[string]string)
 				maps.Copy(deployment.Annotations, internalHost.Annotations)
@@ -1387,19 +1389,41 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 				deployment.Labels["kdex.dev/backend"] = resolvedBackend.Name
 				deployment.Labels["kdex.dev/host"] = internalHost.Name
 				deployment.Labels["kdex.dev/kind"] = resolvedBackend.Kind
+			}
 
-				deployment.Spec = *r.getMemoizedBackendDeployment().DeepCopy()
-
+			// Always rebuild Spec from the memoized backend template so chart
+			// template changes (securityContext, ports, volumes, etc.)
+			// propagate to existing Deployments. Selector is immutable
+			// post-create — preserve the existing one verbatim. Per-reconcile
+			// overrides apply below on top of the fresh template.
+			// See kdex-tech/host-manager#17.
+			existingSelector := deployment.Spec.Selector
+			deployment.Spec = *r.getMemoizedBackendDeployment().DeepCopy()
+			if existingSelector != nil {
+				deployment.Spec.Selector = existingSelector
+			} else {
+				if deployment.Spec.Selector == nil {
+					deployment.Spec.Selector = &metav1.LabelSelector{}
+				}
+				if deployment.Spec.Selector.MatchLabels == nil {
+					deployment.Spec.Selector.MatchLabels = map[string]string{}
+				}
 				deployment.Spec.Selector.MatchLabels["kdex.dev/type"] = internal.BACKEND
 				deployment.Spec.Selector.MatchLabels["kdex.dev/backend"] = resolvedBackend.Name
 				deployment.Spec.Selector.MatchLabels["kdex.dev/host"] = internalHost.Name
 				deployment.Spec.Selector.MatchLabels["kdex.dev/kind"] = resolvedBackend.Kind
-
-				deployment.Spec.Template.Labels["kdex.dev/type"] = internal.BACKEND
-				deployment.Spec.Template.Labels["kdex.dev/backend"] = resolvedBackend.Name
-				deployment.Spec.Template.Labels["kdex.dev/host"] = internalHost.Name
-				deployment.Spec.Template.Labels["kdex.dev/kind"] = resolvedBackend.Kind
 			}
+
+			// Pod-template labels must match the selector. Idempotent to set
+			// every reconcile — the selector labels themselves never change
+			// post-create even though the Selector is preserved above.
+			if deployment.Spec.Template.Labels == nil {
+				deployment.Spec.Template.Labels = map[string]string{}
+			}
+			deployment.Spec.Template.Labels["kdex.dev/type"] = internal.BACKEND
+			deployment.Spec.Template.Labels["kdex.dev/backend"] = resolvedBackend.Name
+			deployment.Spec.Template.Labels["kdex.dev/host"] = internalHost.Name
+			deployment.Spec.Template.Labels["kdex.dev/kind"] = resolvedBackend.Kind
 
 			deployment.Spec.Template.Spec.Containers[0].Name = "backend"
 
@@ -1489,10 +1513,10 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 			err.Error(),
 		)
 
-		return controllerutil.OperationResultNone, nil, err
+		return nil, err
 	}
 
-	return op, deployment, nil
+	return deployment, nil
 }
 
 func (r *KDexInternalHostReconciler) createOrUpdateBackendService(
