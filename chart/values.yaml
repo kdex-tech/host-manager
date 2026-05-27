@@ -62,8 +62,12 @@ fullnameOverride: ""
 image:
   pullPolicy: Always
   repository: ghcr.io/kdex-tech/host-manager
-  # Overrides the image tag whose default is the chart appVersion.
-  tag: "latest"
+  # Empty falls through to .Chart.AppVersion via the deployment template's
+  # `{{ .Values.image.tag | default .Chart.AppVersion }}`. Keep this empty
+  # so operators pinning chart.version get the matching image tag by
+  # default; explicit override (e.g. "latest" for dev) is still possible
+  # by setting this. Fixes #39.
+  tag: ""
 
 imagePullSecrets: []
 
