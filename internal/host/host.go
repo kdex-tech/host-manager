@@ -302,45 +302,75 @@ func (hh *HostHandler) MetaToString(handler page.PageHandler, l language.Tag) st
 	return buffer.String()
 }
 
+// rebuildSnapshot carries the fully-assembled mux + state from the read
+// phase of RebuildMux to the commit phase. Decoupling the two phases lets
+// both lock acquisitions use defer'd unlocks so a panic in either phase
+// (e.g. ParseRequirements on a corrupted SecurityRequirements slice header,
+// kdex-tech/host-manager#26) auto-releases the lock instead of orphaning
+// it and deadlocking subsequent reconciles.
+type rebuildSnapshot struct {
+	translations     *Translations
+	registeredPaths  map[string]ko.PathInfo
+	mux              *http.ServeMux
+	functionHandlers map[string]*KDexFunctionHandler
+	// hasFunctionHandlers distinguishes the empty-set case (overwrite
+	// hh.functionHandlers with the empty map) from the not-ready case
+	// (don't touch hh.functionHandlers at all).
+	hasFunctionHandlers bool
+}
+
 func (hh *HostHandler) RebuildMux() {
 	hh.log.V(3).Info("rebuilding mux")
-	hh.mu.RLock()
 
-	if hh.host == nil {
-		hh.mu.RUnlock()
+	snap, ok := hh.rebuildMuxSnapshot()
+	if !ok {
 		return
 	}
 
-	// copy fields that we need while under RLock
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	hh.Translations = *snap.translations
+	hh.registeredPaths = snap.registeredPaths
+	hh.Mux = snap.mux
+	if snap.hasFunctionHandlers {
+		hh.functionHandlers = snap.functionHandlers
+	}
+}
+
+// rebuildMuxSnapshot performs all reads and assembles the new mux under a
+// single defer'd RLock. A panic anywhere inside (most plausibly inside
+// authChecker.ParseRequirements) unwinds through the defer and releases
+// the lock cleanly. See kdex-tech/host-manager#26.
+func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
+	if hh.host == nil {
+		return rebuildSnapshot{}, false
+	}
+
 	defaultLanguageResource := hh.defaultLanguage
 	translationResources := maps.Clone(hh.translationResources)
 
 	newTranslations, err := NewTranslations(defaultLanguageResource, translationResources)
 	if err != nil {
 		hh.log.Error(err, "failed to rebuild translations")
-		hh.mu.RUnlock()
-		return
+		return rebuildSnapshot{}, false
 	}
 
 	registeredPaths := map[string]ko.PathInfo{}
 	maps.Copy(registeredPaths, hh.pathsCollectedInReconcile)
-
 	mux := hh.muxWithDefaultsLocked(registeredPaths)
 
 	pageHandlers := hh.Pages.List()
-
 	if len(pageHandlers) == 0 && len(hh.functions) == 0 {
 		mux.HandleFunc("GET /{$}", hh.notReadyHandler)
 		mux.HandleFunc("GET /{l10n}/{$}", hh.notReadyHandler)
-
-		hh.mu.RUnlock()
-		hh.mu.Lock()
-		defer hh.mu.Unlock()
-		hh.Translations = *newTranslations
-		hh.registeredPaths = registeredPaths
-		hh.Mux = mux
-
-		return
+		return rebuildSnapshot{
+			translations:    newTranslations,
+			registeredPaths: registeredPaths,
+			mux:             mux,
+		}, true
 	}
 
 	renderedPages := map[string]pageRender{}
@@ -352,7 +382,9 @@ func (hh *HostHandler) RebuildMux() {
 			continue
 		}
 
-		// Pre-parse requirements for Power API
+		// Pre-parse requirements for Power API. authChecker.ParseRequirements
+		// has its own defensive recover (#26), but the snapshot's defer'd
+		// RLock-release is the last line of defense if recovery is bypassed.
 		if hh.authChecker != nil {
 			reqs := hh.pageRequirements(&ph)
 			parsed := hh.authChecker.ParseRequirements(reqs)
@@ -384,13 +416,10 @@ func (hh *HostHandler) RebuildMux() {
 		}
 	}
 
-	hh.mu.RUnlock()
-	hh.mu.Lock()
-	defer hh.mu.Unlock()
-
+	// Mux mutations happen on local objects (mux + registeredPaths) — no hh
+	// state is touched here, so this can stay under the read lock.
 	for _, pr := range renderedPages {
-		err = hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations)
-		if err != nil {
+		if err := hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations); err != nil {
 			hh.log.Error(err, "skipping")
 		}
 	}
@@ -403,10 +432,13 @@ func (hh *HostHandler) RebuildMux() {
 		}
 	}
 
-	hh.Translations = *newTranslations
-	hh.registeredPaths = registeredPaths
-	hh.functionHandlers = actualHandlers
-	hh.Mux = mux
+	return rebuildSnapshot{
+		translations:        newTranslations,
+		registeredPaths:     registeredPaths,
+		mux:                 mux,
+		functionHandlers:    actualHandlers,
+		hasFunctionHandlers: true,
+	}, true
 }
 
 func (hh *HostHandler) RemovePage(name string) {

@@ -416,3 +416,36 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 		})
 	}
 }
+
+// Regression for kdex-tech/host-manager#26. ParseRequirements must be
+// safe against degenerate inputs — both nil and len(0) slices, and any
+// runtime panic inside the range loop (e.g. a corrupted slice header
+// from a DeepCopy edge case as observed in production). Without a
+// guard, a panic here orphans the RLock held by callers like RebuildMux
+// and deadlocks every subsequent controller reconcile.
+func TestAuthorizationChecker_ParseRequirements_NilSafe(t *testing.T) {
+	checker := NewAuthorizationChecker([]string{}, logr.Logger{})
+
+	t.Run("nil slice returns non-nil empty result without panic", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			result := checker.ParseRequirements(nil)
+			assert.NotNil(t, result)
+		})
+	})
+
+	t.Run("empty slice returns non-nil empty result without panic", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			result := checker.ParseRequirements([]v1alpha1.SecurityRequirement{})
+			assert.NotNil(t, result)
+		})
+	})
+
+	t.Run("populated slice still works", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			result := checker.ParseRequirements([]v1alpha1.SecurityRequirement{
+				{"bearer": []string{"pages"}},
+			})
+			assert.NotNil(t, result)
+		})
+	})
+}

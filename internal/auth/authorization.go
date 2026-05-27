@@ -98,10 +98,27 @@ func (ac *AuthorizationChecker) ParseEntitlements(e entitlements.Entitlements) e
 	return ac.ec.ParseEntitlements(e)
 }
 
-func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
-	requirements := entitlements.Requirements{}
-	for _, v := range kdexreqs {
-		requirements = append(requirements, v)
+func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.SecurityRequirement) (result entitlements.ParsedRequirements) {
+	// Defensive recover: a corrupted slice header (nil data + non-zero len,
+	// as observed in production via a DeepCopy edge case on a value-struct
+	// SecurityRequirements field) makes `range kdexreqs` segfault. The
+	// caller is typically holding a read lock (RebuildMux); a panic here
+	// must not propagate up far enough to leak that lock. Returning an
+	// empty parsed-requirements set on panic preserves liveness — the
+	// affected page falls through to anonymous-access semantics, but the
+	// host as a whole keeps reconciling. See kdex-tech/host-manager#26.
+	defer func() {
+		if r := recover(); r != nil {
+			ac.log.Error(nil, "ParseRequirements panic recovered", "panic", r)
+			result = ac.ec.ParseRequirements(entitlements.Requirements{})
+		}
+	}()
+	if len(kdexreqs) == 0 {
+		return ac.ec.ParseRequirements(entitlements.Requirements{})
+	}
+	requirements := make(entitlements.Requirements, 0, len(kdexreqs))
+	for i := range kdexreqs {
+		requirements = append(requirements, kdexreqs[i])
 	}
 	return ac.ec.ParseRequirements(requirements)
 }
