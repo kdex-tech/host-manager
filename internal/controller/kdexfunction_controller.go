@@ -605,6 +605,44 @@ func shouldSkipCodegen(fn *kdexv1alpha1.KDexFunction) bool {
 	return !edgeMode || !inputsChanged
 }
 
+// isCodegenJobTerminal reports whether the Kubernetes Job has reached a
+// terminal Failed state — i.e. BackoffLimit was exhausted (or any other
+// condition that flipped JobFailed=True). When this returns true, the
+// controller must NOT delete-and-recreate the Job (that's the retry-storm
+// bug in kdex-tech/host-manager#27); instead it should mark the function
+// Degraded and stop, so the operator can inspect the failed pods. The
+// returned message carries the JobCondition's Reason+Message for the
+// function's Degraded condition.
+func isCodegenJobTerminal(job *batchv1.Job) (bool, string) {
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return true, fmt.Sprintf("%s: %s", c.Reason, c.Message)
+		}
+	}
+	return false, ""
+}
+
+// markCodegenJobTerminallyFailed sets the function's conditions to indicate
+// a permanent codegen-Job failure and returns a no-requeue ctrl.Result.
+// Centralised so both handleBuildValid and handleExecutableAvailable use
+// the same shape — and so the cyclomatic complexity of those handlers
+// doesn't accumulate the SetConditions block twice. See
+// kdex-tech/host-manager#27.
+func markCodegenJobTerminallyFailed(fn *kdexv1alpha1.KDexFunction, job *batchv1.Job, msg string) (ctrl.Result, error) {
+	err := fmt.Errorf("code generation job %s/%s exhausted retries: %s — inspect pods for details (Job is NOT auto-deleted)", job.Namespace, job.Name, msg)
+	kdexv1alpha1.SetConditions(
+		&fn.Status.Conditions,
+		kdexv1alpha1.ConditionStatuses{
+			Degraded:    metav1.ConditionTrue,
+			Progressing: metav1.ConditionFalse,
+			Ready:       metav1.ConditionFalse,
+		},
+		kdexv1alpha1.ConditionReasonReconcileError,
+		err.Error(),
+	)
+	return ctrl.Result{}, nil
+}
+
 // recordCodegenInputs persists the inputs a just-completed codegen Job
 // ran against, so subsequent reconciles can edge-trigger on input
 // changes without needing regenerate=true. See kdex-tech/host-manager#40.
@@ -855,24 +893,17 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 				}
 			}
 
-			if job.Status.Failed == 1 {
-				err := fmt.Errorf("code generation job %s/%s failed: %s", job.Namespace, job.Name, terminationMessage)
-				kdexv1alpha1.SetConditions(
-					&hc.function.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
-				)
-
-				if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-					return ctrl.Result{}, err
+			// Terminal-Failed Jobs are surfaced as Degraded with no requeue
+			// and (critically) without deletion — the operator needs the
+			// failed pods around to diagnose. Replaces the pre-#27
+			// `job.Status.Failed == 1` short-circuit which delete-and-
+			// recreated the Job on every reconcile, masking the failure as
+			// "still building" indefinitely. See kdex-tech/host-manager#27.
+			if terminal, msg := isCodegenJobTerminal(job); terminal {
+				if terminationMessage != "" {
+					msg = msg + "; results: " + terminationMessage
 				}
-
-				return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+				return markCodegenJobTerminallyFailed(hc.function, job, msg)
 			}
 
 			type results struct {
@@ -1254,24 +1285,14 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 			}
 		}
 
-		if job.Status.Failed == 1 {
-			err := fmt.Errorf("function deployment job %s/%s failed: %s", job.Namespace, job.Name, terminationMessage)
-			kdexv1alpha1.SetConditions(
-				&hc.function.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-				return ctrl.Result{}, err
+		// Terminal-Failed deployer Job: surface Degraded, no requeue, no
+		// delete — same shape as the codegen-Job path in handleBuildValid.
+		// See kdex-tech/host-manager#27.
+		if terminal, msg := isCodegenJobTerminal(job); terminal {
+			if terminationMessage != "" {
+				msg = msg + "; results: " + terminationMessage
 			}
-
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			return markCodegenJobTerminallyFailed(hc.function, job, msg)
 		}
 
 		type results struct {
