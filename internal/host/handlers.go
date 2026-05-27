@@ -632,10 +632,6 @@ func (hh *HostHandler) navigationHandler(mux *http.ServeMux, registeredPaths map
 }
 
 func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
-		return
-	}
-
 	log := logf.FromContext(r.Context())
 
 	hh.mu.RLock()
@@ -644,6 +640,13 @@ func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// applyCachingHeadersWithLang folds the language tag into the ETag
+	// so en-CA and fr-CA announcement renders get distinct ETags.
+	// See kdex-tech/host-manager#43.
+	if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
 		return
 	}
 

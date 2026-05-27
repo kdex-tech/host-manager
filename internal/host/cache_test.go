@@ -174,6 +174,70 @@ func (m *mockAuthChecker) VerifyResourceParsedEntitlements(string, string, entit
 	return true, nil
 }
 
+func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
+	// Regression for kdex-tech/host-manager#43: applyCachingHeaders built
+	// the ETag from lastModified + identity only — not the language. Two
+	// responses to the same URL with different Accept-Language values
+	// shared an ETag despite serving different content, breaking Vary-
+	// aware revalidation at intermediaries that normalize Accept-Language
+	// (some CDNs do) and confusing any client that treats the ETag as a
+	// content-identity claim. Fix: applyCachingHeadersWithLang folds the
+	// resolved language tag into the ETag input.
+	log := logr.Discard()
+	cacheManager, _ := cache.NewCacheManager("", "foo", nil)
+	hh := NewHostHandler(nil, "test-host", "default", log, cacheManager)
+	hh.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "en",
+		BrandName:   "KDex",
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
+
+	lastModified := hh.reconcileTime
+
+	wEn := httptest.NewRecorder()
+	rEn := httptest.NewRequest("GET", "/", nil)
+	hh.applyCachingHeadersWithLang(wEn, rEn, nil, lastModified, "en-CA")
+	etagEn := wEn.Header().Get("ETag")
+
+	wFr := httptest.NewRecorder()
+	rFr := httptest.NewRequest("GET", "/", nil)
+	hh.applyCachingHeadersWithLang(wFr, rFr, nil, lastModified, "fr-CA")
+	etagFr := wFr.Header().Get("ETag")
+
+	assert.NotEmpty(t, etagEn)
+	assert.NotEmpty(t, etagFr)
+	assert.NotEqual(t, etagEn, etagFr,
+		"ETag must differ between en-CA and fr-CA responses for the same URL — pre-fix they were identical")
+	assert.Contains(t, etagEn, "en-CA", "ETag should encode the resolved language")
+	assert.Contains(t, etagFr, "fr-CA", "ETag should encode the resolved language")
+
+	// If-None-Match with the en ETag must NOT 304 a fr request (the
+	// observable symptom of the bug — wrong-variant cache hits).
+	wCross := httptest.NewRecorder()
+	rCross := httptest.NewRequest("GET", "/", nil)
+	rCross.Header.Set("If-None-Match", etagEn)
+	completed := hh.applyCachingHeadersWithLang(wCross, rCross, nil, lastModified, "fr-CA")
+	assert.False(t, completed, "fr-CA request must not be answered as 304 against an en-CA ETag")
+	assert.NotEqual(t, http.StatusNotModified, wCross.Code)
+
+	// Sanity: same-language If-None-Match still 304s.
+	wSame := httptest.NewRecorder()
+	rSame := httptest.NewRequest("GET", "/", nil)
+	rSame.Header.Set("If-None-Match", etagEn)
+	completed = hh.applyCachingHeadersWithLang(wSame, rSame, nil, lastModified, "en-CA")
+	assert.True(t, completed, "en-CA request with matching en-CA ETag must 304")
+	assert.Equal(t, http.StatusNotModified, wSame.Code)
+
+	// Backwards-compat shim (no language) still works for endpoints
+	// genuinely independent of Accept-Language (favicon, raw OpenAPI).
+	wPlain := httptest.NewRecorder()
+	rPlain := httptest.NewRequest("GET", "/-/openapi", nil)
+	hh.applyCachingHeaders(wPlain, rPlain, nil, lastModified)
+	etagPlain := wPlain.Header().Get("ETag")
+	assert.NotEmpty(t, etagPlain)
+	assert.NotContains(t, etagPlain, "en-CA")
+	assert.NotContains(t, etagPlain, "fr-CA")
+}
+
 func TestSetHost_DoesNotEvictUncycledCache(t *testing.T) {
 	// Regression for kdex-tech/host-manager#42: SetHost used to invoke
 	// cacheManager.Cycle(checksum, true) with force=true, which silently

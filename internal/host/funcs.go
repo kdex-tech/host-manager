@@ -33,11 +33,47 @@ func (hh *HostHandler) convertRequirements(in *[]kdexv1alpha1.SecurityRequiremen
 	return out
 }
 
+// applyCachingHeaders is a backwards-compat shim that omits the language
+// from the ETag input. Use applyCachingHeadersWithLang for any endpoint
+// whose response varies by Accept-Language (page renders, navigation,
+// /-/translation/{lng}, login utility page) so the ETag varies per
+// language too. See applyCachingHeadersWithLang for the rationale.
 func (hh *HostHandler) applyCachingHeaders(
 	w http.ResponseWriter,
 	r *http.Request,
 	requirements []kdexv1alpha1.SecurityRequirement,
 	lastModified time.Time,
+) bool {
+	return hh.applyCachingHeadersWithLang(w, r, requirements, lastModified, "")
+}
+
+// applyCachingHeadersWithLang sets Cache-Control / Vary / Last-Modified /
+// ETag headers and returns true if the response was completed as a 304
+// (no further body should be written). The language parameter is folded
+// into the ETag input so that two responses to the same URL with
+// different Accept-Language values get distinct ETags. Without this,
+// en-CA and fr-CA responses share an ETag, which causes:
+//
+//   - Intermediaries that normalize Accept-Language (some CDNs do) to
+//     serve the cached variant cross-language because the ETag is the
+//     only discriminator left.
+//   - Clients that revalidate via If-None-Match across cache entries to
+//     accept a 304 against the wrong language.
+//   - Tooling that treats identical ETags as a content-identity claim
+//     to silently conflate variants.
+//
+// Vary: Accept-Language is still set so well-behaved caches handle
+// negotiation themselves; the per-language ETag closes the gap for
+// caches that don't fully honor Vary. See kdex-tech/host-manager#43.
+//
+// Pass language="" only for endpoints that genuinely don't vary by
+// Accept-Language (favicon, raw OpenAPI, schemas).
+func (hh *HostHandler) applyCachingHeadersWithLang(
+	w http.ResponseWriter,
+	r *http.Request,
+	requirements []kdexv1alpha1.SecurityRequirement,
+	lastModified time.Time,
+	language string,
 ) bool {
 	if !hh.IsAuthEnabled() {
 		// If auth is disabled, everything is public
@@ -63,11 +99,16 @@ func (hh *HostHandler) applyCachingHeaders(
 		identity = ":" + hh.getUserHash(r)
 	}
 
+	langSuffix := ""
+	if language != "" {
+		langSuffix = ":" + language
+	}
+
 	if lastModified.IsZero() {
 		lastModified = hh.reconcileTime
 	}
 	lastModified = lastModified.UTC().Truncate(time.Second)
-	etag := fmt.Sprintf(`"%d%s"`, lastModified.Unix(), identity)
+	etag := fmt.Sprintf(`"%d%s%s"`, lastModified.Unix(), langSuffix, identity)
 
 	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)

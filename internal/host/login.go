@@ -12,10 +12,6 @@ import (
 )
 
 func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime) {
-		return
-	}
-
 	log := logf.FromContext(r.Context())
 
 	returnURL := kdexhttp.SafeReturnPath(r.URL.Query().Get("return"))
@@ -26,6 +22,13 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// applyCachingHeadersWithLang folds the language tag into the ETag
+	// so en-CA and fr-CA login renders get distinct ETags.
+	// See kdex-tech/host-manager#43.
+	if hh.applyCachingHeadersWithLang(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String()) {
 		return
 	}
 

@@ -72,7 +72,7 @@ func (hh *HostHandler) pageHandlerFunc(
 				return
 			}
 		}
-		if hh.applyCachingHeaders(w, r, hh.pageRequirements(&ph), hh.reconcileTime) {
+		if hh.applyCachingHeadersWithLang(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String()) {
 			return
 		}
 

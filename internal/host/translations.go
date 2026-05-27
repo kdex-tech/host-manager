@@ -44,16 +44,19 @@ func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha
 }
 
 func (hh *HostHandler) TranslationGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, nil, hh.reconcileTime) {
-		return
-	}
-
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// applyCachingHeadersWithLang folds the language tag into the ETag
+	// so en-CA and fr-CA responses to this URL get distinct ETags.
+	// See kdex-tech/host-manager#43.
+	if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
 		return
 	}
 

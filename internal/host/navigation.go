@@ -123,10 +123,6 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 }
 
 func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
-	if hh.applyCachingHeaders(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime) {
-		return
-	}
-
 	log := logf.FromContext(r.Context())
 
 	hh.mu.RLock()
@@ -156,6 +152,13 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	l, err := kdexhttp.GetLang(r, defaultLang, translations.Languages())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// applyCachingHeadersWithLang folds the language tag into the ETag
+	// so navigation renders for different Accept-Language values get
+	// distinct ETags. See kdex-tech/host-manager#43.
+	if hh.applyCachingHeadersWithLang(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String()) {
 		return
 	}
 
