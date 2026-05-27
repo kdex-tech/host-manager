@@ -173,3 +173,51 @@ func (m *mockAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement) 
 func (m *mockAuthChecker) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
 	return true, nil
 }
+
+func TestSetHost_DoesNotEvictUncycledCache(t *testing.T) {
+	// Regression for kdex-tech/host-manager#42: SetHost used to invoke
+	// cacheManager.Cycle(checksum, true) with force=true, which silently
+	// evicted Uncycled caches despite the flag. Refresh tokens live in
+	// the "refresh-tokens" cache with Uncycled: true precisely so they
+	// survive routine config-change reconciles — pre-fix, every CR apply
+	// (KDexPage, KDexFunction, etc.) wiped every active refresh token,
+	// surfacing as "refresh token not found or expired" right when a
+	// user's JWT was about to expire.
+	//
+	// Fix: SetHost calls Cycle(..., false). Cycled caches still rotate
+	// with a prevPrefix transition window; Uncycled caches are preserved.
+	ctx := context.Background()
+	log := logr.Discard()
+	cacheManager, _ := cache.NewCacheManager("", "foo", nil)
+
+	// Simulate the refresh-tokens cache shape: Uncycled: true.
+	uncycled := cacheManager.GetCache("refresh-tokens", cache.CacheOptions{Uncycled: true})
+	require.NoError(t, uncycled.Set(ctx, "rt-id", "rt-payload"))
+	val, found, _, err := uncycled.Get(ctx, "rt-id")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, "rt-payload", val)
+
+	hh := NewHostHandler(nil, "test-host", "default", log, cacheManager)
+	hh.SetHost(ctx, &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "en",
+		BrandName:   "KDex",
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
+
+	// Post-SetHost: refresh-tokens cache content must still be reachable.
+	val, found, _, err = uncycled.Get(ctx, "rt-id")
+	require.NoError(t, err)
+	assert.True(t, found, "Uncycled cache must survive SetHost — refresh tokens were being evicted on every config-change reconcile")
+	assert.Equal(t, "rt-payload", val)
+
+	// Sanity: a second SetHost (the routine reconcile case) also preserves.
+	hh.SetHost(ctx, &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "fr",
+		BrandName:   "KDex2",
+	}, nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
+
+	val, found, _, err = uncycled.Get(ctx, "rt-id")
+	require.NoError(t, err)
+	assert.True(t, found, "Uncycled cache must survive repeated SetHost calls")
+	assert.Equal(t, "rt-payload", val)
+}

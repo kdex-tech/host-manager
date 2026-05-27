@@ -636,7 +636,15 @@ func (hh *HostHandler) SetHost(
 	hh.status = status
 	hh.themeAssets = themeAssets
 
-	if err := hh.cacheManager.Cycle(hh.Checksum(), true); err != nil {
+	// force=false: rotate cycled caches (rendered pages, navigation,
+	// importmap) with a prevPrefix transition window for graceful cutover,
+	// but DO NOT touch Uncycled caches. The refresh-tokens cache is
+	// registered Uncycled because it holds user-session state that must
+	// survive routine config-change reconciles — force=true here would
+	// silently evict every active refresh token on every CR apply,
+	// surfacing as "refresh token not found or expired" errors right when
+	// a user's JWT is about to expire. See kdex-tech/host-manager#42.
+	if err := hh.cacheManager.Cycle(hh.Checksum(), false); err != nil {
 		hh.log.Error(err, "failed to cycle cache manager")
 	}
 
