@@ -723,11 +723,24 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	if hasScope("profile") {
 		grantedScopes = append(grantedScopes, "profile")
 	}
+	// Mirror mintTokensFromSubject: when the client did not request the
+	// entitlements or roles scope, strip those claims from the signing
+	// context so the access-token JWT doesn't leak them. Pre-fix
+	// mintTokensFromCode set both claims unconditionally and the scope
+	// claim disagreed with the claims actually present — downstream
+	// consumers trusting either side reached different access
+	// decisions, and the same session lost the leaked claims after the
+	// first refresh (since mintTokensFromSubject filters correctly).
+	// See kdex-tech/host-manager#80.
 	if hasScope("entitlements") {
 		grantedScopes = append(grantedScopes, "entitlements")
+	} else {
+		delete(signingContext, "entitlements")
 	}
 	if hasScope("roles") {
 		grantedScopes = append(grantedScopes, "roles")
+	} else {
+		delete(signingContext, "roles")
 	}
 
 	// Pass through any other requested scopes.
