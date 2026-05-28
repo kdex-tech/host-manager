@@ -182,9 +182,16 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: new(int32(3)),
-			Completions:  new(int32(1)),
-			Parallelism:  new(int32(1)),
+			// Without ActiveDeadlineSeconds a hung packref pod (npm
+			// install on a slow registry, oras push to a deadlocked
+			// registry) runs forever — BackoffLimit only counts pod
+			// failures. 30m covers a heavy npm install + oras push;
+			// well below "operator intervenes." See
+			// kdex-tech/host-manager#63.
+			ActiveDeadlineSeconds: new(int64(30 * 60)),
+			BackoffLimit:          new(int32(3)),
+			Completions:           new(int32(1)),
+			Parallelism:           new(int32(1)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
