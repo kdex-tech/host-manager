@@ -217,8 +217,35 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
-	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
-		message := fmt.Sprintf("Waiting on packages job %s/%s to complete", job.Namespace, job.Name)
+	switch state, terminalMsg := classifyPackRefJob(job); state {
+	case packRefJobTerminalFailed:
+		// BackoffLimit exhausted (or JobFailed flipped True for any
+		// other reason). Mark Degraded but DO NOT delete the Job —
+		// operator needs to inspect the failed pods. See
+		// kdex-tech/host-manager#61 (and #27 for the parallel
+		// KDexFunction fix).
+		err := fmt.Errorf("packages job %s/%s exhausted retries: %s — inspect pods for details (Job is NOT auto-deleted)", job.Namespace, job.Name, terminalMsg)
+		kdexv1alpha1.SetConditions(
+			&ipr.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionTrue,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileError,
+			err.Error(),
+		)
+		log.V(1).Info("packages job terminally failed", "job", job.Name, "msg", terminalMsg)
+		return ctrl.Result{}, nil
+
+	case packRefJobInProgress:
+		// Either freshly created (Succeeded=0, Failed=0) or mid-retry
+		// (Failed>0 but JobFailed!=True — BackoffLimit hasn't fired).
+		// Both cases: wait. Pre-#61 the controller treated Failed==1 as
+		// terminal here, defeating BackoffLimit and surfacing transient
+		// npm flakes as permanent failures.
+		message := fmt.Sprintf("Waiting on packages job %s/%s to complete (Succeeded=%d, Failed=%d)",
+			job.Namespace, job.Name, job.Status.Succeeded, job.Status.Failed)
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
 			kdexv1alpha1.ConditionStatuses{
@@ -229,16 +256,14 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 			kdexv1alpha1.ConditionReasonReconciling,
 			message,
 		)
-
 		log.V(2).Info(message)
-
 		if err := r.cleanupJobs(ctx, &ipr); err != nil {
 			return ctrl.Result{}, err
 		}
-
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-	} else {
-		// Harvest results from the pods
+
+	case packRefJobSucceeded:
+		// Harvest results from the successful pod.
 		pod, err := kjob.GetPodForJob(ctx, r.Client, job)
 		if err != nil {
 			kdexv1alpha1.SetConditions(
@@ -251,47 +276,19 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 				kdexv1alpha1.ConditionReasonReconcileError,
 				err.Error(),
 			)
-
 			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
 				return ctrl.Result{}, err
 			}
-
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
-		var terminationMessage string
+		var imageDigest string
 		for _, containerStatus := range pod.Status.ContainerStatuses {
 			if containerStatus.Name == "packager" && containerStatus.State.Terminated != nil {
-				terminationMessage = strings.TrimSpace(containerStatus.State.Terminated.Message)
+				imageDigest = strings.TrimSpace(containerStatus.State.Terminated.Message)
 				break
 			}
 		}
-
-		if job.Status.Failed == 1 {
-			err := fmt.Errorf("packages job %s/%s failed: %s", job.Namespace, job.Name, terminationMessage)
-			kdexv1alpha1.SetConditions(
-				&ipr.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			if err := r.cleanupJobs(ctx, &ipr); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-		}
-
-		imageDigest := terminationMessage
 
 		var importmap string
 		for _, containerStatus := range pod.Status.InitContainerStatuses {
@@ -542,4 +539,29 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 	)
 
 	return op, secret, err
+}
+
+// packRefJobState classifies the high-level state of the IPR's packref
+// Job (`InProgress`, `Succeeded`, `TerminalFailed`). Used to remove the
+// hard-coded `job.Status.Failed == 1` short-circuit that prematurely
+// retired transient first-pod failures and let `Failed >= 2` fall
+// through to a bogus imageDigest extraction from a failed pod's
+// termination message. See kdex-tech/host-manager#61, and the parallel
+// fix for KDexFunction in #27 (isCodegenJobTerminal).
+type packRefJobState int
+
+const (
+	packRefJobInProgress packRefJobState = iota
+	packRefJobSucceeded
+	packRefJobTerminalFailed
+)
+
+func classifyPackRefJob(job *batchv1.Job) (packRefJobState, string) {
+	if ok, msg := isCodegenJobTerminal(job); ok {
+		return packRefJobTerminalFailed, msg
+	}
+	if job.Status.Succeeded > 0 {
+		return packRefJobSucceeded, ""
+	}
+	return packRefJobInProgress, ""
 }
