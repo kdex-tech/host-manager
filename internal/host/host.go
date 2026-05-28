@@ -847,14 +847,18 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 }
 
 func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code int, msg string) {
+	// Defer RUnlock so a panic anywhere on the render path (template
+	// execution, cache backend, anything) releases the lock instead of
+	// orphaning a reader and silently wedging every subsequent reconcile
+	// on hh.mu. Same shape as the RebuildMux bug closed in #26, different
+	// site. See kdex-tech/host-manager#51.
 	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		l = language.Make(hh.defaultLanguage)
 	}
-
-	// collect stacktrace
-	// stacktrace := string(debug.Stack())
 
 	hh.log.V(2).Info(
 		"generating error page",
@@ -862,7 +866,6 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 		"code", code,
 		"msg", msg,
 		"language", l,
-		// "stacktrace", stacktrace,
 	)
 
 	rendered := hh.renderUtilityPage(
@@ -871,7 +874,6 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 		map[string]any{"ErrorCode": code, "ErrorCodeString": http.StatusText(code), "ErrorMessage": msg},
 		&hh.Translations,
 	)
-	hh.mu.RUnlock()
 
 	if rendered == "" {
 		// Fallback to standard http error if no custom error page
