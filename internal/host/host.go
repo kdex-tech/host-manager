@@ -816,6 +816,19 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 			// Stale Hit (vN-1): Serve fast, but migrate in background
 			hh.log.Info("stale cache hit, triggering background migration", "key", cacheKey)
 			go func() {
+				// Hold the host's read lock for the duration of the
+				// re-render so the goroutine sees consistent hh.*
+				// state vs concurrent SetHost writes. Without this
+				// the goroutine races on hh.host/hh.themeAssets/...
+				// and an unlucky interleaving crashes the process via
+				// uncaught panic in a detached goroutine (net/http's
+				// per-request recover doesn't see it). Render is
+				// local CPU work — holding RLock here is fine, unlike
+				// the #59 case where the proxy held RLock across an
+				// upstream round-trip. See kdex-tech/host-manager#73.
+				hh.mu.RLock()
+				defer hh.mu.RUnlock()
+
 				// Background context to ensure it lives past the request
 				bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()

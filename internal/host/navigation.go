@@ -179,9 +179,16 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		// 2. Stale Hit (vN-1): Serve fast, migrate in background
 		log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
 
-		// Clone necessary request context or data for the goroutine
-		// Note: we don't pass r.Context() because it cancels when the request ends
+		// Clone necessary request context or data for the goroutine.
+		// Note: we don't pass r.Context() because it cancels when the
+		// request ends. Hold hh.mu.RLock for the duration of the
+		// re-render so the goroutine sees consistent hh.*
+		// (authChecker, Pages, etc.) state vs concurrent SetHost
+		// writes. See kdex-tech/host-manager#73.
 		go func() {
+			hh.mu.RLock()
+			defer hh.mu.RUnlock()
+
 			bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
