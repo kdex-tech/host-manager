@@ -235,10 +235,24 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			"target", target.String(),
 		)
 
+		// Snapshot the only hh field this handler reads (authChecker)
+		// under a tight RLock, then release before doing the auth check
+		// and proxy round-trip. Pre-fix the RLock was held across
+		// proxy.ServeHTTP, which pinned hh.mu for the entire upstream
+		// HTTP round-trip — a single hung backend silently wedged every
+		// reconcile via writer-starvation on hh.mu. See
+		// kdex-tech/host-manager#59.
+		//
+		// The captured AuthorizationChecker is safe to use after release:
+		// its internals (ec, log) are immutable post-construction, and
+		// the closure-captured proxy state (target, signer, tokenCache,
+		// fh.patternMux, fh.parsedRequirements, fn) is set up once at
+		// handler-build time.
 		hh.mu.RLock()
-		defer hh.mu.RUnlock()
+		authChecker := hh.authChecker
+		hh.mu.RUnlock()
 
-		if hh.authChecker != nil {
+		if authChecker != nil {
 			_, pattern := fh.patternMux.Handler(r)
 			key := r.Method + " " + pattern
 			var reqs entitlements.ParsedRequirements
@@ -246,11 +260,11 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				reqs = pr
 			} else {
 				// Default to empty requirements (allows access if identity matches)
-				reqs = hh.authChecker.ParseRequirements(nil)
+				reqs = authChecker.ParseRequirements(nil)
 			}
 
-			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
-			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
+			parsedUserEntitlements := authChecker.GetParsedEntitlements(r.Context())
+			authorized, err := authChecker.VerifyResourceParsedEntitlements(
 				"functions", fn.Spec.API.BasePath, parsedUserEntitlements, reqs)
 
 			if err != nil || !authorized {
@@ -264,7 +278,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			}
 		}
 
-		// Execute the proxy
+		// Execute the proxy — runs WITHOUT holding hh.mu so a slow
+		// upstream cannot starve the host's writers.
 		proxy.ServeHTTP(w, r)
 	})
 
