@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/crypto/bcrypt"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -651,4 +652,66 @@ func TestLookupChain_HTTPFallback(t *testing.T) {
 		}
 	}
 	t.Fatal("KnowDrive user was not matched")
+}
+
+// TestSecretLookup_FindInternal_HashAsPasswordIsRejected pins the fix for
+// kdex-tech/host-manager#47: when a subject Secret stores a bcrypt hash
+// (the documented, recommended storage), submitting the hash itself as
+// the password must NOT authenticate. Pre-fix, the `string(passBytes) ==
+// password` shortcut in FindInternal accepted the hash and short-circuited
+// past bcrypt, giving anyone who could read the Secret YAML a full
+// account-takeover primitive.
+func TestSecretLookup_FindInternal_HashAsPasswordIsRejected(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("real-password"), bcrypt.MinCost)
+	assert.NoError(t, err)
+
+	secret := v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "alice",
+			Annotations: map[string]string{"kdex.dev/secret-type": "subject"},
+		},
+		Data: map[string][]byte{
+			"sub":      []byte("alice"),
+			"password": hash,
+		},
+	}
+	sl := NewSecretLookup(kdexv1alpha1.Secrets{secret})
+
+	// The attack: submit the hash itself as the password.
+	ok, claims, ferr := sl.FindInternal("alice", string(hash))
+	assert.False(t, ok, "submitting the bcrypt hash as the password must NOT authenticate (#47)")
+	assert.Nil(t, claims)
+	assert.Error(t, ferr, "must return an invalid-password error")
+}
+
+// TestSecretLookup_FindInternal_BcryptHappyPaths pins the positive
+// behavior so the #47 fix can't silently break legitimate logins.
+func TestSecretLookup_FindInternal_BcryptHappyPaths(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("real-password"), bcrypt.MinCost)
+	assert.NoError(t, err)
+
+	secret := v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "alice",
+			Annotations: map[string]string{"kdex.dev/secret-type": "subject"},
+		},
+		Data: map[string][]byte{
+			"sub":      []byte("alice"),
+			"password": hash,
+		},
+	}
+	sl := NewSecretLookup(kdexv1alpha1.Secrets{secret})
+
+	t.Run("correct password authenticates", func(t *testing.T) {
+		ok, claims, ferr := sl.FindInternal("alice", "real-password")
+		assert.True(t, ok)
+		assert.NoError(t, ferr)
+		assert.Equal(t, "alice", claims["sub"])
+	})
+
+	t.Run("wrong password is rejected", func(t *testing.T) {
+		ok, _, ferr := sl.FindInternal("alice", "wrong-password")
+		assert.False(t, ok)
+		assert.Error(t, ferr)
+	})
 }

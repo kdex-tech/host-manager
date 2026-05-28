@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"maps"
 	"regexp"
@@ -354,13 +355,41 @@ func NewSecretLookup(secrets kdexv1alpha1.Secrets) *secretLookup {
 	}
 }
 
+// looksLikeBcrypt returns true if the stored secret bytes are in bcrypt
+// modular crypt format ($2a$, $2b$, $2x$, $2y$ followed by cost+salt+hash).
+// When this is true, the secret MUST be verified through
+// bcrypt.CompareHashAndPassword — accepting the hash itself as the
+// password (the historical `string(passBytes) == password` shortcut) is
+// a credential-bypass primitive for anyone who can read the Secret. See
+// kdex-tech/host-manager#47.
+func looksLikeBcrypt(b []byte) bool {
+	if len(b) < 4 || b[0] != '$' || b[1] != '2' || b[3] != '$' {
+		return false
+	}
+	switch b[2] {
+	case 'a', 'b', 'x', 'y':
+		return true
+	}
+	return false
+}
+
 func (sl *secretLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {
 	for _, secret := range sl.secrets {
 		subBytes, hasSub := secret.Data["sub"]
 		emailBytes, hasEmail := secret.Data["email"]
 		if (hasSub && string(subBytes) == subject) || (hasEmail && string(emailBytes) == subject) {
 			if passBytes, ok := secret.Data["password"]; ok {
-				if string(passBytes) == password || bcrypt.CompareHashAndPassword(passBytes, []byte(password)) == nil {
+				var matched bool
+				if looksLikeBcrypt(passBytes) {
+					// Bcrypt-stored: the only valid comparison is
+					// CompareHashAndPassword. Never accept the hash
+					// bytes themselves as the password (#47).
+					matched = bcrypt.CompareHashAndPassword(passBytes, []byte(password)) == nil
+				} else {
+					// Legacy plaintext storage: timing-safe compare.
+					matched = subtle.ConstantTimeCompare(passBytes, []byte(password)) == 1
+				}
+				if matched {
 					current := map[string]any{}
 					for k, bts := range secret.Data {
 						if k == "password" {
