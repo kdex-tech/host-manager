@@ -15,6 +15,14 @@ type Cache interface {
 	Class() string
 	Delete(ctx context.Context, key string) error
 	Get(ctx context.Context, key string) (value string, exists bool, isCurrent bool, err error)
+	// GetAndDelete atomically reads and removes the entry for key,
+	// returning whether it existed. The primitive is needed to close
+	// the concurrent-redeem race in auth-code / refresh-token rotation
+	// (kdex-tech/host-manager#71): two concurrent callers that race on
+	// the same key must observe exactly one winner (found=true) and
+	// N-1 losers (found=false). Implementations that don't natively
+	// expose an atomic GETDEL must guard with their own lock.
+	GetAndDelete(ctx context.Context, key string) (value string, exists bool, isCurrent bool, err error)
 	Host() string
 	Set(ctx context.Context, key string, value string, opts ...SetOption) error
 	TTL() time.Duration
