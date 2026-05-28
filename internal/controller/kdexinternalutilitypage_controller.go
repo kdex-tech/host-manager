@@ -374,18 +374,17 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 		"uniqueScriptDefs", uniqueScriptDefs,
 	)
 
-	r.HostHandler.AddOrUpdateUtilityPage(page.PageHandler{
-		Content:           contentsMap,
-		Footer:            footerContent,
-		Header:            headerContent,
-		MainTemplate:      pageArchetypeSpec.Content,
-		Name:              internalUtilityPage.Name,
-		Navigations:       navigationsMap,
-		PackageReferences: uniquePackageRefs,
-		RequiredBackends:  uniqueBackendRefs,
-		Scripts:           uniqueScriptDefs,
-		UtilityPage:       &internalUtilityPage.Spec.KDexUtilityPageSpec,
-	})
+	r.HostHandler.AddOrUpdateUtilityPage(buildUtilityPagePageHandler(
+		&internalUtilityPage,
+		pageArchetypeSpec.Content,
+		contentsMap,
+		footerContent,
+		headerContent,
+		navigationsMap,
+		uniquePackageRefs,
+		uniqueBackendRefs,
+		uniqueScriptDefs,
+	))
 
 	kdexv1alpha1.SetConditions(
 		&internalUtilityPage.Status.Conditions,
@@ -453,4 +452,41 @@ func (r *KDexInternalUtilityPageReconciler) SetupWithManager(mgr ctrl.Manager) e
 		).
 		Named("kdexinternalutilitypage").
 		Complete(r)
+}
+
+// buildUtilityPagePageHandler assembles the PageHandler the reconciler
+// hands to HostHandler.AddOrUpdateUtilityPage. The Status field — wired
+// here — is what lets PageHandler.Checksum (and therefore the
+// utility-page render-cache key) fold in the referenced-resource
+// generations the reconciler writes into Status.Attributes. Without it,
+// CacheKey collapses to "<name>::<lang>" and the cache never invalidates
+// on theme / header / footer / app / navigation / script-library
+// changes. See kdex-tech/host-manager#55.
+//
+// Mirror of the inline `Status: &page.Status` field in
+// kdexpage_controller.go.
+func buildUtilityPagePageHandler(
+	internalUtilityPage *kdexv1alpha1.KDexInternalUtilityPage,
+	mainTemplate string,
+	contentsMap map[string]page.PackedContent,
+	footerContent string,
+	headerContent string,
+	navigationsMap map[string]string,
+	packageReferences []kdexv1alpha1.PackageReference,
+	requiredBackends []kdexv1alpha1.KDexObjectReference,
+	scripts []kdexv1alpha1.ScriptDef,
+) page.PageHandler {
+	return page.PageHandler{
+		Content:           contentsMap,
+		Footer:            footerContent,
+		Header:            headerContent,
+		MainTemplate:      mainTemplate,
+		Name:              internalUtilityPage.Name,
+		Navigations:       navigationsMap,
+		PackageReferences: packageReferences,
+		RequiredBackends:  requiredBackends,
+		Scripts:           scripts,
+		Status:            &internalUtilityPage.Status,
+		UtilityPage:       &internalUtilityPage.Spec.KDexUtilityPageSpec,
+	}
 }
