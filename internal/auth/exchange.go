@@ -41,9 +41,20 @@ type Exchanger struct {
 	oidcVerifier      *oidc.IDTokenVerifier
 	refreshTokenCache cache.Cache
 	refreshTokenTTL   time.Duration
-	maxSessionAge     time.Duration
-	sp                InternalIdentityProvider
+	// authCodeCache tracks the JTI of every unredeemed authorization code.
+	// On RedeemAuthorizationCode the JTI is Get-then-Delete'd; an absent
+	// JTI signals replay (or expiry) and the redemption is rejected. See
+	// kdex-tech/host-manager#65 (RFC 6749 §10.5 single-use requirement).
+	authCodeCache cache.Cache
+	maxSessionAge time.Duration
+	sp            InternalIdentityProvider
 }
+
+// authCodeTTL is the upper bound on how long an unredeemed authorization
+// code remains valid. Slightly longer than the 10-minute default Exp on
+// AuthorizationCodeClaims so the cache TTL doesn't expire the JTI ahead
+// of the code itself. Codes are typically redeemed within seconds.
+const authCodeTTL = 15 * time.Minute
 
 // RefreshTokenClaims holds the data stored inside a refresh token entry in the cache.
 type RefreshTokenClaims struct {
@@ -80,6 +91,12 @@ func NewExchanger(
 	if cacheManager != nil {
 		ex.refreshTokenCache = cacheManager.GetCache("refresh-tokens", cache.CacheOptions{
 			TTL:      &ex.refreshTokenTTL,
+			Uncycled: true,
+		})
+		// Single-use tracking for authorization codes. See #65.
+		ttl := authCodeTTL
+		ex.authCodeCache = cacheManager.GetCache("auth-codes", cache.CacheOptions{
+			TTL:      &ttl,
 			Uncycled: true,
 		})
 	}
@@ -505,7 +522,34 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		}
 	}
 
-	// 5. Mint tokens — subject is known from the decrypted code claims.
+	// 5. Single-use enforcement (RFC 6749 §10.5). If the cache holds an
+	// entry for the code's JTI, consume it and proceed. If the JTI is
+	// absent the code has been redeemed already (or expired) — reject.
+	// Skipped only when no cache is configured (compatibility with the
+	// pre-#65 stateless path). See kdex-tech/host-manager#65.
+	if e.authCodeCache != nil {
+		if claims.JTI == "" {
+			// Pre-#65 codes have no JTI; treat as already-consumed
+			// rather than honour them — the upgrade window is the
+			// 10-minute code expiry, well under the typical deploy
+			// rollout.
+			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
+		}
+		_, found, _, err := e.authCodeCache.Get(ctx, claims.JTI)
+		if err != nil {
+			return TokenSet{}, fmt.Errorf("failed to check auth code consumption: %w", err)
+		}
+		if !found {
+			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
+		}
+		// Consume the JTI BEFORE minting so a transient mint failure
+		// cannot leave the code reusable.
+		if err := e.authCodeCache.Delete(ctx, claims.JTI); err != nil {
+			return TokenSet{}, fmt.Errorf("failed to consume auth code: %w", err)
+		}
+	}
+
+	// 6. Mint tokens — subject is known from the decrypted code claims.
 	return e.mintTokensFromCode(ctx, claims)
 }
 
@@ -590,9 +634,13 @@ type AuthorizationCodeClaims struct {
 	CodeChallenge       string     `json:"challenge,omitempty"`
 	CodeChallengeMethod string     `json:"challenge_method,omitempty"`
 	Exp                 int64      `json:"exp"`
-	RedirectURI         string     `json:"uri"`
-	Scope               string     `json:"scp"`
-	Subject             string     `json:"sub"`
+	// JTI is the random per-code identifier used to enforce single-use
+	// semantics. Set on mint, looked up + deleted on redeem. See
+	// kdex-tech/host-manager#65.
+	JTI         string `json:"jti,omitempty"`
+	RedirectURI string `json:"uri"`
+	Scope       string `json:"scp"`
+	Subject     string `json:"sub"`
 }
 
 func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims AuthorizationCodeClaims) (string, error) {
@@ -605,9 +653,28 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 	if claims.Exp == 0 {
 		claims.Exp = time.Now().Add(10 * time.Minute).Unix()
 	}
+	// Random per-code JTI for single-use tracking. Sized so collisions
+	// across the issuing host's lifetime are negligible. See #65.
+	if claims.JTI == "" {
+		jtiBytes := make([]byte, 16)
+		if _, err := rand.Read(jtiBytes); err != nil {
+			return "", fmt.Errorf("failed to generate auth code jti: %w", err)
+		}
+		claims.JTI = base64.RawURLEncoding.EncodeToString(jtiBytes)
+	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal auth code claims: %w", err)
+	}
+
+	// Register the JTI as "unredeemed" in the consumption cache so
+	// RedeemAuthorizationCode can enforce single-use. If no cache is
+	// configured we fall back to the pre-#65 stateless behaviour
+	// (vulnerable, but compatible with cache-less setups).
+	if e.authCodeCache != nil {
+		if err := e.authCodeCache.Set(ctx, claims.JTI, "1"); err != nil {
+			return "", fmt.Errorf("failed to register auth code jti: %w", err)
+		}
 	}
 
 	// 2. Derive Key
