@@ -168,24 +168,24 @@ func (c *InMemoryCache) reap() {
 	}
 }
 
+// startReaper runs the cache's lazy-eviction loop. updateChan MUST be
+// initialised by GetCache before this is spawned — see
+// kdex-tech/host-manager#75. Pre-fix the channel was created inside
+// this method, racing with the fast-path GetCache send.
 func (c *InMemoryCache) startReaper(interval time.Duration) {
-	c.updateChan = make(chan time.Duration, 1)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.reap()
 
-		for {
-			select {
-			case <-ticker.C:
-				c.reap()
-
-			case newInterval := <-c.updateChan:
-				ticker.Reset(newInterval)
-				c.reap()
-			}
+		case newInterval := <-c.updateChan:
+			ticker.Reset(newInterval)
+			c.reap()
 		}
-	}()
+	}
 }
 
 type InMemoryCacheManager struct {
@@ -306,9 +306,13 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		uncycled:        opts.Uncycled,
 		segments:        make(map[string]map[string]memoryCacheEntry),
 		ttl:             ttl,
+		// Initialise updateChan synchronously here so the fast-path
+		// GetCache send (line ~266) can't race the reaper-goroutine
+		// initialisation. See kdex-tech/host-manager#75.
+		updateChan: make(chan time.Duration, 1),
 	}
-	go cache.(*InMemoryCache).startReaper(ttl)
 	m.caches[class] = cache
+	go cache.(*InMemoryCache).startReaper(ttl)
 	return cache
 }
 
