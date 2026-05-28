@@ -522,11 +522,13 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		}
 	}
 
-	// 5. Single-use enforcement (RFC 6749 §10.5). If the cache holds an
-	// entry for the code's JTI, consume it and proceed. If the JTI is
-	// absent the code has been redeemed already (or expired) — reject.
-	// Skipped only when no cache is configured (compatibility with the
-	// pre-#65 stateless path). See kdex-tech/host-manager#65.
+	// 5. Single-use enforcement (RFC 6749 §10.5). Atomic GetAndDelete
+	// closes the concurrent-redeem race that the pre-#71 Get-then-
+	// Delete pair left open: two simultaneous redemptions of the same
+	// code would both pass Get before either reached Delete. With
+	// GetAndDelete only one caller observes found=true; the loser is
+	// rejected as a replay. Skipped only when no cache is configured.
+	// See kdex-tech/host-manager#65 (single-use) and #71 (atomicity).
 	if e.authCodeCache != nil {
 		if claims.JTI == "" {
 			// Pre-#65 codes have no JTI; treat as already-consumed
@@ -535,17 +537,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 			// rollout.
 			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
 		}
-		_, found, _, err := e.authCodeCache.Get(ctx, claims.JTI)
+		_, found, _, err := e.authCodeCache.GetAndDelete(ctx, claims.JTI)
 		if err != nil {
 			return TokenSet{}, fmt.Errorf("failed to check auth code consumption: %w", err)
 		}
 		if !found {
 			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
-		}
-		// Consume the JTI BEFORE minting so a transient mint failure
-		// cannot leave the code reusable.
-		if err := e.authCodeCache.Delete(ctx, claims.JTI); err != nil {
-			return TokenSet{}, fmt.Errorf("failed to consume auth code: %w", err)
 		}
 	}
 
@@ -560,7 +557,12 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("refresh token storage not configured")
 	}
 
-	raw, found, _, err := e.refreshTokenCache.Get(ctx, tokenID)
+	// Atomic GetAndDelete is what makes rotation actually single-use
+	// under concurrent redemptions. Pre-#71 the Get-then-Delete pattern
+	// let two simultaneous redemptions of the same refresh token both
+	// pass Get before either reached Delete; both then minted parallel
+	// session lineages that rotation never detected.
+	raw, found, _, err := e.refreshTokenCache.GetAndDelete(ctx, tokenID)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to read refresh token: %w", err)
 	}
@@ -574,25 +576,20 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	}
 
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
+	// The token is already consumed by GetAndDelete above, so we just
+	// reject and let the caller re-authenticate.
 	if time.Now().Unix() > claims.ExpiresAt {
-		_ = e.refreshTokenCache.Delete(ctx, tokenID)
 		return TokenSet{}, fmt.Errorf("refresh token expired")
 	}
 
 	// Validate absolute session timeout
 	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
-		_ = e.refreshTokenCache.Delete(ctx, tokenID)
 		return TokenSet{}, fmt.Errorf("session absolute timeout reached")
 	}
 
 	// Validate the client matches what was issued.
 	if claims.ClientID != clientID {
 		return TokenSet{}, fmt.Errorf("refresh token was not issued to this client")
-	}
-
-	// Consume the token (one-time use).
-	if err := e.refreshTokenCache.Delete(ctx, tokenID); err != nil {
-		return TokenSet{}, fmt.Errorf("failed to consume refresh token: %w", err)
 	}
 
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.

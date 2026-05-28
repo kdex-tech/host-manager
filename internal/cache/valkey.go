@@ -90,6 +90,40 @@ func (s *ValkeyCache) Get(ctx context.Context, key string) (string, bool, bool, 
 	return "", false, true, nil // Not found in either version
 }
 
+// GetAndDelete atomically reads and removes the entry. Backed by
+// Valkey's GETDEL primitive (single round-trip, server-side atomic),
+// so two concurrent callers racing on the same key always produce
+// exactly one winner. See kdex-tech/host-manager#71.
+func (s *ValkeyCache) GetAndDelete(ctx context.Context, key string) (string, bool, bool, error) {
+	s.mu.RLock()
+	curr := s.prefix
+	prev := s.prevPrefix
+	s.mu.RUnlock()
+
+	val, found, err := s.getDelValue(ctx, curr+key)
+	if err != nil || found {
+		return val, found, true, err
+	}
+
+	if prev != "" {
+		val, found, err := s.getDelValue(ctx, prev+key)
+		if found {
+			return val, true, false, err
+		}
+	}
+
+	return "", false, true, nil
+}
+
+func (s *ValkeyCache) getDelValue(ctx context.Context, fullKey string) (string, bool, error) {
+	cmd := s.client.B().Getdel().Key(fullKey).Build()
+	val, err := s.client.Do(ctx, cmd).ToString()
+	if valkey.IsValkeyNil(err) {
+		return "", false, nil
+	}
+	return val, true, err
+}
+
 func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
 	options := SetOptions{}
 	for _, opt := range opts {

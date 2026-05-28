@@ -62,19 +62,47 @@ func (c *InMemoryCache) Uncycled() bool {
 func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	v, found, isCurrent := c.lookupLocked(key, false)
+	return v, found, isCurrent, nil
+}
 
+// GetAndDelete atomically reads and removes the entry. Implementation:
+// run the same Get walk and, on a hit, evict the entry before releasing
+// the lock. The single c.mu.Lock around both halves is what makes this
+// the contract-required single-winner primitive. See
+// kdex-tech/host-manager#71.
+func (c *InMemoryCache) GetAndDelete(ctx context.Context, key string) (string, bool, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, found, isCurrent := c.lookupLocked(key, true)
+	return v, found, isCurrent, nil
+}
+
+// lookupLocked performs the two-generation key walk shared by Get and
+// GetAndDelete. Caller must hold c.mu.Lock(). When evict is true, a
+// found entry is removed from its segment + LRU before returning.
+// In-memory lookup can't fail, so this returns no error — callers
+// satisfy the cache.Cache interface by appending a nil err.
+func (c *InMemoryCache) lookupLocked(key string, evict bool) (string, bool, bool) {
 	// 1. Try Current Generation
 	if seg, ok := c.segments[c.currentChecksum]; ok {
 		if entry, found := seg[key]; found {
 			// LAZY DELETION CHECK
 			if time.Now().After(entry.expiry) {
 				// Just pretend it's not found. The reaper will get it later.
-				return "", false, true, nil
+				return "", false, true
+			}
+			if evict {
+				if entry.element != nil {
+					c.lru.Remove(entry.element)
+				}
+				delete(seg, key)
+				return entry.value, true, true
 			}
 			if entry.element != nil {
 				c.lru.MoveToFront(entry.element)
 			}
-			return entry.value, true, true, nil // Found in current version
+			return entry.value, true, true // Found in current version
 		}
 	}
 
@@ -88,16 +116,23 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (string, bool, bool
 			// LAZY DELETION CHECK
 			if time.Now().After(entry.expiry) {
 				// Just pretend it's not found. The reaper will get it later.
-				return "", false, true, nil
+				return "", false, true
+			}
+			if evict {
+				if entry.element != nil {
+					c.lru.Remove(entry.element)
+				}
+				delete(seg, key)
+				return entry.value, true, false
 			}
 			if entry.element != nil {
 				c.lru.MoveToFront(entry.element)
 			}
-			return entry.value, true, false, nil // Found, but it's the old version
+			return entry.value, true, false // Found, but it's the old version
 		}
 	}
 
-	return "", false, true, nil // Not found in either version
+	return "", false, true // Not found in either version
 }
 
 // Set stores a rendered page in the cache.
