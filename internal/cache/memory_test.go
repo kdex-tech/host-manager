@@ -389,3 +389,40 @@ func TestInMemoryCacheManager_GetCache_RaceOnFirstCreate(t *testing.T) {
 	im.mu.RUnlock()
 	assert.Equal(t, 1, count, "must register exactly one cache for the class (#57)")
 }
+
+// TestInMemoryCacheManager_UpdateChanInitializedBeforeReaper pins the
+// fix for kdex-tech/host-manager#75. Pre-fix, InMemoryCache.updateChan
+// was initialised INSIDE the reaper goroutine (`c.updateChan = make(...)`
+// at the top of startReaper), but the fast-path GetCache sent to that
+// same channel — a classic publish-after-spawn race. Under -race the
+// detector trips on the unsynchronised write/read. The reaper's
+// eventual `case <-c.updateChan` on the uninitialised field is also a
+// goroutine-leak vector.
+//
+// Post-fix the channel is constructed synchronously in GetCache's
+// slow path before `go cache.startReaper(...)` is spawned, so the
+// reaper observes an already-initialised field.
+func TestInMemoryCacheManager_UpdateChanInitializedBeforeReaper(t *testing.T) {
+	ttl := 100 * time.Millisecond
+	mgr, err := NewCacheManager("", "", &ttl)
+	assert.NoError(t, err)
+
+	// Concurrent GetCache calls on the same class: one spawns the
+	// reaper, the other hits the fast path and sends to updateChan
+	// with a different TTL. Pre-fix this race-detector trips on the
+	// updateChan field write/read.
+	const goroutines = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		newTTL := 50 * time.Millisecond * time.Duration(i+1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = mgr.GetCache("class-x", CacheOptions{TTL: &newTTL})
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
