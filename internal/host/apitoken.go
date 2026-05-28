@@ -106,7 +106,11 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 
 	targetSub := ""
 	if req.Token != "" {
-		data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), req.Token)
+		// Revocation extracts subject from a token regardless of which
+		// audience it was minted for — the token is being inspected,
+		// not used for authentication on the current request. Skip the
+		// audience check by passing "". See kdex-tech/host-manager#69.
+		data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), req.Token, "")
 		if err != nil {
 			log.Error(err, "Invalid token provided for revocation")
 			http.Error(w, "Invalid token", http.StatusBadRequest)
@@ -309,7 +313,10 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 		tokenString = after
 	}
 
-	data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), tokenString)
+	// Verify enforces the host's own audience: a token minted for a
+	// different audience must NOT be considered valid for use here.
+	// Pre-#69 this defaulted to "accept any audience" — confused-deputy.
+	data, err := hh.authConfig.TokenManager.ValidateToken(r.Context(), tokenString, hh.authConfig.Audience)
 	if err != nil {
 		log.Error(err, "Token verification failed")
 		http.Error(w, "Invalid token", http.StatusUnauthorized)

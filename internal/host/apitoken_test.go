@@ -226,7 +226,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessToken(t *testing.T) {
 	g.Expect(resp.Status).To(Equal("revoked"))
 
 	// Verify token is now invalid
-	_, err := tm.ValidateToken(context.Background(), token)
+	_, err := tm.ValidateToken(context.Background(), token, "")
 	g.Expect(err).To(HaveOccurred())
 }
 
@@ -264,7 +264,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 	g.Expect(resp.Status).To(Equal("revoked"))
 
 	// Verify token is now invalid
-	_, err := tm.ValidateToken(context.Background(), token)
+	_, err := tm.ValidateToken(context.Background(), token, "")
 	g.Expect(err).To(HaveOccurred())
 }
 

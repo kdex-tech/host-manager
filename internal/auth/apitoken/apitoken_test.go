@@ -51,7 +51,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Validate token (should succeed)
-	data, err := tm.ValidateToken(ctx, signed)
+	data, err := tm.ValidateToken(ctx, signed, "")
 	require.NoError(t, err)
 	assert.Equal(t, act, data.Action)
 	assert.Equal(t, sub, data.Subject)
@@ -61,7 +61,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 4. Validate token (should fail)
-	_, err = tm.ValidateToken(ctx, signed)
+	_, err = tm.ValidateToken(ctx, signed, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token revoked")
 
@@ -70,7 +70,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 6. Validate token 2 (should succeed)
-	_, err = tm.ValidateToken(ctx, signed2)
+	_, err = tm.ValidateToken(ctx, signed2, "")
 	require.NoError(t, err)
 
 	// 7. Revoke token 2 by signed string
@@ -78,7 +78,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 8. Validate token 2 (should fail)
-	_, err = tm.ValidateToken(ctx, signed2)
+	_, err = tm.ValidateToken(ctx, signed2, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "token revoked")
 }
@@ -102,7 +102,7 @@ func TestTokenManager_NoCache(t *testing.T) {
 	require.NoError(t, err)
 
 	// Validate (should succeed)
-	_, err = tm.ValidateToken(ctx, signed)
+	_, err = tm.ValidateToken(ctx, signed, "")
 	require.NoError(t, err)
 
 	// Revoke by metadata (should error)

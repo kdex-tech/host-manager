@@ -235,7 +235,20 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 	return signed, nil
 }
 
-func (tm *TokenManager) ValidateToken(ctx context.Context, signed string) (*TokenData, error) {
+// ValidateToken parses and verifies a PASETO API token.
+//
+// expectedAudience is REQUIRED in spirit but technically optional in
+// signature:
+//   - non-empty: a paseto.ForAudience rule is added so a token minted
+//     for a different audience is rejected. This is the correct mode
+//     for any handler that uses ValidateToken's success as proof the
+//     bearer should be granted access on the receiving party.
+//   - empty: the audience check is skipped. This is ONLY appropriate
+//     when the token is being INSPECTED (e.g. to extract its subject
+//     for a revocation flow) — not when validating for use. Passing
+//     "" in any other context is the kdex-tech/host-manager#69
+//     confused-deputy regression.
+func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudience string) (*TokenData, error) {
 	// 1. Peek at the footer without verifying the signature
 	// This is safe because the footer is always in the clear (Base64)
 	parser := paseto.NewParser()
@@ -261,6 +274,9 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed string) (*Toke
 	parser.AddRule(paseto.IssuedBy(tm.issuer))
 	parser.AddRule(paseto.NotExpired())
 	parser.AddRule(paseto.ValidAt(time.Now()))
+	if expectedAudience != "" {
+		parser.AddRule(paseto.ForAudience(expectedAudience))
+	}
 
 	token, err := parser.ParseV4Public(*keyPair.PublicKey, signed, nil)
 	if err != nil {
