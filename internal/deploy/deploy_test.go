@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -228,4 +229,155 @@ func splitCSV(s string) []string {
 	}
 	out = append(out, cur)
 	return out
+}
+
+func indexEnvByName(envs []corev1.EnvVar) map[string]string {
+	m := map[string]string{}
+	for _, e := range envs {
+		m[e.Name] = e.Value
+	}
+	return m
+}
+
+// scalingTestDeployer builds a Deployer + KDexFunction suitable for asserting
+// the SCALING_* env block. Caller customizes the returned function's
+// Status.Executable.Scaling.
+func scalingTestSetup(t *testing.T) (*Deployer, *kdexv1alpha1.KDexFunction) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kdexv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn", Namespace: "dev", Generation: 1, UID: "u"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/x"},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{
+			Executable: &kdexv1alpha1.Executable{Image: "img"},
+		},
+	}
+	d := &Deployer{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Host: kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: "h", Namespace: "dev"},
+			Spec: kdexv1alpha1.KDexInternalHostSpec{
+				KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+					Routing: kdexv1alpha1.Routing{Scheme: "https", Domains: []string{"x"}},
+				},
+			},
+		},
+		Scheme: scheme,
+	}
+	return d, fn
+}
+
+// TestDeploy_NilScalingFields_DoNotPanic_AndAreOmitted pins kdex-tech/host-manager#45:
+// the SCALING_* env block dereferenced Scaling.* pointers unconditionally and
+// panicked on any nil field. Target is the trigger today (the only field
+// without a CRD default), but every pointer in the block was a latent trap.
+// Post-fix: nil fields are silently omitted from the env block and Deploy
+// returns a Job normally.
+func TestDeploy_NilScalingFields_DoNotPanic_AndAreOmitted(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+	one := int32(1)
+	// Scaling block set, but every field nil except MinScale — mirrors the
+	// real-world CR that triggered the crash (scaling: { minScale: 1 }).
+	fn.Status.Executable.Scaling = &kdexv1alpha1.ScalingConfig{
+		MinScale: &one,
+	}
+
+	job, err := d.Deploy(context.Background(), fn)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	envs := indexEnvByName(job.Spec.Template.Spec.Containers[0].Env)
+
+	// MinScale is set — present, derefed correctly.
+	if v, ok := envs["SCALING_MIN_SCALE"]; !ok || v != "1" {
+		t.Errorf("SCALING_MIN_SCALE = %q (present=%v); want %q", v, ok, "1")
+	}
+
+	// All other fields are nil — must be omitted entirely (not panicked,
+	// not emitted with a garbage pointer-address value).
+	for _, k := range []string{
+		"SCALING_ACTIVATION_SCALE",
+		"SCALING_INITIAL_SCALE",
+		"SCALING_MAX_SCALE",
+		"SCALING_METRIC",
+		"SCALING_PANIC_THRESHOLD_PERCENTAGE",
+		"SCALING_PANIC_WINDOW_PERCENTAGE",
+		"SCALING_SCALE_DOWN_DELAY",
+		"SCALING_SCALE_TO_ZERO_POD_RETENTION_PERIOD",
+		"SCALING_STABLE_WINDOW",
+		"SCALING_TARGET",
+		"SCALING_TARGET_UTILIZATION_PERCENTAGE",
+	} {
+		if v, present := envs[k]; present {
+			t.Errorf("%s present with value %q but the field was nil on Scaling — should be omitted", k, v)
+		}
+	}
+}
+
+// TestDeploy_ScalingFieldFormatting pins the *VALUE* shape of each SCALING_*
+// env. Two latent format bugs in the pre-fix code:
+//   - MaxScale / MinScale are *int32 in kdex-crds but the original deploy.go
+//     formatted them WITHOUT a deref (fmt.Sprintf("%d", *int32)), so the env
+//     value was the pointer address as a giant integer rather than the field
+//     value.
+//   - ScaleDownDelay / ScaleToZeroPodRetentionPeriod / StableWindow are
+//     *metav1.Duration. fmt.Sprintf("%d", durationStruct) prints
+//     "%!d(v1.Duration={…})" garbage rather than the duration string.
+//
+// Post-fix: int32 fields format as the integer value; Duration fields
+// format as their canonical Go string ("30s", "0s", etc.).
+func TestDeploy_ScalingFieldFormatting(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+	one := int32(1)
+	five := int32(5)
+	hundred := int32(100)
+	conc := "concurrency"
+	thirty := metav1.Duration{Duration: 30 * time.Second}
+	sixty := metav1.Duration{Duration: 60 * time.Second}
+	zero := metav1.Duration{Duration: 0}
+
+	fn.Status.Executable.Scaling = &kdexv1alpha1.ScalingConfig{
+		MinScale:                      &one,
+		MaxScale:                      &five,
+		Target:                        &hundred,
+		Metric:                        &conc,
+		StableWindow:                  &sixty,
+		ScaleDownDelay:                &thirty,
+		ScaleToZeroPodRetentionPeriod: &zero,
+	}
+
+	job, err := d.Deploy(context.Background(), fn)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	envs := indexEnvByName(job.Spec.Template.Spec.Containers[0].Env)
+
+	want := map[string]string{
+		"SCALING_MIN_SCALE":                          "1",
+		"SCALING_MAX_SCALE":                          "5",
+		"SCALING_TARGET":                             "100",
+		"SCALING_METRIC":                             "concurrency",
+		"SCALING_STABLE_WINDOW":                      "1m0s", // 60s canonical form
+		"SCALING_SCALE_DOWN_DELAY":                   "30s",
+		"SCALING_SCALE_TO_ZERO_POD_RETENTION_PERIOD": "0s",
+	}
+	for k, w := range want {
+		if got := envs[k]; got != w {
+			t.Errorf("%s = %q; want %q", k, got, w)
+		}
+	}
 }

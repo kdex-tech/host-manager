@@ -275,57 +275,48 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	env = append(env, d.FaaSAdaptor.Deployer.Env...)
 
 	// Scaling environment variables
-	if function.Status.Executable.Scaling != nil {
-		env = append(env, []corev1.EnvVar{
-			{
-				Name:  "SCALING_ACTIVATION_SCALE",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.ActivationScale),
-			},
-			{
-				Name:  "SCALING_INITIAL_SCALE",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.InitialScale),
-			},
-			{
-				Name:  "SCALING_MAX_SCALE",
-				Value: fmt.Sprintf("%d", function.Status.Executable.Scaling.MaxScale),
-			},
-			{
-				Name:  "SCALING_METRIC",
-				Value: *function.Status.Executable.Scaling.Metric,
-			},
-			{
-				Name:  "SCALING_MIN_SCALE",
-				Value: fmt.Sprintf("%d", function.Status.Executable.Scaling.MinScale),
-			},
-			{
-				Name:  "SCALING_PANIC_THRESHOLD_PERCENTAGE",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.PanicThresholdPercentage),
-			},
-			{
-				Name:  "SCALING_PANIC_WINDOW_PERCENTAGE",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.PanicWindowPercentage),
-			},
-			{
-				Name:  "SCALING_SCALE_DOWN_DELAY",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.ScaleDownDelay),
-			},
-			{
-				Name:  "SCALING_SCALE_TO_ZERO_POD_RETENTION_PERIOD",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.ScaleToZeroPodRetentionPeriod),
-			},
-			{
-				Name:  "SCALING_STABLE_WINDOW",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.StableWindow),
-			},
-			{
-				Name:  "SCALING_TARGET",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.Target),
-			},
-			{
-				Name:  "SCALING_TARGET_UTILIZATION_PERCENTAGE",
-				Value: fmt.Sprintf("%d", *function.Status.Executable.Scaling.TargetUtilizationPercentage),
-			},
-		}...)
+	// SCALING_* env block — each field is appended individually so a nil
+	// pointer on any single field (including Target, the only ScalingConfig
+	// field without a CRD default) doesn't take down the whole reconcile.
+	// Durations use Duration.String() so the consumer reads "30s", not the
+	// internal struct rep. See kdex-tech/host-manager#45.
+	if s := function.Status.Executable.Scaling; s != nil {
+		if s.ActivationScale != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_ACTIVATION_SCALE", Value: fmt.Sprintf("%d", *s.ActivationScale)})
+		}
+		if s.InitialScale != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_INITIAL_SCALE", Value: fmt.Sprintf("%d", *s.InitialScale)})
+		}
+		if s.MaxScale != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_MAX_SCALE", Value: fmt.Sprintf("%d", *s.MaxScale)})
+		}
+		if s.Metric != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_METRIC", Value: *s.Metric})
+		}
+		if s.MinScale != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_MIN_SCALE", Value: fmt.Sprintf("%d", *s.MinScale)})
+		}
+		if s.PanicThresholdPercentage != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_PANIC_THRESHOLD_PERCENTAGE", Value: fmt.Sprintf("%d", *s.PanicThresholdPercentage)})
+		}
+		if s.PanicWindowPercentage != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_PANIC_WINDOW_PERCENTAGE", Value: fmt.Sprintf("%d", *s.PanicWindowPercentage)})
+		}
+		if s.ScaleDownDelay != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_SCALE_DOWN_DELAY", Value: s.ScaleDownDelay.Duration.String()})
+		}
+		if s.ScaleToZeroPodRetentionPeriod != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_SCALE_TO_ZERO_POD_RETENTION_PERIOD", Value: s.ScaleToZeroPodRetentionPeriod.Duration.String()})
+		}
+		if s.StableWindow != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_STABLE_WINDOW", Value: s.StableWindow.Duration.String()})
+		}
+		if s.Target != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_TARGET", Value: fmt.Sprintf("%d", *s.Target)})
+		}
+		if s.TargetUtilizationPercentage != nil {
+			env = append(env, corev1.EnvVar{Name: "SCALING_TARGET_UTILIZATION_PERCENTAGE", Value: fmt.Sprintf("%d", *s.TargetUtilizationPercentage)})
+		}
 	}
 
 	job = &batchv1.Job{
