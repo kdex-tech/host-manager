@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,4 +389,59 @@ func TestInMemoryCacheManager_GetCache_RaceOnFirstCreate(t *testing.T) {
 	count := len(im.caches)
 	im.mu.RUnlock()
 	assert.Equal(t, 1, count, "must register exactly one cache for the class (#57)")
+}
+
+// TestInMemoryCache_GetAndDelete_AtomicSingleWinner pins the
+// contract for kdex-tech/host-manager#71: N concurrent GetAndDelete
+// calls on the same key must produce exactly one winner (found=true,
+// value=expected) and N-1 losers (found=false). This is the primitive
+// that lets Exchanger.RedeemRefreshToken / RedeemAuthorizationCode
+// reject the second of two concurrent redemptions instead of issuing
+// two parallel token lineages from one consumed token.
+func TestInMemoryCache_GetAndDelete_AtomicSingleWinner(t *testing.T) {
+	ttl := time.Minute
+	mgr, err := NewCacheManager("", "", &ttl)
+	assert.NoError(t, err)
+	c := mgr.GetCache("race", CacheOptions{})
+
+	const key, val = "the-one-token", "payload"
+	const goroutines = 64
+
+	for trial := 0; trial < 20; trial++ {
+		assert.NoError(t, c.Set(context.Background(), key, val))
+
+		var winners atomic.Int32
+		var losers atomic.Int32
+		var observedVal atomic.Value
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				v, found, _, err := c.GetAndDelete(context.Background(), key)
+				if err != nil {
+					t.Errorf("GetAndDelete: unexpected error: %v", err)
+					return
+				}
+				if found {
+					winners.Add(1)
+					observedVal.Store(v)
+				} else {
+					losers.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		assert.EqualValues(t, 1, winners.Load(), "trial %d: exactly one goroutine must win", trial)
+		assert.EqualValues(t, goroutines-1, losers.Load(), "trial %d: every loser must observe found=false", trial)
+		assert.Equal(t, val, observedVal.Load(), "trial %d: winner must observe the stored value", trial)
+
+		// Key is gone after GetAndDelete.
+		_, found, _, _ := c.Get(context.Background(), key)
+		assert.False(t, found, "trial %d: key must be absent after GetAndDelete", trial)
+	}
 }
