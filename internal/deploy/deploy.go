@@ -333,9 +333,17 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: new(int32(3)),
-			Completions:  new(int32(1)),
-			Parallelism:  new(int32(1)),
+			// Without ActiveDeadlineSeconds a hung deployer pod (Knative
+			// API blocked, probe stuck) runs forever — BackoffLimit only
+			// counts pod failures, so a never-failing pod is never
+			// retried and never expires, and the KDexFunction stays
+			// Progressing=True indefinitely. 30m comfortably covers a
+			// Knative cold start with deps; well below "operator
+			// intervenes." See kdex-tech/host-manager#63.
+			ActiveDeadlineSeconds: new(int64(30 * 60)),
+			BackoffLimit:          new(int32(3)),
+			Completions:           new(int32(1)),
+			Parallelism:           new(int32(1)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{

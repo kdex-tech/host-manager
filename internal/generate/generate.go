@@ -180,9 +180,15 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: new(int32(3)),
-			Completions:  new(int32(1)),
-			Parallelism:  new(int32(1)),
+			// Without ActiveDeadlineSeconds a hung codegen pod (slow git
+			// checkout, generate-code blocked on a network call) runs
+			// forever — BackoffLimit only counts pod failures. 30m
+			// covers a heavy codegen run plus git pull/push; well
+			// below "operator intervenes." See kdex-tech/host-manager#63.
+			ActiveDeadlineSeconds: new(int64(30 * 60)),
+			BackoffLimit:          new(int32(3)),
+			Completions:           new(int32(1)),
+			Parallelism:           new(int32(1)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
