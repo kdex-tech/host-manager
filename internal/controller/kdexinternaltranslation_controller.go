@@ -99,6 +99,10 @@ func (r *KDexInternalTranslationReconciler) Reconcile(ctx context.Context, req c
 				return ctrl.Result{}, err
 			}
 		}
+		// Mirror kdexpage_controller.go: stop reconciling on the
+		// deletion path so we don't fall through and re-add the
+		// translation we just removed. See kdex-tech/host-manager#53.
+		return ctrl.Result{}, nil
 	}
 
 	kdexv1alpha1.SetConditions(
