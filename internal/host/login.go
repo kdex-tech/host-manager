@@ -123,6 +123,19 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
+	// Revoke the server-side refresh-token entry BEFORE we tell the
+	// browser to forget the cookie. Without this a stolen `_refresh`
+	// cookie value (XSS, log leak, shared-device residual) replays
+	// for up to RefreshTokenTTL after the user "logs out". See
+	// kdex-tech/host-manager#84.
+	if hh.authConfig != nil && hh.authExchanger != nil {
+		if c, err := r.Cookie(hh.authConfig.CookieName + "_refresh"); err == nil && c.Value != "" {
+			// Fire-and-forget: errors here shouldn't block the logout
+			// from completing.
+			_ = hh.authExchanger.RevokeRefreshToken(r.Context(), c.Value)
+		}
+	}
+
 	// Clear local cookies
 	http.SetCookie(w, &http.Cookie{
 		Name:     hh.authConfig.CookieName,

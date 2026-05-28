@@ -254,6 +254,17 @@ func (e *Exchanger) IsRefreshTokenEnabled() bool {
 	return e != nil && e.refreshTokenCache != nil
 }
 
+// RevokeRefreshToken deletes the refresh-token entry identified by
+// tokenID from the cache. Idempotent — returns nil if no entry exists.
+// Called from logout flows so a stolen `_refresh` cookie value cannot
+// be replayed after the user logs out. See kdex-tech/host-manager#84.
+func (e *Exchanger) RevokeRefreshToken(ctx context.Context, tokenID string) error {
+	if !e.IsRefreshTokenEnabled() {
+		return nil
+	}
+	return e.refreshTokenCache.Delete(ctx, tokenID)
+}
+
 // createRefreshToken is the internal helper that stores a refresh token in the cache.
 func (e *Exchanger) createRefreshToken(ctx context.Context, claims RefreshTokenClaims) (string, error) {
 	now := time.Now()
