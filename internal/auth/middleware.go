@@ -57,9 +57,17 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				return
 			}
 
-			audiences := make([]string, 0, len(c.FunctionURLs)+1)
-			audiences = append(audiences, c.Audience)
-			audiences = append(audiences, c.FunctionURLs...)
+			// Host middleware accepts ONLY the host's own audience.
+			// Pre-#86 it also accepted c.FunctionURLs — any function's
+			// FAT (minted in proxy.go with aud=fn.Status.URL) leaked
+			// into the host as a valid identity token, since Project
+			// copies the user's roles/entitlements/sub into the FAT.
+			// A function that logged or proxied its inbound
+			// Authorization header surrendered a token replayable
+			// across the entire host surface (confused-deputy).
+			// Function backends still validate aud==fn.Status.URL
+			// themselves; the host doesn't need to.
+			audiences := []string{c.Audience}
 
 			token, err := jwt.ParseWithClaims(
 				tokenString,
