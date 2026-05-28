@@ -243,7 +243,15 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Get(ctx, types.NamespacedName{Name: kImageName, Namespace: function.Namespace}, image); err == nil {
 			latestImage, found, _ := unstructured.NestedString(image.Object, "status", "latestImage")
 			if found && latestImage != "" {
-				if function.Status.State == kdexv1alpha1.KDexFunctionStateReady && function.Status.Executable.Image != latestImage {
+				// nil-guard Status.Executable: the same #77 scenario
+				// (older binary landed state=Ready without populating
+				// Status.Executable) would nil-deref Image here and
+				// crash the controller before handleReady's self-heal
+				// runs. Skip the drift check when nil — let handleReady
+				// re-derive on the next loop.
+				if function.Status.State == kdexv1alpha1.KDexFunctionStateReady &&
+					function.Status.Executable != nil &&
+					function.Status.Executable.Image != latestImage {
 					log.Info("New image detected from KPack, re-reconciling from source available", "latestImage", latestImage)
 					function.Status.State = kdexv1alpha1.KDexFunctionStateSourceAvailable
 				}
@@ -1221,6 +1229,24 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 
 func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
+
+	// Self-heal the state=ExecutableAvailable ⇒ Status.Executable != nil
+	// invariant. Pre-fix the handler reached Deploy() with a nil
+	// Executable and got stuck on "function … has no executable" forever
+	// — the populate site (handleOpenAPIValid) never re-runs. Observed
+	// on a 0.2.38 → 0.2.91 binary upgrade where the older version landed
+	// the state without pairing the populate. Mirrors handleReady's
+	// self-heal at line 1409. See kdex-tech/host-manager#77.
+	if hc.function.Status.Executable == nil {
+		if hc.function.Spec.Origin.Executable != nil {
+			log.V(2).Info("Status.Executable is nil, re-deriving from Spec.Origin.Executable")
+			hc.function.Status.Executable = hc.function.Spec.Origin.Executable
+			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+		}
+		log.V(2).Info("Status.Executable is nil and Spec has no executable, stepping back to OpenAPIValid")
+		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateOpenAPIValid
+		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+	}
 
 	deployer := deploy.Deployer{
 		Client:      r.Client,
