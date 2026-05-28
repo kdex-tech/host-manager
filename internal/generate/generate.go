@@ -50,6 +50,11 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 		return nil, err
 	}
 
+	functionSpec, err := marshall(function)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal function spec for codegen Job: %w", err)
+	}
+
 	env := []corev1.EnvVar{
 		{
 			Name:  "FUNCTION_HOST",
@@ -77,7 +82,7 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 		},
 		{
 			Name:  "FUNCTION_SPEC",
-			Value: marshall(function),
+			Value: functionSpec,
 		},
 		{
 			Name:  "FUNCTION_API_SPEC",
@@ -274,7 +279,7 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 	return job, nil
 }
 
-func marshall(function *kdexv1alpha1.KDexFunction) string {
+func marshall(function *kdexv1alpha1.KDexFunction) (string, error) {
 	copy := function.DeepCopy()
 
 	if copy.Status.Generator != nil && copy.Spec.Origin.Generator == nil {
@@ -298,6 +303,14 @@ func marshall(function *kdexv1alpha1.KDexFunction) string {
 	copy.Finalizers = nil
 	copy.GenerateName = ""
 	copy.Generation = 0
-	yamlBytes, _ := yaml.Marshal(&copy)
-	return string(yamlBytes)
+	// Propagate the marshal error instead of swallowing it. Pre-#67
+	// the error was discarded; a marshal failure produced an empty
+	// FUNCTION_SPEC, codegen ran against defaults, and git-push
+	// overwrote the developer's authored source with a stub —
+	// silent dev-repo corruption.
+	yamlBytes, err := yaml.Marshal(&copy)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal function spec: %w", err)
+	}
+	return string(yamlBytes), nil
 }
