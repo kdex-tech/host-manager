@@ -279,6 +279,16 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		m.caches = make(map[string]Cache)
 	}
 
+	// Double-checked locking: another goroutine may have created the
+	// cache between our RUnlock and Lock. Without this recheck, both
+	// racers each construct a fresh InMemoryCache + reaper goroutine,
+	// the second registration overwrites the first in m.caches[class],
+	// and the loser's cache is orphaned (silent token loss + goroutine
+	// leak). See kdex-tech/host-manager#57.
+	if existing, ok := m.caches[class]; ok {
+		return existing
+	}
+
 	ttl := m.ttl
 	if opts.TTL != nil && *opts.TTL >= minTTL {
 		ttl = *opts.TTL

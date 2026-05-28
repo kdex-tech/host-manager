@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,4 +345,47 @@ func TestInMemoryCache_IndividualTTL(t *testing.T) {
 	// default should still be there
 	_, ok, _, _ = c.Get(ctx, "default")
 	assert.True(t, ok)
+}
+
+// TestInMemoryCacheManager_GetCache_RaceOnFirstCreate pins the fix for
+// kdex-tech/host-manager#57. The pre-fix GetCache slow-path took
+// m.mu.Lock() but did not re-check m.caches[class] before constructing
+// — two concurrent callers that both missed the RLock fast path would
+// each construct a separate *InMemoryCache + launch a separate reaper
+// goroutine, the second overwriting the first in m.caches[class]. The
+// loser's cache was orphaned (silent data loss for any tokens already
+// written through it) and the loser's reaper goroutine leaked.
+//
+// Post-fix, all concurrent callers receive the same cache pointer.
+func TestInMemoryCacheManager_GetCache_RaceOnFirstCreate(t *testing.T) {
+	ttl := time.Minute
+	mgr, err := NewCacheManager("", "", &ttl)
+	assert.NoError(t, err)
+
+	const n = 32
+	results := make([]Cache, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = mgr.GetCache("race-class", CacheOptions{})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 1; i < n; i++ {
+		assert.Samef(t, results[0], results[i],
+			"GetCache must return the same cache pointer for every concurrent caller (#57); got distinct caches at index 0 and %d", i)
+	}
+
+	// And only one entry exists in the manager's map.
+	im := mgr.(*InMemoryCacheManager)
+	im.mu.RLock()
+	count := len(im.caches)
+	im.mu.RUnlock()
+	assert.Equal(t, 1, count, "must register exactly one cache for the class (#57)")
 }
