@@ -94,8 +94,14 @@ func (hh *HostHandler) pageHandlerFunc(
 			if !isCurrent {
 				log.V(2).Info("serving stale page, migrating in background", "page", ph.Name, "lang", l)
 
-				// Background Migration
+				// Background Migration. Hold hh.mu.RLock for the
+				// duration of the re-render so the goroutine sees
+				// consistent hh.* state vs concurrent SetHost writes.
+				// See kdex-tech/host-manager#73.
 				go func(p page.PageHandler, lang language.Tag, trans *Translations) {
+					hh.mu.RLock()
+					defer hh.mu.RUnlock()
+
 					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 
