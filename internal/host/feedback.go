@@ -190,9 +190,16 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log := logf.FromContext(r.Context())
 
+		// Snapshot the fields we need and release the RLock IMMEDIATELY.
+		// Pre-#82 the outer RLock was held across hh.serveError /
+		// hh.unwrap, both of which call hh.serveError — which itself
+		// takes hh.mu.RLock. Go's RWMutex prohibits recursive read
+		// locking, so a writer queued between the outer and inner
+		// RLock deadlocked the host. Same shape as #26 and #51.
 		hh.mu.RLock()
 		mux := hh.Mux
 		sniffer := hh.sniffer
+		hh.mu.RUnlock()
 
 		h, p := mux.Handler(r)
 		if p == "" {
@@ -206,12 +213,8 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 
 		// Only intercept if we have a sniffer (checker), it's not an internal path
 		if sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && p != "") {
-			hh.mu.RUnlock()
 			next.ServeHTTP(wrapped, r)
-
-			hh.mu.RLock()
 			hh.unwrap(ew, r, w)
-			hh.mu.RUnlock()
 			return
 		}
 
@@ -271,7 +274,6 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 				} else {
 					hh.serveError(w, r, http.StatusBadRequest, err.Error())
 				}
-				hh.mu.RUnlock()
 				return
 			}
 
@@ -281,7 +283,6 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 				} else {
 					hh.serveError(w, r, ew.statusCode, ew.statusMsg)
 				}
-				hh.mu.RUnlock()
 				return
 			}
 
@@ -310,14 +311,9 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			if err != nil {
 				hh.serveError(w, r, http.StatusInternalServerError, err.Error())
 			}
-			hh.mu.RUnlock()
 		} else {
-			hh.mu.RUnlock()
 			next.ServeHTTP(wrapped, r)
-
-			hh.mu.RLock()
 			hh.unwrap(ew, r, w)
-			hh.mu.RUnlock()
 		}
 	})
 }
