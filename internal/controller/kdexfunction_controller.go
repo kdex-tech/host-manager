@@ -1141,35 +1141,20 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			"KPackImage", imgUnstruct,
 		)
 
-		success := false
-		if imgUnstruct != nil && imgUnstruct.Object != nil {
-			status, ok := imgUnstruct.Object["status"].(map[string]any)
-			if ok {
-				observedGeneration, found, _ := unstructured.NestedInt64(imgUnstruct.Object, "status", "observedGeneration")
-				if found && observedGeneration >= imgUnstruct.GetGeneration() {
-					conditions, ok := status["conditions"].([]any)
-					if ok {
-						for _, cond := range conditions {
-							if cond.(map[string]any)["type"] == "Ready" && cond.(map[string]any)["status"] == "True" {
-								success = true
-							} else if cond.(map[string]any)["type"] == "Failed" && cond.(map[string]any)["status"] == "True" {
-								err := fmt.Errorf("image builder job %s/%s failed: %s", imgUnstruct.GetNamespace(), imgUnstruct.GetName(), cond.(map[string]any)["message"])
-								kdexv1alpha1.SetConditions(
-									&hc.function.Status.Conditions,
-									kdexv1alpha1.ConditionStatuses{
-										Degraded:    metav1.ConditionTrue,
-										Progressing: metav1.ConditionFalse,
-										Ready:       metav1.ConditionFalse,
-									},
-									kdexv1alpha1.ConditionReasonReconcileError,
-									err.Error(),
-								)
-								return ctrl.Result{}, err
-							}
-						}
-					}
-				}
-			}
+		success, failedErr := inspectKPackImageStatus(imgUnstruct)
+		if failedErr != nil {
+			err := fmt.Errorf("image builder job %s/%s failed: %s", imgUnstruct.GetNamespace(), imgUnstruct.GetName(), failedErr.Error())
+			kdexv1alpha1.SetConditions(
+				&hc.function.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionTrue,
+					Progressing: metav1.ConditionFalse,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileError,
+				err.Error(),
+			)
+			return ctrl.Result{}, err
 		}
 
 		if !success {
@@ -1524,4 +1509,65 @@ func decodeDeployerURL(terminationMessage string) (string, error) {
 		return "", fmt.Errorf("deployer returned empty URL; backend not admitted yet")
 	}
 	return res.URL, nil
+}
+
+// inspectKPackImageStatus reads the kpack Image's status.conditions
+// and returns whether the build succeeded (success=true ⇔
+// Ready=True observed for the CURRENT generation) and whether it
+// failed (non-nil failedErr ⇔ Failed=True observed on ANY
+// generation).
+//
+// The Failed signal is intentionally NOT gated on
+// `observedGeneration == generation`. Pre-#94 the whole block was
+// gated and a Failed=True on a prior generation was silently
+// discarded — when kpack lagged reconciling its own Image (pod
+// restart, stuck webhook), the function infinite-looped at
+// Progressing=True / Degraded=False with no operator-visible signal.
+// Ready stays gated because a stale Ready=True from before the
+// operator's latest spec edit must not promote the function to
+// success.
+func inspectKPackImageStatus(imgUnstruct *unstructured.Unstructured) (success bool, failedErr error) {
+	if imgUnstruct == nil || imgUnstruct.Object == nil {
+		return false, nil
+	}
+	status, ok := imgUnstruct.Object["status"].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	conditions, ok := status["conditions"].([]any)
+	if !ok {
+		return false, nil
+	}
+
+	// Failed=True from ANY generation → terminal signal worth
+	// surfacing.
+	for _, cond := range conditions {
+		c, ok := cond.(map[string]any)
+		if !ok {
+			continue
+		}
+		if c["type"] == "Failed" && c["status"] == "True" {
+			msg, _ := c["message"].(string)
+			if msg == "" {
+				msg = "kpack reports Failed=True"
+			}
+			return false, fmt.Errorf("%s", msg)
+		}
+	}
+
+	// Ready=True only when kpack has observed the current generation.
+	observedGeneration, found, _ := unstructured.NestedInt64(imgUnstruct.Object, "status", "observedGeneration")
+	if !found || observedGeneration < imgUnstruct.GetGeneration() {
+		return false, nil
+	}
+	for _, cond := range conditions {
+		c, ok := cond.(map[string]any)
+		if !ok {
+			continue
+		}
+		if c["type"] == "Ready" && c["status"] == "True" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
