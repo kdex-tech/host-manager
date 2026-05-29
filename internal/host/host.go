@@ -565,8 +565,16 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 }
 
 func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Snapshot every field this method dereferences under one RLock.
+	// Pre-#88 only hh.Mux was captured; hh.authConfig and
+	// hh.authExchanger were read at line 591 with no lock, racing
+	// SetHost's writes under Lock. Race detector tripped; an unlucky
+	// torn-interface read of hh.authConfig could nil-deref the
+	// method-table pointer mid-call.
 	hh.mu.RLock()
 	mux := hh.Mux
+	authConfig := hh.authConfig
+	authExchanger := hh.authExchanger
 	hh.mu.RUnlock()
 
 	// While the host is initializing we still need to honor the contracts of
@@ -588,7 +596,7 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// whether the caller may auto-generate KDexFunctions, so authentication must
 	// resolve first and place the AuthContext on the request context.
 	wrappedMux := hh.DesignMiddleware(mux)
-	wrappedMux = hh.authConfig.AddAuthentication(wrappedMux, hh.authExchanger)
+	wrappedMux = authConfig.AddAuthentication(wrappedMux, authExchanger)
 	wrappedMux.ServeHTTP(w, r)
 }
 
