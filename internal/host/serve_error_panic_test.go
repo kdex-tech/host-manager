@@ -18,7 +18,7 @@ import (
 // RUnlock orphans the reader, deadlocking every subsequent reconcile.
 type panickingCacheManager struct{}
 
-func (panickingCacheManager) Cycle(string, bool) error                            { return nil }
+func (panickingCacheManager) Cycle(string, bool) error { return nil }
 func (panickingCacheManager) GetCache(string, cache.CacheOptions) cache.Cache {
 	panic("simulated render-path panic (kdex-tech/host-manager#51)")
 }

@@ -45,7 +45,7 @@ func TestBuildUtilityPagePageHandler_PropagatesStatus(t *testing.T) {
 		Status: kdexv1alpha1.KDexObjectStatus{
 			ObservedGeneration: 7,
 			Attributes: map[string]string{
-				"archetype.generation":       "3",
+				"archetype.generation":        "3",
 				"archetype.header.generation": "2",
 				"archetype.footer.generation": "1",
 			},

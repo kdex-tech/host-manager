@@ -44,4 +44,3 @@ func assertJobHasReasonableDeadline(t *testing.T, spec *batchv1.JobSpec, label s
 	assert.LessOrEqual(t, *spec.ActiveDeadlineSeconds, int64(2*60*60),
 		"%s Job ActiveDeadlineSeconds should be aggressive (≤ 2h) — operator-friendly upper bound", label)
 }
-

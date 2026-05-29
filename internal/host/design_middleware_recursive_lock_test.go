@@ -163,4 +163,3 @@ func TestDesignMiddleware_NoRecursiveRLockDeadlock(t *testing.T) {
 		t.Fatal("request goroutine never completed")
 	}
 }
-

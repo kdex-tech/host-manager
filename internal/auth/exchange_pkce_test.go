@@ -84,7 +84,7 @@ func TestRedeemAuthorizationCode_RejectsPlainAndEmptyPKCE(t *testing.T) {
 		t.Helper()
 		code, err := ex.CreateAuthorizationCode(ctx, AuthorizationCodeClaims{
 			Subject:             "alice",
-			ClientID:             "app",
+			ClientID:            "app",
 			RedirectURI:         "https://app/cb",
 			Scope:               "openid",
 			Exp:                 time.Now().Add(time.Minute).Unix(),

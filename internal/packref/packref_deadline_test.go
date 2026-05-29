@@ -46,14 +46,14 @@ func TestPackRefJob_ActiveDeadlineSecondsSet(t *testing.T) {
 	}
 
 	p := &PackRef{
-		Client:       fake.NewClientBuilder().WithScheme(scheme).Build(),
-		ConfigMap:    &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: "dev"}},
-		InternalHost: host,
+		Client:        fake.NewClientBuilder().WithScheme(scheme).Build(),
+		ConfigMap:     &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: "dev"}},
+		InternalHost:  host,
 		ImageRegistry: "example.com",
-		NPMSecret:    corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "npmrc", Namespace: "dev"}},
-		Log:          logr.Discard(),
-		Packages:     &configuration.Packages{PackagerImage: "pkg", ToolsImage: "tools"},
-		Scheme:       scheme,
+		NPMSecret:     corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "npmrc", Namespace: "dev"}},
+		Log:           logr.Discard(),
+		Packages:      &configuration.Packages{PackagerImage: "pkg", ToolsImage: "tools"},
+		Scheme:        scheme,
 	}
 
 	job, err := p.GetOrCreatePackRefJob(context.Background(), ipr)
