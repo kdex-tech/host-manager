@@ -105,6 +105,23 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				}
 				headers := map[string]any{}
 				for key, value := range preq.In.Header {
+					// Strip sensitive headers from the snapshot so they
+					// can't leak into the FAT through ClaimMappings that
+					// extract `self.headers.<name>`. Specifically:
+					//   - Authorization: the user's host-audience token
+					//   - Cookie: the user's whole session cookie jar
+					//   - X-Forwarded-*: attacker-spoofable on the
+					//     inbound request (SetXForwarded appends the
+					//     true chain to preq.Out, but the snapshot here
+					//     is preq.In and runs before that).
+					// See kdex-tech/host-manager#90.
+					canonical := http.CanonicalHeaderKey(key)
+					if canonical == "Authorization" || canonical == "Cookie" || canonical == "Set-Cookie" {
+						continue
+					}
+					if strings.HasPrefix(canonical, "X-Forwarded-") || canonical == "Forwarded" {
+						continue
+					}
 					headers[key] = value
 				}
 				if len(headers) > 0 {
