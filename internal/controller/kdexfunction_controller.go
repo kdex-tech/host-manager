@@ -1334,11 +1334,8 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 			return markCodegenJobTerminallyFailed(hc.function, job, msg)
 		}
 
-		type results struct {
-			URL string `json:"url"`
-		}
-		var res results
-		if err := json.Unmarshal([]byte(terminationMessage), &res); err != nil {
+		url, err := decodeDeployerURL(terminationMessage)
+		if err != nil {
 			kdexv1alpha1.SetConditions(
 				&hc.function.Status.Conditions,
 				kdexv1alpha1.ConditionStatuses{
@@ -1357,7 +1354,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
-		hc.function.Status.URL = res.URL
+		hc.function.Status.URL = url
 	}
 
 	hc.function.Status.State = kdexv1alpha1.KDexFunctionStateFunctionDeployed
@@ -1506,4 +1503,25 @@ func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdex
 		}
 	}
 	return nil
+}
+
+// decodeDeployerURL parses the deployer pod's termination message
+// into the function URL. An empty URL — knative-deployer's
+// Knative-Service-not-yet-admitted case, or any deployer bug
+// producing success-with-empty-URL — is treated as a failure rather
+// than silently accepted. Pre-#92 the empty URL was assigned to
+// Status.URL, the state transitioned to FunctionDeployed → Ready=True,
+// the host-handler mounted a route at an empty upstream, and end
+// users got 502 Bad Gateway from a CR that looked healthy.
+func decodeDeployerURL(terminationMessage string) (string, error) {
+	var res struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(terminationMessage), &res); err != nil {
+		return "", fmt.Errorf("failed to parse deployer results: %w", err)
+	}
+	if res.URL == "" {
+		return "", fmt.Errorf("deployer returned empty URL; backend not admitted yet")
+	}
+	return res.URL, nil
 }
