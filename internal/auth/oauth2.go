@@ -95,6 +95,18 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When PKCE is in use, force S256. Pre-#96 the authorize handler
+	// passed code_challenge_method through verbatim and the token
+	// endpoint accepted `plain`/empty as a literal string compare —
+	// allowing an attacker to downgrade their own flow to plain and
+	// redeem an intercepted code with any matching verifier. RFC 7636
+	// §4.2 has considered plain unsafe since 2015.
+	if codeChallenge != "" && codeChallengeMethod != "S256" {
+		err = fmt.Errorf("unsupported code_challenge_method: only S256 is accepted")
+		http.Error(w, "Unsupported code_challenge_method: only S256 is accepted", http.StatusBadRequest)
+		return
+	}
+
 	if !slices.Contains(authClient.RedirectURIs, redirectURI) {
 		err = fmt.Errorf("invalid redirect_uri")
 		http.Error(w, "Invalid redirect_uri", http.StatusBadRequest)
