@@ -1601,9 +1601,22 @@ var _ = Describe("Service-backed KDexFunction", func() {
 				testSvcs = append(testSvcs, s)
 			}
 			g.Expect(testSvcs).To(HaveLen(0))
+			// Same exclusion as the Service check above: envtest's
+			// auto-managed "kubernetes" Service owns an EndpointSlice in
+			// the default namespace (kubernetes.io/service-name=kubernetes,
+			// managed by kube-apiserver) that the bootstrap controller
+			// recreates on delete — DeleteAllOf can't clear it. Only
+			// test-owned slices should remain absent.
 			var slices discoveryv1.EndpointSliceList
 			g.Expect(k8sClient.List(ctx, &slices, client.InNamespace(namespace))).To(Succeed())
-			g.Expect(slices.Items).To(HaveLen(0))
+			testSlices := make([]discoveryv1.EndpointSlice, 0, len(slices.Items))
+			for _, s := range slices.Items {
+				if s.Namespace == "default" && s.Labels["kubernetes.io/service-name"] == "kubernetes" {
+					continue
+				}
+				testSlices = append(testSlices, s)
+			}
+			g.Expect(testSlices).To(HaveLen(0))
 		}, "5s", "200ms").Should(Succeed())
 		cleanupResources(namespace)
 	})
