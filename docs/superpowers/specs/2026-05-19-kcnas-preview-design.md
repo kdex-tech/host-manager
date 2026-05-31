@@ -1,7 +1,10 @@
 # kcnas-preview — Design Spec
 
+> **Status: SUPERSEDED** by [2026-05-31-kdex-unified-cli-design.md](2026-05-31-kdex-unified-cli-design.md).
+> The unified design absorbs this preview spec as the `kdex preview` subcommand of a broader CLI that also includes `kdex codegen go`. Binary name changes from `kcnas-preview` to `kdex`; cmd path changes from `cmd/preview/` to `cmd/kdex/`; design content otherwise carries over. Refer to the unified spec for current direction.
+
 **Date:** 2026-05-19
-**Status:** Draft, pending implementation plan
+**Status:** Superseded (kept for historical context)
 **Repo:** kdex-tech/host-manager (in-tree alongside the existing controller binary)
 
 ## 1. Overview
