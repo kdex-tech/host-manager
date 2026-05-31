@@ -1,0 +1,16 @@
+# Minimal KDexPage. One static-HTML content entry in the required 'main'
+# slot; no archetype/footer/header/navigation overrides — the page
+# reconciler falls back to defaults for those.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexPage
+metadata:
+  name: spike-home
+  namespace: default
+spec:
+  hostRef:
+    name: spike
+  label: "Home"
+  basePath: /
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>SPIKE_HOME_CONTENT</p>"

@@ -1,0 +1,12 @@
+# Minimal KDexTheme. One inline <style> asset is enough to prove the
+# theme-asset path threads through to the rendered page (ThemeAssetsToString
+# concatenates Asset.ToTag()).
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTheme
+metadata:
+  name: spike-theme
+  namespace: default
+spec:
+  assets:
+    - style: |
+        :root { --spike: 1; }

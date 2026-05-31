@@ -1,0 +1,24 @@
+# Minimal KDexInternalHost.
+#
+# Why KDexInternalHost and not KDexHost? In production the nexus-manager
+# operator (a sibling project, not in this repo) materializes one
+# KDexInternalHost per user-facing KDexHost. host-manager's reconcilers
+# only watch KDexInternalHost, so the spike fixture must use it directly.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexInternalHost
+metadata:
+  name: spike
+  namespace: default
+spec:
+  brandName: "Spike"
+  organization: "Spike Org"
+  defaultLang: en
+  devMode: true
+  modulePolicy: Loose
+  routing:
+    domains:
+      - spike.local
+    scheme: http
+  themeRef:
+    kind: KDexTheme
+    name: spike-theme
