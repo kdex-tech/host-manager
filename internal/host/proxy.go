@@ -23,6 +23,37 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// fatAudienceFor returns the audience to mint a Function Access Token for.
+//
+// For Knative-deployed functions (no Spec.Backend), each function has its
+// own Knative Service so Status.URL identifies a recipient uniquely; the
+// audience is Status.URL verbatim.
+//
+// For Service-backed functions (Spec.Backend.Type=Service), multiple sibling
+// KDexFunction CRs commonly proxy to the same backend Service — typically
+// the case when one upstream API is split across resource-family CRs to
+// fit under the Spec.API.Paths MaxProperties=16 cap. The backend's JWT
+// validator usually has a single audience configured; to satisfy it from
+// any of those siblings' FATs, the audience is the Service origin
+// (scheme + host[:port]) without the Spec.Backend.Service.Path suffix. All
+// sibling functions backed by the same Service then mint FATs with the
+// same audience.
+//
+// See kdex-tech/host-manager#98 for background on the shared-backend case.
+func fatAudienceFor(fn *kdexv1alpha1.KDexFunction) string {
+	if fn.Spec.Backend == nil {
+		return fn.Status.URL
+	}
+	u, err := url.Parse(fn.Status.URL)
+	if err != nil {
+		return fn.Status.URL
+	}
+	u.Path = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 //nolint:gocyclo
 func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer string) http.Handler {
 	target, err := url.Parse(fn.Status.URL)
@@ -45,7 +76,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	}
 
 	signer, err := sign.NewSigner(
-		fn.Status.URL,
+		fatAudienceFor(fn),
 		signerDuration,
 		issuer,
 		&hh.authConfig.ActivePair.Private,
