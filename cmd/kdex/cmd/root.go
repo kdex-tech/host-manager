@@ -15,6 +15,7 @@ It bundles developer-experience tools for the KDex SDLC:
   - kdex codegen     — generate function scaffolding from an OpenAPI spec
 
 See https://github.com/kdex-tech/host-manager for documentation.`,
+		SilenceUsage: true,
 	}
 	return root
 }
