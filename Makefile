@@ -107,8 +107,15 @@ modernizer-fix: ## Run modernizer and perform fixes
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager ./cmd/host-manager
+build: build-host-manager build-kdex ## Build both binaries.
+
+.PHONY: build-host-manager
+build-host-manager: manifests generate fmt vet ## Build host-manager binary.
+	go build -o bin/host-manager ./cmd/host-manager
+
+.PHONY: build-kdex
+build-kdex: fmt vet ## Build kdex CLI binary.
+	go build -o bin/kdex ./cmd/kdex
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
