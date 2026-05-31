@@ -470,6 +470,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	issuer := fmt.Sprintf("%s://%s", internalHost.Spec.Routing.Scheme, internalHost.Spec.Routing.Domains[0])
 
+	// White-label API token prefix: per-host spec wins, else the
+	// NexusConfiguration framework default. Empty => bare "v4.public." tokens.
+	apiTokenPrefix := resolveAPITokenPrefix(internalHost.Spec.Auth, r.Configuration)
+
 	authConfigBuilder := auth.NewConfigBuilder().WithAuthClientLoader(
 		func() (map[string]auth.AuthClient, error) {
 			return auth.AuthClientLoader(
@@ -492,12 +496,19 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		},
 	).WithAPITokenManagerLoader(
 		func() (*apitoken.TokenManager, error) {
-			return apitoken.APITokenManagerLoader(
+			tm, err := apitoken.APITokenManagerLoader(
 				issuer,
 				secrets,
 				r.HostHandler.GetCacheManager().GetCache("apitoken-revocation", cache.CacheOptions{}),
 				internalHost.Spec.DevMode,
 			)
+			if err != nil {
+				return nil, err
+			}
+			if tm != nil {
+				tm.WithTokenPrefix(apiTokenPrefix)
+			}
+			return tm, nil
 		},
 	).WithAudience(
 		issuer,
@@ -1725,6 +1736,19 @@ func (r *KDexInternalHostReconciler) backendServicePort() gatewayv1.PortNumber {
 		return ports[0].Port
 	}
 	return 80
+}
+
+// resolveAPITokenPrefix returns the white-label PASETO API token prefix for a
+// host: the per-host KDexHost.spec.auth.apiToken.tokenPrefix when set, otherwise
+// the NexusConfiguration framework default. Empty means no prefixing (tokens
+// are emitted as bare "v4.public." PASETO strings). It is also the value
+// injected into each function's PASETO_TOKEN_PREFIX env so the function's
+// verifier can restore the header.
+func resolveAPITokenPrefix(auth *kdexv1alpha1.Auth, cfg configuration.NexusConfiguration) string {
+	if auth != nil && auth.APIToken != nil && auth.APIToken.TokenPrefix != "" {
+		return auth.APIToken.TokenPrefix
+	}
+	return cfg.APIToken.TokenPrefix
 }
 
 func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {

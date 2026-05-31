@@ -52,6 +52,12 @@ type Deployer struct {
 	ImagePullSecrets []corev1.LocalObjectReference
 	Scheme           *runtime.Scheme
 	ServiceAccount   string
+	// TokenPrefix is the host's resolved white-label PASETO API token prefix
+	// (per-host spec or NexusConfiguration default). Injected as
+	// PASETO_TOKEN_PREFIX so the function's verifier can restore the
+	// "v4.public." header. Empty => bare tokens (no prefixing). It MUST be the
+	// same value the host's TokenManager mints with.
+	TokenPrefix string
 }
 
 // Runtime defines the interface for interacting with a FaaS provider.
@@ -190,6 +196,15 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		{
 			Name:  "JWKS_URL",
 			Value: internalHost + "/.well-known/jwks.json",
+		},
+		{
+			// White-label API token prefix. When non-empty the host mints
+			// PASETO API tokens with the "v4.public." header replaced by this
+			// prefix; the function's verifier restores the header before
+			// parsing. Empty => bare tokens. MUST match the host's
+			// TokenManager prefix (both resolved via resolveAPITokenPrefix).
+			Name:  "PASETO_TOKEN_PREFIX",
+			Value: d.TokenPrefix,
 		},
 		{
 			Name:  "PKS_URL",

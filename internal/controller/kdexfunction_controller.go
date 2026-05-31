@@ -1237,6 +1237,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		Client:      r.Client,
 		FaaSAdaptor: hc.faasAdaptorSpec,
 		Host:        hc.host,
+		// Resolved white-label API token prefix (per-host spec or Nexus
+		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
+		// TokenManager uses, so mint and verify agree.
+		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
 		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
 			return corev1.LocalObjectReference{
 				Name: s.Name,
@@ -1368,6 +1372,10 @@ func (r *KDexFunctionReconciler) handleFunctionDeployed(hc handlerContext) (ctrl
 		Client:      r.Client,
 		FaaSAdaptor: hc.faasAdaptorSpec,
 		Host:        hc.host,
+		// Resolved white-label API token prefix (per-host spec or Nexus
+		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
+		// TokenManager uses, so mint and verify agree.
+		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
 		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
 			return corev1.LocalObjectReference{
 				Name: s.Name,
@@ -1424,6 +1432,10 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 		Client:      r.Client,
 		FaaSAdaptor: hc.faasAdaptorSpec,
 		Host:        hc.host,
+		// Resolved white-label API token prefix (per-host spec or Nexus
+		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
+		// TokenManager uses, so mint and verify agree.
+		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
 		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
 			return corev1.LocalObjectReference{
 				Name: s.Name,

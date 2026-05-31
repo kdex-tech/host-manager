@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,13 @@ var (
 	instance *KeyPairs
 	once     sync.Once
 )
+
+// pasetoV4PublicHeader is the fixed protocol header of every v4.public PASETO
+// token produced by V4Sign. In white-label (replace) prefixing this header is
+// swapped out for the host's brand prefix on the wire and restored before any
+// parse, so the bytes handed to the parser are identical to what V4Sign
+// produced and the signature is unaffected.
+const pasetoV4PublicHeader = "v4.public."
 
 type TokenData struct {
 	Action     string `json:"act"`
@@ -74,6 +82,7 @@ type TokenManager struct {
 	issuer          string
 	keyPairs        KeyPairs
 	revocationCache cache.Cache
+	tokenPrefix     string
 }
 
 func APITokenManagerLoader(
@@ -142,7 +151,50 @@ func NewTokenManager(issuer string, keyPairs *KeyPairs, revocationCache cache.Ca
 		activeKey:       *keyPairs.ActiveKey(),
 		keyPairs:        *keyPairs,
 		revocationCache: revocationCache,
+		// tokenPrefix defaults to "" — prefixing is opt-in via WithTokenPrefix.
 	}, nil
+}
+
+// WithTokenPrefix sets this host's white-label API token prefix. Prefixing is
+// off by default (empty), in which case tokens are emitted as bare
+// "v4.public." PASETO strings. When set, the prefix REPLACES the PASETO header
+// on the wire (see wrap/unwrap). Returns the receiver for chaining. This is the
+// single configuration point for the prefix; the controller sources it from
+// KDexHost.spec.auth.apiToken.tokenPrefix (falling back to the
+// NexusConfiguration default) and calls this once per host.
+func (tm *TokenManager) WithTokenPrefix(prefix string) *TokenManager {
+	tm.tokenPrefix = prefix
+	return tm
+}
+
+// wrap converts a freshly signed token to its on-the-wire form by REPLACING the
+// PASETO "v4.public." header with this host's brand prefix (e.g.
+// "kdex_pat_<payload>.<footer>"). No-op when no prefix is configured. Must be
+// applied only AFTER signing. Because the swap is a deterministic substitution
+// of a fixed header for a fixed prefix, unwrap restores the exact original
+// bytes, so the signature is unaffected.
+func (tm *TokenManager) wrap(signed string) string {
+	if tm.tokenPrefix == "" {
+		return signed
+	}
+	return tm.tokenPrefix + strings.TrimPrefix(signed, pasetoV4PublicHeader)
+}
+
+// unwrap restores the PASETO header on an inbound token before parsing. It is
+// deliberately lenient and ordered so bare tokens are detected first: a token
+// that already begins with "v4.public." (e.g. issued before prefixing was
+// enabled, or sent by a client that omits the prefix) is returned unchanged;
+// otherwise, if it carries this host's prefix, the prefix is swapped back to
+// the header. Anything else is passed through untouched (it will fail the
+// signature check downstream). Must be applied BEFORE any parse.
+func (tm *TokenManager) unwrap(signed string) string {
+	if tm.tokenPrefix == "" || strings.HasPrefix(signed, pasetoV4PublicHeader) {
+		return signed
+	}
+	if rest, ok := strings.CutPrefix(signed, tm.tokenPrefix); ok {
+		return pasetoV4PublicHeader + rest
+	}
+	return signed
 }
 
 func (tm *TokenManager) KeyPairs() KeyPairs {
@@ -163,6 +215,9 @@ func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
 	if tm.revocationCache == nil {
 		return fmt.Errorf("revocation cache not configured")
 	}
+
+	// Strip the application-level prefix (if any) before any PASETO parsing.
+	signed = tm.unwrap(signed)
 
 	// 1. Peek at the footer to get the KID
 	parser := paseto.NewParser()
@@ -232,7 +287,7 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 
 	signed := token.V4Sign(*tm.activeKey.SecretKey, nil)
 
-	return signed, nil
+	return tm.wrap(signed), nil
 }
 
 // ValidateToken parses and verifies a PASETO API token.
@@ -249,6 +304,9 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 //     "" in any other context is the kdex-tech/host-manager#69
 //     confused-deputy regression.
 func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudience string) (*TokenData, error) {
+	// Strip the application-level prefix (if any) before any PASETO parsing.
+	signed = tm.unwrap(signed)
+
 	// 1. Peek at the footer without verifying the signature
 	// This is safe because the footer is always in the clear (Base64)
 	parser := paseto.NewParser()

@@ -2,6 +2,7 @@ package apitoken
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +141,87 @@ func TestKeyPairs(t *testing.T) {
 	singleKp := &KeyPair{KeyId: "k1"}
 	singleKps := &KeyPairs{singleKp}
 	assert.Equal(t, singleKp, singleKps.ActiveKey())
+}
+
+func TestTokenManager_Prefix(t *testing.T) {
+	ctx := context.Background()
+	keyPairs := GenerateDevmodeKeyPair()
+	ttl := 1 * time.Hour
+
+	t.Run("prefixing is off by default — bare PASETO token", func(t *testing.T) {
+		tm, err := NewTokenManager("test-issuer", keyPairs, nil)
+		require.NoError(t, err)
+
+		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		require.NoError(t, err)
+
+		assert.True(t, strings.HasPrefix(signed, "v4.public."),
+			"default (no prefix) must yield the bare PASETO string")
+
+		data, err := tm.ValidateToken(ctx, signed, "")
+		require.NoError(t, err)
+		assert.Equal(t, "sub", data.Subject)
+	})
+
+	t.Run("replace mode swaps the PASETO header for the brand prefix", func(t *testing.T) {
+		tm, err := NewTokenManager("test-issuer", keyPairs, nil)
+		require.NoError(t, err)
+		tm.WithTokenPrefix("acme_pat_")
+
+		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		require.NoError(t, err)
+
+		// The brand prefix REPLACES the header — "v4.public." must be gone.
+		assert.True(t, strings.HasPrefix(signed, "acme_pat_"),
+			"token must start with the brand prefix")
+		assert.False(t, strings.Contains(signed, "v4.public."),
+			"the PASETO header must be swapped out, not retained")
+
+		data, err := tm.ValidateToken(ctx, signed, "")
+		require.NoError(t, err)
+		assert.Equal(t, "sub", data.Subject)
+	})
+
+	t.Run("verify is lenient: a bare (unprefixed) token still validates", func(t *testing.T) {
+		// Mint bare, then verify with a host that has prefixing enabled — models
+		// tokens issued before the host opted into a prefix.
+		bareTM, err := NewTokenManager("test-issuer", keyPairs, nil)
+		require.NoError(t, err)
+		bare, err := bareTM.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		require.NoError(t, err)
+		assert.True(t, strings.HasPrefix(bare, "v4.public."))
+
+		prefixedTM, err := NewTokenManager("test-issuer", keyPairs, nil)
+		require.NoError(t, err)
+		prefixedTM.WithTokenPrefix("acme_pat_")
+
+		data, err := prefixedTM.ValidateToken(ctx, bare, "")
+		require.NoError(t, err)
+		assert.Equal(t, "sub", data.Subject)
+	})
+
+	t.Run("replaced token round-trips through mint, verify and revoke", func(t *testing.T) {
+		cacheMgr, err := cache.NewCacheManager("", "test-host", nil)
+		require.NoError(t, err)
+		revocationCache := cacheMgr.GetCache("prefix-revocation", cache.CacheOptions{})
+
+		tm, err := NewTokenManager("test-issuer", keyPairs, revocationCache)
+		require.NoError(t, err)
+		tm.WithTokenPrefix("rsi_tok_")
+
+		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		require.NoError(t, err)
+		assert.True(t, strings.HasPrefix(signed, "rsi_tok_"))
+		assert.False(t, strings.Contains(signed, "v4.public."))
+
+		// RevokeToken takes the replaced string and must restore the header too.
+		err = tm.RevokeToken(ctx, signed)
+		require.NoError(t, err)
+
+		_, err = tm.ValidateToken(ctx, signed, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "token revoked")
+	})
 }
 
 func TestTokenManager_RevokeToken_Errors(t *testing.T) {
