@@ -1744,9 +1744,9 @@ func (r *KDexInternalHostReconciler) backendServicePort() gatewayv1.PortNumber {
 // are emitted as bare "v4.public." PASETO strings). It is also the value
 // injected into each function's PASETO_TOKEN_PREFIX env so the function's
 // verifier can restore the header.
-func resolveAPITokenPrefix(auth *kdexv1alpha1.Auth, cfg configuration.NexusConfiguration) string {
-	if auth != nil && auth.APIToken != nil && auth.APIToken.TokenPrefix != "" {
-		return auth.APIToken.TokenPrefix
+func resolveAPITokenPrefix(authSpec *kdexv1alpha1.Auth, cfg configuration.NexusConfiguration) string {
+	if authSpec != nil && authSpec.APIToken != nil && authSpec.APIToken.TokenPrefix != "" {
+		return authSpec.APIToken.TokenPrefix
 	}
 	return cfg.APIToken.TokenPrefix
 }
