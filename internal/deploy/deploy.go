@@ -148,7 +148,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	// leaving the cluster. The cnas-operator names the host's
 	// host-manager Service after the KDexHost.metadata.name in the
 	// host's namespace; webserver-bind-address defaults to :8090 (see
-	// host-manager/cmd/main.go). Going via the external URL works on
+	// host-manager/cmd/host-manager/main.go). Going via the external URL works on
 	// permissive networks but (a) burns a public LB round-trip and
 	// (b) requires explicit egress NetworkPolicy allowance in
 	// strict-default-deny namespaces, which the function pod doesn't
