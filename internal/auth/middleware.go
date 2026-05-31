@@ -105,9 +105,20 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							})
 						}
 
-						// Update authContext for the current request
-						token, err := jwt.ParseWithClaims(
-							tokenString,
+						// Update authContext for the current request — must
+						// parse the FRESHLY-MINTED access token (ts.AccessToken),
+						// NOT the inbound expired tokenString. The assignment
+						// uses `=` (not `:=`) to update the OUTER token/err so
+						// the post-block error-handler at line ~125 sees the
+						// refreshed state. Pre-fix this both (a) re-parsed
+						// tokenString (still expired → still invalid) AND
+						// (b) used `:=` which created shadowed inner vars, so
+						// even fixing (a) alone wasn't enough: the outer
+						// error-handler still cleared both cookies (Max-Age:-1)
+						// and redirected to "/", defeating auto-extend entirely
+						// at every JWT TTL boundary. See #100.
+						token, err = jwt.ParseWithClaims(
+							ts.AccessToken,
 							&authContext,
 							func(token *jwt.Token) (any, error) {
 								return c.ActivePair.Private.Public(), nil
@@ -184,9 +195,19 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 								})
 							}
 
-							// Update authContext for the current request
+							// Update authContext for the current request — must
+							// parse ts.AccessToken (the freshly-minted token),
+							// NOT the inbound tokenString. The near-expiry path
+							// is less visibly broken than the expired path
+							// because tokenString here is still-valid (just
+							// close to exp), so the re-parse "succeeds" against
+							// the stale token and the outer error-handler
+							// doesn't fire. But any updated claims from the
+							// refresh (entitlement changes, role changes since
+							// the original mint) get silently dropped from the
+							// in-request authContext. See #100.
 							newToken, err := jwt.ParseWithClaims(
-								tokenString,
+								ts.AccessToken,
 								&authContext,
 								func(token *jwt.Token) (any, error) {
 									return c.ActivePair.Private.Public(), nil
