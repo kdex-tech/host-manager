@@ -344,6 +344,29 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 		signingContext["scope"] = grantedScopeStr
 	}
 
+	// Resolve the client's roles/entitlements via the same resolver every other
+	// grant type already uses (password -> FindInternal; authorization_code,
+	// refresh_token and OIDC token-exchange -> FindInternalRolesAndEntitlements),
+	// so a client_credentials token carries an authorization context the proxy
+	// identity gate can evaluate. Without this the token verifies cleanly but
+	// 404s on every secured function path. Gated on requested scope; when no
+	// scope is requested, default to including both (mirrors LoginLocal's
+	// default-scope set). See kdex-tech/host-manager#105.
+	wantRoles := len(grantedScopes) == 0 || slices.Contains(grantedScopes, "roles")
+	wantEntitlements := len(grantedScopes) == 0 || slices.Contains(grantedScopes, "entitlements")
+	if wantRoles || wantEntitlements {
+		roles, entitlements, rerr := e.ResolveInternalRolesAndEntitlements(clientID)
+		if rerr != nil {
+			return TokenSet{}, fmt.Errorf("failed to resolve roles/entitlements for client %s: %w", clientID, rerr)
+		}
+		if wantRoles {
+			signingContext["roles"] = roles
+		}
+		if wantEntitlements {
+			signingContext["entitlements"] = entitlements
+		}
+	}
+
 	accessToken, err := e.config.Signer.Sign(signingContext)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
