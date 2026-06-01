@@ -15,13 +15,12 @@ The unified `kdex` CLI addresses three developer-experience friction points acro
 
 ### v1 scope
 
-- `kdex preview` — local KCNAS-runtime preview server (carry-over of the [2026-05-19 design](2026-05-19-kcnas-preview-design.md), reframed as a subcommand).
+- `kdex preview` — local KCNAS-runtime preview server (carry-over of the [2026-05-19 design](2026-05-19-kcnas-preview-design.md), reframed as a subcommand). **Now includes the function-proxy override** (`--fn name=URL`) — closes the editor→browser SDLC loop. Promoted from v2 after the phase-0 spike confirmed the architecture supports it cleanly; see §4.5.
 - `kdex codegen go` — Go function scaffolding generator. Independent reimplementation of `kdex-fngogen`, parity-tested via golden files against fngogen's `test-fixtures/`. Coexists with kdex-fngogen until cluster cutover (Phase 8).
 
 ### v2 territory (out of v1 scope; named here to prevent feature creep)
 
 - `kdex codegen node` — defer until the first KDex Node function lands. No current usage of kdex-fnnodejsgen.
-- `kdex preview --fn name=URL` — proxy preview requests to a locally-running function process; closes the editor→browser SDLC loop.
 - `kdex package` — port of kdex-cli-tools (OCI artifact packaging).
 - Bash script-bundle tools (kdex-node-tools).
 
@@ -143,6 +142,7 @@ Everything in the 2026-05-19 spec carries over except:
 | Internal Go package | `internal/preview/*` | `internal/preview/*` (unchanged) |
 | Distribution | npm package `@kdex-tech/kcnas-preview`, brew `kcnas-preview` | npm package `@kdex-tech/kdex`, brew `kdex` |
 | Existing operator cmd | `cmd/main.go` (unchanged) | `cmd/host-manager/main.go` (renamed for symmetry with `cmd/kdex/`) |
+| Function proxying | Out of scope (proxy stubbed with 501) | **In scope.** `--fn name=URL` overrides resolve KDexFunction proxy targets to a locally-running developer process; see §4.5 |
 
 Unchanged from the 2026-05-19 spec:
 
@@ -151,8 +151,72 @@ Unchanged from the 2026-05-19 spec:
 - Override resolver (CLI flags + config file; theme/app local paths or URLs).
 - Kustomize-aware loading with flat-dir fallback.
 - Missing-app placeholder behavior.
-- Stubbing strategy (501 responses for proxy/openapi/login/feedback/apitoken routes).
 - Phase-0 spike to validate fake-client + existing reconcilers.
+
+Changed from the 2026-05-19 spec:
+
+- **Function proxy now in scope** (was: 501 stub). Proxy routes for KDexFunction CRs resolve via the new `--fn` override map (§4.5) instead of Knative Service URLs; falls back to the placeholder pattern when an override is missing. Auth/login/feedback/OpenAPI routes remain stubbed as 501.
+
+## 4.5 Function-proxy override
+
+The `--fn name=URL` flag (repeatable, mirrors `--app` and `--theme`) lets a developer point preview's proxy at a locally-running function process. This closes the editor→save→browser-refresh loop without touching a cluster.
+
+### Why this is in v1
+
+Phase 0's fake-client spike confirmed the architecture composes cleanly: reconcilers run in-process behind `fake.Client`, `HostHandler.SetHost(...)` is called directly from CR data, and the existing `internal/host/proxy.go` middleware reads its route targets from `HostHandler`. Wiring overrides into that resolution path is a small surgical change, not a separate subsystem. Original deferral to v2 was conservative; the spike removed the uncertainty.
+
+### CLI shape
+
+```
+kdex preview \
+  --crs ./crs \
+  --fn checkout=http://localhost:8081 \      # repeatable
+  --fn search=http://localhost:8082 \
+  ...
+```
+
+In the config file (`kdex-preview.yaml`):
+
+```yaml
+functions:
+  checkout: http://localhost:8081
+  search:   http://localhost:8082
+```
+
+Override URL must be `http(s)://` — local paths are not meaningful for a function (it's a running process, not a static asset). The override targets a running HTTP server that satisfies the function's OpenAPI spec; in the common case the developer runs `go run ./cmd` from a `kdex codegen go`-produced project.
+
+### Resolution semantics
+
+Preview applies the same "skip the reconciler that doesn't compose; synthesize state directly" pattern the spike validated for `KDexInternalHost` (see `hack/spike-fakeclient/README.md`):
+
+- **`KDexFunctionReconciler` is skipped** in preview mode. Production resolves a function's proxy URL from KDexFunction `Status.URL` (the Knative Service URL stamped by the FaaS adaptor). In preview, no Knative serving = no status URL.
+- **Loader walks `KDexFunction` CRs** from `--crs` and matches each to the override map. Matched: the override URL is plugged into the proxy route table via `HostHandler` directly. Unmatched: emits a missing-function placeholder (see below).
+- **`internal/host/proxy.go` middleware is unchanged.** It reads target URLs from the `HostHandler` route table the same way it does in production; whether the URL came from a real Knative Service or from a `--fn` override is opaque to the proxy itself. This minimizes the change surface and keeps preview's proxy behavior faithful to prod.
+
+### Auth handling
+
+Per §1 design principles, KDex security is spec-driven and not opt-out. In preview, the developer is running their function without the production auth substrate (no JWKS endpoint, no PASETO public-key set, no Knative-stamped service account).
+
+- **The proxy middleware does not mint a per-Service FAT audience in preview mode.** Forwarded requests reach the override URL without the `Authorization` headers the FAAS adaptor would normally inject.
+- **The developer's function is responsible for tolerating this** during local dev. Two acceptable patterns:
+  1. **Recommended:** run the function with `AUDIENCE` / `ISSUER` / `JWKS_URL` / `PKS_URL` env vars unset; the kdex-generated security middleware (§7) treats missing vars as "no security expected" — matches the case where the OpenAPI spec declares no `security` block.
+  2. The developer runs a dev-mode function variant that short-circuits auth checks (e.g., behind a `KDEX_DEV=1` env).
+
+Pattern (1) is the path of least resistance for spec-first functions and is what `kdex codegen go`'s emitted code naturally supports.
+
+### Missing-function behavior
+
+Mirrors missing-app (§5 in the 2026-05-19 spec; carried over):
+
+- `missingFn: placeholder` (default) — the proxy returns a styled HTML stub for routes whose function isn't overridden: "Function `checkout` is not overridden. Pass `--fn checkout=URL` or set `functions.checkout` in `kdex-preview.yaml`."
+- `missingFn: skip` — proxy returns `502 Bad Gateway` with no body. Useful when previewing a page whose function dependencies aren't ready yet.
+- `missingFn: error` — preview boot fails if any referenced function lacks an override. Useful for `--check`-style CI validation later.
+
+### Hot reload
+
+Changes to `--fn` paths in the config file are picked up by the existing fsnotify watcher (already specified for `--crs` and override paths). Adding/removing/changing an override re-renders the proxy route table and emits the WebSocket reload signal so connected browser tabs refresh.
+
+`--fn` URLs themselves are not watched (we don't probe the function process for liveness); if the developer restarts their `go run`, the next request through the proxy will see the new instance naturally.
 
 ## 5. Codegen subcommand — architecture
 
@@ -424,7 +488,7 @@ Out of scope for v1. The preview WS reload protocol is exercised via a Go WS cli
 |---|---|---|---|
 | **0. Spike** | (a) Boot existing controllers under fake-client with a hand-coded fixture; render one page. (b) Invoke ogen as a library against a minimal OpenAPI fixture; produce buildable Go. Throw both away. | 1–2 days | (a) Page renders correctly; (b) ogen library API is sufficient and `go build ./...` works on the output. If (a) blocked → escalate to envtest decision. If (b) blocked → escalate to subprocess invocation with a bundled ogen binary. |
 | **1. Restructure** | Rename `cmd/main.go` → `cmd/host-manager/main.go`. Add `cmd/kdex/main.go` with cobra scaffolding; `preview` and `codegen go` registered as stub subcommands. Update Makefile, Dockerfile (multi-stage; two images), CI. Verify host-manager still builds + tests pass. | 1 day | `make build-host-manager build-kdex` produces both binaries; `make test` for host-manager passes; chart still references unchanged image. |
-| **2. Preview MVP** | Loader (flat dir only), fake-client wiring, override resolver, web server with stubs, override URL serving, manual-refresh. (Equivalent of phase 1 from the 2026-05-19 spec.) | ~1 week | `kdex preview --crs ./fixtures` renders a multi-page host with theme + app overrides. |
+| **2. Preview MVP** | Loader (flat dir only), fake-client wiring, override resolver (theme + app + **function**), web server with stubs, override URL serving, function-proxy URL substitution (§4.5), manual-refresh. (Equivalent of phase 1 from the 2026-05-19 spec, plus the function-proxy promotion.) | ~1.5 weeks | `kdex preview --crs ./fixtures --fn checkout=http://localhost:8081` renders a multi-page host where the proxy routes to the local function process. |
 | **3. Preview hot reload** | fsnotify + debouncer + WS hub + JS shim + error overlay. | ~3 days | Editing a CR or local theme file reloads the browser within 1 second. |
 | **4. Preview kustomize + config file** | krusty integration + `kdex-preview.yaml`. | ~2 days | Kustomize overlay tree works; config file equivalence with flags. |
 | **5. Distribution v1** | goreleaser config, brew formula, npm optional-deps package, container images, release docs. v1 ships with `kdex preview` GA and `kdex codegen go` marked experimental in `--help`. | ~3 days | `brew install` and `npm i -g` both produce a working binary on the four target platforms. |
@@ -432,13 +496,14 @@ Out of scope for v1. The preview WS reload protocol is exercised via a Go WS cli
 | **7. Codegen parity** | Close remaining parity gaps; gate CI on parity. | ~3–5 days | All fngogen fixtures pass parity diff. |
 | **8. Cluster cutover** | Confidence period elapsed (1 week of dev usage). Update `knative-deployer`'s helm chart to call `kdex codegen go` via the `ghcr.io/kdex-tech/kdex` image instead of kdex-fngogen. Archive kdex-fngogen repo. | ~1 day | Cluster path runs `kdex codegen go`; fngogen retired. |
 
-**Total v1 calendar:** ~3.5 weeks (phases 0–5; `kdex` GA-ships with preview only, codegen experimental).
-**Total to cluster cutover:** ~5–6 weeks (phases 0–8).
+**Total v1 calendar:** ~4 weeks (phases 0–5; `kdex` GA-ships with preview + function-proxy, codegen experimental).
+**Total to cluster cutover:** ~5.5–6.5 weeks (phases 0–8).
 
 ## 12. Open questions deferred to implementation
 
 - **Reconcile-drain detection** (preview). Counter vs. fixed delay vs. callback. Phase-0 spike picks the simplest workable approach.
-- **`KDexFunction` / `KDexInternalPackageReferences` reconciler handling** (preview). Register-and-no-op vs. skip-registration. Phase-0 spike confirms.
+- **`KDexFunction` reconciler handling** (preview). Phase-0 spike resolved: skip the reconciler entirely and populate `HostHandler` proxy routes directly from `KDexFunction` CR data + `--fn` overrides (§4.5). Mirrors the spike's recommended pattern for `KDexInternalHostReconciler`.
+- **`KDexInternalPackageReferences` reconciler handling** (preview). Register-and-no-op vs. skip-registration. Phase-0 spike confirms in Phase 2.
 - **ogen library API sufficiency** (codegen). Phase-0 spike validates; subprocess fallback is the contingency.
 - **`go.mod` regeneration policy** (codegen). Initially "preserve after first emit," but if the embedded deps list drifts (e.g., we change a runtime library version), do we ask the user to rerun with `--force` or do we update only the version pins while preserving user-added deps? Decide before phase 6 ships.
 - **Brew tap repo** (distribution). Verify whether `kdex-tech/homebrew-tap` exists; create during phase 5 if not.
@@ -446,4 +511,4 @@ Out of scope for v1. The preview WS reload protocol is exercised via a Go WS cli
 
 ## 13. Migration narrative (one-sentence summary)
 
-Add a unified `kdex` CLI to host-manager that subsumes the standalone preview tool and a fresh-port of fngogen's codegen logic. Ship preview to GA and codegen as experimental in v1. Keep kdex-fngogen running the cluster path until parity is reached; then cut the cluster over and archive fngogen.
+Add a unified `kdex` CLI to host-manager that subsumes the standalone preview tool and a fresh-port of fngogen's codegen logic. Ship preview (now including the function-proxy override that closes the editor→browser SDLC loop) to GA and codegen as experimental in v1. Keep kdex-fngogen running the cluster path until parity is reached; then cut the cluster over and archive fngogen.
