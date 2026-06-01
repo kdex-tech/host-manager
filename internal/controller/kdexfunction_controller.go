@@ -37,6 +37,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,10 +48,12 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -357,6 +360,14 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 	}
 	url := fmt.Sprintf("%s://%s.%s.svc.cluster.local:%d%s", scheme, svcRef.Name, ns, port, path)
 
+	// Snapshot status before mutation so the write below is conditional on an
+	// actual diff. A service-backed function's happy path is byte-stable once
+	// resolved, but an unconditional Status().Update() bumps resourceVersion
+	// on every reconcile, which re-fires the controller's own For() watch and
+	// self-amplifies a single upstream ping into 5-20 reconciles. See
+	// kdex-tech/host-manager#102.
+	oldStatus := fn.Status.DeepCopy()
+
 	// Clear stale build-pathway status fields when switching from origin -> backend.
 	fn.Status.Executable = nil
 	fn.Status.Generator = nil
@@ -372,10 +383,12 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 		Message: fmt.Sprintf("Backend Service %s/%s resolved to %s", ns, svcRef.Name, url),
 	})
 	meta.RemoveStatusCondition(&fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
-	if err := r.Status().Update(ctx, fn); err != nil {
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(*oldStatus, fn.Status) {
+		if err := r.Status().Update(ctx, fn); err != nil {
+			return ctrl.Result{}, err
+		}
+		log.Info("Service-backed function ready", "function", fn.Name, "url", url)
 	}
-	log.Info("Service-backed function ready", "function", fn.Name, "url", url)
 	return ctrl.Result{}, nil
 }
 
@@ -414,6 +427,10 @@ func (r *KDexFunctionReconciler) hasReadyEndpoint(ctx context.Context, ns, svcNa
 // (transient drops yield 503s instead of 404s). If false, Status.URL is
 // cleared and State degrades back to OpenAPIValid.
 func (r *KDexFunctionReconciler) markBackendUnready(ctx context.Context, fn *kdexv1alpha1.KDexFunction, reason, msg string, retainURL bool) (ctrl.Result, error) {
+	// Snapshot before mutation; only write on a real diff so repeated unready
+	// polls don't churn resourceVersion and re-fan-out the watch. See
+	// kdex-tech/host-manager#102.
+	oldStatus := fn.Status.DeepCopy()
 	meta.SetStatusCondition(&fn.Status.Conditions, metav1.Condition{
 		Type:    string(kdexv1alpha1.ConditionTypeReady),
 		Status:  metav1.ConditionFalse,
@@ -438,8 +455,10 @@ func (r *KDexFunctionReconciler) markBackendUnready(ctx context.Context, fn *kde
 		})
 	}
 	fn.Status.ObservedGeneration = fn.Generation
-	if err := r.Status().Update(ctx, fn); err != nil {
-		return ctrl.Result{}, err
+	if !equality.Semantic.DeepEqual(*oldStatus, fn.Status) {
+		if err := r.Status().Update(ctx, fn); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 }
@@ -513,7 +532,15 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder = builder.
 		Watches(
 			&kdexv1alpha1.KDexInternalHost{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexFunction{}, &kdexv1alpha1.KDexFunctionList{}, "{.Spec.HostRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexFunction{}, &kdexv1alpha1.KDexFunctionList{}, "{.Spec.HostRef}"),
+			// KDexFunction resolution only consults the InternalHost spec
+			// (HostRef, security). The InternalHost status subresource is
+			// rewritten on every upstream reconcile (~every 5 min); without
+			// this predicate each status-only bump fans out to every function
+			// on the host. Generation only moves on spec changes, so this
+			// drops the status-write fan-out entirely. See
+			// kdex-tech/host-manager#102.
+			ctrlbuilder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(mapServiceToFunctions)).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(mapEndpointSliceToFunctions)).
 		WithOptions(controller.TypedOptions[reconcile.Request]{
