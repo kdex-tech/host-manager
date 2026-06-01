@@ -54,6 +54,35 @@ func fatAudienceFor(fn *kdexv1alpha1.KDexFunction) string {
 	return u.String()
 }
 
+// isAPIKeyScheme reports whether a security scheme name is one of the host's
+// stateless API-token (PASETO) apiKey* schemes advertised in
+// OpenAPIBuilder.SecuritySchemes(). See kdex-tech/host-manager#103.
+func isAPIKeyScheme(name string) bool {
+	switch name {
+	case "apiKeyCookie", "apiKeyHeader", "apiKeyQuery":
+		return true
+	default:
+		return false
+	}
+}
+
+// extractAPIToken returns the PASETO API token carried on the request, checking
+// (in order) the X-API-TOKEN cookie, the X-API-TOKEN header, and the api_token
+// query parameter — the three apiKey* scheme locations the host advertises.
+// Returns "" when none is present.
+func extractAPIToken(r *http.Request) string {
+	if c, err := r.Cookie("X-API-TOKEN"); err == nil && c.Value != "" {
+		return c.Value
+	}
+	if h := r.Header.Get("X-API-TOKEN"); h != "" {
+		return h
+	}
+	if q := r.URL.Query().Get("api_token"); q != "" {
+		return q
+	}
+	return ""
+}
+
 //nolint:gocyclo
 func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer string) http.Handler {
 	target, err := url.Parse(fn.Status.URL)
@@ -234,6 +263,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	patternMux := http.NewServeMux()
 	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
 
+	// acceptsAPIKey opts this function into the PASETO->authContext bridge when
+	// any operation declares an apiKey* security scheme. Per-function (not
+	// per-operation) granularity, matching the existing identity gate. See
+	// kdex-tech/host-manager#103.
+	acceptsAPIKey := false
+
 	for p, item := range fn.Spec.API.Paths {
 		// Use empty handler, we only care about the pattern match
 		patternMux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {})
@@ -243,7 +278,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			if op != nil && op.Security != nil {
 				raw := make([]kdexv1alpha1.SecurityRequirement, 0, len(*op.Security))
 				for _, s := range *op.Security {
-					raw = append(raw, kdexv1alpha1.SecurityRequirement(s))
+					sr := kdexv1alpha1.SecurityRequirement(s)
+					raw = append(raw, sr)
+					for scheme := range sr {
+						if isAPIKeyScheme(scheme) {
+							acceptsAPIKey = true
+						}
+					}
 				}
 				parsedRequirements[method+" "+p] = hh.authChecker.ParseRequirements(raw)
 			}
@@ -254,6 +295,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		Function:           fn,
 		parsedRequirements: parsedRequirements,
 		patternMux:         patternMux,
+		acceptsAPIKey:      acceptsAPIKey,
 	}
 
 	// Capture the start time and log the completion
@@ -298,7 +340,48 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// handler-build time.
 		hh.mu.RLock()
 		authChecker := hh.authChecker
+		authConfig := hh.authConfig
+		authExchanger := hh.authExchanger
 		hh.mu.RUnlock()
+
+		// PASETO -> authContext bridge. Fires only when (a) this function's API
+		// declared an apiKey* scheme (fh.acceptsAPIKey) AND (b) WithAuthentication
+		// did not already populate authContext (JWT wins on mixed-token
+		// requests). On success the request carries a structured authContext
+		// (sub/roles/entitlements/scp) derived from the token subject, so the
+		// identity gate below and the FAT mint in the proxy Rewrite treat the
+		// API-token caller exactly like a JWT-authed one — the raw PASETO is
+		// still forwarded (cookie preserved in Rewrite; X-API-TOKEN header and
+		// api_token query pass through untouched). See kdex-tech/host-manager#103.
+		if fh.acceptsAPIKey && authConfig != nil && authConfig.TokenManager != nil {
+			if _, alreadyLoggedIn := auth.GetAuthContext(r.Context()); !alreadyLoggedIn {
+				if tok := extractAPIToken(r); tok != "" {
+					data, err := authConfig.TokenManager.ValidateToken(r.Context(), tok, authConfig.Audience)
+					if err != nil {
+						// Invalid / expired / revoked / audience-mismatch token:
+						// leave the request anonymous and let the gate decide.
+						log.V(1).Info("api token rejected", "function", fn.Name, "err", err.Error())
+					} else {
+						// Reuse the JWT-mint path's subject resolver so PASETO and
+						// JWT callers get identical structured entitlements.
+						roles, ents, rerr := authExchanger.ResolveInternalRolesAndEntitlements(data.Subject)
+						if rerr != nil {
+							log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
+						} else {
+							r = r.WithContext(auth.SetAuthContext(r.Context(), auth.AuthContext{
+								"sub":          data.Subject,
+								"roles":        roles,
+								"entitlements": ents,
+								// The token's static scope rides along under its own
+								// key; the structured entitlements above are the
+								// authoritative authz model.
+								"scp": data.Scope,
+							}))
+						}
+					}
+				}
+			}
+		}
 
 		if authChecker != nil {
 			_, pattern := fh.patternMux.Handler(r)

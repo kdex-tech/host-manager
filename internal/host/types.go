@@ -189,6 +189,12 @@ type KDexFunctionHandler struct {
 	Handler            http.Handler
 	parsedRequirements map[string]entitlements.ParsedRequirements
 	patternMux         *http.ServeMux
+	// acceptsAPIKey is set at handler-build time when at least one operation
+	// on the function's API declares an apiKey* security scheme (apiKeyCookie /
+	// apiKeyHeader / apiKeyQuery). It opts the per-function handler into the
+	// PASETO->authContext bridge so the global hot path pays no PASETO cost.
+	// See kdex-tech/host-manager#103.
+	acceptsAPIKey bool
 }
 
 func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

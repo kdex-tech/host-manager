@@ -44,6 +44,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -112,9 +113,22 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		internalHost.Status.Attributes = make(map[string]string)
 	}
 
+	// Snapshot the observed status so the deferred write can be made
+	// conditional on an actual change.
+	observedStatus := internalHost.Status.DeepCopy()
+
 	// Defer status update
 	defer func() {
 		internalHost.Status.ObservedGeneration = internalHost.Generation
+		// Only write status when it actually changed. An unconditional
+		// Status().Update() bumps resourceVersion on every reconcile, and
+		// every InternalHost RV bump fans out to all controllers watching it
+		// (the focal host reconciles ~every 5 min from nexus-manager's resync).
+		// See kdex-tech/host-manager#102.
+		if internalHostStatusEqual(observedStatus, &internalHost.Status) {
+			log.V(3).Info("status unchanged, skipping update", "res", res)
+			return
+		}
 		updateErr := r.Status().Update(ctx, &internalHost)
 		if updateErr != nil {
 			if kerrors.IsConflict(updateErr) {
@@ -1854,6 +1868,25 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	packagesBackend := r.createIPRBackend(internalHost, packagesImage)
 
 	return &packagesBackend, importMap, false, ctrl.Result{}, nil
+}
+
+// internalHostStatusEqual reports whether two KDexInternalHost statuses are
+// equivalent for the purpose of deciding whether to issue a Status().Update().
+// Per-condition LastTransitionTime is normalized out: the reconciler pulses a
+// transient "Reconciling" conditions set at the top of every pass, which bumps
+// LastTransitionTime on Ready/Progressing even when the net settled status is
+// unchanged. Comparing those timestamps would defeat the diff and re-introduce
+// the unconditional write. See kdex-tech/host-manager#102.
+func internalHostStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
+	ac := a.DeepCopy()
+	bc := b.DeepCopy()
+	for i := range ac.Conditions {
+		ac.Conditions[i].LastTransitionTime = metav1.Time{}
+	}
+	for i := range bc.Conditions {
+		bc.Conditions[i].LastTransitionTime = metav1.Time{}
+	}
+	return equality.Semantic.DeepEqual(ac, bc)
 }
 
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {
