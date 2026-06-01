@@ -102,7 +102,10 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	}
 
 	// custom claims
-	for _, claim := range []string{"email", "entitlements", "idp", "roles", "scope", "grant_type"} {
+	// "scp" carries the static scope of a PASETO API token bridged into the
+	// authContext by the proxy so the FAT preserves it alongside the
+	// structured entitlements. See kdex-tech/host-manager#103.
+	for _, claim := range []string{"email", "entitlements", "idp", "roles", "scope", "scp", "grant_type"} {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val
 		}

@@ -128,6 +128,21 @@ func NewExchanger(
 	return ex, nil
 }
 
+// ResolveInternalRolesAndEntitlements maps a subject (e.g. the `sub` of a
+// validated PASETO API token) to its internal roles and entitlements using the
+// same KDexRole/KDexRoleBinding resolution the JWT login path uses
+// (scopeProvider.FindInternalRolesAndEntitlements). It exists so the proxy's
+// PASETO->authContext bridge can derive a structured authorization context for
+// API-token callers without duplicating role resolution. Returns empty slices
+// (fail-closed) when no identity provider is wired. See
+// kdex-tech/host-manager#103.
+func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
+	if e == nil || e.sp == nil {
+		return nil, nil, nil
+	}
+	return e.sp.FindInternalRolesAndEntitlements(subject)
+}
+
 func (e *Exchanger) AuthCodeURL(state string) string {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return ""
