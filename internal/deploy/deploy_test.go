@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,78 @@ func scalingTestSetup(t *testing.T) (*Deployer, *kdexv1alpha1.KDexFunction) {
 		Scheme: scheme,
 	}
 	return d, fn
+}
+
+// TestDeploy_ForwardsVolumesMountsInternal pins kdex-tech/kdex-crds#10 + #6:
+// Spec.Volumes / Spec.VolumeMounts are JSON-forwarded onto the deployer Job as
+// FUNCTION_VOLUMES / FUNCTION_VOLUME_MOUNTS (knative-deployer decodes them onto
+// the Knative Service podspec/container), and Spec.Internal=true forwards
+// FUNCTION_INTERNAL=true (deployer labels the Service cluster-local).
+func TestDeploy_ForwardsVolumesMountsInternal(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+	fn.Spec.Volumes = []corev1.Volume{{
+		Name:         "cfg",
+		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "app-cfg"}},
+	}}
+	fn.Spec.VolumeMounts = []corev1.VolumeMount{{Name: "cfg", MountPath: "/etc/app"}}
+	fn.Spec.Internal = true
+
+	job, err := d.Deploy(context.Background(), fn)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	envs := indexEnvByName(job.Spec.Template.Spec.Containers[0].Env)
+
+	if v, ok := envs["FUNCTION_VOLUMES"]; !ok {
+		t.Error("FUNCTION_VOLUMES missing")
+	} else {
+		var vols []corev1.Volume
+		if err := json.Unmarshal([]byte(v), &vols); err != nil || len(vols) != 1 || vols[0].Name != "cfg" {
+			t.Errorf("FUNCTION_VOLUMES = %q; want JSON [{name:cfg ...}] (err=%v)", v, err)
+		}
+	}
+	if v, ok := envs["FUNCTION_VOLUME_MOUNTS"]; !ok {
+		t.Error("FUNCTION_VOLUME_MOUNTS missing")
+	} else {
+		var mounts []corev1.VolumeMount
+		if err := json.Unmarshal([]byte(v), &mounts); err != nil || len(mounts) != 1 || mounts[0].MountPath != "/etc/app" {
+			t.Errorf("FUNCTION_VOLUME_MOUNTS = %q; want JSON [{mountPath:/etc/app ...}] (err=%v)", v, err)
+		}
+	}
+	if v, ok := envs["FUNCTION_INTERNAL"]; !ok || v != "true" {
+		t.Errorf("FUNCTION_INTERNAL = %q (present=%v); want \"true\"", v, ok)
+	}
+
+	// The three vars must NOT be listed in FORWARDED_ENV_VARS — otherwise the
+	// deployer would re-inject them (incl. the large volumes JSON) as literal
+	// env vars on the function container. They are consumed by the deployer's
+	// own LoadEnv to build the podspec/Service, not forwarded to the function.
+	fwd := envs["FORWARDED_ENV_VARS"]
+	for _, name := range []string{"FUNCTION_VOLUMES", "FUNCTION_VOLUME_MOUNTS", "FUNCTION_INTERNAL"} {
+		for listed := range strings.SplitSeq(fwd, ",") {
+			if listed == name {
+				t.Errorf("%s must not appear in FORWARDED_ENV_VARS (would pollute the function container env); got %q", name, fwd)
+			}
+		}
+	}
+}
+
+// TestDeploy_NoVolumesOrInternal_OmitsEnv keeps the additive path a no-op:
+// a function without volumes and Internal=false must not emit any of the three
+// env vars (preserves pre-#10/#6 behavior for existing CRs).
+func TestDeploy_NoVolumesOrInternal_OmitsEnv(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+
+	job, err := d.Deploy(context.Background(), fn)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	envs := indexEnvByName(job.Spec.Template.Spec.Containers[0].Env)
+	for _, k := range []string{"FUNCTION_VOLUMES", "FUNCTION_VOLUME_MOUNTS", "FUNCTION_INTERNAL"} {
+		if v, present := envs[k]; present {
+			t.Errorf("%s present with value %q but should be omitted when unset", k, v)
+		}
+	}
 }
 
 // TestDeploy_NilScalingFields_DoNotPanic_AndAreOmitted pins kdex-tech/host-manager#45:

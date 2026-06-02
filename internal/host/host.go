@@ -406,6 +406,12 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 			if f.Status.State != kdexv1alpha1.KDexFunctionStateReady {
 				continue
 			}
+			// internal functions are not exposed through the host mux;
+			// in-cluster callers reach them at the cluster-local Knative URL
+			// (e.g. auth.HTTPLookup credential checks). See kdex-tech/kdex-crds#6.
+			if f.Spec.Internal {
+				continue
+			}
 			h := hh.reverseProxyHandler(&f, hh.issuerAddress())
 			fh := h.(*KDexFunctionHandler)
 			actualHandlers[f.Spec.API.BasePath] = fh

@@ -45,6 +45,34 @@ func resolveNodeSelector(
 	return faas.Deployer.NodeSelector
 }
 
+// functionFileAndExposureEnv builds the deployer-Job env vars that forward
+// file-config projection (FUNCTION_VOLUMES / FUNCTION_VOLUME_MOUNTS, #10) and
+// the internal-exposure marker (FUNCTION_INTERNAL, #6) to knative-deployer.
+// Extracted from Deploy to keep its cyclomatic complexity in check; each var
+// is omitted when its source field is empty/false so existing CRs are
+// unaffected.
+func functionFileAndExposureEnv(function *kdexv1alpha1.KDexFunction) ([]corev1.EnvVar, error) {
+	var env []corev1.EnvVar
+	if len(function.Spec.Volumes) > 0 {
+		body, err := json.Marshal(function.Spec.Volumes)
+		if err != nil {
+			return nil, fmt.Errorf("marshal function volumes: %w", err)
+		}
+		env = append(env, corev1.EnvVar{Name: "FUNCTION_VOLUMES", Value: string(body)})
+	}
+	if len(function.Spec.VolumeMounts) > 0 {
+		body, err := json.Marshal(function.Spec.VolumeMounts)
+		if err != nil {
+			return nil, fmt.Errorf("marshal function volumeMounts: %w", err)
+		}
+		env = append(env, corev1.EnvVar{Name: "FUNCTION_VOLUME_MOUNTS", Value: string(body)})
+	}
+	if function.Spec.Internal {
+		env = append(env, corev1.EnvVar{Name: "FUNCTION_INTERNAL", Value: "true"})
+	}
+	return env, nil
+}
+
 type Deployer struct {
 	Client           client.Client
 	FaaSAdaptor      kdexv1alpha1.KDexFaaSAdaptorSpec
@@ -263,6 +291,17 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 		Name:  "FORWARDED_ENV_VARS",
 		Value: forwardedEnvVars.String(),
 	})
+
+	// File-config projection (#10) + internal-exposure marker (#6) are
+	// appended AFTER the FORWARDED_ENV_VARS builder (like the SCALING_*
+	// block) so the deployer reads them via its own os.Getenv to build the
+	// podspec/Service WITHOUT injecting the (potentially large) JSON as
+	// literal env vars on the function container.
+	fileExposureEnv, err := functionFileAndExposureEnv(function)
+	if err != nil {
+		return nil, err
+	}
+	env = append(env, fileExposureEnv...)
 
 	// FUNCTION_USER_ENV carries function.Spec.Env opaquely to
 	// knative-deployer (which JSON-unmarshals it back into the Knative
