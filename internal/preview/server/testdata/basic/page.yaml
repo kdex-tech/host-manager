@@ -1,0 +1,13 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexPage
+metadata:
+  name: preview-home
+  namespace: default
+spec:
+  hostRef:
+    name: preview
+  label: "Home"
+  basePath: /
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>PREVIEW_HOME_CONTENT</p>"

@@ -1,0 +1,22 @@
+# Minimal KDexInternalHost for the server smoke test. Mirrors the shape of
+# the Phase 0 spike fixture (hack/spike-fakeclient/testdata/host.yaml) — the
+# spike validated that this shape renders end-to-end. Task 2.9 will expand
+# the fixture set; 2.7 only needs enough to drive a single page render.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexInternalHost
+metadata:
+  name: preview
+  namespace: default
+spec:
+  brandName: "Preview"
+  organization: "Preview Org"
+  defaultLang: en
+  devMode: true
+  modulePolicy: Loose
+  routing:
+    domains:
+      - preview.local
+    scheme: http
+  themeRef:
+    kind: KDexTheme
+    name: preview-theme

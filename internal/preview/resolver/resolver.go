@@ -80,8 +80,12 @@ func ParseFnOverride(spec string) (FnOverride, error) {
 		return FnOverride{}, err
 	}
 	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
-		if _, err := url.Parse(value); err != nil {
+		u, err := url.Parse(value)
+		if err != nil {
 			return FnOverride{}, fmt.Errorf("fn override %q: invalid URL: %w", name, err)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return FnOverride{}, fmt.Errorf("fn override %q: URL must not contain a path (got %q); use host:port only", name, u.Path)
 		}
 		return FnOverride{Name: name, Kind: FnOverrideURL, URL: value}, nil
 	}

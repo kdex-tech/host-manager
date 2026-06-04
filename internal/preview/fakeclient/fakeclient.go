@@ -54,6 +54,15 @@ type FakeClient struct {
 	Scheme       *runtime.Scheme
 }
 
+// SetupOptions configures Setup's host selection behavior.
+type SetupOptions struct {
+	// FocalHostName, if non-empty, overrides the default first-InternalHost
+	// pick. Use when the caller has already selected a specific host (e.g.
+	// via `--host` flag) so that the fakeclient and the server's outer proxy
+	// mux agree on which host is focal.
+	FocalHostName string
+}
+
 // Setup builds the fake client, runs the page/translation/utility reconcilers
 // to populate the HostHandler from snap's CR data, and returns the assembled
 // FakeClient. The KDexInternalHost and KDexFunction reconcilers are not
@@ -63,8 +72,15 @@ type FakeClient struct {
 // after Setup — only the Pages / Translations / UtilityPages maps mutated by
 // the simpler reconcilers. SetHost is the synth-stage responsibility.
 func Setup(ctx context.Context, snap *loader.Snapshot) (*FakeClient, error) {
+	return SetupWithOptions(ctx, snap, SetupOptions{})
+}
+
+// SetupWithOptions is like Setup but accepts explicit options. Use when the
+// caller has already selected a focal host (e.g. via pickHost / --host flag)
+// so the fakeclient's reconciler filtering agrees with the server's outer mux.
+func SetupWithOptions(ctx context.Context, snap *loader.Snapshot, opts SetupOptions) (*FakeClient, error) {
 	scheme := buildScheme()
-	focalHost, namespace, err := deriveFocalHostAndNamespace(snap)
+	focalHost, namespace, err := deriveFocalHostAndNamespace(snap, opts.FocalHostName)
 	if err != nil {
 		return nil, fmt.Errorf("derive focal host: %w", err)
 	}
@@ -129,14 +145,30 @@ func buildScheme() *runtime.Scheme {
 // deriveFocalHostAndNamespace picks a (focal-host name, controller-namespace)
 // pair from the snapshot. The reconcilers gate on both: req.Namespace must
 // equal ControllerNamespace, and KDexPage.Spec.HostRef.Name must equal
-// FocalHost, or the reconcile is a no-op. Preference order:
+// FocalHost, or the reconcile is a no-op.
+//
+// If explicitName is non-empty, the InternalHost with that name is selected
+// (error if not found). Otherwise the preference order is:
 //   - first InternalHost (preview's intended driver)
 //   - first Page's hostRef + namespace (covers minimal fixtures with just
 //     theme + page)
 //
 // Returns an error when the snapshot contains neither, so Setup surfaces a
 // clear diagnostic instead of silently producing an empty HostHandler.
-func deriveFocalHostAndNamespace(snap *loader.Snapshot) (focalHost, namespace string, err error) {
+func deriveFocalHostAndNamespace(snap *loader.Snapshot, explicitName string) (focalHost, namespace string, err error) {
+	if explicitName != "" {
+		for i := range snap.InternalHosts {
+			if snap.InternalHosts[i].Name == explicitName {
+				ih := &snap.InternalHosts[i]
+				ns := ih.Namespace
+				if ns == "" {
+					ns = defaultNamespace
+				}
+				return ih.Name, ns, nil
+			}
+		}
+		return "", "", fmt.Errorf("no KDexInternalHost named %q in snapshot", explicitName)
+	}
 	if len(snap.InternalHosts) > 0 {
 		ih := &snap.InternalHosts[0]
 		ns := ih.Namespace

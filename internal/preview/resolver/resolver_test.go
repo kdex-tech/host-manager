@@ -57,6 +57,7 @@ func TestParseFnOverride_BadInput(t *testing.T) {
 		"=foo",
 		"foo",                       // missing =
 		"foo=relative/no/such/path", // not a URL and not an existing dir
+		"svc=http://gateway/v1",     // URL with non-empty path — would double-prefix forwarded paths
 	}
 	for _, c := range cases {
 		if _, err := ParseFnOverride(c); err == nil {

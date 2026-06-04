@@ -1,0 +1,9 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTheme
+metadata:
+  name: preview-theme
+  namespace: default
+spec:
+  assets:
+    - style: |
+        :root { --preview: 1; }
