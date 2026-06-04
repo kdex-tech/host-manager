@@ -6,8 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/kdex-tech/host-manager/internal/preview/resolver"
 )
 
 // TestRun_ServesBasicPage boots Run with the testdata/basic fixture set and
@@ -48,6 +51,75 @@ func TestRun_ServesBasicPage(t *testing.T) {
 			t.Errorf("Run returned: %v", err)
 		}
 	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// TestPreview_RendersPageAndProxiesFunction boots Run with the basic fixture
+// set + a dir-form function override pointing at testdata/sample-fn-go, then
+// verifies that:
+//  1. GET / returns HTML from host-manager's page renderer.
+//  2. GET /api/echo/echo is reverse-proxied to the supervised Go process and
+//     returns "ECHO /echo" (the function's /echo handler echoes its path).
+//
+// Path-strip math: basePath=/api/echo, request=/api/echo/echo →
+// strip prefix → /echo → hits the supervised process's /echo handler.
+func TestPreview_RendersPageAndProxiesFunction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test boots a real server + go run child")
+	}
+	crsDir := "testdata/basic"
+	fnDir, _ := filepath.Abs("testdata/sample-fn-go")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	addr := freeAddr(t)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{
+			CRsDir: crsDir,
+			Addr:   addr,
+			FnOverrides: []resolver.FnOverride{
+				{Name: "echo", Kind: resolver.FnOverrideDir, Dir: fnDir, Lang: resolver.FnLangGo},
+			},
+			FnStartupTimeout: 60 * time.Second,
+		})
+	}()
+
+	waitForServer(t, "http://"+addr+"/")
+
+	// Hit the page
+	resp, err := http.Get("http://" + addr + "/") //nolint:noctx // integration test, deliberate
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !bytes.Contains(body, []byte("<html")) && !bytes.Contains(body, []byte("<!doctype")) {
+		t.Errorf("expected HTML response; got: %s", body)
+	}
+
+	// Hit the proxied function — /api/echo/echo strips /api/echo → /echo on
+	// the supervised process, which returns "ECHO /echo".
+	resp, err = http.Get("http://" + addr + "/api/echo/echo") //nolint:noctx // integration test, deliberate
+	if err != nil {
+		t.Fatalf("GET /api/echo/echo: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !bytes.Equal(body, []byte("ECHO /echo")) {
+		t.Errorf("expected exact body %q (verifies basePath strip); got: %s", "ECHO /echo", body)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && err != context.Canceled && err != context.DeadlineExceeded {
+			t.Errorf("Run returned: %v", err)
+		}
+	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after cancel")
 	}
 }
