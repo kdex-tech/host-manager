@@ -1,0 +1,8 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTheme
+metadata:
+  name: t1
+  namespace: default
+spec:
+  assets:
+    - style: ":root { --x: 1; }"

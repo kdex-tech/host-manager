@@ -1,0 +1,30 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexInternalHost
+metadata:
+  name: h1
+  namespace: default
+spec:
+  brandName: "Preview"
+  organization: "Preview Org"
+  defaultLang: en
+  modulePolicy: Loose
+  routing:
+    domains: [test.local]
+    scheme: http
+  themeRef:
+    kind: KDexTheme
+    name: t1
+---
+apiVersion: kdex.dev/v1alpha1
+kind: KDexPage
+metadata:
+  name: home
+  namespace: default
+spec:
+  hostRef:
+    name: h1
+  label: "Home"
+  basePath: /
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>multi-doc</p>"

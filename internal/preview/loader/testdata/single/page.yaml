@@ -1,0 +1,13 @@
+apiVersion: kdex.dev/v1alpha1
+kind: KDexPage
+metadata:
+  name: home
+  namespace: default
+spec:
+  hostRef:
+    name: h1
+  label: "Home"
+  basePath: /
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>hello</p>"
