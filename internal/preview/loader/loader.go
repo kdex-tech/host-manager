@@ -31,6 +31,18 @@ type Snapshot struct {
 	InternalTranslations  []kdexv1alpha1.KDexInternalTranslation
 	InternalUtilityPages  []kdexv1alpha1.KDexInternalUtilityPage
 	ClusterPageArchetypes []kdexv1alpha1.KDexClusterPageArchetype
+
+	// Page-composition kinds (C.6): consumed directly by host-manager's page
+	// reconciler; no projection step required.
+	PageArchetypes         []kdexv1alpha1.KDexPageArchetype
+	PageHeaders            []kdexv1alpha1.KDexPageHeader
+	PageFooters            []kdexv1alpha1.KDexPageFooter
+	PageNavigations        []kdexv1alpha1.KDexPageNavigation
+	ScriptLibraries        []kdexv1alpha1.KDexScriptLibrary
+	ClusterPageHeaders     []kdexv1alpha1.KDexClusterPageHeader
+	ClusterPageFooters     []kdexv1alpha1.KDexClusterPageFooter
+	ClusterPageNavigations []kdexv1alpha1.KDexClusterPageNavigation
+	ClusterScriptLibraries []kdexv1alpha1.KDexClusterScriptLibrary
 }
 
 // rawBuckets accumulates all decoded CRs before materialization. The two-phase
@@ -55,6 +67,16 @@ type rawBuckets struct {
 	userTranslations   []kdexv1alpha1.KDexTranslation
 	userUtilityPages   []kdexv1alpha1.KDexUtilityPage
 	userPageArchetypes []kdexv1alpha1.KDexPageArchetype
+
+	// Page-composition kinds (C.6): no projection; loaded directly into Snapshot.
+	pageHeaders            []kdexv1alpha1.KDexPageHeader
+	pageFooters            []kdexv1alpha1.KDexPageFooter
+	pageNavigations        []kdexv1alpha1.KDexPageNavigation
+	scriptLibraries        []kdexv1alpha1.KDexScriptLibrary
+	clusterPageHeaders     []kdexv1alpha1.KDexClusterPageHeader
+	clusterPageFooters     []kdexv1alpha1.KDexClusterPageFooter
+	clusterPageNavigations []kdexv1alpha1.KDexClusterPageNavigation
+	clusterScriptLibraries []kdexv1alpha1.KDexClusterScriptLibrary
 }
 
 // materializeSnapshot projects rawBuckets into the public Snapshot type.
@@ -62,14 +84,23 @@ type rawBuckets struct {
 // user-facing CRs into the post-reconcile bucket fields.
 func materializeSnapshot(b *rawBuckets) *Snapshot {
 	return &Snapshot{
-		InternalHosts:         b.internalHosts,
-		Themes:                b.themes,
-		Pages:                 b.pages,
-		Apps:                  b.apps,
-		Functions:             b.functions,
-		InternalTranslations:  b.internalTranslations,
-		InternalUtilityPages:  b.internalUtilityPages,
-		ClusterPageArchetypes: b.clusterPageArchetypes,
+		InternalHosts:          b.internalHosts,
+		Themes:                 b.themes,
+		Pages:                  b.pages,
+		Apps:                   b.apps,
+		Functions:              b.functions,
+		InternalTranslations:   b.internalTranslations,
+		InternalUtilityPages:   b.internalUtilityPages,
+		ClusterPageArchetypes:  b.clusterPageArchetypes,
+		PageArchetypes:         b.userPageArchetypes,
+		PageHeaders:            b.pageHeaders,
+		PageFooters:            b.pageFooters,
+		PageNavigations:        b.pageNavigations,
+		ScriptLibraries:        b.scriptLibraries,
+		ClusterPageHeaders:     b.clusterPageHeaders,
+		ClusterPageFooters:     b.clusterPageFooters,
+		ClusterPageNavigations: b.clusterPageNavigations,
+		ClusterScriptLibraries: b.clusterScriptLibraries,
 	}
 }
 
@@ -212,7 +243,16 @@ func decodeOne(path string, docIdx int, doc []byte, b *rawBuckets) error {
 	if m.APIVersion != "kdex.dev/v1alpha1" {
 		return nil // ignore non-KDex resources
 	}
-	switch m.Kind {
+	if err := decodeCoreKinds(path, docIdx, doc, m.Kind, b); err != nil {
+		return err
+	}
+	return decodePageCompositionKinds(path, docIdx, doc, m.Kind, b)
+}
+
+// decodeCoreKinds handles the host/theme/page/app/function and
+// translation/utility-page/archetype CR kinds.
+func decodeCoreKinds(path string, docIdx int, doc []byte, kind string, b *rawBuckets) error {
+	switch kind {
 	case "KDexInternalHost":
 		var obj kdexv1alpha1.KDexInternalHost
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
@@ -285,11 +325,63 @@ func decodeOne(path string, docIdx int, doc []byte, b *rawBuckets) error {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
 		b.userPageArchetypes = append(b.userPageArchetypes, obj)
-	case "KDexPageHeader", "KDexPageFooter", "KDexPageNavigation", "KDexScriptLibrary":
-		// Page-composition CRs referenced by KDexPage. The loader doesn't
-		// wire them yet; surface that explicitly so the user knows their
-		// page chrome will be missing rather than just looking broken.
-		return fmt.Errorf("%s doc %d: %s is not yet supported by preview (page-composition CRs land in Phase 3)", path, docIdx, m.Kind)
+	}
+	return nil
+}
+
+// decodePageCompositionKinds handles the namespace-scoped and cluster-scoped
+// page-chrome CR kinds (header/footer/navigation/scriptlibrary). These are
+// consumed directly by host-manager's page reconciler; no projection step.
+func decodePageCompositionKinds(path string, docIdx int, doc []byte, kind string, b *rawBuckets) error {
+	switch kind {
+	case "KDexPageHeader":
+		var obj kdexv1alpha1.KDexPageHeader
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.pageHeaders = append(b.pageHeaders, obj)
+	case "KDexPageFooter":
+		var obj kdexv1alpha1.KDexPageFooter
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.pageFooters = append(b.pageFooters, obj)
+	case "KDexPageNavigation":
+		var obj kdexv1alpha1.KDexPageNavigation
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.pageNavigations = append(b.pageNavigations, obj)
+	case "KDexScriptLibrary":
+		var obj kdexv1alpha1.KDexScriptLibrary
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.scriptLibraries = append(b.scriptLibraries, obj)
+	case "KDexClusterPageHeader":
+		var obj kdexv1alpha1.KDexClusterPageHeader
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.clusterPageHeaders = append(b.clusterPageHeaders, obj)
+	case "KDexClusterPageFooter":
+		var obj kdexv1alpha1.KDexClusterPageFooter
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.clusterPageFooters = append(b.clusterPageFooters, obj)
+	case "KDexClusterPageNavigation":
+		var obj kdexv1alpha1.KDexClusterPageNavigation
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.clusterPageNavigations = append(b.clusterPageNavigations, obj)
+	case "KDexClusterScriptLibrary":
+		var obj kdexv1alpha1.KDexClusterScriptLibrary
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.clusterScriptLibraries = append(b.clusterScriptLibraries, obj)
 	default:
 		// Silently ignore other kdex.dev kinds that are orthogonal to
 		// preview's rendering scope (KDexRole, KDexRoleBinding, etc.).
