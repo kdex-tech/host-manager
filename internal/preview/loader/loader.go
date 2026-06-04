@@ -153,9 +153,38 @@ func decodeOne(path string, docIdx int, doc []byte, snap *Snapshot) error {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
 		snap.ClusterPageArchetypes = append(snap.ClusterPageArchetypes, obj)
+	case "KDexHost", "KDexTranslation", "KDexUtilityPage", "KDexPageArchetype":
+		// User-facing CRs that get reconciled in-cluster (by nexus-manager)
+		// into the post-reconcile forms preview consumes. Phase 2 has no
+		// in-process projection, so refuse loudly rather than silently
+		// dropping the host (which then surfaces as "snapshot contains no
+		// KDexInternalHost"). Phase 3 / Plan C will add the projection.
+		return fmt.Errorf("%s doc %d: found %s; preview consumes the post-reconcile form (%s). KDexHost/KDexTranslation/KDexUtilityPage/KDexPageArchetype are user-facing CRs reconciled by nexus-manager in the cluster — in-process projection is planned for Phase 3", path, docIdx, m.Kind, postReconcileForm(m.Kind))
+	case "KDexPageHeader", "KDexPageFooter", "KDexPageNavigation", "KDexScriptLibrary":
+		// Page-composition CRs referenced by KDexPage. The loader doesn't
+		// wire them yet; surface that explicitly so the user knows their
+		// page chrome will be missing rather than just looking broken.
+		return fmt.Errorf("%s doc %d: %s is not yet supported by preview (page-composition CRs land in Phase 3)", path, docIdx, m.Kind)
 	default:
-		// Silently ignore other kdex.dev kinds we don't yet handle. Phase 2
-		// scope: only the kinds listed above.
+		// Silently ignore other kdex.dev kinds that are orthogonal to
+		// preview's rendering scope (KDexRole, KDexRoleBinding, etc.).
 	}
 	return nil
+}
+
+// postReconcileForm returns the Internal*/Cluster* kind name a user-facing
+// kind reconciles into. Used in the error message so the user knows which
+// CR form preview's loader expects.
+func postReconcileForm(userFacingKind string) string {
+	switch userFacingKind {
+	case "KDexHost":
+		return "KDexInternalHost"
+	case "KDexTranslation":
+		return "KDexInternalTranslation"
+	case "KDexUtilityPage":
+		return "KDexInternalUtilityPage"
+	case "KDexPageArchetype":
+		return "KDexClusterPageArchetype"
+	}
+	return ""
 }

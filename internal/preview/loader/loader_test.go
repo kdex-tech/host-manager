@@ -1,6 +1,9 @@
 package loader
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,3 +47,28 @@ func TestLoad_RejectsInvalidYAML(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsUserFacingHostWithGuidance(t *testing.T) {
+	dir := t.TempDir()
+	hostYAML := []byte(`apiVersion: kdex.dev/v1alpha1
+kind: KDexHost
+metadata:
+  name: example
+  namespace: default
+spec:
+  routing:
+    domains: [example.local]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "host.yaml"), hostYAML, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("expected error for KDexHost (user-facing form); got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"KDexHost", "KDexInternalHost", "nexus-manager"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should guide user toward post-reconcile form; missing %q in: %v", want, msg)
+		}
+	}
+}
