@@ -755,7 +755,20 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						},
 					},
 				}
-			})).
+			}),
+			// Only fan out to the host on KDexFunction SPEC changes (and
+			// creates/deletes), not on status-only updates. Origin/FaaS
+			// functions self-requeue every RequeueDelay and write status on
+			// every observe tick; without this predicate each of those ticks
+			// triggers a full host reconcile (recompute all backends + package
+			// refs + ingress) in lockstep with the function observer. The host
+			// reconciler reads only KDexFunction .Spec (API.Paths/BasePath) +
+			// CreationTimestamp — never .Status — so dropping status-only
+			// updates is safe. GenerationChangedPredicate still passes Create
+			// and Delete events; it only filters Updates whose .metadata
+			// .generation is unchanged. Mirrors the predicate already on
+			// For(KDexInternalHost) above. See kdex-tech/host-manager#112.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&kdexv1alpha1.KDexScriptLibrary{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.ScriptLibraryRef}")).
