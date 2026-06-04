@@ -146,6 +146,31 @@ func contains(haystack []string, needle string) bool {
 	return false
 }
 
+func TestProjectUtilityPage_NamesAndHostRef(t *testing.T) {
+	host := kdexv1alpha1.KDexHost{
+		ObjectMeta: metav1.ObjectMeta{Name: "h1", Namespace: "ns1"},
+	}
+	up := kdexv1alpha1.KDexUtilityPage{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-login", Namespace: "ns1"},
+		Spec: kdexv1alpha1.KDexUtilityPageSpec{
+			Type: kdexv1alpha1.LoginUtilityPageType,
+		},
+	}
+	got := ProjectUtilityPage(up, host)
+	if got.Name != "h1-login" {
+		t.Errorf("Name: got %q want %q (host-lowercase-type, source name discarded)", got.Name, "h1-login")
+	}
+	if got.Namespace != "ns1" {
+		t.Errorf("Namespace: got %q", got.Namespace)
+	}
+	if got.Spec.HostRef.Name != "h1" {
+		t.Errorf("HostRef.Name: got %q", got.Spec.HostRef.Name)
+	}
+	if got.Spec.Type != kdexv1alpha1.LoginUtilityPageType {
+		t.Errorf("Spec.Type not copied")
+	}
+}
+
 func TestProjectTranslation_NamesAndHostRef(t *testing.T) {
 	host := kdexv1alpha1.KDexHost{
 		ObjectMeta: metav1.ObjectMeta{Name: "h1", Namespace: "ns1"},

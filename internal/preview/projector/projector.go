@@ -118,6 +118,24 @@ func ProjectTranslation(tr kdexv1alpha1.KDexTranslation, host kdexv1alpha1.KDexH
 	}
 }
 
+// ProjectUtilityPage replicates nexus-manager's createOrUpdateInternalUtilityPage
+// (kdexhost_controller_util.go:114-181). The output Name is "<host>-<lowercase-type>"
+// — the source utility page's own name is discarded.
+func ProjectUtilityPage(up kdexv1alpha1.KDexUtilityPage, host kdexv1alpha1.KDexHost) kdexv1alpha1.KDexInternalUtilityPage {
+	return kdexv1alpha1.KDexInternalUtilityPage{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        utilityPageProjectedName(host.Name, string(up.Spec.Type)),
+			Namespace:   host.Namespace,
+			Labels:      copyLabels(up.Labels, host.Name),
+			Annotations: copyAnnotations(up.Annotations),
+		},
+		Spec: kdexv1alpha1.KDexInternalUtilityPageSpec{
+			KDexUtilityPageSpec: *up.Spec.DeepCopy(),
+			HostRef:             corev1.LocalObjectReference{Name: host.Name},
+		},
+	}
+}
+
 // translationProjectedName returns the InternalTranslation name nexus-manager
 // generates: "<host>-<source>". Matches kdexhost_controller_util.go:43.
 func translationProjectedName(hostName, translationName string) string {
