@@ -2,7 +2,20 @@
 // a typed Snapshot. Multi-doc YAML is supported. Subdirectories are walked
 // recursively. Files not matching *.yaml or *.yml are ignored.
 //
-// Kustomize support is deferred to Phase 4 of the preview implementation.
+// User-facing CRs (KDexHost, KDexTranslation, KDexUtilityPage) are projected
+// to their post-reconcile Internal* equivalents at load time via the
+// internal/preview/projector package — preview consumes the same form as
+// host-manager's in-cluster reconcilers. KDexPageArchetype and
+// KDexClusterPageArchetype are independent kinds (no projection); both are
+// loaded into the Snapshot for the fake client to seed.
+//
+// Page-composition kinds (KDexPageHeader, KDexPageFooter, KDexPageNavigation,
+// KDexScriptLibrary plus their cluster-scoped siblings) have no projection —
+// host-manager's page reconciler reads them directly from the API server, and
+// the fake client serves them at reconcile time.
+//
+// Kinds orthogonal to page rendering (KDexRole, KDexRoleBinding) are silently
+// ignored. Kustomize support is deferred to Phase 4.
 package loader
 
 import (
