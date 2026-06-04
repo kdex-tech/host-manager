@@ -171,11 +171,62 @@ func TestApplyToHostHandler_CallsSetHostWithRoutes(t *testing.T) {
 	}
 	hh := host.NewHostHandler(c, "test-host", "default", log.Log.WithName("test"), cm)
 
-	if err := ApplyToHostHandler(context.Background(), hh, snap, urls); err != nil {
+	if err := ApplyToHostHandler(context.Background(), hh, &ih, snap, urls); err != nil {
 		t.Fatalf("ApplyToHostHandler: %v", err)
 	}
 
 	if got := hh.GetStatus(); got != host.HostStatusReady {
 		t.Errorf("HostHandler status after SetHost: got %q, want %q", got, host.HostStatusReady)
+	}
+}
+
+// TestApplyToHostHandler_MultiHost verifies that when the snapshot contains two
+// KDexInternalHosts, ApplyToHostHandler uses the explicitly-passed focal host
+// (the second) rather than defaulting to InternalHosts[0] (the first). It does
+// this by giving each host a distinct namespace and a function in that namespace,
+// then asserting the HostHandler renders Ready (meaning SetHost was called with
+// the correct focal) and that selectFunctionsForHost returns only the second
+// host's function.
+func TestApplyToHostHandler_MultiHost_UsesFocalNotFirst(t *testing.T) {
+	host1 := minimalHost("host-one", "ns-one")
+	host2 := minimalHost("host-two", "ns-two")
+
+	fn1 := minimalFunction("fn-one", "ns-one", "/api/one")
+	fn2 := minimalFunction("fn-two", "ns-two", "/api/two")
+
+	// Only provide a URL override for fn-two (host2's function). fn-one has
+	// no override so it should be excluded regardless of which host is focal.
+	urls := map[string]string{"fn-two": "http://localhost:22222"}
+
+	snap := &loader.Snapshot{
+		InternalHosts: []kdexv1alpha1.KDexInternalHost{host1, host2},
+		Functions:     []kdexv1alpha1.KDexFunction{fn1, fn2},
+	}
+
+	scheme := buildTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	cm, err := cache.NewCacheManager("", "host-two", nil)
+	if err != nil {
+		t.Fatalf("NewCacheManager: %v", err)
+	}
+	hh := host.NewHostHandler(c, "host-two", "ns-two", log.Log.WithName("test"), cm)
+
+	// Pass &host2 as focal — the fix under test.
+	if err := ApplyToHostHandler(context.Background(), hh, &host2, snap, urls); err != nil {
+		t.Fatalf("ApplyToHostHandler: %v", err)
+	}
+
+	// SetHost was called with host2's spec — HostHandler should be Ready.
+	if got := hh.GetStatus(); got != host.HostStatusReady {
+		t.Errorf("HostHandler status: got %q, want %q (wrong focal would give wrong spec)", got, host.HostStatusReady)
+	}
+
+	// Independently verify selectFunctionsForHost selects only fn2 when focal=host2.
+	selected := selectFunctionsForHost(&host2, snap.Functions, urls)
+	if len(selected) != 1 {
+		t.Fatalf("selectFunctionsForHost with focal=host2: expected 1 function, got %d", len(selected))
+	}
+	if selected[0].Name != "fn-two" {
+		t.Errorf("selectFunctionsForHost: got %q, want %q", selected[0].Name, "fn-two")
 	}
 }

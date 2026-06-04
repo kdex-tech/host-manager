@@ -46,16 +46,10 @@ type Route struct {
 //     caller decides how to surface that (e.g. missing-fn placeholder is the
 //     proxy resolver's job, not synth's).
 func SynthesizeRoutes(h kdexv1alpha1.KDexInternalHost, fns []kdexv1alpha1.KDexFunction, urls map[string]string) ([]Route, error) {
-	var routes []Route
-	for i := range fns {
-		fn := &fns[i]
-		if fn.Namespace != h.Namespace {
-			continue
-		}
-		url, ok := urls[fn.Name]
-		if !ok {
-			continue
-		}
+	selected := selectFunctionsForHost(&h, fns, urls)
+	routes := make([]Route, 0, len(selected))
+	for _, fn := range selected {
+		url := urls[fn.Name]
 		routes = append(routes, Route{
 			FunctionName: fn.Name,
 			BasePath:     fn.Spec.API.BasePath,
@@ -67,13 +61,15 @@ func SynthesizeRoutes(h kdexv1alpha1.KDexInternalHost, fns []kdexv1alpha1.KDexFu
 
 // ApplyToHostHandler calls hh.SetHost with the host spec and a synthesized
 // function CR list. Each function in the snapshot whose Namespace matches the
-// host AND has an entry in urls gets a clone whose Status.URL is set to the
-// override URL and Status.State is forced to Ready — those are the two fields
-// reverseProxyHandler (proxy.go:88) and the registration gate (host.go:406)
-// read when wiring the function mux.
+// focal host AND has an entry in urls gets a clone whose Status.URL is set to
+// the override URL and Status.State is forced to Ready — those are the two
+// fields reverseProxyHandler (proxy.go:88) and the registration gate
+// (host.go:406) read when wiring the function mux.
 //
-// The snapshot's first KDexInternalHost is the focal host; if the snapshot has
-// none, ApplyToHostHandler returns an error.
+// focal must be non-nil (the caller — server.Run — guarantees this via
+// pickHost). The snapshot's InternalHosts slice is not consulted; focal is
+// used directly, which ensures multi-host snapshots with --host selecting a
+// non-first host are rendered correctly.
 //
 // Known gap (Task 2.6 scope): host-manager's reverseProxyHandler also
 // short-circuits when hh.authConfig.ActivePair is nil (host.go:404). The
@@ -86,46 +82,35 @@ func SynthesizeRoutes(h kdexv1alpha1.KDexInternalHost, fns []kdexv1alpha1.KDexFu
 // zero/nil defaults; ThemeAssets is pulled from the first KDexTheme in the
 // snapshot whose name matches host.Spec.ThemeRef (best-effort — the preview
 // is render-focused, not auth-focused).
-func ApplyToHostHandler(ctx context.Context, hh *host.HostHandler, snap *loader.Snapshot, urls map[string]string) error {
-	if len(snap.InternalHosts) == 0 {
-		return ErrNoInternalHost
-	}
-	ih := &snap.InternalHosts[0]
-
+func ApplyToHostHandler(ctx context.Context, hh *host.HostHandler, focal *kdexv1alpha1.KDexInternalHost, snap *loader.Snapshot, urls map[string]string) error {
 	// Patch each function CR with the override URL + Ready state so the
 	// downstream proxy registration path treats it as a deployed Knative
 	// service. Operate on a copy so we don't mutate the loader.Snapshot
 	// (which other callers may iterate after us).
-	synth := make([]kdexv1alpha1.KDexFunction, 0, len(snap.Functions))
-	for i := range snap.Functions {
-		fn := snap.Functions[i].DeepCopy()
-		if fn.Namespace != ih.Namespace {
-			continue
-		}
-		url, ok := urls[fn.Name]
-		if !ok {
-			continue
-		}
-		fn.Status.URL = url
-		fn.Status.State = kdexv1alpha1.KDexFunctionStateReady
-		synth = append(synth, *fn)
+	selected := selectFunctionsForHost(focal, snap.Functions, urls)
+	synthFns := make([]kdexv1alpha1.KDexFunction, 0, len(selected))
+	for _, fn := range selected {
+		clone := fn.DeepCopy()
+		clone.Status.URL = urls[fn.Name]
+		clone.Status.State = kdexv1alpha1.KDexFunctionStateReady
+		synthFns = append(synthFns, *clone)
 	}
 
-	themeAssets := themeAssetsFor(ih, snap)
+	themeAssets := themeAssetsFor(focal, snap)
 
 	// Match the spike's argument shape (hack/spike-fakeclient/main.go:146-161).
 	// nil authExchanger/authConfig are tolerated by ServeHTTP; scheme="http"
 	// matches the dev preview's loopback origin.
 	hh.SetHost(
 		ctx,
-		&ih.Spec.KDexHostSpec,
+		&focal.Spec.KDexHostSpec,
 		statusReady(),
 		nil,         // packageReferences — Task 2.6 doesn't resolve npm registry references
 		themeAssets, // themeAssets — pulled from snapshot's theme if present
 		nil,         // scripts
 		"",          // importmap — Task 2.6 doesn't synthesize the importmap
 		nil,         // paths (initialPaths from controller)
-		synth,       // functions — the load-bearing synth output
+		synthFns,    // functions — the load-bearing synth output
 		nil,         // authExchanger
 		nil,         // authConfig
 		"http",      // scheme
@@ -133,6 +118,24 @@ func ApplyToHostHandler(ctx context.Context, hh *host.HostHandler, snap *loader.
 		time.Now(),
 	)
 	return nil
+}
+
+// selectFunctionsForHost returns pointers to functions in fns whose namespace
+// matches focal's namespace AND have a URL override in urls. The returned
+// pointers point into fns — callers must DeepCopy before mutating.
+func selectFunctionsForHost(focal *kdexv1alpha1.KDexInternalHost, fns []kdexv1alpha1.KDexFunction, urls map[string]string) []*kdexv1alpha1.KDexFunction {
+	var out []*kdexv1alpha1.KDexFunction
+	for i := range fns {
+		fn := &fns[i]
+		if fn.Namespace != focal.Namespace {
+			continue
+		}
+		if _, ok := urls[fn.Name]; !ok {
+			continue
+		}
+		out = append(out, fn)
+	}
+	return out
 }
 
 // themeAssetsFor returns the asset list from the snapshot's KDexTheme that
@@ -168,8 +171,9 @@ func statusReady() *kdexv1alpha1.KDexObjectStatus {
 	}
 }
 
-// ErrNoInternalHost is returned when ApplyToHostHandler is called on a snapshot
-// with no KDexInternalHost. Callers can detect it with errors.Is.
+// ErrNoInternalHost is retained for compatibility but is no longer returned by
+// ApplyToHostHandler (which now accepts focal directly). Kept so any external
+// callers using errors.Is(err, synth.ErrNoInternalHost) don't break.
 var ErrNoInternalHost = synthError("snapshot has no KDexInternalHost — cannot synthesize SetHost call")
 
 type synthError string

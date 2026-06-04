@@ -104,6 +104,24 @@ const (
 func Run(ctx context.Context, opts Options) error {
 	logger := log.Log.WithName("preview")
 
+	// 0. Validate that unsupported options are not set. Phase 2 supports
+	// CRsDir, Addr, Host, FnOverrides, FnStartupTimeout. Theme/app overrides
+	// and non-placeholder missing-* modes land in Phase 3 (hot reload) or
+	// Phase 4 (kustomize). Reject explicit non-zero values early so users get
+	// clear feedback rather than silent drops.
+	if len(opts.ThemeOverrides) > 0 {
+		return fmt.Errorf("--theme overrides are not yet supported in preview (planned for Phase 3)")
+	}
+	if len(opts.AppOverrides) > 0 {
+		return fmt.Errorf("--app overrides are not yet supported in preview (planned for Phase 3)")
+	}
+	if opts.MissingApp != resolver.MissingAppPlaceholder {
+		return fmt.Errorf("--missing-app modes other than 'placeholder' are not yet supported")
+	}
+	if opts.MissingFn != resolver.MissingFnPlaceholder {
+		return fmt.Errorf("--missing-fn modes other than 'placeholder' are not yet supported")
+	}
+
 	// 1. Load CRs from disk.
 	snap, err := loader.Load(opts.CRsDir)
 	if err != nil {
@@ -156,7 +174,7 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("synth routes: %w", err)
 	}
-	if err := synth.ApplyToHostHandler(ctx, fc.HostHandler, snap, urls); err != nil {
+	if err := synth.ApplyToHostHandler(ctx, fc.HostHandler, focal, snap, urls); err != nil {
 		return fmt.Errorf("synth.ApplyToHostHandler: %w", err)
 	}
 
