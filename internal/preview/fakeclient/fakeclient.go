@@ -191,7 +191,23 @@ func deriveFocalHostAndNamespace(snap *loader.Snapshot, explicitName string) (fo
 // snapshotToObjects builds the seed objects list. Apps + Functions are NOT
 // included; their proxy targets are synthesized in Task 2.6.
 func snapshotToObjects(snap *loader.Snapshot) []client.Object {
-	out := make([]client.Object, 0, len(snap.Themes)+len(snap.Pages)+len(snap.InternalHosts)+len(snap.InternalTranslations)+len(snap.InternalUtilityPages)+len(snap.ClusterPageArchetypes))
+	out := make([]client.Object, 0,
+		len(snap.Themes)+
+			len(snap.Pages)+
+			len(snap.InternalHosts)+
+			len(snap.InternalTranslations)+
+			len(snap.InternalUtilityPages)+
+			len(snap.ClusterPageArchetypes)+
+			len(snap.PageArchetypes)+
+			len(snap.PageHeaders)+
+			len(snap.PageFooters)+
+			len(snap.PageNavigations)+
+			len(snap.ScriptLibraries)+
+			len(snap.ClusterPageHeaders)+
+			len(snap.ClusterPageFooters)+
+			len(snap.ClusterPageNavigations)+
+			len(snap.ClusterScriptLibraries),
+	)
 	for i := range snap.Themes {
 		out = append(out, &snap.Themes[i])
 	}
@@ -209,6 +225,33 @@ func snapshotToObjects(snap *loader.Snapshot) []client.Object {
 	}
 	for i := range snap.ClusterPageArchetypes {
 		out = append(out, &snap.ClusterPageArchetypes[i])
+	}
+	for i := range snap.PageArchetypes {
+		out = append(out, &snap.PageArchetypes[i])
+	}
+	for i := range snap.PageHeaders {
+		out = append(out, &snap.PageHeaders[i])
+	}
+	for i := range snap.PageFooters {
+		out = append(out, &snap.PageFooters[i])
+	}
+	for i := range snap.PageNavigations {
+		out = append(out, &snap.PageNavigations[i])
+	}
+	for i := range snap.ScriptLibraries {
+		out = append(out, &snap.ScriptLibraries[i])
+	}
+	for i := range snap.ClusterPageHeaders {
+		out = append(out, &snap.ClusterPageHeaders[i])
+	}
+	for i := range snap.ClusterPageFooters {
+		out = append(out, &snap.ClusterPageFooters[i])
+	}
+	for i := range snap.ClusterPageNavigations {
+		out = append(out, &snap.ClusterPageNavigations[i])
+	}
+	for i := range snap.ClusterScriptLibraries {
+		out = append(out, &snap.ClusterScriptLibraries[i])
 	}
 	return out
 }
