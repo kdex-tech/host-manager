@@ -1,0 +1,25 @@
+# Minimal KDexFunction fixture for the server e2e integration test (Task 2.9).
+# Paired with testdata/sample-fn-go/ which exposes /echo and /env handlers.
+# The hostRef.name matches the KDexInternalHost in host.yaml ("preview").
+# BasePath /api/echo satisfies the CRD's ^/\w+/\w+ pattern; paths entries
+# all start with that prefix as required by the XValidation rule.
+# spec.origin is omitted — preview overrides the function via FnOverrides,
+# so origin/backend aren't read at test time.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexFunction
+metadata:
+  name: echo
+  namespace: default
+spec:
+  hostRef:
+    name: preview
+  api:
+    basePath: /api/echo
+    paths:
+      /api/echo/echo:
+        get:
+          operationId: echoGet
+          summary: Echo the request path back to the caller
+          responses:
+            "200":
+              description: Echo response
