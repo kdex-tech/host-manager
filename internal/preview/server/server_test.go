@@ -124,6 +124,42 @@ func TestPreview_RendersPageAndProxiesFunction(t *testing.T) {
 	}
 }
 
+// TestPreview_StubRoutes_Return501 boots Run against testdata/basic (no
+// function overrides) and verifies that the out-of-scope /-/ routes return
+// 501 Not Implemented rather than host-manager's default 404.
+func TestPreview_StubRoutes_Return501(t *testing.T) {
+	if testing.Short() {
+		t.Skip("server test boots a real listener")
+	}
+	addr := freeAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{CRsDir: "testdata/basic", Addr: addr})
+	}()
+	waitForServer(t, "http://"+addr+"/")
+
+	for _, route := range []string{"/-/login", "/-/logout", "/-/feedback", "/-/apitoken"} {
+		resp, err := http.Get("http://" + addr + route) //nolint:noctx // smoke test, deliberate
+		if err != nil {
+			t.Errorf("GET %s: %v", route, err)
+			continue
+		}
+		if resp.StatusCode != http.StatusNotImplemented {
+			t.Errorf("GET %s: got status %d, want 501", route, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(10 * time.Second):
+	}
+}
+
 // freeAddr allocates a free TCP address on 127.0.0.1 for the test server.
 // Closes the listener immediately; small race between close and re-bind is
 // acceptable for a one-shot test.

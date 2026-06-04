@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/preview/resolver"
+	"github.com/kdex-tech/host-manager/internal/preview/stubs"
 	"github.com/kdex-tech/host-manager/internal/preview/synth"
 )
 
@@ -27,10 +28,17 @@ import (
 // When 2.8 lands, the placeholder/skip/error semantics will gate which routes
 // get registered here.
 func newProxyMux(inner http.Handler, routes []synth.Route, _ resolver.MissingFnMode) http.Handler {
-	if len(routes) == 0 {
-		return inner
-	}
 	mux := http.NewServeMux()
+
+	// Stub 501 handlers for routes preview cannot meaningfully serve.
+	// Registered BEFORE function routes and the '/' catchall so they take
+	// precedence over host-manager's default routing for these paths.
+	mux.Handle("/-/login", stubs.NotImplemented("login"))
+	mux.Handle("/-/logout", stubs.NotImplemented("logout"))
+	mux.Handle("/-/feedback", stubs.NotImplemented("feedback"))
+	mux.Handle("/-/apitoken", stubs.NotImplemented("apitoken"))
+	mux.Handle("/-/openapi/", stubs.NotImplemented("openapi"))
+
 	for _, r := range routes {
 		target, err := url.Parse(r.URL)
 		if err != nil {
