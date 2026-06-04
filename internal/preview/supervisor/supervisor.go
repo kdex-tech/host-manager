@@ -137,7 +137,7 @@ func (s *Supervisor) Shutdown(gracePeriod time.Duration) error {
 	s.mu.Unlock()
 
 	for _, c := range children {
-		fmt.Fprintf(s.opts.Stderr, "[%s] shutting down\n", c.name)
+		_, _ = fmt.Fprintf(s.opts.Stderr, "[%s] shutting down\n", c.name)
 		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
 	}
 	done := make(chan struct{})

@@ -34,7 +34,7 @@ type FnOverride struct {
 	Kind FnOverrideKind
 	URL  string // populated when Kind == FnOverrideURL OR after Supervisor binds a port
 	Dir  string // populated when Kind == FnOverrideDir
-	Lang FnLang  // populated when Kind == FnOverrideDir
+	Lang FnLang // populated when Kind == FnOverrideDir
 }
 
 // ThemeOverride and AppOverride are simpler: name + URL-or-path. Theme and app

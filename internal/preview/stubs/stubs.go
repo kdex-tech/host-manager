@@ -15,6 +15,6 @@ func NotImplemented(feature string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprintf(w, "kdex preview does not serve %s.\nThis endpoint requires a live cluster. See docs/superpowers/specs/2026-05-31-kdex-unified-cli-design.md §6.\n", feature)
+		_, _ = fmt.Fprintf(w, "kdex preview does not serve %s.\nThis endpoint requires a live cluster. See docs/superpowers/specs/2026-05-31-kdex-unified-cli-design.md §6.\n", feature)
 	})
 }
