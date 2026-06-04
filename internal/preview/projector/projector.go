@@ -10,7 +10,13 @@
 // runtime, no OwnerReferences (preview has no apiserver to attach to).
 //
 // Out of scope (documented limitations):
-//   - kdex-default-translation auto-injection (per-host, in nexus-manager)
+//   - kdex-default-translation auto-injection (per-host, in nexus-manager).
+//     If your host references it, copy the kdex-default-translation CR into
+//     your --crs directory.
+//   - kdex-default-script-library (and similar cluster-level "default" CRs
+//     installed by nexus-manager). If a page or archetype references one,
+//     copy the cluster's actual default CR into your --crs directory or the
+//     page reconciler will hard-fail with a NotFound error.
 //   - Default utility-page short-circuit names (require webhook constants)
 //   - CreationTimestamp-ordered archetype defaulting (Phase 3 task)
 //   - kdex.dev/generation label (nexus-manager stamps the host's generation;
