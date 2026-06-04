@@ -3,7 +3,6 @@ package loader
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -47,7 +46,7 @@ func TestLoad_RejectsInvalidYAML(t *testing.T) {
 	}
 }
 
-func TestLoad_RejectsUserFacingHostWithGuidance(t *testing.T) {
+func TestLoad_UserFacingHost_AwaitsProjection(t *testing.T) {
 	dir := t.TempDir()
 	hostYAML := []byte(`apiVersion: kdex.dev/v1alpha1
 kind: KDexHost
@@ -61,14 +60,14 @@ spec:
 	if err := os.WriteFile(filepath.Join(dir, "host.yaml"), hostYAML, 0o644); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
-	_, err := Load(dir)
-	if err == nil {
-		t.Fatal("expected error for KDexHost (user-facing form); got nil")
+	snap, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	msg := err.Error()
-	for _, want := range []string{"KDexHost", "KDexInternalHost", "nexus-manager"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error should guide user toward post-reconcile form; missing %q in: %v", want, msg)
-		}
+	// Pre-projection (Task C.1 only buffers): KDexHost lands in the user
+	// bucket but is NOT yet visible in snap.InternalHosts. Task C.5 wires
+	// projectUserFacing into the load pipeline.
+	if got, want := len(snap.InternalHosts), 0; got != want {
+		t.Errorf("InternalHosts before projection wired: got %d want %d", got, want)
 	}
 }

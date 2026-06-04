@@ -32,6 +32,46 @@ type Snapshot struct {
 	ClusterPageArchetypes []kdexv1alpha1.KDexClusterPageArchetype
 }
 
+// rawBuckets accumulates all decoded CRs before materialization. The two-phase
+// design lets Task C.5 inject projectUserFacing(buckets) between decode and
+// materialize so that KDexHost → KDexInternalHost projection has all
+// KDexUtilityPage + KDexTranslation objects in scope when it runs.
+type rawBuckets struct {
+	// Post-reconcile kinds (passed through unchanged)
+	internalHosts         []kdexv1alpha1.KDexInternalHost
+	internalTranslations  []kdexv1alpha1.KDexInternalTranslation
+	internalUtilityPages  []kdexv1alpha1.KDexInternalUtilityPage
+	clusterPageArchetypes []kdexv1alpha1.KDexClusterPageArchetype
+
+	// Direct-consumption kinds
+	themes    []kdexv1alpha1.KDexTheme
+	pages     []kdexv1alpha1.KDexPage
+	apps      []kdexv1alpha1.KDexApp
+	functions []kdexv1alpha1.KDexFunction
+
+	// User-facing kinds (projected to Internal*/Cluster* in Task C.5; buffered here for now)
+	userHosts          []kdexv1alpha1.KDexHost
+	userTranslations   []kdexv1alpha1.KDexTranslation
+	userUtilityPages   []kdexv1alpha1.KDexUtilityPage
+	userPageArchetypes []kdexv1alpha1.KDexPageArchetype
+}
+
+// materializeSnapshot projects rawBuckets into the public Snapshot type.
+// Task C.5 will call projectUserFacing(buckets) before this to fold
+// user-facing CRs into the post-reconcile bucket fields.
+func materializeSnapshot(b *rawBuckets) *Snapshot {
+	return &Snapshot{
+		InternalHosts:         b.internalHosts,
+		Themes:                b.themes,
+		Pages:                 b.pages,
+		Apps:                  b.apps,
+		Functions:             b.functions,
+		InternalTranslations:  b.internalTranslations,
+		InternalUtilityPages:  b.internalUtilityPages,
+		ClusterPageArchetypes: b.clusterPageArchetypes,
+	}
+}
+
 // Load walks dir recursively for *.yaml/*.yml files, decodes them into Snapshot,
 // and returns the Snapshot. Multi-doc YAML files are split on the standard
 // document separator. Unknown kinds are ignored (not an error) — this lets a
@@ -45,7 +85,7 @@ func Load(dir string) (*Snapshot, error) {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
 
-	snap := &Snapshot{}
+	buckets := &rawBuckets{}
 
 	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -62,15 +102,16 @@ func Load(dir string) (*Snapshot, error) {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
-		return decodeDocs(path, data, snap)
+		return decodeDocs(path, data, buckets)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return snap, nil
+	// Task C.5 will inject projectUserFacing(buckets) here before materialization.
+	return materializeSnapshot(buckets), nil
 }
 
-func decodeDocs(path string, data []byte, snap *Snapshot) error {
+func decodeDocs(path string, data []byte, b *rawBuckets) error {
 	reader := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
 	for docIdx := 0; ; docIdx++ {
 		doc, err := reader.Read()
@@ -84,7 +125,7 @@ func decodeDocs(path string, data []byte, snap *Snapshot) error {
 		if len(doc) == 0 {
 			continue
 		}
-		if err := decodeOne(path, docIdx, doc, snap); err != nil {
+		if err := decodeOne(path, docIdx, doc, b); err != nil {
 			return err
 		}
 	}
@@ -96,7 +137,7 @@ type meta struct {
 	Kind       string `json:"kind"`
 }
 
-func decodeOne(path string, docIdx int, doc []byte, snap *Snapshot) error {
+func decodeOne(path string, docIdx int, doc []byte, b *rawBuckets) error {
 	var m meta
 	if err := yaml.Unmarshal(doc, &m); err != nil {
 		return fmt.Errorf("%s doc %d: parse meta: %w", path, docIdx, err)
@@ -110,56 +151,73 @@ func decodeOne(path string, docIdx int, doc []byte, snap *Snapshot) error {
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.InternalHosts = append(snap.InternalHosts, obj)
+		b.internalHosts = append(b.internalHosts, obj)
 	case "KDexTheme":
 		var obj kdexv1alpha1.KDexTheme
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.Themes = append(snap.Themes, obj)
+		b.themes = append(b.themes, obj)
 	case "KDexPage":
 		var obj kdexv1alpha1.KDexPage
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.Pages = append(snap.Pages, obj)
+		b.pages = append(b.pages, obj)
 	case "KDexApp":
 		var obj kdexv1alpha1.KDexApp
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.Apps = append(snap.Apps, obj)
+		b.apps = append(b.apps, obj)
 	case "KDexFunction":
 		var obj kdexv1alpha1.KDexFunction
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.Functions = append(snap.Functions, obj)
+		b.functions = append(b.functions, obj)
 	case "KDexInternalTranslation":
 		var obj kdexv1alpha1.KDexInternalTranslation
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.InternalTranslations = append(snap.InternalTranslations, obj)
+		b.internalTranslations = append(b.internalTranslations, obj)
 	case "KDexInternalUtilityPage":
 		var obj kdexv1alpha1.KDexInternalUtilityPage
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.InternalUtilityPages = append(snap.InternalUtilityPages, obj)
+		b.internalUtilityPages = append(b.internalUtilityPages, obj)
 	case "KDexClusterPageArchetype":
 		var obj kdexv1alpha1.KDexClusterPageArchetype
 		if err := yaml.Unmarshal(doc, &obj); err != nil {
 			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
 		}
-		snap.ClusterPageArchetypes = append(snap.ClusterPageArchetypes, obj)
-	case "KDexHost", "KDexTranslation", "KDexUtilityPage", "KDexPageArchetype":
-		// User-facing CRs that get reconciled in-cluster (by nexus-manager)
-		// into the post-reconcile forms preview consumes. Phase 2 has no
-		// in-process projection, so refuse loudly rather than silently
-		// dropping the host (which then surfaces as "snapshot contains no
-		// KDexInternalHost"). Phase 3 / Plan C will add the projection.
-		return fmt.Errorf("%s doc %d: found %s; preview consumes the post-reconcile form (%s). KDexHost/KDexTranslation/KDexUtilityPage/KDexPageArchetype are user-facing CRs reconciled by nexus-manager in the cluster — in-process projection is planned for Phase 3", path, docIdx, m.Kind, postReconcileForm(m.Kind))
+		b.clusterPageArchetypes = append(b.clusterPageArchetypes, obj)
+	case "KDexHost":
+		var obj kdexv1alpha1.KDexHost
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.userHosts = append(b.userHosts, obj)
+	case "KDexTranslation":
+		var obj kdexv1alpha1.KDexTranslation
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.userTranslations = append(b.userTranslations, obj)
+	case "KDexUtilityPage":
+		var obj kdexv1alpha1.KDexUtilityPage
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.userUtilityPages = append(b.userUtilityPages, obj)
+	case "KDexPageArchetype":
+		var obj kdexv1alpha1.KDexPageArchetype
+		if err := yaml.Unmarshal(doc, &obj); err != nil {
+			return fmt.Errorf("%s doc %d: %w", path, docIdx, err)
+		}
+		b.userPageArchetypes = append(b.userPageArchetypes, obj)
 	case "KDexPageHeader", "KDexPageFooter", "KDexPageNavigation", "KDexScriptLibrary":
 		// Page-composition CRs referenced by KDexPage. The loader doesn't
 		// wire them yet; surface that explicitly so the user knows their
@@ -170,21 +228,4 @@ func decodeOne(path string, docIdx int, doc []byte, snap *Snapshot) error {
 		// preview's rendering scope (KDexRole, KDexRoleBinding, etc.).
 	}
 	return nil
-}
-
-// postReconcileForm returns the Internal*/Cluster* kind name a user-facing
-// kind reconciles into. Used in the error message so the user knows which
-// CR form preview's loader expects.
-func postReconcileForm(userFacingKind string) string {
-	switch userFacingKind {
-	case "KDexHost":
-		return "KDexInternalHost"
-	case "KDexTranslation":
-		return "KDexInternalTranslation"
-	case "KDexUtilityPage":
-		return "KDexInternalUtilityPage"
-	case "KDexPageArchetype":
-		return "KDexClusterPageArchetype"
-	}
-	return ""
 }
