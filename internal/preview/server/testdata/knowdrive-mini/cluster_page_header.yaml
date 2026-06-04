@@ -1,7 +1,7 @@
 # Cluster-scoped header referenced by the archetype's defaultHeaderRef.
 # Minimal HTML body — just enough to verify [[ .Header ]] is rendered.
-# status.conditions[Ready]=True for the same reason as the archetype
-# fixture: preview doesn't run a header reconciler.
+# No status block needed: fakeclient.stampReadyCondition auto-stamps
+# Ready=True on all page-composition kinds at seed time.
 apiVersion: kdex.dev/v1alpha1
 kind: KDexClusterPageHeader
 metadata:
@@ -11,10 +11,3 @@ spec:
     <header class="mini-header">
       <a href="/">[[ l10n .BrandName ]]</a>
     </header>
-status:
-  conditions:
-    - type: Ready
-      status: "True"
-      reason: Reconciled
-      message: "Stamped Ready in fixture (preview doesn't run header reconciler)"
-      lastTransitionTime: "2026-06-04T00:00:00Z"

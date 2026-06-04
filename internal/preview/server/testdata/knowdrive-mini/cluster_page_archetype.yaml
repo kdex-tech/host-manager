@@ -15,14 +15,8 @@
 # All slot accesses ([[ .Title ]], [[ .Theme ]], etc.) match the renderer
 # contract documented in render/render.go.
 #
-# status.conditions[Ready]=True is required because preview doesn't run
-# the archetype/header/footer reconcilers that would normally stamp it.
-# ResolveKDexObjectReference → isReady checks the Ready condition before
-# letting the page reconciler proceed; without it the page reconciler
-# bails early with shouldReturn=true, the page never lands in
-# HostHandler.Pages, RebuildMux registers no page handlers, and GET /
-# returns 404. Phase 3's hot-reload work can revisit whether the
-# fakeclient should auto-stamp these instead of fixtures pre-stamping.
+# No status block needed: fakeclient.stampReadyCondition auto-stamps
+# Ready=True on all page-composition kinds at seed time.
 apiVersion: kdex.dev/v1alpha1
 kind: KDexClusterPageArchetype
 metadata:
@@ -57,10 +51,3 @@ spec:
   defaultFooterRef:
     kind: KDexClusterPageFooter
     name: mini-footer
-status:
-  conditions:
-    - type: Ready
-      status: "True"
-      reason: Reconciled
-      message: "Stamped Ready in fixture (preview doesn't run archetype reconciler)"
-      lastTransitionTime: "2026-06-04T00:00:00Z"

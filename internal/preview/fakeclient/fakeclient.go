@@ -188,8 +188,59 @@ func deriveFocalHostAndNamespace(snap *loader.Snapshot, explicitName string) (fo
 	return "", "", fmt.Errorf("snapshot has no KDexInternalHost and no KDexPage to derive focal host from")
 }
 
+// stampReadyCondition sets status.conditions = [{type: Ready, status: True}] on
+// the given page-composition object. This is the preview fakeclient's stand-in
+// for the per-kind reconcilers that run in a real cluster and stamp the Ready
+// condition after validating the CR. Without it,
+// controller/resolver_common.go:ResolveKDexObjectReference bails (shouldReturn=true)
+// and pages that reference any of these kinds never land in HostHandler.Pages —
+// meaning RebuildMux registers no page handlers and GET / returns 404.
+//
+// These 10 kinds are NOT in WithStatusSubresource(...), so the fake client
+// serves the status field directly from the seeded object rather than
+// requiring a separate Status().Update call.
+//
+// Mutates the object in place. Safe because Snapshot objects are consumed once
+// by Setup and discarded.
+func stampReadyCondition(obj client.Object) {
+	ready := metav1.Condition{
+		Type:               string(kdexv1alpha1.ConditionTypeReady),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Time{},
+		Reason:             "PreviewSynthesized",
+		Message:            "synthesized by kdex preview fakeclient",
+	}
+	switch o := obj.(type) {
+	case *kdexv1alpha1.KDexPageArchetype:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexClusterPageArchetype:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexPageHeader:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexClusterPageHeader:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexPageFooter:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexClusterPageFooter:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexPageNavigation:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexClusterPageNavigation:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexScriptLibrary:
+		o.Status.Conditions = []metav1.Condition{ready}
+	case *kdexv1alpha1.KDexClusterScriptLibrary:
+		o.Status.Conditions = []metav1.Condition{ready}
+	}
+}
+
 // snapshotToObjects builds the seed objects list. Apps + Functions are NOT
 // included; their proxy targets are synthesized in Task 2.6.
+//
+// stampReadyCondition is called on each page-composition object (the 10 chrome
+// kinds) before appending. In a real cluster, each kind's own reconciler stamps
+// Ready=True after validating the CR; here the fakeclient does it at seed time
+// so that KDexPageReconciler.ResolveKDexObjectReference does not bail early.
 func snapshotToObjects(snap *loader.Snapshot) []client.Object {
 	out := make([]client.Object, 0,
 		len(snap.Themes)+
@@ -224,33 +275,43 @@ func snapshotToObjects(snap *loader.Snapshot) []client.Object {
 		out = append(out, &snap.InternalUtilityPages[i])
 	}
 	for i := range snap.ClusterPageArchetypes {
+		stampReadyCondition(&snap.ClusterPageArchetypes[i])
 		out = append(out, &snap.ClusterPageArchetypes[i])
 	}
 	for i := range snap.PageArchetypes {
+		stampReadyCondition(&snap.PageArchetypes[i])
 		out = append(out, &snap.PageArchetypes[i])
 	}
 	for i := range snap.PageHeaders {
+		stampReadyCondition(&snap.PageHeaders[i])
 		out = append(out, &snap.PageHeaders[i])
 	}
 	for i := range snap.PageFooters {
+		stampReadyCondition(&snap.PageFooters[i])
 		out = append(out, &snap.PageFooters[i])
 	}
 	for i := range snap.PageNavigations {
+		stampReadyCondition(&snap.PageNavigations[i])
 		out = append(out, &snap.PageNavigations[i])
 	}
 	for i := range snap.ScriptLibraries {
+		stampReadyCondition(&snap.ScriptLibraries[i])
 		out = append(out, &snap.ScriptLibraries[i])
 	}
 	for i := range snap.ClusterPageHeaders {
+		stampReadyCondition(&snap.ClusterPageHeaders[i])
 		out = append(out, &snap.ClusterPageHeaders[i])
 	}
 	for i := range snap.ClusterPageFooters {
+		stampReadyCondition(&snap.ClusterPageFooters[i])
 		out = append(out, &snap.ClusterPageFooters[i])
 	}
 	for i := range snap.ClusterPageNavigations {
+		stampReadyCondition(&snap.ClusterPageNavigations[i])
 		out = append(out, &snap.ClusterPageNavigations[i])
 	}
 	for i := range snap.ClusterScriptLibraries {
+		stampReadyCondition(&snap.ClusterScriptLibraries[i])
 		out = append(out, &snap.ClusterScriptLibraries[i])
 	}
 	return out
@@ -268,7 +329,7 @@ func ensureDefaultArchetype(snap *loader.Snapshot) client.Object {
 			return nil
 		}
 	}
-	return &kdexv1alpha1.KDexClusterPageArchetype{
+	def := &kdexv1alpha1.KDexClusterPageArchetype{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "preview-default-archetype",
 			Labels: map[string]string{"kdex.dev/default": "true"},
@@ -279,6 +340,8 @@ func ensureDefaultArchetype(snap *loader.Snapshot) client.Object {
 			Content: `<!doctype html><html><head><title>[[.Title]]</title>[[.Meta]][[.Theme]][[.HeadScript]]</head><body>[[.Content.main]]</body></html>`,
 		},
 	}
+	stampReadyCondition(def)
+	return def
 }
 
 // reconcilePages runs KDexPageReconciler.Reconcile twice per page (per the
