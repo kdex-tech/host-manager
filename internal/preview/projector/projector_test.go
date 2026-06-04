@@ -145,3 +145,33 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestProjectTranslation_NamesAndHostRef(t *testing.T) {
+	host := kdexv1alpha1.KDexHost{
+		ObjectMeta: metav1.ObjectMeta{Name: "h1", Namespace: "ns1"},
+	}
+	tr := kdexv1alpha1.KDexTranslation{
+		ObjectMeta: metav1.ObjectMeta{Name: "tr-en", Namespace: "ns1"},
+		Spec: kdexv1alpha1.KDexTranslationSpec{
+			Translations: []kdexv1alpha1.Translation{
+				{Lang: "en", KeysAndValues: map[string]string{"hello": "Hello"}},
+			},
+		},
+	}
+	got := ProjectTranslation(tr, host)
+	if got.Name != "h1-tr-en" {
+		t.Errorf("Name: got %q want %q", got.Name, "h1-tr-en")
+	}
+	if got.Namespace != "ns1" {
+		t.Errorf("Namespace: got %q want %q", got.Namespace, "ns1")
+	}
+	if got.Spec.HostRef.Name != "h1" {
+		t.Errorf("HostRef.Name: got %q want h1", got.Spec.HostRef.Name)
+	}
+	if len(got.Spec.Translations) != 1 || got.Spec.Translations[0].Lang != "en" {
+		t.Errorf("Spec.Translations not copied correctly: %+v", got.Spec.Translations)
+	}
+	if got.Spec.Translations[0].KeysAndValues["hello"] != "Hello" {
+		t.Errorf("Spec.Translations[0].KeysAndValues not copied")
+	}
+}

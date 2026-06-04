@@ -99,6 +99,25 @@ func ProjectHost(host kdexv1alpha1.KDexHost, in ProjectInput) (ProjectedHost, er
 	return pr, nil
 }
 
+// ProjectTranslation replicates nexus-manager's createOrUpdateInternalTranslation
+// (kdexhost_controller_util.go:36-112). Name is "<host>-<source>", namespace is
+// the host's namespace (even if the source was a cluster-scoped translation in
+// nexus-manager — preview consolidates everything into the host's namespace).
+func ProjectTranslation(tr kdexv1alpha1.KDexTranslation, host kdexv1alpha1.KDexHost) kdexv1alpha1.KDexInternalTranslation {
+	return kdexv1alpha1.KDexInternalTranslation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        translationProjectedName(host.Name, tr.Name),
+			Namespace:   host.Namespace,
+			Labels:      copyLabels(tr.Labels, host.Name),
+			Annotations: copyAnnotations(tr.Annotations),
+		},
+		Spec: kdexv1alpha1.KDexInternalTranslationSpec{
+			KDexTranslationSpec: *tr.Spec.DeepCopy(),
+			HostRef:             corev1.LocalObjectReference{Name: host.Name},
+		},
+	}
+}
+
 // translationProjectedName returns the InternalTranslation name nexus-manager
 // generates: "<host>-<source>". Matches kdexhost_controller_util.go:43.
 func translationProjectedName(hostName, translationName string) string {
