@@ -160,6 +160,51 @@ func TestPreview_StubRoutes_Return501(t *testing.T) {
 	}
 }
 
+// TestPreview_LoadsRealClusterCRShape is the Phase 2.5 gate test. It boots
+// preview against a CR set written in the user-facing form (KDexHost,
+// KDexTranslation, KDexUtilityPage, KDexClusterPageArchetype,
+// KDexClusterPageHeader, KDexClusterPageFooter) — the shape people actually
+// author — and verifies that loader projection + fakeclient seeding +
+// host-manager's page reconciler all compose to render a page.
+//
+// The fixture set at testdata/knowdrive-mini/ is a minimized model of the
+// user's real dev cluster CRs at /home/rotty/projects/RSI/knowdrive-site/k8s/
+// dev/. It exercises the user-facing-CR-only intake path Phase 2.5 added.
+func TestPreview_LoadsRealClusterCRShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test boots a real server")
+	}
+	addr := freeAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{CRsDir: "testdata/knowdrive-mini", Addr: addr})
+	}()
+	waitForServer(t, "http://"+addr+"/")
+
+	resp, err := http.Get("http://" + addr + "/") //nolint:noctx // smoke test, deliberate
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Errorf("status: got %d body=%s", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("<html")) && !bytes.Contains(body, []byte("<!doctype")) {
+		t.Errorf("expected HTML; got: %s", body)
+	}
+
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
 // freeAddr allocates a free TCP address on 127.0.0.1 for the test server.
 // Closes the listener immediately; small race between close and re-bind is
 // acceptable for a one-shot test.

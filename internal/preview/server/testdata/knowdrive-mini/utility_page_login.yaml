@@ -1,0 +1,14 @@
+# KDexUtilityPage referenced by host.utilityPages.loginRef. type=Login is
+# required for the projector to derive the InternalUtilityPage's name
+# (host-name + "-login"). contentEntries[] needs at least one entry with
+# slot=main (CRD validation rule).
+apiVersion: kdex.dev/v1alpha1
+kind: KDexUtilityPage
+metadata:
+  name: mini-login
+  namespace: default
+spec:
+  type: Login
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>MINI_LOGIN</p>"

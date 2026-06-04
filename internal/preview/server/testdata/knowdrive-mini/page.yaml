@@ -1,0 +1,17 @@
+# Home page mounted at basePath=/. Same shape as the Phase 2
+# testdata/basic/page.yaml, but referencing mini-host instead of preview.
+# No explicit pageArchetypeRef — the page reconciler falls back to the
+# cluster-default-labeled archetype (mini-archetype above).
+apiVersion: kdex.dev/v1alpha1
+kind: KDexPage
+metadata:
+  name: mini-home
+  namespace: default
+spec:
+  hostRef:
+    name: mini-host
+  label: "Home"
+  basePath: /
+  contentEntries:
+    - slot: main
+      rawHTML: "<p>MINI_HOME_CONTENT</p>"

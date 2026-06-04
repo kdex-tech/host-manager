@@ -1,0 +1,66 @@
+# KDexClusterPageArchetype labeled kdex.dev/default=true so the page
+# reconciler picks it up via ResolveOrDefaultPageArchetype. This
+# replaces the synthetic default the fakeclient injects when the
+# snapshot has no labeled archetype (see
+# internal/preview/fakeclient/fakeclient.go: ensureDefaultArchetype).
+#
+# Cluster-scoped here for two reasons:
+#  1. The existing default-archetype shim is also cluster-scoped, so we
+#     match the production code path host-manager hits in cluster.
+#  2. defaultHeaderRef / defaultFooterRef can point at namespaced or
+#     cluster-scoped chrome; we use cluster-scoped headers/footers below
+#     to keep the lookup unambiguous (cluster archetype + cluster chrome).
+#
+# Template uses the [[ ]] delimiters host-manager's renderer expects.
+# All slot accesses ([[ .Title ]], [[ .Theme ]], etc.) match the renderer
+# contract documented in render/render.go.
+#
+# status.conditions[Ready]=True is required because preview doesn't run
+# the archetype/header/footer reconcilers that would normally stamp it.
+# ResolveKDexObjectReference → isReady checks the Ready condition before
+# letting the page reconciler proceed; without it the page reconciler
+# bails early with shouldReturn=true, the page never lands in
+# HostHandler.Pages, RebuildMux registers no page handlers, and GET /
+# returns 404. Phase 3's hot-reload work can revisit whether the
+# fakeclient should auto-stamp these instead of fixtures pre-stamping.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexClusterPageArchetype
+metadata:
+  name: mini-archetype
+  labels:
+    kdex.dev/default: "true"
+spec:
+  content: |
+    <!doctype html>
+    <html lang="[[ .Language ]]">
+      <head>
+        <meta charset="UTF-8">
+        [[ .Meta ]]
+        <title>[[ l10n .Title ]]</title>
+        [[ .Theme ]]
+        [[ .HeadScript ]]
+      </head>
+      <body>
+        [[ .Header ]]
+        <main>
+          <div data-viewport="main">
+            [[ .Content.main ]]
+          </div>
+        </main>
+        [[ .Footer ]]
+        [[ .FootScript ]]
+      </body>
+    </html>
+  defaultHeaderRef:
+    kind: KDexClusterPageHeader
+    name: mini-header
+  defaultFooterRef:
+    kind: KDexClusterPageFooter
+    name: mini-footer
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: Reconciled
+      message: "Stamped Ready in fixture (preview doesn't run archetype reconciler)"
+      lastTransitionTime: "2026-06-04T00:00:00Z"

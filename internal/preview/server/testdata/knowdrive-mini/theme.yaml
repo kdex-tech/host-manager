@@ -1,0 +1,13 @@
+# Theme referenced by host.themeRef. Same shape as
+# testdata/basic/theme.yaml and the Task C.1 loader fixture
+# (testdata/single/theme.yaml) — one style asset is enough to
+# exercise the [[ .Theme ]] template slot in the archetype.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTheme
+metadata:
+  name: mini-theme
+  namespace: default
+spec:
+  assets:
+    - style: |
+        :root { --mini: 1; }

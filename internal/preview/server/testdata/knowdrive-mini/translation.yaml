@@ -1,0 +1,16 @@
+# Translation referenced by host.translationRefs. The shape
+# (translations[].lang + .keysAndValues map) was confirmed in Task C.3 —
+# this is the same form k8s/dev/019_translations.yaml uses, just trimmed
+# to the keys the mini fixture exercises.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTranslation
+metadata:
+  name: mini-translations
+  namespace: default
+spec:
+  translations:
+    - lang: en
+      keysAndValues:
+        "Mini": Mini
+        nav.home: Home
+        footer.copy: Mini Copyright

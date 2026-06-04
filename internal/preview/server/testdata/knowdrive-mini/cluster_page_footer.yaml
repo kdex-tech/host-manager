@@ -1,0 +1,20 @@
+# Cluster-scoped footer referenced by the archetype's defaultFooterRef.
+# Minimal HTML body — just enough to verify [[ .Footer ]] is rendered.
+# status.conditions[Ready]=True for the same reason as the archetype
+# fixture: preview doesn't run a footer reconciler.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexClusterPageFooter
+metadata:
+  name: mini-footer
+spec:
+  content: |
+    <footer class="mini-footer">
+      <small>[[ l10n "footer.copy" ]]</small>
+    </footer>
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: Reconciled
+      message: "Stamped Ready in fixture (preview doesn't run footer reconciler)"
+      lastTransitionTime: "2026-06-04T00:00:00Z"

@@ -1,0 +1,37 @@
+# KDexHost in the user-facing form (NOT KDexInternalHost). Modeled on the
+# shape of /home/rotty/projects/RSI/knowdrive-site/k8s/dev/028_host.yaml —
+# minimized to the fields preview needs to render a single page:
+#   - brandName, organization, defaultLang, modulePolicy (Loose for preview)
+#   - routing.domains (host-manager uses these for cookie scoping etc.)
+#   - themeRef pointing at the namespaced KDexTheme
+#   - translationRefs[] pointing at the namespaced KDexTranslation
+#   - utilityPages.loginRef pointing at the namespaced KDexUtilityPage (type=Login)
+#
+# This drives the projector: KDexHost → KDexInternalHost +
+# KDexTranslation → KDexInternalTranslation + KDexUtilityPage →
+# KDexInternalUtilityPage all happen in the loader.
+apiVersion: kdex.dev/v1alpha1
+kind: KDexHost
+metadata:
+  name: mini-host
+  namespace: default
+spec:
+  brandName: "Mini"
+  organization: "Mini Org"
+  defaultLang: en
+  devMode: true
+  modulePolicy: Loose
+  routing:
+    domains:
+      - mini.local
+    scheme: http
+  themeRef:
+    kind: KDexTheme
+    name: mini-theme
+  translationRefs:
+    - kind: KDexTranslation
+      name: mini-translations
+  utilityPages:
+    loginRef:
+      kind: KDexUtilityPage
+      name: mini-login
