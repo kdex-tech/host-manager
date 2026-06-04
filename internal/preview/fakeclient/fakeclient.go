@@ -234,8 +234,12 @@ func stampReadyCondition(obj client.Object) {
 	}
 }
 
-// snapshotToObjects builds the seed objects list. Apps + Functions are NOT
-// included; their proxy targets are synthesized in Task 2.6.
+// snapshotToObjects builds the seed objects list. Functions are NOT included
+// — their proxy targets are synthesized by the synth layer (which patches
+// Function CRs in-flight). Apps ARE included (added 2026-06-04 / Plan C) so
+// the page reconciler can resolve KDexApp references; the original Phase 2
+// exclusion was symmetrical with Functions but lookups by the page reconciler
+// were not anticipated.
 //
 // stampReadyCondition is called on each page-composition object (the 10 chrome
 // kinds) before appending. In a real cluster, each kind's own reconciler stamps
@@ -257,8 +261,12 @@ func snapshotToObjects(snap *loader.Snapshot) []client.Object {
 			len(snap.ClusterPageHeaders)+
 			len(snap.ClusterPageFooters)+
 			len(snap.ClusterPageNavigations)+
-			len(snap.ClusterScriptLibraries),
+			len(snap.ClusterScriptLibraries)+
+			len(snap.Apps),
 	)
+	for i := range snap.Apps {
+		out = append(out, &snap.Apps[i])
+	}
 	for i := range snap.Themes {
 		out = append(out, &snap.Themes[i])
 	}
