@@ -17,6 +17,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
+	"github.com/kdex-tech/host-manager/internal/preview/projector"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -107,7 +108,9 @@ func Load(dir string) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Task C.5 will inject projectUserFacing(buckets) here before materialization.
+	if err := projectUserFacing(buckets); err != nil {
+		return nil, fmt.Errorf("projection: %w", err)
+	}
 	return materializeSnapshot(buckets), nil
 }
 
@@ -127,6 +130,70 @@ func decodeDocs(path string, data []byte, b *rawBuckets) error {
 		}
 		if err := decodeOne(path, docIdx, doc, b); err != nil {
 			return err
+		}
+	}
+}
+
+// projectUserFacing translates user-facing KDexHost/Translation/UtilityPage
+// into the post-reconcile Internal* equivalents and appends them to the
+// buckets. Warnings are logged to stderr.
+func projectUserFacing(b *rawBuckets) error {
+	for _, host := range b.userHosts {
+		// Filter translations + utility pages by namespace (only those in the
+		// host's namespace can be referenced by it).
+		var hostNSTranslations []kdexv1alpha1.KDexTranslation
+		for _, tr := range b.userTranslations {
+			if tr.Namespace == host.Namespace {
+				hostNSTranslations = append(hostNSTranslations, tr)
+			}
+		}
+		var hostNSUtilityPages []kdexv1alpha1.KDexUtilityPage
+		for _, up := range b.userUtilityPages {
+			if up.Namespace == host.Namespace {
+				hostNSUtilityPages = append(hostNSUtilityPages, up)
+			}
+		}
+
+		ph, err := projector.ProjectHost(host, projector.ProjectInput{
+			UtilityPages: hostNSUtilityPages,
+			Translations: hostNSTranslations,
+		})
+		if err != nil {
+			return fmt.Errorf("project host %s/%s: %w", host.Namespace, host.Name, err)
+		}
+		for _, w := range ph.Warnings {
+			_, _ = fmt.Fprintln(os.Stderr, "preview: projection warning:", w)
+		}
+		b.internalHosts = append(b.internalHosts, ph.KDexInternalHost)
+
+		// Project each utility page referenced by this host.
+		if host.Spec.UtilityPages != nil {
+			projectUPRef(b, host, host.Spec.UtilityPages.LoginRef, hostNSUtilityPages)
+			projectUPRef(b, host, host.Spec.UtilityPages.ErrorRef, hostNSUtilityPages)
+			projectUPRef(b, host, host.Spec.UtilityPages.AnnouncementRef, hostNSUtilityPages)
+		}
+
+		// Project each translation referenced by this host.
+		for _, ref := range host.Spec.TranslationRefs {
+			for _, tr := range hostNSTranslations {
+				if tr.Name == ref.Name {
+					b.internalTranslations = append(b.internalTranslations, projector.ProjectTranslation(tr, host))
+					break
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func projectUPRef(b *rawBuckets, host kdexv1alpha1.KDexHost, ref *kdexv1alpha1.KDexObjectReference, pages []kdexv1alpha1.KDexUtilityPage) {
+	if ref == nil {
+		return
+	}
+	for _, up := range pages {
+		if up.Name == ref.Name {
+			b.internalUtilityPages = append(b.internalUtilityPages, projector.ProjectUtilityPage(up, host))
+			return
 		}
 	}
 }

@@ -46,7 +46,7 @@ func TestLoad_RejectsInvalidYAML(t *testing.T) {
 	}
 }
 
-func TestLoad_UserFacingHost_AwaitsProjection(t *testing.T) {
+func TestLoad_UserFacingHost_ProjectsToInternal(t *testing.T) {
 	dir := t.TempDir()
 	hostYAML := []byte(`apiVersion: kdex.dev/v1alpha1
 kind: KDexHost
@@ -54,6 +54,9 @@ metadata:
   name: example
   namespace: default
 spec:
+  brandName: Test
+  organization: Test
+  modulePolicy: Loose
   routing:
     domains: [example.local]
 `)
@@ -64,10 +67,55 @@ spec:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	// Pre-projection (Task C.1 only buffers): KDexHost lands in the user
-	// bucket but is NOT yet visible in snap.InternalHosts. Task C.5 wires
-	// projectUserFacing into the load pipeline.
-	if got, want := len(snap.InternalHosts), 0; got != want {
-		t.Errorf("InternalHosts before projection wired: got %d want %d", got, want)
+	if got, want := len(snap.InternalHosts), 1; got != want {
+		t.Errorf("InternalHosts: got %d want %d", got, want)
+	}
+	if snap.InternalHosts[0].Name != "example" {
+		t.Errorf("InternalHost name: got %q want example", snap.InternalHosts[0].Name)
+	}
+}
+
+func TestLoad_UserFacingHostWithTranslation_ProjectsBoth(t *testing.T) {
+	dir := t.TempDir()
+	multiYAML := []byte(`apiVersion: kdex.dev/v1alpha1
+kind: KDexHost
+metadata:
+  name: example
+  namespace: default
+spec:
+  brandName: Test
+  organization: Test
+  modulePolicy: Loose
+  routing:
+    domains: [example.local]
+  translationRefs:
+    - name: en
+---
+apiVersion: kdex.dev/v1alpha1
+kind: KDexTranslation
+metadata:
+  name: en
+  namespace: default
+spec:
+  translations:
+    - lang: en
+      keysAndValues:
+        hello: Hello
+`)
+	if err := os.WriteFile(filepath.Join(dir, "all.yaml"), multiYAML, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	snap, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := len(snap.InternalHosts), 1; got != want {
+		t.Errorf("InternalHosts: got %d want %d", got, want)
+	}
+	if got, want := len(snap.InternalTranslations), 1; got != want {
+		t.Errorf("InternalTranslations: got %d want %d", got, want)
+	}
+	if snap.InternalTranslations[0].Name != "example-en" {
+		t.Errorf("translation name: got %q want example-en", snap.InternalTranslations[0].Name)
 	}
 }
