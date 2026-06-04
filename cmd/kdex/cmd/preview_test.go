@@ -12,31 +12,30 @@ func TestPreviewCmd_StubAdvertisesPreviewSubcommand(t *testing.T) {
 	root.AddCommand(NewPreviewCmd())
 	root.SetOut(buf)
 	root.SetErr(buf)
-	root.SetArgs([]string{"--help"})
+	root.SetArgs([]string{"preview", "--help"})
 
-	if err := root.Execute(); err != nil {
-		t.Fatalf("Execute returned error: %v", err)
-	}
+	_ = root.Execute()
 
 	out := buf.String()
-	if !strings.Contains(out, "preview") {
-		t.Errorf("expected root help to list 'preview' command; got: %q", out)
+	for _, want := range []string{"--crs", "--fn", "--theme", "--app", "--missing-app", "--missing-fn"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview --help should mention %q; got: %q", want, out)
+		}
 	}
 }
 
-func TestPreviewCmd_NotImplementedYet(t *testing.T) {
+func TestPreviewCmd_RequiresCrsFlag(t *testing.T) {
 	buf := &bytes.Buffer{}
 	root := NewRootCmd()
 	root.AddCommand(NewPreviewCmd())
 	root.SetOut(buf)
 	root.SetErr(buf)
 	root.SetArgs([]string{"preview"})
-
 	err := root.Execute()
 	if err == nil {
-		t.Fatalf("expected 'preview' stub to return an error; got nil")
+		t.Fatal("expected error when --crs missing; got nil")
 	}
-	if !strings.Contains(err.Error(), "not yet implemented") {
-		t.Errorf("expected 'not yet implemented' error; got: %v", err)
+	if !strings.Contains(err.Error(), "crs") {
+		t.Errorf("error should mention --crs; got: %v", err)
 	}
 }
