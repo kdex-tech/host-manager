@@ -217,6 +217,28 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
+	// A nil Job means the image for the current generation is already built and
+	// recorded in status (the Job object was GC'd / reaped). Don't rebuild —
+	// just GC superseded prior-gen Jobs and report Ready. See
+	// kdex-tech/host-manager#111.
+	if job == nil {
+		if err := r.cleanupJobs(ctx, &ipr); err != nil {
+			return ctrl.Result{}, err
+		}
+		kdexv1alpha1.SetConditions(
+			&ipr.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionFalse,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionTrue,
+			},
+			kdexv1alpha1.ConditionReasonReconcileSuccess,
+			"Reconciliation successful, package image already built for current generation",
+		)
+		log.V(2).Info("package image already built for current generation, skipping rebuild", "image", ipr.Status.Attributes["image"])
+		return ctrl.Result{}, nil
+	}
+
 	switch state, terminalMsg := classifyPackRefJob(job); state {
 	case packRefJobTerminalFailed:
 		// BackoffLimit exhausted (or JobFailed flipped True for any
