@@ -443,6 +443,14 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
+	// A soft requeue (shouldReturn=false but RequeueAfter set) means the
+	// front-end packages image is still (re)building. We deliberately do NOT
+	// return here: the reconcile continues through backend setup and SetHost so
+	// backend KDexFunction routes are registered regardless of front-end
+	// package state. The requeue is applied at the end, after function setup.
+	// See kdex-tech/host-manager#117.
+	packagesRequeue := r1
+
 	if iprBackend != nil {
 		requiredBackends = append(requiredBackends, *iprBackend)
 	}
@@ -661,6 +669,26 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	)
 
 	log.V(3).Info("host has been set")
+
+	// Function routes are now registered (SetHost above). If the front-end
+	// packages image is still (re)building, surface the host as Progressing
+	// (the dedicated PackagesReady=False condition pinpoints the cause) and
+	// requeue — without having gated backend function delivery on it. See
+	// kdex-tech/host-manager#117.
+	if packagesRequeue.RequeueAfter > 0 {
+		kdexv1alpha1.SetConditions(
+			&internalHost.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionFalse,
+				Progressing: metav1.ConditionTrue,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileSuccess,
+			"functions registered; waiting for packages image",
+		)
+		log.V(1).Info("reconciled; packages image pending")
+		return packagesRequeue, nil
+	}
 
 	kdexv1alpha1.SetConditions(
 		&internalHost.Status.Conditions,
@@ -1036,6 +1064,47 @@ func (r *KDexInternalHostReconciler) createIPRBackend(
 	}
 
 	return packagesBackend
+}
+
+// ConditionTypePackagesReady is a host status condition dedicated to the
+// front-end packages image build. Surfacing front-end package state on its own
+// condition (rather than collapsing it into the host's overall Ready/Degraded,
+// which also covers backend functions) lets a front-end package failure be
+// observed independently and keeps it from gating backend function delivery.
+// See kdex-tech/host-manager#117.
+const ConditionTypePackagesReady = "PackagesReady"
+
+func setPackagesReadyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
+	meta.SetStatusCondition(conditions, metav1.Condition{
+		Type:    ConditionTypePackagesReady,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+}
+
+// packagesPendingOutcome builds the host's view while the front-end packages
+// image is (re)building or has failed. Crucially it does NOT gate the rest of
+// the host reconcile (backend function routes, ingress) on front-end package
+// state: it sets the dedicated PackagesReady=False condition, reuses the
+// last-known packages image/importmap so the existing packages route isn't
+// dropped mid-rebuild, and returns a soft requeue the caller applies AFTER
+// function route registration. See kdex-tech/host-manager#117.
+func (r *KDexInternalHostReconciler) packagesPendingOutcome(
+	internalHost *kdexv1alpha1.KDexInternalHost,
+	reason, message string,
+) (*resolvedBackend, string, ctrl.Result) {
+	setPackagesReadyCondition(&internalHost.Status.Conditions, metav1.ConditionFalse, reason, message)
+
+	lastImage := internalHost.Status.Attributes["packages.image"]
+	lastImportMap := internalHost.Status.Attributes["packages.importmap"]
+	requeue := ctrl.Result{RequeueAfter: r.RequeueDelay}
+
+	if lastImage != "" {
+		backend := r.createIPRBackend(internalHost, lastImage)
+		return &backend, lastImportMap, requeue
+	}
+	return nil, lastImportMap, requeue
 }
 
 func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
@@ -1824,6 +1893,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 
 		packagesBackend := r.createIPRBackend(internalHost, internalHost.Spec.PackagesImage)
 
+		setPackagesReadyCondition(&internalHost.Status.Conditions, metav1.ConditionTrue, "Available", "packages image pinned via spec.packagesImage")
 		return &packagesBackend, importMap, false, ctrl.Result{}, nil
 	}
 
@@ -1844,6 +1914,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 		delete(internalHost.Status.Attributes, "packages.image")
 		delete(internalHost.Status.Attributes, "packages.importmap")
 
+		setPackagesReadyCondition(&internalHost.Status.Conditions, metav1.ConditionTrue, "NoPackages", "host declares no package references")
 		return nil, "", false, ctrl.Result{}, nil
 	}
 
@@ -1853,18 +1924,14 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	}
 
 	if meta.IsStatusConditionFalse(internalPackageReferences.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) {
-		kdexv1alpha1.SetConditions(
-			&internalHost.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionFalse,
-				Progressing: metav1.ConditionTrue,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileSuccess,
-			"image not available yet, requeueing",
-		)
-
-		return nil, "", true, ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+		// Front-end packages image is (re)building or has failed. Do NOT gate
+		// the host reconcile on it — surface it on the dedicated PackagesReady
+		// condition, reuse the last-known image/importmap, and return
+		// shouldReturn=false so the reconcile continues to register backend
+		// function routes (SetHost). The caller applies the soft requeue AFTER
+		// function setup. See kdex-tech/host-manager#117.
+		backend, importMap, requeue := r.packagesPendingOutcome(internalHost, "Building", "packages image not available yet")
+		return backend, importMap, false, requeue, nil
 	}
 
 	packagesImage := internalPackageReferences.Status.Attributes["image"]
@@ -1887,6 +1954,7 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 
 	packagesBackend := r.createIPRBackend(internalHost, packagesImage)
 
+	setPackagesReadyCondition(&internalHost.Status.Conditions, metav1.ConditionTrue, "Available", "packages image built and available")
 	return &packagesBackend, importMap, false, ctrl.Result{}, nil
 }
 
