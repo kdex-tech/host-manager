@@ -3,6 +3,7 @@ package packref
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal"
@@ -31,6 +32,24 @@ type PackRef struct {
 	ServiceAccount   string
 }
 
+// imageBuiltForCurrentGeneration reports whether status already records a
+// packages image (and importmap) whose tag matches the IPR's current
+// generation. The recorded image is written by the controller as
+// "<registry>/<name>/packages:<generation>@<digest>" on a successful build, so
+// a matching ":<generation>@" prefix means this exact generation has already
+// produced an image — no rebuild is required. See kdex-tech/host-manager#111.
+func (p *PackRef) imageBuiltForCurrentGeneration(ipr *kdexv1alpha1.KDexInternalPackageReferences) bool {
+	if ipr.Status.Attributes == nil {
+		return false
+	}
+	image := ipr.Status.Attributes["image"]
+	if image == "" || ipr.Status.Attributes["importmap"] == "" {
+		return false
+	}
+	wantTag := fmt.Sprintf("/%s/packages:%d@", ipr.Name, ipr.Generation)
+	return strings.Contains(image, wantTag)
+}
+
 func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.KDexInternalPackageReferences) (*batchv1.Job, error) {
 	jobName := fmt.Sprintf("%s-packages-%d", ipr.Name, ipr.Generation)
 
@@ -41,6 +60,18 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 	}
 	if !errors.IsNotFound(err) {
 		return nil, err
+	}
+
+	// Idempotency guard: if the packages image for the CURRENT generation is
+	// already recorded in status, the build is content-complete — a missing Job
+	// object (GC'd after success, reaped on a controller restart, or no TTL but
+	// externally deleted) must NOT trigger a full rebuild. Re-running npm
+	// install + image build + push is pure waste and (per #110's
+	// non-reproducible digests) needlessly rolls the packages Deployment. A
+	// real generation bump changes the recorded tag, so this only suppresses
+	// rebuilds of an unchanged generation. See kdex-tech/host-manager#111.
+	if p.imageBuiltForCurrentGeneration(ipr) {
+		return nil, nil
 	}
 
 	volumes := []corev1.Volume{
