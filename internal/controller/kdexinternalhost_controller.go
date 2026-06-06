@@ -678,6 +678,49 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{}, nil
 }
 
+// functionHostWatchPredicate decides which KDexFunction events fan out to the
+// focal KDexInternalHost reconcile (which rebuilds the host mux via SetHost).
+//
+// #112 added GenerationChangedPredicate here to drop the high-frequency
+// status writes that origin/FaaS function observers emit every RequeueDelay
+// (which otherwise drove a full host reconcile per observe tick). But the host
+// mounts a function's proxy route only when the function is Ready with a
+// populated Status.URL (see host.go), so a status-only Pending->Ready / URL
+// transition MUST reach the host — GenerationChangedPredicate dropped it,
+// leaving newly-Ready routes unregistered until a host-manager restart
+// (kdex-tech/host-manager#116).
+//
+// This predicate passes Create/Delete (initial wiring + teardown), spec
+// (generation) changes, AND route-relevant status transitions (Ready flips,
+// Status.URL changes), while still filtering the steady-state status churn
+// #112 targeted.
+var functionHostWatchPredicate = predicate.Funcs{
+	CreateFunc:  func(event.CreateEvent) bool { return true },
+	DeleteFunc:  func(event.DeleteEvent) bool { return true },
+	GenericFunc: func(event.GenericEvent) bool { return true },
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldFn, ok1 := e.ObjectOld.(*kdexv1alpha1.KDexFunction)
+		newFn, ok2 := e.ObjectNew.(*kdexv1alpha1.KDexFunction)
+		if !ok1 || !ok2 {
+			// Unexpected type — don't silently drop it.
+			return true
+		}
+		// Spec change.
+		if oldFn.Generation != newFn.Generation {
+			return true
+		}
+		// Route-relevant status transitions: readiness flip or URL change.
+		// These are exactly the status fields host.go consults when deciding
+		// whether (and where) to mount the function's proxy route.
+		oldReady := oldFn.Status.State == kdexv1alpha1.KDexFunctionStateReady
+		newReady := newFn.Status.State == kdexv1alpha1.KDexFunctionStateReady
+		if oldReady != newReady {
+			return true
+		}
+		return oldFn.Status.URL != newFn.Status.URL
+	},
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	err := r.indexers(mgr)
@@ -756,19 +799,11 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					},
 				}
 			}),
-			// Only fan out to the host on KDexFunction SPEC changes (and
-			// creates/deletes), not on status-only updates. Origin/FaaS
-			// functions self-requeue every RequeueDelay and write status on
-			// every observe tick; without this predicate each of those ticks
-			// triggers a full host reconcile (recompute all backends + package
-			// refs + ingress) in lockstep with the function observer. The host
-			// reconciler reads only KDexFunction .Spec (API.Paths/BasePath) +
-			// CreationTimestamp — never .Status — so dropping status-only
-			// updates is safe. GenerationChangedPredicate still passes Create
-			// and Delete events; it only filters Updates whose .metadata
-			// .generation is unchanged. Mirrors the predicate already on
-			// For(KDexInternalHost) above. See kdex-tech/host-manager#112.
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+			// Fan out to the host on KDexFunction spec changes, creates,
+			// deletes, AND route-relevant status transitions — but NOT on the
+			// high-frequency steady-state status churn that origin/FaaS function
+			// observers emit every RequeueDelay. See functionHostWatchPredicate.
+			builder.WithPredicates(functionHostWatchPredicate)).
 		Watches(
 			&kdexv1alpha1.KDexScriptLibrary{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.ScriptLibraryRef}")).
