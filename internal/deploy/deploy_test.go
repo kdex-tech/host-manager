@@ -454,3 +454,113 @@ func TestDeploy_ScalingFieldFormatting(t *testing.T) {
 		}
 	}
 }
+
+// newObserverTestScheme builds the scheme the observer tests share.
+func newObserverTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := batchv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kdexv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	return scheme
+}
+
+func newObserverFunction() *kdexv1alpha1.KDexFunction {
+	return &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "user-service",
+			Namespace: "dev",
+			UID:       "fn-uid",
+		},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "rsi-dev"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/users"},
+		},
+	}
+}
+
+// TestObserve_SteersObserverPodsViaNodeSelectorAndTolerations is the wire-up
+// for kdex-tech/host-manager#121 (consuming kdex-crds#13): the observer
+// CronJob's PodSpec must carry the FaaSAdaptor.Observer NodeSelector +
+// Tolerations so operators can pin observer Job pods to a specific node pool.
+func TestObserve_SteersObserverPodsViaNodeSelectorAndTolerations(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+
+	tolerations := []corev1.Toleration{
+		{Key: "component", Operator: corev1.TolerationOpEqual, Value: "workload", Effect: corev1.TaintEffectNoSchedule},
+	}
+	nodeSelector := map[string]string{"kubernetes.io/arch": "arm64"}
+
+	d := &Deployer{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		FaaSAdaptor: kdexv1alpha1.KDexFaaSAdaptorSpec{
+			Observer: &kdexv1alpha1.Observer{
+				Image:        "ghcr.io/kdex-tech/knative-deployer:test",
+				Schedule:     "*/5 * * * *",
+				NodeSelector: nodeSelector,
+				Tolerations:  tolerations,
+			},
+		},
+		Scheme:         scheme,
+		ServiceAccount: "observer-sa",
+	}
+
+	obj, err := d.Observe(context.Background(), newObserverFunction())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	cronJob, ok := obj.(*batchv1.CronJob)
+	if !ok {
+		t.Fatalf("Observe returned %T; want *batchv1.CronJob", obj)
+	}
+
+	podSpec := cronJob.Spec.JobTemplate.Spec.Template.Spec
+	if podSpec.NodeSelector["kubernetes.io/arch"] != "arm64" {
+		t.Errorf("observer NodeSelector not propagated: %+v", podSpec.NodeSelector)
+	}
+	if len(podSpec.Tolerations) != 1 ||
+		podSpec.Tolerations[0].Key != "component" ||
+		podSpec.Tolerations[0].Value != "workload" ||
+		podSpec.Tolerations[0].Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("observer Tolerations not propagated: %+v", podSpec.Tolerations)
+	}
+}
+
+// TestObserve_OmitsPlacementWhenUnset keeps the change backward-compatible:
+// an Observer with no NodeSelector/Tolerations yields a PodSpec with neither
+// set, preserving the prior "scheduler picks anything" behavior.
+func TestObserve_OmitsPlacementWhenUnset(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+
+	d := &Deployer{
+		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		FaaSAdaptor: kdexv1alpha1.KDexFaaSAdaptorSpec{
+			Observer: &kdexv1alpha1.Observer{
+				Image:    "ghcr.io/kdex-tech/knative-deployer:test",
+				Schedule: "*/5 * * * *",
+			},
+		},
+		Scheme:         scheme,
+		ServiceAccount: "observer-sa",
+	}
+
+	obj, err := d.Observe(context.Background(), newObserverFunction())
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	cronJob := obj.(*batchv1.CronJob)
+
+	podSpec := cronJob.Spec.JobTemplate.Spec.Template.Spec
+	if podSpec.NodeSelector != nil {
+		t.Errorf("expected nil NodeSelector when unset, got %+v", podSpec.NodeSelector)
+	}
+	if podSpec.Tolerations != nil {
+		t.Errorf("expected nil Tolerations when unset, got %+v", podSpec.Tolerations)
+	}
+}

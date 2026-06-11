@@ -538,9 +538,16 @@ func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunct
 									SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 								},
 							},
-							ImagePullSecrets:   d.ImagePullSecrets,
+							ImagePullSecrets: d.ImagePullSecrets,
+							// Steer observer Job pods to the operator-intended
+							// node pool. Cluster-default-only: read from the
+							// FaaSAdaptor's Observer. Empty values are no-ops, so
+							// observers keep their prior scheduler-picks-anything
+							// behavior unless an operator sets them.
+							NodeSelector:       d.FaaSAdaptor.Observer.NodeSelector,
 							RestartPolicy:      corev1.RestartPolicyOnFailure,
 							ServiceAccountName: d.ServiceAccount,
+							Tolerations:        d.FaaSAdaptor.Observer.Tolerations,
 						},
 					},
 					TTLSecondsAfterFinished: new(int32(0)),
