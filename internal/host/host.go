@@ -741,7 +741,7 @@ func (hh *HostHandler) getOrganization() string {
 }
 
 func (hh *HostHandler) isSecure() bool {
-	return hh.scheme == "https"
+	return hh.scheme == schemeHTTPS
 }
 
 func (hh *HostHandler) issuerAddress() string {
@@ -772,6 +772,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.oauthHandler(mux, registeredPaths)
 	hh.openapiHandler(mux, registeredPaths)
 	hh.protectedResourceHandler(mux, registeredPaths)
+	hh.registerHandler(mux, registeredPaths)
 	hh.schemaHandler(mux, registeredPaths)
 	hh.snifferHandler(mux, registeredPaths)
 	hh.stateHandler(mux, registeredPaths)

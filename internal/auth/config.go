@@ -9,6 +9,7 @@ import (
 
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
+	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/auth/idtoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
@@ -59,6 +60,7 @@ type Config struct {
 		Scopes       []string
 	}
 	DCR             DCRConfig
+	DCRStore        *dcr.Store
 	RefreshTokenTTL time.Duration
 	Signer          sign.Signer
 	TokenManager    *apitoken.TokenManager
@@ -243,32 +245,41 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 	}
 
 	if auth != nil && auth.DynamicClientRegistration != nil {
-		dcr := auth.DynamicClientRegistration
+		dcrSpec := auth.DynamicClientRegistration
 		ttl := 720 * time.Hour
-		if dcr.ClientTTL != "" {
-			d, derr := time.ParseDuration(dcr.ClientTTL)
+		if dcrSpec.ClientTTL != "" {
+			d, derr := time.ParseDuration(dcrSpec.ClientTTL)
 			if derr != nil {
 				return nil, derr
 			}
 			ttl = d
 		}
-		schemes := dcr.AllowedRedirectSchemes
+		schemes := dcrSpec.AllowedRedirectSchemes
 		if len(schemes) == 0 {
 			schemes = []string{"https", "http-loopback"}
 		}
-		maxClients := dcr.MaxClients
+		maxClients := dcrSpec.MaxClients
 		if maxClients <= 0 {
 			maxClients = 1000
 		}
 		cfg.DCR = DCRConfig{
-			Enabled:                dcr.Enabled,
+			Enabled:                dcrSpec.Enabled,
 			ClientTTL:              ttl,
 			MaxClients:             maxClients,
 			AllowedRedirectSchemes: schemes,
 		}
+		cfg.DCRStore = cb.buildDCRStore(cfg.DCR)
 	}
 
 	return cfg, nil
+}
+
+// buildDCRStore constructs a DCR store when DCR is enabled and a cache is available.
+func (cb *ConfigBuilder) buildDCRStore(dcrCfg DCRConfig) *dcr.Store {
+	if !dcrCfg.Enabled || cb.CacheManager == nil {
+		return nil
+	}
+	return dcr.NewStore(cb.CacheManager, cb.Issuer, dcrCfg.ClientTTL, dcrCfg.MaxClients)
 }
 
 func (c *Config) AddAuthentication(mux http.Handler, exchanger *Exchanger) http.Handler {
