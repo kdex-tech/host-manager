@@ -69,9 +69,3 @@ func (hh *HostHandler) oauth2ProtectedResources() map[string]OAuth2Resource {
 	}
 	return out
 }
-
-// isOAuth2Protected reports whether basePath is an oauth2-protected resource.
-func (hh *HostHandler) isOAuth2Protected(basePath string) (OAuth2Resource, bool) {
-	r, ok := hh.oauth2ProtectedResources()[basePath]
-	return r, ok
-}
