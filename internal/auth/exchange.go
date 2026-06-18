@@ -238,10 +238,23 @@ func (e *Exchanger) GetClient(clientID string) (AuthClient, bool) {
 	if e == nil {
 		return AuthClient{}, false
 	}
-	// Check M2M clients
-	if e.config.IsM2MEnabled() {
-		client, ok := e.config.Clients[clientID]
-		return client, ok
+	// Static client map takes precedence.
+	if c, ok := e.config.Clients[clientID]; ok {
+		return c, true
+	}
+	// Fall back to dynamically-registered clients (RFC 7591).
+	if e.config.DCRStore != nil {
+		if dc, ok, _ := e.config.DCRStore.Get(context.Background(), clientID); ok {
+			return AuthClient{
+				ClientID:          dc.ClientID,
+				Public:            true,
+				RequirePKCE:       true,
+				RedirectURIs:      dc.RedirectURIs,
+				AllowedGrantTypes: dc.GrantTypes,
+				AllowedScopes:     strings.Fields(dc.Scope),
+				Name:              dc.ClientName,
+			}, true
+		}
 	}
 	return AuthClient{}, false
 }
@@ -685,8 +698,12 @@ type AuthorizationCodeClaims struct {
 	// kdex-tech/host-manager#65.
 	JTI         string `json:"jti,omitempty"`
 	RedirectURI string `json:"uri"`
-	Scope       string `json:"scp"`
-	Subject     string `json:"sub"`
+	// Resource is the RFC 8707 resource indicator supplied by the client
+	// during the authorization request. It is encrypted inside the auth
+	// code JWE and can be inspected by the token endpoint if needed.
+	Resource string `json:"resource,omitempty"`
+	Scope    string `json:"scp"`
+	Subject  string `json:"sub"`
 }
 
 func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims AuthorizationCodeClaims) (string, error) {

@@ -18,7 +18,7 @@ type OAuth2 struct {
 }
 
 func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
-	var clientId, code, codeChallenge, codeChallengeMethod, redirectURI, responseType, scope, state, subject string
+	var clientId, code, codeChallenge, codeChallengeMethod, redirectURI, resource, responseType, scope, state, subject string
 	var callbackURL *url.URL
 	var err error
 
@@ -49,6 +49,7 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	codeChallenge = r.URL.Query().Get("code_challenge")
 	codeChallengeMethod = r.URL.Query().Get("code_challenge_method")
 	redirectURI = r.URL.Query().Get("redirect_uri")
+	resource = r.URL.Query().Get("resource")
 	responseType = r.URL.Query().Get("response_type")
 	scope = r.URL.Query().Get("scope")
 	state = r.URL.Query().Get("state")
@@ -147,6 +148,7 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		RedirectURI:         redirectURI,
+		Resource:            resource,
 		Scope:               scope,
 		Subject:             subject,
 	}
