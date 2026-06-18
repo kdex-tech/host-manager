@@ -246,9 +246,11 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		dcr := auth.DynamicClientRegistration
 		ttl := 720 * time.Hour
 		if dcr.ClientTTL != "" {
-			if d, derr := time.ParseDuration(dcr.ClientTTL); derr == nil {
-				ttl = d
+			d, derr := time.ParseDuration(dcr.ClientTTL)
+			if derr != nil {
+				return nil, derr
 			}
+			ttl = d
 		}
 		schemes := dcr.AllowedRedirectSchemes
 		if len(schemes) == 0 {

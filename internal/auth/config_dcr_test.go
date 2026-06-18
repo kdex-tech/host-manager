@@ -65,3 +65,31 @@ func TestBuildDCRDisabledWhenNil(t *testing.T) {
 		t.Fatal("expected DCR disabled when field omitted")
 	}
 }
+
+func TestBuildDCRAppliesDefaults(t *testing.T) {
+	cb := newTestConfigBuilder(t)
+	auth := &kdexv1alpha1.Auth{
+		DynamicClientRegistration: &kdexv1alpha1.DynamicClientRegistration{
+			Enabled: true,
+		},
+	}
+	cfg, err := cb.Build(auth)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if cfg.DCR.ClientTTL != 720*time.Hour {
+		t.Fatalf("ClientTTL = %v, want 720h", cfg.DCR.ClientTTL)
+	}
+	if cfg.DCR.MaxClients != 1000 {
+		t.Fatalf("MaxClients = %d, want 1000", cfg.DCR.MaxClients)
+	}
+	want := []string{"https", "http-loopback"}
+	if len(cfg.DCR.AllowedRedirectSchemes) != len(want) {
+		t.Fatalf("AllowedRedirectSchemes = %v, want %v", cfg.DCR.AllowedRedirectSchemes, want)
+	}
+	for i, s := range want {
+		if cfg.DCR.AllowedRedirectSchemes[i] != s {
+			t.Fatalf("AllowedRedirectSchemes[%d] = %q, want %q", i, cfg.DCR.AllowedRedirectSchemes[i], s)
+		}
+	}
+}
