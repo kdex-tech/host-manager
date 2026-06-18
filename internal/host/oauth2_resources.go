@@ -69,3 +69,19 @@ func (hh *HostHandler) oauth2ProtectedResources() map[string]OAuth2Resource {
 	}
 	return out
 }
+
+// oauth2ResourceAudiences returns the set of acceptable RFC 8707 `resource`
+// values for this host's oauth2-protected resources. Both the full resource
+// URI (issuer + basePath, what clients send as `resource`) and the basePath
+// form are included so the token endpoint can recognize either. The OAuth2
+// token handler treats a `resource` present in this set as a request to mint
+// an audience-bound PASETO PAT as the access_token.
+func (hh *HostHandler) oauth2ResourceAudiences() map[string]bool {
+	resources := hh.oauth2ProtectedResources()
+	out := make(map[string]bool, len(resources)*2)
+	for _, r := range resources {
+		out[r.Resource] = true
+		out[r.BasePath] = true
+	}
+	return out
+}

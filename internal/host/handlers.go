@@ -169,8 +169,10 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 	}
 
 	oauth2 := &auth.OAuth2{
-		AuthConfig:    hh.authConfig,
-		AuthExchanger: hh.authExchanger,
+		AuthConfig:        hh.authConfig,
+		AuthExchanger:     hh.authExchanger,
+		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 
 	const path = "/-/oauth/authorize"
@@ -687,8 +689,10 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 	}
 
 	oauth2 := &auth.OAuth2{
-		AuthConfig:    hh.authConfig,
-		AuthExchanger: hh.authExchanger,
+		AuthConfig:        hh.authConfig,
+		AuthExchanger:     hh.authExchanger,
+		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 	const path = "/-/oauth/callback"
 	mux.HandleFunc("GET "+path, oauth2.OAuthGet)
@@ -1044,8 +1048,10 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 	}
 
 	oauth2 := &auth.OAuth2{
-		AuthConfig:    hh.authConfig,
-		AuthExchanger: hh.authExchanger,
+		AuthConfig:        hh.authConfig,
+		AuthExchanger:     hh.authExchanger,
+		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 	const path = "/-/token"
 	mux.HandleFunc("POST "+path, oauth2.OAuth2TokenHandler)

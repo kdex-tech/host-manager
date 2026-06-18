@@ -143,6 +143,17 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 	return e.sp.FindInternalRolesAndEntitlements(subject)
 }
 
+// MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
+// resource. The PAT's aud is the resource URI (RFC 8707); the subject's
+// entitlements are NOT baked in — the proxy re-resolves them from the
+// subject's KDexRoleBindings at request time.
+func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Duration) (string, error) {
+	if e.config.TokenManager == nil {
+		return "", fmt.Errorf("no token manager configured")
+	}
+	return e.config.TokenManager.MintStatelessKey(resource, subject, "mcp", scope, ttl)
+}
+
 func (e *Exchanger) AuthCodeURL(state string) string {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return ""

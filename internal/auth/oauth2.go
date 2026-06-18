@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -15,6 +16,14 @@ import (
 type OAuth2 struct {
 	AuthConfig    *Config
 	AuthExchanger *Exchanger
+	// ResourceAudiences is the set of oauth2-protected resource identifiers
+	// for this host (both the basePath and the full resource URI forms, per
+	// RFC 8707). When a token request carries a `resource` value present in
+	// this set, the authorization_code grant mints an audience-bound PASETO
+	// PAT as the access_token instead of the standard JWT.
+	ResourceAudiences map[string]bool
+	// AccessTokenTTL is the lifetime applied to a minted resource PAT.
+	AccessTokenTTL time.Duration
 }
 
 func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +308,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	codeVerifier = r.FormValue("code_verifier")
 	grantType = r.FormValue("grant_type")
 	scope = r.FormValue("scope")
+	resource := r.FormValue("resource")
 
 	if len(client.AllowedGrantTypes) > 0 && !slices.Contains(client.AllowedGrantTypes, grantType) {
 		err = fmt.Errorf("grant_type %s not allowed for this client", grantType)
@@ -359,6 +369,36 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		err = fmt.Errorf("authentication failed: %w", err)
 		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		return
+	}
+
+	// RFC 8707 resource-bound access token: when the authorization_code
+	// grant targets an oauth2-protected MCP resource (the client supplied a
+	// `resource` value present in ResourceAudiences), mint an audience-bound
+	// PASETO PAT as the access_token instead of the standard JWT. The PAT's
+	// aud is the resource URI; entitlements are intentionally NOT baked in —
+	// the proxy re-resolves them from the subject's roles at request time.
+	if grantType == "authorization_code" && resource != "" && o.ResourceAudiences[resource] {
+		var pat string
+		pat, err = o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
+		if err != nil {
+			err = fmt.Errorf("failed to mint resource PAT: %w", err)
+			http.Error(w, "Failed to mint resource token", http.StatusInternalServerError)
+			return
+		}
+		resp := TokenResponse{
+			AccessToken:  pat,
+			ExpiresIn:    int(o.AccessTokenTTL.Seconds()),
+			RefreshToken: ts.RefreshToken,
+			Scope:        ts.Scope,
+			TokenType:    "Bearer",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err = json.NewEncoder(w).Encode(resp); err != nil {
+			err = fmt.Errorf("failed to encode token response: %w", err)
+			http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
+			return
+		}
 		return
 	}
 
