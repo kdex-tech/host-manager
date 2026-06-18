@@ -9,10 +9,12 @@ import (
 type OpenIDConfiguration struct {
 	AuthorizationEndpoint            string   `json:"authorization_endpoint,omitempty"`
 	ClaimsSupported                  []string `json:"claims_supported,omitempty"`
+	CodeChallengeMethodsSupported    []string `json:"code_challenge_methods_supported,omitempty"`
 	GrantTypesSupported              []string `json:"grant_types_supported,omitempty"`
 	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
 	Issuer                           string   `json:"issuer"`
 	JwksURI                          string   `json:"jwks_uri"`
+	RegistrationEndpoint             string   `json:"registration_endpoint,omitempty"`
 	ResponseTypesSupported           []string `json:"response_types_supported"`
 	ScopesSupported                  []string `json:"scopes_supported,omitempty"`
 	SubjectTypesSupported            []string `json:"subject_types_supported"`
@@ -20,7 +22,7 @@ type OpenIDConfiguration struct {
 }
 
 // DiscoveryHandler creates an HTTP handler that serves the OpenID discovery document.
-func DiscoveryHandler(issuer string) http.HandlerFunc {
+func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFunc {
 	config := OpenIDConfiguration{
 		AuthorizationEndpoint: issuer + "/-/oauth/authorize",
 		ClaimsSupported: []string{
@@ -66,6 +68,10 @@ func DiscoveryHandler(issuer string) http.HandlerFunc {
 		},
 		SubjectTypesSupported: []string{"public"},
 		TokenEndpoint:         issuer + "/-/token",
+	}
+	config.CodeChallengeMethodsSupported = []string{PKCE_METHOD_S256}
+	if registrationEndpoint != "" {
+		config.RegistrationEndpoint = registrationEndpoint
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {

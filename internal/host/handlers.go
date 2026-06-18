@@ -312,7 +312,11 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 			return
 		}
 		issuer := hh.serverAddress(r)
-		auth.DiscoveryHandler(issuer)(w, r)
+		regEndpoint := ""
+		if hh.authConfig != nil && hh.authConfig.DCR.Enabled {
+			regEndpoint = issuer + "/-/oauth/register"
+		}
+		auth.DiscoveryHandler(issuer, regEndpoint)(w, r)
 	})
 	registeredPaths[oauth2path] = ko.PathInfo{
 		API: ko.OpenAPI{
@@ -354,7 +358,11 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 			return
 		}
 		issuer := hh.serverAddress(r)
-		auth.DiscoveryHandler(issuer)(w, r)
+		regEndpoint := ""
+		if hh.authConfig != nil && hh.authConfig.DCR.Enabled {
+			regEndpoint = issuer + "/-/oauth/register"
+		}
+		auth.DiscoveryHandler(issuer, regEndpoint)(w, r)
 	})
 	registeredPaths[oidcPath] = ko.PathInfo{
 		API: ko.OpenAPI{

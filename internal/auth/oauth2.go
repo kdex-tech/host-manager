@@ -101,7 +101,7 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	// allowing an attacker to downgrade their own flow to plain and
 	// redeem an intercepted code with any matching verifier. RFC 7636
 	// §4.2 has considered plain unsafe since 2015.
-	if codeChallenge != "" && codeChallengeMethod != "S256" {
+	if codeChallenge != "" && codeChallengeMethod != PKCE_METHOD_S256 {
 		err = fmt.Errorf("unsupported code_challenge_method: only S256 is accepted")
 		http.Error(w, "Unsupported code_challenge_method: only S256 is accepted", http.StatusBadRequest)
 		return

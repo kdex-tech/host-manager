@@ -561,7 +561,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		// who could intercept the code to redeem it with any matching
 		// verifier of their choosing — a PKCE downgrade. RFC 7636
 		// §4.2 has considered plain unsafe since 2015.
-		if claims.CodeChallengeMethod != "S256" {
+		if claims.CodeChallengeMethod != PKCE_METHOD_S256 {
 			return TokenSet{}, fmt.Errorf("unsupported code_challenge_method: only S256 is accepted")
 		}
 		h := sha256.Sum256([]byte(codeVerifier))
