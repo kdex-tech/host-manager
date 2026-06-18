@@ -17,6 +17,14 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
+// DCRConfig is the resolved per-host Dynamic Client Registration config.
+type DCRConfig struct {
+	Enabled                bool
+	ClientTTL              time.Duration
+	MaxClients             int32
+	AllowedRedirectSchemes []string
+}
+
 type AuthClient struct {
 	AllowedGrantTypes []string
 	AllowedScopes     []string
@@ -50,6 +58,7 @@ type Config struct {
 		RedirectURL  string
 		Scopes       []string
 	}
+	DCR             DCRConfig
 	RefreshTokenTTL time.Duration
 	Signer          sign.Signer
 	TokenManager    *apitoken.TokenManager
@@ -230,6 +239,30 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 				}
 				cfg.OIDC.Name = providerURL.Host
 			}
+		}
+	}
+
+	if auth != nil && auth.DynamicClientRegistration != nil {
+		dcr := auth.DynamicClientRegistration
+		ttl := 720 * time.Hour
+		if dcr.ClientTTL != "" {
+			if d, derr := time.ParseDuration(dcr.ClientTTL); derr == nil {
+				ttl = d
+			}
+		}
+		schemes := dcr.AllowedRedirectSchemes
+		if len(schemes) == 0 {
+			schemes = []string{"https", "http-loopback"}
+		}
+		maxClients := dcr.MaxClients
+		if maxClients <= 0 {
+			maxClients = 1000
+		}
+		cfg.DCR = DCRConfig{
+			Enabled:                dcr.Enabled,
+			ClientTTL:              ttl,
+			MaxClients:             maxClients,
+			AllowedRedirectSchemes: schemes,
 		}
 	}
 
