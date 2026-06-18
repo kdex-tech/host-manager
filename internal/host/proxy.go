@@ -445,6 +445,16 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				} else {
 					log.V(1).Info("unauthorized access attempt", "function", fn.Name)
 				}
+				// Defense-in-depth: only emit the 401 challenge when both flags are
+				// set AND oauth2Resource is non-empty. An empty resource would produce
+				// a malformed metadata URL (just the issuer root), so we fall through
+				// to the anti-enumeration 404 in that degenerate case.
+				if fh.oauth2Protected && fh.oauth2Resource != "" {
+					w.Header().Set("WWW-Authenticate",
+						`Bearer resource_metadata="`+fh.issuer+`/.well-known/oauth-protected-resource`+fn.Spec.API.BasePath+`"`)
+					http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+					return
+				}
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
 			}

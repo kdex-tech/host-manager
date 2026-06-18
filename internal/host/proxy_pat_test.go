@@ -167,8 +167,9 @@ func TestProxyPAT_BearerResourceBound(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 
 		assert.False(t, *backendReached, "wrong-audience PAT must NOT reach the backend")
-		// Task 10 adds the 401 + WWW-Authenticate challenge; today this case
-		// returns the existing anti-enumeration 404. Accept either.
-		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, rec.Code)
+		// Task 10: the 401 + WWW-Authenticate challenge is now emitted for
+		// oauth2-protected functions; assert exact status and header presence.
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotEmpty(t, rec.Header().Get("WWW-Authenticate"), "oauth2-protected gate must emit WWW-Authenticate challenge")
 	})
 }
