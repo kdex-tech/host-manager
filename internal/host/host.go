@@ -771,6 +771,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.navigationHandler(mux, registeredPaths)
 	hh.oauthHandler(mux, registeredPaths)
 	hh.openapiHandler(mux, registeredPaths)
+	hh.protectedResourceHandler(mux, registeredPaths)
 	hh.schemaHandler(mux, registeredPaths)
 	hh.snifferHandler(mux, registeredPaths)
 	hh.stateHandler(mux, registeredPaths)
