@@ -167,6 +167,14 @@ func (tm *TokenManager) WithTokenPrefix(prefix string) *TokenManager {
 	return tm
 }
 
+// TokenPrefix returns this host's white-label API token prefix (empty when
+// prefixing is off). Callers that need to discriminate a brand-prefixed PAT on
+// the wire (e.g. the Bearer auth path) use this to recognize the prefix without
+// reaching into the manager's internals.
+func (tm *TokenManager) TokenPrefix() string {
+	return tm.tokenPrefix
+}
+
 // wrap converts a freshly signed token to its on-the-wire form by REPLACING the
 // PASETO "v4.public." header with this host's brand prefix (e.g.
 // "kdex_pat_<payload>.<footer>"). No-op when no prefix is configured. Must be

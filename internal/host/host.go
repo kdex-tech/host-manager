@@ -745,7 +745,7 @@ func (hh *HostHandler) isSecure() bool {
 }
 
 func (hh *HostHandler) issuerAddress() string {
-	if len(hh.host.Routing.Domains) == 0 {
+	if hh.host == nil || len(hh.host.Routing.Domains) == 0 {
 		return ""
 	}
 	return fmt.Sprintf("%s://%s", hh.scheme, hh.host.Routing.Domains[0])

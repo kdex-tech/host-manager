@@ -195,6 +195,17 @@ type KDexFunctionHandler struct {
 	// PASETO->authContext bridge so the global hot path pays no PASETO cost.
 	// See kdex-tech/host-manager#103.
 	acceptsAPIKey bool
+	// oauth2Protected is set at handler-build time when this function declares the
+	// built-in "oauth2" security scheme on any operation. Like acceptsAPIKey it
+	// opts the handler into the PASETO->authContext bridge, but the token is
+	// validated against the function's RESOURCE audience (oauth2Resource) rather
+	// than the host audience — enforcing RFC 8707 audience binding at the gate.
+	oauth2Protected bool
+	// oauth2Resource is the RFC 8707 resource URI (issuer + basePath) a PAT must
+	// be bound to for this oauth2-protected function. Empty when not protected.
+	oauth2Resource string
+	// issuer is the host's issuer address, captured at handler-build time.
+	issuer string
 }
 
 func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

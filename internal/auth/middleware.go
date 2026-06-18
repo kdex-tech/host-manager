@@ -10,6 +10,24 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// looksLikePAT reports whether a bearer credential is a PASETO API token rather
+// than a JWT. PASETO v4 public tokens start with "v4.public."; a host may
+// replace that header on the wire with a brand tokenPrefix. JWTs start with
+// "eyJ" (base64 of '{"') and are never PATs.
+func looksLikePAT(token, tokenPrefix string) bool {
+	if tokenPrefix != "" && strings.HasPrefix(token, tokenPrefix) {
+		return true
+	}
+	return strings.HasPrefix(token, "v4.public.")
+}
+
+// LooksLikePAT is the exported wrapper around looksLikePAT so other packages
+// (e.g. the host proxy bridge) can recognize a PASETO PAT presented on the
+// Authorization: Bearer header.
+func LooksLikePAT(token, tokenPrefix string) bool {
+	return looksLikePAT(token, tokenPrefix)
+}
+
 // WithAuthentication creates a middleware that validates JWT tokens from the Authorization header.
 // It injects the claims into the request context if the token is valid.
 // If the Header is present but invalid, it returns 401 Unauthorized.
@@ -53,6 +71,17 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 
 			if tokenString == "" {
 				log.Info("No token found")
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// A PASETO PAT presented as `Authorization: Bearer <pat>` is NOT a
+			// host-audience JWT and must not be run through jwt.ParseWithClaims
+			// (which would 401 it). Pass it through anonymously here; the function
+			// proxy bridge authenticates the PAT downstream against the target
+			// resource's audience (RFC 8707). This applies only to the header
+			// source — a session cookie always carries the host's own JWT.
+			if authSource == "header" && looksLikePAT(tokenString, c.TokenPrefix()) {
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -289,6 +289,17 @@ func (c *Config) AddAuthentication(mux http.Handler, exchanger *Exchanger) http.
 	return c.WithAuthentication(exchanger)(mux)
 }
 
+// TokenPrefix returns this host's white-label API token prefix (empty when no
+// TokenManager is configured or prefixing is off). Used by the Bearer auth path
+// (both the WithAuthentication middleware and the proxy PAT bridge) to recognize
+// a brand-prefixed PAT.
+func (c *Config) TokenPrefix() string {
+	if c == nil || c.TokenManager == nil {
+		return ""
+	}
+	return c.TokenManager.TokenPrefix()
+}
+
 func (c *Config) IsAuthEnabled() bool {
 	if c == nil || c.ActivePair == nil {
 		return false

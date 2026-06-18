@@ -83,6 +83,26 @@ func extractAPIToken(r *http.Request) string {
 	return ""
 }
 
+// extractBearerOrAPIToken returns the PASETO API token carried on the request,
+// checking first the apiKey* locations (cookie / header / query) and then an
+// `Authorization: Bearer <pat>` header — but only when the bearer credential
+// looks like a PASETO PAT (bare "v4.public." or this host's brand prefix), so a
+// host-audience JWT on the Authorization header is never mistaken for a PAT.
+// Returns "" when none is present.
+func extractBearerOrAPIToken(r *http.Request, tokenPrefix string) string {
+	if tok := extractAPIToken(r); tok != "" {
+		return tok
+	}
+	if ah := r.Header.Get("Authorization"); ah != "" {
+		if rest, ok := strings.CutPrefix(ah, "Bearer "); ok {
+			if auth.LooksLikePAT(rest, tokenPrefix) {
+				return rest
+			}
+		}
+	}
+	return ""
+}
+
 //nolint:gocyclo
 func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer string) http.Handler {
 	target, err := url.Parse(fn.Status.URL)
@@ -296,6 +316,16 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		parsedRequirements: parsedRequirements,
 		patternMux:         patternMux,
 		acceptsAPIKey:      acceptsAPIKey,
+		issuer:             issuer,
+	}
+
+	// Detect whether THIS function is oauth2-protected (declares the built-in
+	// "oauth2" scheme on any operation) and, if so, capture its RFC 8707 resource
+	// URI. A PAT presented on Authorization: Bearer is then validated against this
+	// resource audience rather than the host audience. See Plan B Task 9.
+	if res, ok := hh.oauth2ProtectedResources()[fn.Spec.API.BasePath]; ok {
+		fh.oauth2Protected = true
+		fh.oauth2Resource = res.Resource
 	}
 
 	// Capture the start time and log the completion
@@ -345,18 +375,29 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		hh.mu.RUnlock()
 
 		// PASETO -> authContext bridge. Fires only when (a) this function's API
-		// declared an apiKey* scheme (fh.acceptsAPIKey) AND (b) WithAuthentication
-		// did not already populate authContext (JWT wins on mixed-token
-		// requests). On success the request carries a structured authContext
-		// (sub/roles/entitlements/scp) derived from the token subject, so the
-		// identity gate below and the FAT mint in the proxy Rewrite treat the
-		// API-token caller exactly like a JWT-authed one — the raw PASETO is
-		// still forwarded (cookie preserved in Rewrite; X-API-TOKEN header and
-		// api_token query pass through untouched). See kdex-tech/host-manager#103.
-		if fh.acceptsAPIKey && authConfig != nil && authConfig.TokenManager != nil {
+		// declared an apiKey* scheme (fh.acceptsAPIKey) OR is oauth2-protected
+		// (fh.oauth2Protected) AND (b) WithAuthentication did not already populate
+		// authContext (JWT wins on mixed-token requests). On success the request
+		// carries a structured authContext (sub/roles/entitlements/scp) derived
+		// from the token subject, so the identity gate below and the FAT mint in
+		// the proxy Rewrite treat the API-token caller exactly like a JWT-authed
+		// one — the raw PASETO is still forwarded (cookie preserved in Rewrite;
+		// X-API-TOKEN header and api_token query pass through untouched). See
+		// kdex-tech/host-manager#103.
+		//
+		// For oauth2-protected functions the MCP/oauth2 scheme set does NOT include
+		// an apiKey* scheme, so acceptsAPIKey is false; the bridge must still run.
+		// The token is validated against the function's RESOURCE audience (RFC 8707
+		// audience binding): a PAT minted for a different resource fails here. See
+		// Plan B Task 9.
+		if (fh.acceptsAPIKey || fh.oauth2Protected) && authConfig != nil && authConfig.TokenManager != nil {
 			if _, alreadyLoggedIn := auth.GetAuthContext(r.Context()); !alreadyLoggedIn {
-				if tok := extractAPIToken(r); tok != "" {
-					data, err := authConfig.TokenManager.ValidateToken(r.Context(), tok, authConfig.Audience)
+				expectedAud := authConfig.Audience
+				if fh.oauth2Protected {
+					expectedAud = fh.oauth2Resource
+				}
+				if tok := extractBearerOrAPIToken(r, authConfig.TokenPrefix()); tok != "" {
+					data, err := authConfig.TokenManager.ValidateToken(r.Context(), tok, expectedAud)
 					if err != nil {
 						// Invalid / expired / revoked / audience-mismatch token:
 						// leave the request anonymous and let the gate decide.
