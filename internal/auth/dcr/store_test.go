@@ -41,6 +41,27 @@ func TestRegisterAndGet(t *testing.T) {
 	}
 }
 
+func TestRegisterDefaultsAuthMethod(t *testing.T) {
+	s := newMemStore(t, 10)
+	ctx := context.Background()
+	c, err := s.Register(ctx, Client{
+		RedirectURIs: []string{"https://example.com/callback"},
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if c.TokenEndpointAuthMethod != "none" {
+		t.Fatalf("Register returned TokenEndpointAuthMethod=%q, want %q", c.TokenEndpointAuthMethod, "none")
+	}
+	got, ok, err := s.Get(ctx, c.ClientID)
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.TokenEndpointAuthMethod != "none" {
+		t.Fatalf("Get returned TokenEndpointAuthMethod=%q, want %q", got.TokenEndpointAuthMethod, "none")
+	}
+}
+
 func TestGetMissing(t *testing.T) {
 	s := newMemStore(t, 10)
 	_, ok, err := s.Get(context.Background(), "nope")

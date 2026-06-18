@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kdex-tech/host-manager/internal/cache"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Client is a dynamically-registered (RFC 7591) OAuth client record.
@@ -70,6 +71,8 @@ func (s *Store) Get(ctx context.Context, clientID string) (Client, bool, error) 
 		return Client{}, false, err
 	}
 	// refresh TTL on use
-	_ = s.cache.Set(ctx, clientID, val, cache.WithTTL(s.ttl))
+	if rerr := s.cache.Set(ctx, clientID, val, cache.WithTTL(s.ttl)); rerr != nil {
+		logf.FromContext(ctx).Error(rerr, "dcr: TTL refresh failed", "clientID", clientID)
+	}
 	return c, true, nil
 }
