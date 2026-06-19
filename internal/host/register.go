@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
@@ -25,10 +26,35 @@ func (hh *HostHandler) registerHandler(mux *http.ServeMux, _ map[string]ko.PathI
 	if hh.authConfig == nil || !hh.authConfig.DCR.Enabled || hh.authConfig.DCRStore == nil {
 		return // DCR off: endpoint absent → 404, anti-enum preserved
 	}
+	// Construct the abuse-guardrail limiter exactly once per HostHandler.
+	// registerHandler is invoked on every RebuildMux, so we must not reset
+	// the token buckets on each call (that would defeat the global cap).
+	hh.registerLimiterOnce.Do(func() {
+		if hh.registerLimiter == nil {
+			hh.registerLimiter = newRegisterLimiter(hh.authConfig.DCR.MaxClients)
+		}
+	})
 	mux.HandleFunc("POST /-/oauth/register", hh.oauthRegisterHandler)
 }
 
 func (hh *HostHandler) oauthRegisterHandler(w http.ResponseWriter, r *http.Request) {
+	// Abuse guardrails (RFC 7591 open registration). The GLOBAL limiter is
+	// the authoritative, non-spoofable guard; the per-IP limiter is
+	// best-effort defense-in-depth (its key is derived from spoofable
+	// headers — see clientIP / register_limiter.go).
+	if rl := hh.registerLimiter; rl != nil {
+		// Best-effort per-IP check first so an abusive single source is
+		// throttled without consuming the shared global budget.
+		if !rl.allowIP(clientIP(r)) {
+			writeRegisterRateLimited(w, perIPRetryAfterSeconds)
+			return
+		}
+		if !rl.allowGlobal() {
+			writeRegisterRateLimited(w, globalRetryAfterSeconds)
+			return
+		}
+	}
+
 	var req registerRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
 		writeRegisterError(w, http.StatusBadRequest, "invalid_client_metadata", "malformed JSON")
@@ -48,8 +74,13 @@ func (hh *HostHandler) oauthRegisterHandler(w http.ResponseWriter, r *http.Reque
 	if len(grants) == 0 {
 		grants = []string{"authorization_code", "refresh_token"}
 	}
-	// maxClients soft cap: enforcement deferred — no atomic Incr primitive
-	// exposed by cache.Cache; TTL bounds growth in the meantime.
+	// maxClients (DCR.MaxClients) is enforced as the GLOBAL limiter's burst
+	// size (see newRegisterLimiter): it bounds registrations admitted per
+	// burst window, NOT the count of simultaneously live clients. A true
+	// live cap needs a cache SCAN/atomic-decrement primitive cache.Cache
+	// does not provide; a create-only counter would overcount expiring
+	// clients and could permanently wedge registration. The refilling token
+	// bucket has no permanent-lockout path. TTL continues to bound growth.
 	client, err := hh.authConfig.DCRStore.Register(r.Context(), dcr.Client{
 		RedirectURIs:            req.RedirectURIs,
 		GrantTypes:              grants,
@@ -88,6 +119,14 @@ func redirectAllowed(raw string, schemes []string) bool {
 		}
 	}
 	return false
+}
+
+// writeRegisterRateLimited emits an RFC 7591-shaped error with HTTP 429 and
+// an advisory Retry-After header (seconds).
+func writeRegisterRateLimited(w http.ResponseWriter, retryAfterSeconds int) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	writeRegisterError(w, http.StatusTooManyRequests, "temporarily_unavailable",
+		"registration rate limit exceeded; retry later")
 }
 
 func writeRegisterError(w http.ResponseWriter, code int, errCode, desc string) {

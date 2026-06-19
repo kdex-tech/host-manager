@@ -87,6 +87,8 @@ type HostHandler struct {
 	proxyTimeouts             ProxyTimeouts
 	reconcileTime             time.Time
 	registeredPaths           map[string]ko.PathInfo
+	registerLimiter           *registerLimiter
+	registerLimiterOnce       sync.Once
 	scheme                    string
 	scripts                   []kdexv1alpha1.ScriptDef
 	sniffer                   interface {

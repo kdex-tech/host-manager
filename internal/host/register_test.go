@@ -3,6 +3,7 @@ package host
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,101 @@ func postRegister(t *testing.T, hh *HostHandler, body string) *httptest.Response
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr
+}
+
+// loopbackBody is a valid registration payload used by limiter tests.
+const loopbackBody = `{"redirect_uris":["http://127.0.0.1:33418/cb"],"client_name":"Claude"}`
+
+// postRegisterFrom is like postRegister but lets the caller set RemoteAddr
+// / X-Forwarded-For so per-IP behaviour can be exercised.
+func postRegisterFrom(t *testing.T, hh *HostHandler, body, remoteAddr, xff string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	hh.registerHandler(mux, nil)
+	req := httptest.NewRequest("POST", "/-/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
+	if xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	}
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestRegisterHappyPathUnderLimit ensures the limiter does not break the
+// 201 happy path for a single registration. A fresh HostHandler (and thus
+// a fresh limiter) is used so prior tests cannot drain the bucket.
+func TestRegisterHappyPathUnderLimit(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, loopbackBody)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterGlobalRateLimitReturns429 verifies the authoritative,
+// non-spoofable global limiter returns 429 + Retry-After once exceeded,
+// even as the apparent client IP rotates (so per-IP rotation can't evade
+// it).
+func TestRegisterGlobalRateLimitReturns429(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	// Force the limiter to exist now and shrink the global burst so the
+	// test is fast and deterministic. Per-IP limiter is left generous and
+	// each request uses a unique IP, so the global limiter is the only gate.
+	hh.registerLimiter = newRegisterLimiter(0)
+	hh.registerLimiterOnce.Do(func() {}) // mark done so registerHandler won't reinit
+
+	const burst = globalRegisterBurst
+	var got429 bool
+	for i := 0; i < burst+5; i++ {
+		ip := "203.0.113." + strconv.Itoa(i+1) // unique per request
+		rr := postRegisterFrom(t, hh, loopbackBody, ip+":4444", "")
+		if rr.Code == http.StatusTooManyRequests {
+			got429 = true
+			if ra := rr.Header().Get("Retry-After"); ra == "" {
+				t.Fatalf("429 response missing Retry-After header")
+			}
+			if !strings.Contains(rr.Body.String(), `"error"`) {
+				t.Fatalf("429 body not RFC7591-shaped: %s", rr.Body.String())
+			}
+			break
+		}
+	}
+	if !got429 {
+		t.Fatalf("expected a 429 after exceeding global burst of %d", burst)
+	}
+}
+
+// TestRegisterPerIPLimitedIndependently verifies the best-effort per-IP
+// limiter throttles a single IP while a different IP is still admitted
+// (both well under the global burst).
+func TestRegisterPerIPLimitedIndependently(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	hh.registerLimiter = newRegisterLimiter(0)
+	hh.registerLimiterOnce.Do(func() {})
+
+	// Drain IP A's per-IP bucket (burst = perIPRegisterBurst).
+	var ipARejected bool
+	for i := 0; i < perIPRegisterBurst+2; i++ {
+		rr := postRegisterFrom(t, hh, loopbackBody, "198.51.100.10:5555", "")
+		if rr.Code == http.StatusTooManyRequests {
+			ipARejected = true
+			break
+		}
+	}
+	if !ipARejected {
+		t.Fatalf("expected IP A to be per-IP rate limited after %d requests", perIPRegisterBurst)
+	}
+
+	// A different IP must still be admitted (its bucket is independent and
+	// the global bucket still has tokens).
+	rrB := postRegisterFrom(t, hh, loopbackBody, "198.51.100.20:5555", "")
+	if rrB.Code != http.StatusCreated {
+		t.Fatalf("IP B status = %d, want 201; body=%s", rrB.Code, rrB.Body.String())
+	}
 }
 
 func TestRegisterRejectsNonHTTPSRedirect(t *testing.T) {
