@@ -150,16 +150,19 @@ func (rl *registerLimiter) gcLocked(now time.Time) {
 
 // clientIP extracts a best-effort client IP for the per-IP limiter ONLY.
 //
-// TRUST CAVEAT: X-Forwarded-For is appended to by every hop and is
-// attacker-spoofable when it reaches host-manager (see issue #90). We do
-// NOT trust it for any security decision. We use the RemoteAddr host (the
-// gateway's address from host-manager's perspective) as the primary key.
+// KEY SELECTION: when X-Forwarded-For is present, the rightmost entry
+// (the address seen by the nearest proxy hop) is used as the primary
+// per-IP key, because it better distinguishes real clients behind a shared
+// gateway than RemoteAddr (which is always the gateway's address from
+// host-manager's perspective). RemoteAddr is the fallback when XFF is absent.
 //
-// If you trust EXACTLY ONE proxy hop in front of host-manager, the
-// rightmost XFF entry is the address that hop observed and is marginally
-// harder to spoof than arbitrary entries; we read it only as a tie-breaker
-// to better separate distinct clients behind a single trusted gateway. It
-// remains best-effort: the global limiter is the real guard.
+// SECURITY CAVEAT: host-manager does NOT strip client-supplied XFF headers
+// (see issue #90), so the XFF value is attacker-controlled and trivially
+// spoofable. An adversary can bypass the per-IP limit by rotating IPs or
+// XFF values. The per-IP limiter is therefore BEST-EFFORT defense-in-depth
+// only. The process-global limiter — which depends on no client-supplied
+// value — is the authoritative, non-bypassable guard on registration
+// throughput.
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := splitAndTrim(xff)

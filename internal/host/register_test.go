@@ -128,6 +128,9 @@ func TestRegisterPerIPLimitedIndependently(t *testing.T) {
 		rr := postRegisterFrom(t, hh, loopbackBody, "198.51.100.10:5555", "")
 		if rr.Code == http.StatusTooManyRequests {
 			ipARejected = true
+			if ra := rr.Header().Get("Retry-After"); ra == "" {
+				t.Fatalf("per-IP 429 response missing Retry-After header")
+			}
 			break
 		}
 	}
