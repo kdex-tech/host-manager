@@ -14,6 +14,21 @@ type ContextKey string
 const (
 	// authContextKey is the key used to store the JWT claims in the context.
 	authContextKey ContextKey = "auth"
+
+	// PATBridgeClaim is the auth-context claim set ONLY by the proxy PAT
+	// bridge (internal/host/proxy.go) when it authenticates an
+	// audience-bound PASETO PAT and resolves the subject's role-derived
+	// entitlements. A PAT minted through the authorization-code (oauth2)
+	// flow is semantically an oauth2 authentication, so callers carrying
+	// this marker have their role-resolved entitlements mirrored into the
+	// "oauth2" scheme bucket (in addition to "bearer") by
+	// GetParsedEntitlements — letting them satisfy oauth2-only operation
+	// requirements. This marker is intentionally distinct from
+	// auth_method=="oauth2": an ordinary JWT-cookie user who logged in via
+	// the oauth2 flow also carries auth_method=="oauth2" but must NOT have
+	// their bearer entitlements satisfy oauth2 requirements. Only the PAT
+	// bridge sets this claim. See kdex-tech/host-manager §4.
+	PATBridgeClaim = "pat_bridge"
 )
 
 type AuthContext jwt.MapClaims
@@ -61,6 +76,13 @@ func (ac AuthContext) GetSubject() (string, error) {
 
 func (ac AuthContext) GetEntitlements() ([]string, error) {
 	return ac.parseToStringArray("entitlements")
+}
+
+// IsPATBridge reports whether this auth context was produced by the proxy
+// PAT bridge. See PATBridgeClaim.
+func (ac AuthContext) IsPATBridge() bool {
+	b, _ := ac[PATBridgeClaim].(bool)
+	return b
 }
 
 func (ac AuthContext) GetAuthMethod() (AuthMethod, error) {

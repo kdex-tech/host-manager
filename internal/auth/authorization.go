@@ -78,6 +78,23 @@ func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entit
 	contextEntitlements, _ := authContext.GetEntitlements()
 	if len(contextEntitlements) > 0 {
 		userEntitlements["bearer"] = contextEntitlements
+
+		// PAT-bridge callers (proxy PASETO PAT -> authContext) authenticated
+		// via the authorization-code (oauth2) flow: a PAT IS an oauth2
+		// authentication, so the SAME role-resolved entitlements must also
+		// satisfy operation requirements declared under the "oauth2" scheme
+		// (e.g. {oauth2: ["functions:/api/v1/mcp:read"]}). We mirror them
+		// into the "oauth2" bucket here.
+		//
+		// This is guarded on the PATBridgeClaim marker, which is set ONLY by
+		// the proxy PAT bridge — NOT on auth_method=="oauth2" (an ordinary
+		// JWT-cookie user who logged in via oauth2 also carries that method
+		// but must keep bearer-only bucketing). JWT/cookie/apiKey callers do
+		// not carry this marker, so their bucketing is byte-for-byte
+		// unchanged. See kdex-tech/host-manager §4.
+		if authContext.IsPATBridge() {
+			userEntitlements["oauth2"] = contextEntitlements
+		}
 	}
 
 	contextScopes, _ := authContext.GetScopes()

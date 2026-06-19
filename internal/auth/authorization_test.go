@@ -417,6 +417,83 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 	}
 }
 
+// §4 regression: a PAT-bridge-authenticated caller (proxy PASETO PAT ->
+// authContext, marked with PATBridgeClaim) whose role-resolved entitlements
+// are filed under the "entitlements" claim MUST satisfy an operation that
+// declares ONLY the "oauth2" scheme — because a PAT minted through the
+// authorization-code (oauth2) flow IS an oauth2 authentication. A PAT caller
+// WITHOUT the required entitlement must still be denied, and a non-PAT caller
+// (no marker) must NOT have its bearer entitlements satisfy an oauth2-only
+// requirement (the original, pre-§4 bucketing).
+func TestAuthorizationChecker_PATBridgeSatisfiesOAuth2Requirement(t *testing.T) {
+	const resource = "functions"
+	const resourceName = "/api/v1/mcp"
+	const required = "functions:/api/v1/mcp:read"
+
+	// oauth2-ONLY requirement (no bearer alternative): this is the §4 shape.
+	oauth2Only := []v1alpha1.SecurityRequirement{
+		{"oauth2": []string{required}},
+	}
+
+	tests := []struct {
+		name     string
+		claims   AuthContext
+		req      []v1alpha1.SecurityRequirement
+		succeeds bool
+	}{
+		{
+			name: "PAT caller WITH entitlement satisfies oauth2-only requirement",
+			claims: AuthContext{
+				"sub":          "alice",
+				"entitlements": []string{required},
+				PATBridgeClaim: true,
+			},
+			req:      oauth2Only,
+			succeeds: true,
+		},
+		{
+			name: "PAT caller WITHOUT entitlement is denied (oauth2-only)",
+			claims: AuthContext{
+				"sub":          "mallory",
+				"entitlements": []string{"functions:/something/else:read"},
+				PATBridgeClaim: true,
+			},
+			req:      oauth2Only,
+			succeeds: false,
+		},
+		{
+			name: "non-PAT bearer caller does NOT satisfy oauth2-only requirement",
+			claims: AuthContext{
+				"sub":          "bob",
+				"entitlements": []string{required},
+				// no PATBridgeClaim marker -> bearer-only bucketing preserved.
+			},
+			req:      oauth2Only,
+			succeeds: false,
+		},
+		{
+			name: "non-PAT bearer caller still satisfies a bearer requirement",
+			claims: AuthContext{
+				"sub":          "bob",
+				"entitlements": []string{required},
+			},
+			req:      []v1alpha1.SecurityRequirement{{"bearer": []string{required}}},
+			succeeds: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := SetAuthContext(context.Background(), tt.claims)
+			checker := NewAuthorizationChecker(nil, logr.Logger{})
+			access, err := checker.CheckAccess(ctx, resource, resourceName, tt.req)
+			if assert.NoError(t, err) {
+				assert.Equal(t, tt.succeeds, access)
+			}
+		})
+	}
+}
+
 // Regression for kdex-tech/host-manager#26. ParseRequirements must be
 // safe against degenerate inputs — both nil and len(0) slices, and any
 // runtime panic inside the range loop (e.g. a corrupted slice header

@@ -86,15 +86,15 @@ func (p e2ePerSubjectIDP) FindInternalRolesAndEntitlements(subject string) ([]st
 // satisfy the required functions:/api/v1/mcp:read, not merely when SOME
 // entitlement is present.
 //
-// It delegates GetParsedEntitlements/ParseRequirements to the real checker, and
-// VerifyResourceParsedEntitlements to the real engine's resource-identity check
-// (resource:resourceName:read), which is the production load-bearing check for
-// PAT-bridge callers. (The function's literal {oauth2: [...]} requirement is NOT
-// satisfiable by a PAT-bridge caller — the bridge populates no oauth2-scheme
-// scope in authContext — so passing those parsed requirements through verbatim
-// would deny even an authorized subject; the resource-identity check is what
-// genuinely gates on functions:/api/v1/mcp:read.) This is a REAL membership
-// check, replacing the previous vacuous len(ents) > 0 stub.
+// Every method delegates to the real checker UNMODIFIED — including
+// VerifyResourceParsedEntitlements, which now receives the function's REAL
+// parsed requirements ({oauth2: ["functions:/api/v1/mcp:read"]}) verbatim from
+// the proxy gate. This proves the §4 fix end-to-end: a PAT-bridge caller's
+// role-resolved entitlements are mirrored into the "oauth2" bucket by
+// GetParsedEntitlements, so the authorized subject satisfies the oauth2-ONLY
+// requirement while the wrong-entitlement subject is denied. (Previously this
+// shim discarded the requirements and passed entitlements.ParsedRequirements{},
+// which silently bypassed — and hid — the defect.)
 type e2eEntitlementGateChecker struct {
 	real *auth.AuthorizationChecker
 }
@@ -115,12 +115,13 @@ func (g *e2eEntitlementGateChecker) ParseRequirements(reqs []kdexv1alpha1.Securi
 	return g.real.ParseRequirements(reqs)
 }
 
-func (g *e2eEntitlementGateChecker) VerifyResourceParsedEntitlements(resource, resourceName string, ents entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements, verbs ...string) (bool, error) {
-	// Use the real engine's resource-identity check (functions:/api/v1/mcp:read
-	// derived from resource:resourceName:read). Pass empty parsed requirements so
-	// authorization turns solely on whether the subject's role-resolved
-	// entitlements include that specific identity.
-	return g.real.VerifyResourceParsedEntitlements(resource, resourceName, ents, entitlements.ParsedRequirements{}, verbs...)
+func (g *e2eEntitlementGateChecker) VerifyResourceParsedEntitlements(resource, resourceName string, ents entitlements.ParsedEntitlements, reqs entitlements.ParsedRequirements, verbs ...string) (bool, error) {
+	// Pass the function's REAL parsed requirements through verbatim. The proxy
+	// gate computes these from the operation's {oauth2: [...]} security and the
+	// resource identity; authorization must turn on whether the subject's
+	// role-resolved entitlements satisfy them. Do NOT shortcut with empty
+	// requirements — that bypassed (and hid) the §4 oauth2-bucket defect.
+	return g.real.VerifyResourceParsedEntitlements(resource, resourceName, ents, reqs, verbs...)
 }
 
 // e2eHarness wires up the full MCP/OAuth2 chain for an oauth2-protected

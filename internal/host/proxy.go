@@ -417,6 +417,16 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 								// key; the structured entitlements above are the
 								// authoritative authz model.
 								"scp": data.Scope,
+								// Mark this identity as PAT-bridge-originated. A PAT
+								// minted through the authorization-code (oauth2) flow
+								// IS an oauth2 authentication, so GetParsedEntitlements
+								// mirrors these role-resolved entitlements into the
+								// "oauth2" scheme bucket — letting this caller satisfy
+								// an operation that declares ONLY {oauth2: [...]}. This
+								// marker is read solely by GetParsedEntitlements and is
+								// scoped to the PAT path; JWT/cookie/apiKey callers
+								// never carry it. See kdex-tech/host-manager §4.
+								auth.PATBridgeClaim: true,
 							}))
 						}
 					}
