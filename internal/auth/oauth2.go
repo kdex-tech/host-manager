@@ -82,7 +82,7 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(authClient.AllowedGrantTypes) > 0 && !slices.Contains(authClient.AllowedGrantTypes, "authorization_code") {
+	if len(authClient.AllowedGrantTypes) > 0 && !slices.Contains(authClient.AllowedGrantTypes, GRANT_TYPE_AUTHORIZATION_CODE) {
 		err = fmt.Errorf("grant_type authorization_code not allowed for this client")
 		http.Error(w, "Unauthorized grant type", http.StatusUnauthorized)
 		return
@@ -327,7 +327,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch grantType {
-	case "authorization_code":
+	case GRANT_TYPE_AUTHORIZATION_CODE:
 		code = r.FormValue("code")
 		if code == "" {
 			err = fmt.Errorf("code is required")
@@ -378,7 +378,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	// PASETO PAT as the access_token instead of the standard JWT. The PAT's
 	// aud is the resource URI; entitlements are intentionally NOT baked in —
 	// the proxy re-resolves them from the subject's roles at request time.
-	if grantType == "authorization_code" && resource != "" && o.ResourceAudiences[resource] {
+	if grantType == GRANT_TYPE_AUTHORIZATION_CODE && resource != "" && o.ResourceAudiences[resource] {
 		var pat string
 		pat, err = o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
 		if err != nil {
