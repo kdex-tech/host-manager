@@ -124,6 +124,10 @@ func apiKeySecuredFunction(basePath string, withAPIKey bool) *kdexv1alpha1.KDexF
 func decodeFAT(t *testing.T, header string) jwt.MapClaims {
 	t.Helper()
 	require.True(t, strings.HasPrefix(header, "Bearer "), "expected Bearer FAT, got %q", header)
+	// ParseUnverified is deliberate: these tests assert on the FAT's CLAIMS
+	// (sub/aud), not its signature, and the FAT signing key is internal to the
+	// proxy and not exposed to the test scope. Signature verification is covered
+	// elsewhere; here we only need to read the minted claims.
 	parsed, _, err := jwt.NewParser().ParseUnverified(strings.TrimPrefix(header, "Bearer "), jwt.MapClaims{})
 	require.NoError(t, err)
 	claims, ok := parsed.Claims.(jwt.MapClaims)
