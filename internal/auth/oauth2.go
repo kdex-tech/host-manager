@@ -352,7 +352,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		username = r.FormValue("username")
 		password = r.FormValue("password")
 		ts, err = o.AuthExchanger.LoginLocal(r.Context(), username, password, scope, clientId, AuthMethodOAuth2)
-	case "refresh_token":
+	case GRANT_TYPE_REFRESH_TOKEN:
 		tokenID := r.FormValue("refresh_token")
 		if tokenID == "" {
 			err = fmt.Errorf("refresh_token is required")
@@ -372,33 +372,11 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RFC 8707 resource-bound access token: when the authorization_code
-	// grant targets an oauth2-protected MCP resource (the client supplied a
-	// `resource` value present in ResourceAudiences), mint an audience-bound
-	// PASETO PAT as the access_token instead of the standard JWT. The PAT's
-	// aud is the resource URI; entitlements are intentionally NOT baked in —
-	// the proxy re-resolves them from the subject's roles at request time.
-	if grantType == GRANT_TYPE_AUTHORIZATION_CODE && resource != "" && o.ResourceAudiences[resource] {
-		var pat string
-		pat, err = o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
-		if err != nil {
-			err = fmt.Errorf("failed to mint resource PAT: %w", err)
-			http.Error(w, "Failed to mint resource token", http.StatusInternalServerError)
-			return
-		}
-		resp := TokenResponse{
-			AccessToken:  pat,
-			ExpiresIn:    int(o.AccessTokenTTL.Seconds()),
-			RefreshToken: ts.RefreshToken,
-			Scope:        ts.Scope,
-			TokenType:    "Bearer",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err = json.NewEncoder(w).Encode(resp); err != nil {
-			err = fmt.Errorf("failed to encode token response: %w", err)
-			http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
-			return
-		}
+	// RFC 8707 resource-bound access token path. Handled returns true when the
+	// grant/resource pair is oauth2-protected and the response has already been
+	// written (success or error); fall through only for standard-JWT grants.
+	if handled, herr := o.writeResourcePATResponse(w, grantType, resource, ts); handled {
+		err = herr
 		return
 	}
 
@@ -417,6 +395,49 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
 		return
 	}
+}
+
+// writeResourcePATResponse mints an RFC 8707 resource-bound PASETO PAT for an
+// oauth2-protected MCP resource and writes it as the token response. The PAT's
+// aud is the resource URI; entitlements are intentionally NOT baked in — the
+// function proxy re-resolves them from the subject's roles at request time.
+//
+// It applies to both the authorization_code grant and the refresh_token grant.
+// The refresh_token case matters for long-lived MCP sessions: without it,
+// refreshing silently downgrades the resource-scoped PAT to a host-audience
+// JWT, which the function proxy's audience check then rejects.
+//
+// The boolean reports whether the response was handled here. false means the
+// grant/resource pair is not resource-bound and the caller should fall through
+// to the standard JWT response. When true, any returned error is for audit
+// logging only — the HTTP response has already been written.
+func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, resource string, ts TokenSet) (bool, error) {
+	if grantType != GRANT_TYPE_AUTHORIZATION_CODE && grantType != GRANT_TYPE_REFRESH_TOKEN {
+		return false, nil
+	}
+	if resource == "" || !o.ResourceAudiences[resource] {
+		return false, nil
+	}
+
+	pat, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
+	if err != nil {
+		http.Error(w, "Failed to mint resource token", http.StatusInternalServerError)
+		return true, fmt.Errorf("failed to mint resource PAT: %w", err)
+	}
+
+	resp := TokenResponse{
+		AccessToken:  pat,
+		ExpiresIn:    int(o.AccessTokenTTL.Seconds()),
+		RefreshToken: ts.RefreshToken,
+		Scope:        ts.Scope,
+		TokenType:    "Bearer",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err = json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
+		return true, fmt.Errorf("failed to encode token response: %w", err)
+	}
+	return true, nil
 }
 
 // TokenResponse represents the OAuth2 token response.

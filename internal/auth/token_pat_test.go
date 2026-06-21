@@ -199,3 +199,100 @@ func TestOAuth2TokenHandlerMintsPATForResource(t *testing.T) {
 		assert.NotEmpty(t, resp["id_token"])
 	})
 }
+
+// TestOAuth2TokenHandlerMintsPATForResourceOnRefresh proves the refresh_token
+// grant ALSO returns an audience-bound PASETO PAT (not a generic host JWT) when
+// the refresh request re-states an oauth2-protected resource. Without this, a
+// long-lived MCP session that refreshes its access token silently downgrades
+// from a resource-scoped PAT to a host-audience JWT, which the function proxy's
+// RFC 8707 audience check then rejects.
+func TestOAuth2TokenHandlerMintsPATForResourceOnRefresh(t *testing.T) {
+	keyPairs := keys.GenerateECDSAKeyPair()
+	signer, _ := sign.NewSigner("aud", time.Hour, "iss", &keyPairs.ActiveKey().Private, keyPairs.ActiveKey().KeyId, nil)
+
+	cm, err := cache.NewCacheManager("", "test-host", nil)
+	require.NoError(t, err)
+	tm, err := apitoken.NewTokenManager(
+		"test-issuer",
+		apitoken.GenerateDevmodeKeyPair(),
+		cm.GetCache("revocation", cache.CacheOptions{}),
+	)
+	require.NoError(t, err)
+
+	cfg := Config{
+		ActivePair: keyPairs.ActiveKey(),
+		KeyPairs:   keyPairs,
+		Clients: map[string]AuthClient{
+			"valid-client": {
+				ClientID:     "valid-client",
+				ClientSecret: "valid-secret",
+				RedirectURIs: []string{"http://localhost/cb"},
+			},
+		},
+		Signer:          *signer,
+		TokenTTL:        time.Hour,
+		RefreshTokenTTL: time.Hour,
+		TokenManager:    tm,
+	}
+
+	sp := &mockScopeProvider{
+		resolveIdentity: func(subject string, password string) (jwt.MapClaims, error) {
+			return nil, fmt.Errorf("mock auth failed")
+		},
+		resolveRolesAndEntitlements: func(subject string) ([]string, []string, error) {
+			return []string{"role1"}, []string{"entitlement1"}, nil
+		},
+	}
+	// Passing the cacheManager enables the refresh-token store.
+	ex, _ := NewExchanger(context.Background(), cfg, cm, sp)
+	require.True(t, ex.IsRefreshTokenEnabled(), "refresh tokens must be enabled for this test")
+
+	resource := "https://dev.knowdrive.ai/api/v1/mcp"
+
+	oauth2 := &OAuth2{
+		AuthExchanger:     ex,
+		ResourceAudiences: map[string]bool{resource: true},
+		AccessTokenTTL:    time.Hour,
+	}
+
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/-/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		oauth2.OAuth2TokenHandler(w, req)
+		return w
+	}
+
+	// Seed a refresh token bound to the same client/subject a prior
+	// authorization_code redemption would have produced.
+	refreshID, err := ex.createRefreshToken(context.Background(), RefreshTokenClaims{
+		AuthMethod: "local",
+		ClientID:   "valid-client",
+		Scope:      "openid profile",
+		Subject:    "alice@example.com",
+	})
+	require.NoError(t, err)
+
+	t.Run("refresh with matching resource yields a PAT access_token", func(t *testing.T) {
+		w := post(url.Values{
+			"grant_type":    {"refresh_token"},
+			"client_id":     {"valid-client"},
+			"client_secret": {"valid-secret"},
+			"refresh_token": {refreshID},
+			"resource":      {resource},
+		})
+		require.Equal(t, http.StatusOK, w.Result().StatusCode)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		accessToken, _ := resp["access_token"].(string)
+		require.NotEmpty(t, accessToken)
+		// The refreshed access_token must be the audience-bound PAT — it
+		// validates against the resource audience, not the host audience.
+		data, err := tm.ValidateToken(context.Background(), accessToken, resource)
+		require.NoError(t, err, "refreshed access_token should be a PAT bound to the resource audience")
+		assert.Equal(t, "alice@example.com", data.Subject)
+		assert.Equal(t, "Bearer", resp["token_type"])
+		// Rotation: a fresh refresh token is handed back.
+		assert.NotEmpty(t, resp["refresh_token"], "refresh must rotate the refresh token")
+	})
+}

@@ -54,6 +54,7 @@ func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFu
 			"authorization_code",
 			"client_credentials",
 			"password",
+			"refresh_token",
 		},
 		IDTokenSigningAlgValuesSupported: []string{"RS256", "ES256"},
 		Issuer:                           issuer,
