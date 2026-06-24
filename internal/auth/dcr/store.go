@@ -30,7 +30,13 @@ type Store struct {
 }
 
 func NewStore(cm cache.CacheManager, host string, ttl time.Duration, maxClients int32) *Store {
-	return &Store{cache: cm.GetCache("dcr", cache.CacheOptions{TTL: &ttl}), ttl: ttl, maxClients: maxClients}
+	// Uncycled: a DCR client registration is session-grade state that
+	// refresh tokens are bound to, so it must survive a cache cycle (a
+	// routine host config reconcile) the same way refresh-tokens/auth-codes
+	// do. Without this, every reconcile rotates the cache prefix and orphans
+	// all registered clients, so otherwise-valid refreshes fail with
+	// "Invalid client_id". See kdex-tech/host-manager#122.
+	return &Store{cache: cm.GetCache("dcr", cache.CacheOptions{TTL: &ttl, Uncycled: true}), ttl: ttl, maxClients: maxClients}
 }
 
 func newClientID() (string, error) {
