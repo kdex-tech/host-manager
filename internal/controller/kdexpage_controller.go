@@ -75,17 +75,31 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		page.Status.Attributes = make(map[string]string)
 	}
 
+	// Snapshot the observed status so the deferred write can be made
+	// conditional on an actual change.
+	observedStatus := page.Status.DeepCopy()
+
 	// Defer status update
 	defer func() {
 		page.Status.ObservedGeneration = page.Generation
-		updateErr := r.Status().Update(ctx, &page)
-		if updateErr != nil {
-			if kerrors.IsConflict(updateErr) {
-				err = nil
-				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
-			} else {
-				err = updateErr
-				res = ctrl.Result{}
+
+		// Only write status when it actually changed. The reconciler pulses a
+		// transient "Reconciling" condition at the top of every pass, which
+		// bumps LastTransitionTime on Ready/Progressing even when the net
+		// settled status is unchanged. An unconditional Status().Update() would
+		// then bump resourceVersion every reconcile, re-firing the controller's
+		// own For() watch and self-looping (~25 reconciles/sec, pegging a CPU
+		// core). See kdex-tech/host-manager#126.
+		if !objectStatusEqual(observedStatus, &page.Status) {
+			updateErr := r.Status().Update(ctx, &page)
+			if updateErr != nil {
+				if kerrors.IsConflict(updateErr) {
+					err = nil
+					res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+				} else {
+					err = updateErr
+					res = ctrl.Result{}
+				}
 			}
 		}
 

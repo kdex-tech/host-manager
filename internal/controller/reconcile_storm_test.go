@@ -171,11 +171,11 @@ func TestMarkBackendUnready_SkipsRedundantStatusWrite(t *testing.T) {
 	}
 }
 
-// TestInternalHostStatusEqual pins Fix C's comparison helper from
+// TestObjectStatusEqual pins Fix C's comparison helper from
 // kdex-tech/host-manager#102: per-condition LastTransitionTime must be ignored
-// (the reconciler pulses a transient Reconciling condition every pass), while
+// (the reconcilers pulse a transient Reconciling condition every pass), while
 // genuine status changes must still register as different.
-func TestInternalHostStatusEqual(t *testing.T) {
+func TestObjectStatusEqual(t *testing.T) {
 	t1 := metav1.NewTime(time.Now())
 	t2 := metav1.NewTime(t1.Add(7 * time.Minute))
 
@@ -189,7 +189,7 @@ func TestInternalHostStatusEqual(t *testing.T) {
 	t.Run("transition-time-only difference is equal", func(t *testing.T) {
 		other := *base.DeepCopy()
 		other.Conditions[0].LastTransitionTime = t2
-		if !internalHostStatusEqual(&base, &other) {
+		if !objectStatusEqual(&base, &other) {
 			t.Error("statuses differing only by LastTransitionTime must be considered equal")
 		}
 	})
@@ -198,7 +198,7 @@ func TestInternalHostStatusEqual(t *testing.T) {
 		other := *base.DeepCopy()
 		other.Conditions[0].Status = metav1.ConditionFalse
 		other.Conditions[0].LastTransitionTime = t2
-		if internalHostStatusEqual(&base, &other) {
+		if objectStatusEqual(&base, &other) {
 			t.Error("a real condition Status change must not be considered equal")
 		}
 	})
@@ -206,7 +206,7 @@ func TestInternalHostStatusEqual(t *testing.T) {
 	t.Run("observedGeneration change is not equal", func(t *testing.T) {
 		other := *base.DeepCopy()
 		other.ObservedGeneration = 6
-		if internalHostStatusEqual(&base, &other) {
+		if objectStatusEqual(&base, &other) {
 			t.Error("an ObservedGeneration change must not be considered equal")
 		}
 	})

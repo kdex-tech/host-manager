@@ -125,7 +125,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// every InternalHost RV bump fans out to all controllers watching it
 		// (the focal host reconciles ~every 5 min from nexus-manager's resync).
 		// See kdex-tech/host-manager#102.
-		if internalHostStatusEqual(observedStatus, &internalHost.Status) {
+		if objectStatusEqual(observedStatus, &internalHost.Status) {
 			log.V(3).Info("status unchanged, skipping update", "res", res)
 			return
 		}
@@ -1993,14 +1993,15 @@ func (r *KDexInternalHostReconciler) handleInternalPackageReferences(
 	return &packagesBackend, importMap, false, ctrl.Result{}, nil
 }
 
-// internalHostStatusEqual reports whether two KDexInternalHost statuses are
-// equivalent for the purpose of deciding whether to issue a Status().Update().
-// Per-condition LastTransitionTime is normalized out: the reconciler pulses a
-// transient "Reconciling" conditions set at the top of every pass, which bumps
+// objectStatusEqual reports whether two KDexObjectStatus values are equivalent
+// for the purpose of deciding whether to issue a Status().Update(). Per-condition
+// LastTransitionTime is normalized out: the reconcilers pulse a transient
+// "Reconciling" conditions set at the top of every pass, which bumps
 // LastTransitionTime on Ready/Progressing even when the net settled status is
 // unchanged. Comparing those timestamps would defeat the diff and re-introduce
-// the unconditional write. See kdex-tech/host-manager#102.
-func internalHostStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
+// the unconditional write. Shared by the InternalHost and Page reconcilers.
+// See kdex-tech/host-manager#102 and #126.
+func objectStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
 	ac := a.DeepCopy()
 	bc := b.DeepCopy()
 	for i := range ac.Conditions {
