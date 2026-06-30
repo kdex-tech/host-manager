@@ -11,7 +11,12 @@ import (
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 )
 
-const schemeHTTPS = "https"
+const (
+	schemeHTTP             = "http"
+	schemeHTTPS            = "https"
+	schemeConfigLoopback   = "http-loopback"
+	schemeConfigPrivateUse = "private-use"
+)
 
 type registerRequest struct {
 	RedirectURIs            []string `json:"redirect_uris"`
@@ -109,12 +114,23 @@ func redirectAllowed(raw string, schemes []string) bool {
 			if u.Scheme == schemeHTTPS {
 				return true
 			}
-		case "http-loopback":
-			if u.Scheme == "http" {
+		case schemeConfigLoopback:
+			if u.Scheme == schemeHTTP {
 				host := u.Hostname()
 				if host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost") {
 					return true
 				}
+			}
+		case schemeConfigPrivateUse:
+			// RFC 8252 §7.1 native-app private-use URI scheme. Require a
+			// reverse-DNS (dotted) scheme per the §7.1 SHOULD to reduce
+			// scheme-squatting collisions; reject bare single-label schemes.
+			// The exact redirect_uri is still pinned per-client at
+			// registration and matched at /authorize, and DCR clients are
+			// forced RequirePKCE (§8.1), so an intercepted code is unusable.
+			if u.Scheme != "" && u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS &&
+				strings.Contains(u.Scheme, ".") {
+				return true
 			}
 		}
 	}

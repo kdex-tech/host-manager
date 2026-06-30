@@ -165,3 +165,36 @@ func TestRegisterAcceptsLoopbackAndForcesPublicPKCE(t *testing.T) {
 		t.Fatalf("missing client_id / public auth method: %s", body)
 	}
 }
+
+// TestRegisterAcceptsPrivateUseScheme covers RFC 8252 §7.1 native-app
+// private-use redirects: a reverse-DNS (dotted) custom scheme registers
+// successfully when "private-use" is enabled on the host.
+func TestRegisterAcceptsPrivateUseScheme(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "private-use"})
+	rr := postRegister(t, hh, `{"redirect_uris":["ai.knowdrive.interviewer://oauth"],"client_name":"Interviewer"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterRejectsBareSingleLabelPrivateUseScheme pins the §7.1 SHOULD that
+// private-use schemes be reverse-DNS: a bare single-label scheme (no dot) is
+// the most squat-prone form and must be rejected even when private-use is on.
+func TestRegisterRejectsBareSingleLabelPrivateUseScheme(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "private-use"})
+	rr := postRegister(t, hh, `{"redirect_uris":["myapp://cb"],"client_name":"Squatter"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterRejectsPrivateUseSchemeWhenNotEnabled ensures the scheme is
+// opt-in: a dotted custom scheme is rejected when the host does not list
+// "private-use".
+func TestRegisterRejectsPrivateUseSchemeWhenNotEnabled(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, `{"redirect_uris":["ai.knowdrive.interviewer://oauth"],"client_name":"Interviewer"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}

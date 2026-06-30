@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -69,6 +70,25 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 			requirePKCE = true
 		}
 
+		// Footgun guard: a public client whose redirect uses an RFC 8252
+		// private-use (custom) URI scheme is open to authorization-code
+		// interception via scheme hijacking unless the code is PKCE-bound.
+		// DCR-registered clients are forced RequirePKCE, but static clients
+		// opt into PKCE via require_pkce — so fail closed when a public,
+		// custom-scheme client omits it rather than silently load it.
+		// See kdex-tech/host-manager#128.
+		if public && !requirePKCE {
+			for _, ru := range redirectURIs {
+				if isPrivateUseScheme(ru) {
+					return nil, fmt.Errorf(
+						"auth-client %q is public with a private-use redirect URI %q but require_pkce is not set: "+
+							"custom-scheme redirects are vulnerable to authorization-code interception without PKCE "+
+							"(RFC 8252 §8.1); set require_pkce=true to allow this client",
+						clientID, ru)
+				}
+			}
+		}
+
 		client := AuthClient{
 			AllowedGrantTypes: allowedGrantTypes,
 			AllowedScopes:     allowedScopes,
@@ -85,6 +105,19 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 	}
 
 	return clients, nil
+}
+
+// isPrivateUseScheme reports whether a redirect URI uses an RFC 8252 §7.1
+// private-use (custom) URI scheme — any scheme that is neither http nor https.
+// It is intentionally broader than the registration-time reverse-DNS check
+// (register.go): for the footgun guard, ANY non-web scheme on a public,
+// non-PKCE client is unsafe, dotted or not.
+func isPrivateUseScheme(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return u.Scheme != "" && u.Scheme != "http" && u.Scheme != HTTPS
 }
 
 type OIDCClientConfig struct {
