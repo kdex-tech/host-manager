@@ -78,7 +78,7 @@ func NewHTTPLookup(secret corev1.Secret) (*httpLookup, error) {
 }
 
 func (hl *httpLookup) Type() string {
-	return "http"
+	return HTTP
 }
 
 func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {

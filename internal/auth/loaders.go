@@ -117,7 +117,7 @@ func isPrivateUseScheme(raw string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme != "" && u.Scheme != "http" && u.Scheme != HTTPS
+	return u.Scheme != "" && u.Scheme != HTTP && u.Scheme != HTTPS
 }
 
 type OIDCClientConfig struct {
