@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -239,4 +240,52 @@ func TestReverseProxy_InterceptsMintTokenCall(t *testing.T) {
 	var resp jsonRPCResponse
 	g.Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 	g.Expect(resp.Result).ToNot(BeNil())
+}
+
+// TestReverseProxy_LargeBodyNotTruncated proves that a POST body larger than
+// maxMintPeekBytes to a mint-enabled, oauth2-protected MCP function is
+// forwarded to the upstream in full — never truncated — even though it is
+// not a mint_token call. The mint_token interceptor only buffers up to
+// maxMintPeekBytes+1 bytes to classify the body; anything larger must be
+// streamed through uninspected rather than silently cut off. See #280.
+func TestReverseProxy_LargeBodyNotTruncated(t *testing.T) {
+	g := NewWithT(t)
+
+	// Stub upstream that records the full length of the body it receives.
+	var upstreamHit bool
+	var upstreamBodyLen int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		b, err := io.ReadAll(r.Body)
+		g.Expect(err).ToNot(HaveOccurred())
+		upstreamBodyLen = len(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	hh := newTestHostHandlerForProxy(t, testAuthConfigForMint(t))
+	fn := newServiceBackedMCPFunction(t, upstream.URL)
+	hh.functions = []kdexv1alpha1.KDexFunction{*fn}
+	handler := hh.reverseProxyHandler(fn, mintProxyIssuer)
+
+	// Build a >maxMintPeekBytes JSON-RPC body that is NOT a mint_token call.
+	const argSize = 2 << 20 // 2 MiB
+	prefix := `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"bulk_ingest_text","arguments":{"text":"`
+	suffix := `"}}}`
+	text := strings.Repeat("a", argSize)
+	body := prefix + text + suffix
+	sentLen := len(body)
+	g.Expect(sentLen).To(BeNumerically(">", maxMintPeekBytes))
+
+	req := httptest.NewRequest(http.MethodPost, mintProxyBasePath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice", "entitlements": []any{"pages:/:read"},
+	}))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	g.Expect(upstreamHit).To(BeTrue())
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+	g.Expect(upstreamBodyLen).To(Equal(sentLen))
 }

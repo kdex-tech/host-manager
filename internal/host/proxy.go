@@ -502,21 +502,34 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// oauth2-protected MCP function. A tools/call for mint_token is handled
 		// locally (never forwarded); a tools/list is marked so ModifyResponse
 		// can splice the descriptor. All other bodies pass through untouched.
-		if fh.mintTokenEnabled && r.Method == http.MethodPost {
-			body, rerr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-			_ = r.Body.Close()
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			if rerr == nil {
-				if id, args, matched := isMintTokenCall(body); matched {
+		if fh.mintTokenEnabled && r.Method == http.MethodPost && r.Body != nil {
+			// Peek up to maxMintPeekBytes+1 to classify the JSON-RPC body without
+			// buffering an arbitrarily large request.
+			peek, rerr := io.ReadAll(io.LimitReader(r.Body, maxMintPeekBytes+1))
+			if rerr == nil && len(peek) <= maxMintPeekBytes {
+				// Small enough to fully buffer (EOF reached within the cap): the
+				// original body is drained, so close it and forward the buffer.
+				_ = r.Body.Close()
+				r.Body = io.NopCloser(bytes.NewReader(peek))
+				if id, args, matched := isMintTokenCall(peek); matched {
 					ac, _ := auth.GetAuthContext(r.Context())
 					sub, _ := ac["sub"].(string)
 					held := stringSliceFromClaim(ac["entitlements"])
 					hh.writeMintTokenRPC(w, id, sub, held, args)
 					return
 				}
-				if isToolsListCall(body) {
+				if isToolsListCall(peek) {
 					r = r.WithContext(context.WithValue(r.Context(), mintTokenListMarkerKey, true))
 				}
+			} else {
+				// Oversized (or read error): NEVER truncate the forwarded body.
+				// Prepend the peeked bytes back onto the still-unread remainder and
+				// forward the full stream uninspected. The composed body's Close
+				// closes the original underlying body (no leak).
+				r.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.MultiReader(bytes.NewReader(peek), r.Body), r.Body}
 			}
 		}
 
@@ -548,6 +561,12 @@ const (
 	// remaining life. Without skew, an entry served right at TTL boundary
 	// would hand out a token that expires mid-request downstream.
 	fatCacheTTLSkew = 30 * time.Second
+
+	// maxMintPeekBytes bounds how much of an MCP function's POST body the
+	// mint_token interceptor buffers to classify it as a tools/call / tools/list
+	// JSON-RPC request. A legitimate mint call is small; larger bodies are
+	// forwarded in full and uninspected (never truncated).
+	maxMintPeekBytes = 1 << 20
 )
 
 // newProxyTransport builds the http.Transport used by every KDexFunction
