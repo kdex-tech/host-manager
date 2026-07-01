@@ -55,7 +55,7 @@ func TestMintCapabilityToken_AttenuatesAndSignsHostAudience(t *testing.T) {
 	g.Expect(perr).ToNot(HaveOccurred())
 	g.Expect(claims["sub"]).To(Equal("alice"))
 	g.Expect(claims["entitlements"]).To(ContainElement("functions:/api/v1/files:write"))
-	g.Expect(claims[capUsesClaim]).To(BeTrue())
+	g.Expect(claims[auth.CapUsesClaim]).To(BeTrue())
 }
 
 func TestMintCapabilityToken_RejectsOverBroad(t *testing.T) {

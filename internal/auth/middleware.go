@@ -10,6 +10,14 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// CapUsesClaim marks a JWT as a bounded-use capability minted by mint_token
+// (internal/host/mint_token.go). The inbound middleware decrements the
+// jti-keyed use counter only for tokens carrying this claim; ordinary
+// session/FAT tokens never carry it. Exported so both the minting side
+// (internal/host) and the enforcing side (this package) share one source
+// of truth for the marker's name.
+const CapUsesClaim = "kdx_cap"
+
 // looksLikePAT reports whether a bearer credential is a PASETO API token rather
 // than a JWT. PASETO v4 public tokens start with "v4.public."; a host may
 // replace that header on the wire with a brand tokenPrefix. JWTs start with
@@ -250,6 +258,24 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 						} else {
 							log.Error(err, "Failed to refresh token")
 						}
+					}
+				}
+			}
+
+			// Bounded-use capability tokens carry the CapUsesClaim marker and a
+			// jti-keyed budget. Decrement atomically; reject (fail-closed) when the
+			// counter is missing or exhausted. Ordinary tokens (no marker) are
+			// untouched. See #280.
+			if c.MintCapCache != nil {
+				if marker, _ := authContext[CapUsesClaim].(bool); marker {
+					jti, _ := authContext["jti"].(string)
+					if jti == "" {
+						http.Error(w, "invalid capability token", http.StatusUnauthorized)
+						return
+					}
+					if _, ok, derr := c.MintCapCache.DecrementIfPositive(r.Context(), "uses:"+jti); derr != nil || !ok {
+						http.Error(w, "capability exhausted", http.StatusUnauthorized)
+						return
 					}
 				}
 			}

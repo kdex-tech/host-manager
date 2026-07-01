@@ -11,14 +11,10 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	entitlements "github.com/kdex-tech/entitlements/go"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 )
-
-// capUsesClaim marks a JWT as a bounded-use capability minted by mint_token.
-// The inbound middleware decrements the jti-keyed use counter only for tokens
-// carrying this claim; ordinary session/FAT tokens never carry it.
-const capUsesClaim = "kdx_cap"
 
 // ctxKey namespaces context values set by the mint_token interception so
 // they can't collide with other packages' context keys.
@@ -90,8 +86,9 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 //
 // Phase 1: the token is a stateless windowed JWT. `Uses` is clamped and
 // reflected in UsesRemaining but no counter is provisioned yet (Phase 2 adds
-// the jti-keyed Valkey counter and the middleware decrement). The capUsesClaim
-// marker is always set so Phase 2 activates without re-minting semantics.
+// the jti-keyed Valkey counter and the middleware decrement). The
+// auth.CapUsesClaim marker is always set so Phase 2 activates without
+// re-minting semantics.
 func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
@@ -139,9 +136,9 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	}
 
 	// signer.Project runs the claim allowlist (which passes "entitlements" and
-	// "sub" but NOT capUsesClaim). Inject the capability marker into the
+	// "sub" but NOT auth.CapUsesClaim). Inject the capability marker into the
 	// PROJECTED claims so it survives into the signed token — SignProjected
-	// gives the projection the last word. (signer.Sign would drop capUsesClaim.)
+	// gives the projection the last word. (signer.Sign would drop auth.CapUsesClaim.)
 	projected, err := signer.Project(jwt.MapClaims{
 		"sub":          sub,
 		"entitlements": req.Entitlements,
@@ -149,7 +146,7 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	if err != nil {
 		return MintTokenResult{}, fmt.Errorf("mint project: %w", err)
 	}
-	projected[capUsesClaim] = true
+	projected[auth.CapUsesClaim] = true
 	token, err := signer.SignProjected(projected)
 	if err != nil {
 		return MintTokenResult{}, fmt.Errorf("mint sign: %w", err)

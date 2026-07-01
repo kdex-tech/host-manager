@@ -61,6 +61,7 @@ type Config struct {
 	}
 	DCR                       DCRConfig
 	DCRStore                  *dcr.Store
+	MintCapCache              cache.Cache
 	MintTokenEnabled          bool
 	MintTokenTTLCap           time.Duration
 	MintTokenUsesCap          int
@@ -155,6 +156,7 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		cfg.CookieName = utils.IfElse(auth.JWT.CookieName == "", "auth_token", auth.JWT.CookieName)
 
 		applyMintTokenPolicy(cfg, auth.MintToken)
+		cb.buildMintCapCache(cfg)
 
 		if len(cb.Functions.Items) > 0 {
 			functionURLs := make([]string, 0, len(cb.Functions.Items))
@@ -278,6 +280,20 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// buildMintCapCache populates cfg.MintCapCache with the "cap" cache when mint
+// token is enabled and a cache manager is available. That cache holds
+// jti-keyed bounded-use counters provisioned at mint time
+// (internal/host/mint_token.go) and decremented by the inbound middleware
+// (WithAuthentication) on every request bearing a CapUsesClaim-marked token.
+// Uncycled: true — these keys carry their own TTL (== the token's ttl)
+// rather than the cache's default cycle.
+func (cb *ConfigBuilder) buildMintCapCache(cfg *Config) {
+	if !cfg.MintTokenEnabled || cb.CacheManager == nil {
+		return
+	}
+	cfg.MintCapCache = cb.CacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
 }
 
 // buildDCRStore constructs a DCR store when DCR is enabled and a cache is available.
