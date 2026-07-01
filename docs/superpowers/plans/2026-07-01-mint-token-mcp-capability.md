@@ -87,11 +87,14 @@ func TestDominates(t *testing.T) {
 }
 
 func TestVerifyAttenuation(t *testing.T) {
+	// Wildcard held (medium-form == vector_stores:*:read) dominates a specific request.
 	held := []string{"functions:/api/v1/files:write", "vector_stores::read"}
 	if off, ok := VerifyAttenuation(held, []string{"functions:/api/v1/files:write", "vector_stores:X:read"}); !ok {
 		t.Fatalf("expected ok, got offender %q", off)
 	}
-	off, ok := VerifyAttenuation(held, []string{"vector_stores:X:read", "vector_stores:*:read"})
+	// A SPECIFIC held grant cannot be widened to a wildcard request.
+	held2 := []string{"vector_stores:X:read"}
+	off, ok := VerifyAttenuation(held2, []string{"vector_stores:X:read", "vector_stores:*:read"})
 	if ok || off != "vector_stores:*:read" {
 		t.Fatalf("expected reject on wildcard widen, got ok=%v offender=%q", ok, off)
 	}
@@ -521,6 +524,11 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 	for _, e := range requested {
 		parts := strings.Split(e, ":")
 		verb := parts[len(parts)-1]
+		// A wildcard/"all" verb encompasses every verb — including the
+		// destructive ones — so it must trigger the destructive forcing too.
+		if verb == "*" || verb == "all" {
+			return true
+		}
 		for _, d := range destructive {
 			if verb == d {
 				return true
@@ -585,12 +593,20 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		return MintTokenResult{}, fmt.Errorf("mint signer: %w", err)
 	}
 
-	claims := jwt.MapClaims{
+	// signer.Project runs the claim allowlist (which passes "entitlements" and
+	// "sub" but NOT capUsesClaim). Inject the capability marker into the
+	// PROJECTED claims so it survives into the signed token — SignProjected
+	// gives the projection the last word. (signer.Sign would drop capUsesClaim.)
+	// Mirrors the Project+SignProjected split used in proxy.go.
+	projected, err := signer.Project(jwt.MapClaims{
 		"sub":          sub,
 		"entitlements": req.Entitlements,
-		capUsesClaim:   true,
+	})
+	if err != nil {
+		return MintTokenResult{}, fmt.Errorf("mint project: %w", err)
 	}
-	token, err := signer.Sign(claims)
+	projected[capUsesClaim] = true
+	token, err := signer.SignProjected(projected)
 	if err != nil {
 		return MintTokenResult{}, fmt.Errorf("mint sign: %w", err)
 	}
