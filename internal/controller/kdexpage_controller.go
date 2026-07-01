@@ -20,11 +20,13 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"time"
 
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/host"
 	pages "github.com/kdex-tech/host-manager/internal/page"
+	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +34,7 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -434,6 +437,77 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	return ctrl.Result{}, nil
 }
 
+// referencedResourcePredicate filters updates to the resources a page
+// references (apps, headers, footers, navigations, archetypes, script
+// libraries, the host) so a noisy upstream operator can't peg the renderer.
+// It re-enqueues on any meaningful change but drops updates whose ONLY
+// differences are pure noise: metadata.resourceVersion, metadata.managedFields,
+// and per-condition status.conditions[*].LastTransitionTime. That is exactly
+// the churn observed in kdex-tech/host-manager#129 (nexus-manager rewriting
+// KDexApp condition timestamps ~2x/sec), which pre-fix re-rendered every page
+// ~4x/sec and pegged a CPU core even though host-manager itself wrote nothing.
+//
+// A plain GenerationChangedPredicate is too blunt here: indirect dependency
+// edits propagate through an intermediate resource's *status* (e.g. an
+// archetype re-publishing a referenced header's generation into
+// status.Attributes), which carries no generation bump. Filtering that would
+// break "updates when an indirect dependency is updated". This predicate keeps
+// those — it drops only timestamp/bookkeeping churn. Create/Delete still pass
+// (a newly-appearing dependency can settle a page; a removed one degrades it).
+// This is the watch-side complement to the #126 status-write guard.
+var referencedResourcePredicate = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		if e.ObjectOld == nil || e.ObjectNew == nil {
+			return true
+		}
+		return !referencedResourceNoiseOnly(e.ObjectOld, e.ObjectNew)
+	},
+}
+
+// referencedResourceNoiseOnly reports whether old and new differ only by
+// fields that carry no meaning for page rendering: resourceVersion,
+// managedFields, and per-condition LastTransitionTime. It is the watch-level
+// analog of objectStatusEqual (the #126 status-write guard).
+func referencedResourceNoiseOnly(oldObj, newObj client.Object) bool {
+	return equality.Semantic.DeepEqual(
+		normalizeReferencedResource(oldObj),
+		normalizeReferencedResource(newObj),
+	)
+}
+
+// normalizeReferencedResource returns a deep copy with the noisy fields zeroed
+// so two revisions that differ only by churn compare equal. Status.Conditions
+// is reached by reflection because every referenced type embeds the same
+// KDexObjectStatus but exposes no shared Go interface for it (the same reason
+// ResolveKDexObjectReference reflects over Status.Conditions).
+func normalizeReferencedResource(obj client.Object) client.Object {
+	c, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return obj
+	}
+	c.SetResourceVersion("")
+	c.SetManagedFields(nil)
+
+	v := reflect.ValueOf(c)
+	if v.Kind() != reflect.Ptr || v.IsNil() {
+		return c
+	}
+	statusField := v.Elem().FieldByName("Status")
+	if !statusField.IsValid() {
+		return c
+	}
+	conditionsField := statusField.FieldByName("Conditions")
+	if !conditionsField.IsValid() || !conditionsField.CanInterface() {
+		return c
+	}
+	if conditions, ok := conditionsField.Interface().([]metav1.Condition); ok {
+		for i := range conditions {
+			conditions[i].LastTransitionTime = metav1.Time{}
+		}
+	}
+	return c
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *KDexPageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	l := LogConstructor("kdexpage", mgr)(nil)
@@ -473,46 +547,60 @@ func (r *KDexPageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&kdexv1alpha1.KDexPage{}).
 		Watches(
 			&kdexv1alpha1.KDexApp{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ContentEntries[*].AppRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ContentEntries[*].AppRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterApp{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ContentEntries[*].AppRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ContentEntries[*].AppRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexInternalHost{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.HostRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.HostRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexPageArchetype{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.PageArchetypeRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.PageArchetypeRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterPageArchetype{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.PageArchetypeRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.PageArchetypeRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexPage{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ParentPageRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ParentPageRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexPageFooter{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideFooterRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideFooterRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterPageFooter{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideFooterRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideFooterRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexPageHeader{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideHeaderRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideHeaderRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterPageHeader{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideHeaderRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideHeaderRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexPageNavigation{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideNavigationRefs.*}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideNavigationRefs.*}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterPageNavigation{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideNavigationRefs.*}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.OverrideNavigationRefs.*}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexScriptLibrary{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ScriptLibraryRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ScriptLibraryRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		Watches(
 			&kdexv1alpha1.KDexClusterScriptLibrary{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ScriptLibraryRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ScriptLibraryRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
 		WithEventFilter(enabledFilter).
 		WithOptions(
 			controller.TypedOptions[reconcile.Request]{
