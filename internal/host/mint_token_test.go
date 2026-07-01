@@ -100,6 +100,30 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 	g.Expect(res2.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
 }
 
+func TestMintCapabilityToken_ProvisionsCounter(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	hh := &HostHandler{authConfig: testAuthConfigForMint(t), cacheManager: mgr}
+
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"functions:/api/v1/files:write"},
+		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, Uses: 3})
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.UsesRemaining).To(Equal(3))
+
+	// Extract jti and confirm the counter exists with value "3".
+	var claims jwt.MapClaims
+	_, _ = jwt.ParseWithClaims(res.Token, &claims, func(*jwt.Token) (any, error) {
+		return hh.authConfig.ActivePair.Private.Public(), nil
+	})
+	jti := claims["jti"].(string)
+	c := mgr.GetCache("cap", cache.CacheOptions{Uncycled: true})
+	val, exists, _, _ := c.Get(context.Background(), "uses:"+jti)
+	g.Expect(exists).To(BeTrue())
+	g.Expect(val).To(Equal("3"))
+}
+
 func TestIsMintTokenCall(t *testing.T) {
 	g := NewWithT(t)
 	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mint_token","arguments":{"entitlements":["pages:/:read"],"ttl_seconds":30}}}`)

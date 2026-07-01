@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	entitlements "github.com/kdex-tech/entitlements/go"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 )
 
@@ -90,8 +92,6 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 // reflected in UsesRemaining but no counter is provisioned yet (Phase 2 adds
 // the jti-keyed Valkey counter and the middleware decrement). The capUsesClaim
 // marker is always set so Phase 2 activates without re-minting semantics.
-//
-//nolint:unparam // ctx is unused in Phase 1; Phase 2 threads it into the jti-keyed Valkey counter provisioning call (see doc comment above)
 func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
@@ -153,6 +153,19 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	token, err := signer.SignProjected(projected)
 	if err != nil {
 		return MintTokenResult{}, fmt.Errorf("mint sign: %w", err)
+	}
+
+	// Provision the bounded-use counter keyed by the token's jti.
+	if hh.cacheManager != nil {
+		parsed, _, perr := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+		if perr == nil {
+			if mc, ok := parsed.Claims.(jwt.MapClaims); ok {
+				if jti, ok := mc["jti"].(string); ok && jti != "" {
+					capCache := hh.cacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
+					_ = capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl))
+				}
+			}
+		}
 	}
 
 	return MintTokenResult{
