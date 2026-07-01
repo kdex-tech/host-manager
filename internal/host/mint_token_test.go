@@ -67,3 +67,25 @@ func TestMintCapabilityToken_ClampsTTL(t *testing.T) {
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(61*time.Second).Unix()))
 }
+
+func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
+
+	// Explicit destructive verb: forced to uses=1 and ttl<=10s even though
+	// the caller asked for uses=5 and a 60s ttl.
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"vector_stores:X:delete"},
+		MintTokenRequest{Entitlements: []string{"vector_stores:X:delete"}, Uses: 5, TTLSeconds: 60})
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.UsesRemaining).To(Equal(1))
+	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
+
+	// Wildcard verb encompasses destructive verbs -> same forcing.
+	res2, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"vector_stores:X:all"},
+		MintTokenRequest{Entitlements: []string{"vector_stores:X:all"}, Uses: 5, TTLSeconds: 60})
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res2.UsesRemaining).To(Equal(1))
+	g.Expect(res2.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
+}

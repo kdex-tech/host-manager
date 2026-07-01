@@ -37,6 +37,11 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 	for _, e := range requested {
 		parts := strings.Split(e, ":")
 		verb := parts[len(parts)-1]
+		// A wildcard/"all" verb encompasses every verb — including the
+		// destructive ones — so it must trigger the destructive forcing too.
+		if verb == "*" || verb == "all" {
+			return true
+		}
 		for _, d := range destructive {
 			if verb == d {
 				return true
