@@ -2,7 +2,9 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -129,4 +131,87 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		Entitlements:  req.Entitlements,
 		UsesRemaining: uses,
 	}, nil
+}
+
+type jsonRPCRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"params"`
+}
+
+type jsonRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type jsonRPCResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   *jsonRPCError   `json:"error,omitempty"`
+}
+
+// isMintTokenCall returns the request id, parsed arguments, and true when body
+// is a single JSON-RPC tools/call for the mint_token tool. Batch (array) bodies
+// and any other method/tool return matched=false (passthrough). MCP revision
+// 2025-06-18 removed batching, so only the single-object shape is intercepted.
+func isMintTokenCall(body []byte) (json.RawMessage, MintTokenRequest, bool) {
+	trimmed := strings.TrimLeft(string(body), " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, MintTokenRequest{}, false
+	}
+	var req jsonRPCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, MintTokenRequest{}, false
+	}
+	if req.Method != "tools/call" || req.Params.Name != "mint_token" {
+		return nil, MintTokenRequest{}, false
+	}
+	var args MintTokenRequest
+	if len(req.Params.Arguments) > 0 {
+		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+			return req.ID, MintTokenRequest{}, true // matched but bad args; handler emits error
+		}
+	}
+	return req.ID, args, true
+}
+
+// mcpToolResult wraps a value as an MCP tools/call result (structuredContent +
+// a text content block, per MCP tools/call response shape).
+func mcpToolResult(v any) map[string]any {
+	return map[string]any{
+		"content":           []map[string]any{{"type": "text", "text": mustJSON(v)}},
+		"structuredContent": v,
+		"isError":           false,
+	}
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// writeMintTokenRPC executes the mint and writes a JSON-RPC response. Attenuation
+// / policy failures are returned as an MCP tool error result (isError=true) with
+// HTTP 200, matching how MCP tools surface domain errors.
+func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessage, sub string, held []string, args MintTokenRequest) {
+	w.Header().Set("Content-Type", "application/json")
+	res, err := hh.mintCapabilityToken(context.Background(), sub, held, args)
+	var payload jsonRPCResponse
+	if err != nil {
+		payload = jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: map[string]any{
+			"content": []map[string]any{{"type": "text", "text": err.Error()}},
+			"isError": true,
+		}}
+	} else {
+		payload = jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: mcpToolResult(res)}
+	}
+	_ = json.NewEncoder(w).Encode(payload)
 }

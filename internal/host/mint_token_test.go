@@ -89,3 +89,19 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 	g.Expect(res2.UsesRemaining).To(Equal(1))
 	g.Expect(res2.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
 }
+
+func TestIsMintTokenCall(t *testing.T) {
+	g := NewWithT(t)
+	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mint_token","arguments":{"entitlements":["pages:/:read"],"ttl_seconds":30}}}`)
+	id, args, matched := isMintTokenCall(body)
+	g.Expect(matched).To(BeTrue())
+	g.Expect(string(id)).To(Equal("7"))
+	g.Expect(args.Entitlements).To(Equal([]string{"pages:/:read"}))
+	g.Expect(args.TTLSeconds).To(Equal(30))
+
+	_, _, m2 := isMintTokenCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_atoms"}}`))
+	g.Expect(m2).To(BeFalse())
+
+	_, _, m3 := isMintTokenCall([]byte(`[{"jsonrpc":"2.0"}]`)) // batch passthrough
+	g.Expect(m3).To(BeFalse())
+}
