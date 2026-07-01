@@ -208,6 +208,10 @@ type KDexFunctionHandler struct {
 	oauth2Resource string
 	// issuer is the host's issuer address, captured at handler-build time.
 	issuer string
+	// mintTokenEnabled opts this (oauth2-protected) MCP function into the AS
+	// mint_token augmentation: tools/call name=mint_token is handled locally
+	// and tools/list responses gain the mint_token descriptor. See #280.
+	mintTokenEnabled bool
 }
 
 func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

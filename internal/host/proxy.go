@@ -1,9 +1,11 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -254,6 +256,28 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			log := logf.FromContext(resp.Request.Context())
 
 			log.V(2).Info("PROXY: modifying response", "url", resp.Request.URL)
+
+			// mint_token AS-augmentation: splice the mint_token descriptor into a
+			// tools/list response body forwarded upstream. The marker is set in
+			// fh.Handler when the request was recognized as a tools/list call on
+			// a mint-token-enabled function; non-JSON or non-tools/list bodies
+			// pass through untouched.
+			if v, _ := resp.Request.Context().Value(mintTokenListMarkerKey).(bool); v &&
+				strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
+				raw, rerr := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if rerr == nil {
+					if spliced, ok := spliceMintTokenDescriptor(raw); ok {
+						raw = spliced
+					}
+					resp.Body = io.NopCloser(bytes.NewReader(raw))
+					resp.ContentLength = int64(len(raw))
+					resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(raw)))
+				} else {
+					resp.Body = io.NopCloser(bytes.NewReader(raw))
+				}
+			}
+
 			// 5. Rewrite Set-Cookie Domain
 			// This ensures cookies from the FaaS backend are tied to your proxy domain
 			cookies := resp.Header["Set-Cookie"]
@@ -326,6 +350,10 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	if res, ok := hh.oauth2ProtectedResources()[fn.Spec.API.BasePath]; ok {
 		fh.oauth2Protected = true
 		fh.oauth2Resource = res.Resource
+	}
+
+	if fh.oauth2Protected && hh.authConfig != nil && hh.authConfig.MintTokenEnabled {
+		fh.mintTokenEnabled = true
 	}
 
 	// Capture the start time and log the completion
@@ -467,6 +495,28 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				}
 				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
 				return
+			}
+		}
+
+		// mint_token AS-augmentation: peek the JSON-RPC body of an
+		// oauth2-protected MCP function. A tools/call for mint_token is handled
+		// locally (never forwarded); a tools/list is marked so ModifyResponse
+		// can splice the descriptor. All other bodies pass through untouched.
+		if fh.mintTokenEnabled && r.Method == http.MethodPost {
+			body, rerr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			_ = r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if rerr == nil {
+				if id, args, matched := isMintTokenCall(body); matched {
+					ac, _ := auth.GetAuthContext(r.Context())
+					sub, _ := ac["sub"].(string)
+					held := stringSliceFromClaim(ac["entitlements"])
+					hh.writeMintTokenRPC(w, id, sub, held, args)
+					return
+				}
+				if isToolsListCall(body) {
+					r = r.WithContext(context.WithValue(r.Context(), mintTokenListMarkerKey, true))
+				}
 			}
 		}
 

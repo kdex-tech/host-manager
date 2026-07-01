@@ -3,13 +3,21 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func testAuthConfigForMint(t *testing.T) *auth.Config {
@@ -127,4 +135,108 @@ func TestIsToolsListCall(t *testing.T) {
 	g := NewWithT(t)
 	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))).To(BeTrue())
 	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))).To(BeFalse())
+}
+
+// mintProxyDomain / mintProxyBasePath mirror the oauth2 e2e fixtures' naming
+// (see mcp_oauth2_e2e_test.go / proxy_pat_test.go) but scoped to the
+// mint_token interception test so as not to collide with those constants.
+const (
+	mintProxyDomain   = "dev.example"
+	mintProxyIssuer   = "https://" + mintProxyDomain
+	mintProxyBasePath = "/api/v1/mcp"
+)
+
+// newTestHostHandlerForProxy builds a HostHandler with a real in-memory
+// cache.CacheManager, an always-authorized authChecker (the interception
+// under test sits AFTER the identity gate in reverseProxyHandler, so the
+// gate must pass for a request carrying an authContext — mirrors
+// entitlementGateChecker in proxy_pat_test.go, which authorizes whenever the
+// request's authContext carries resolved entitlements), and the given
+// authConfig (MintTokenEnabled=true from testAuthConfigForMint). Mirrors the
+// HostHandler construction in mcp_oauth2_e2e_test.go / proxy_pat_test.go.
+func newTestHostHandlerForProxy(t *testing.T, cfg *auth.Config) *HostHandler {
+	t.Helper()
+	logf.SetLogger(logr.Discard())
+
+	ttl := time.Hour
+	cacheManager, err := cache.NewCacheManager("", "mint-proxy-test", &ttl)
+	if err != nil {
+		t.Fatalf("cache.NewCacheManager: %v", err)
+	}
+
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, stubInternalIdentityProvider{})
+	if err != nil {
+		t.Fatalf("auth.NewExchanger: %v", err)
+	}
+
+	return &HostHandler{
+		log:          logr.Discard(),
+		scheme:       "https",
+		cacheManager: cacheManager,
+		authChecker:  &entitlementGateChecker{},
+		host: &kdexv1alpha1.KDexHostSpec{
+			Routing: kdexv1alpha1.Routing{Domains: []string{mintProxyDomain}},
+		},
+		authConfig:    cfg,
+		authExchanger: ex,
+	}
+}
+
+// newServiceBackedMCPFunction returns a Ready, Service-backed KDexFunction
+// whose single POST /api/v1/mcp operation declares the built-in oauth2
+// scheme (so oauth2ProtectedResources() marks it oauth2-protected) and whose
+// Status.URL points at the given stub upstream.
+func newServiceBackedMCPFunction(t *testing.T, upstreamURL string) *kdexv1alpha1.KDexFunction {
+	t.Helper()
+	fn := newReadyFunctionWithOAuth2(t, mintProxyBasePath, []string{"functions:" + mintProxyBasePath + ":read"})
+	fn.Spec.Backend = &kdexv1alpha1.FunctionBackend{
+		Type: kdexv1alpha1.FunctionBackendTypeService,
+		Service: &kdexv1alpha1.ServiceBackend{
+			Name: "mint-proxy-upstream",
+			Port: intstr.FromInt(80),
+			Path: "/",
+		},
+	}
+	fn.Status.URL = upstreamURL
+	return &fn
+}
+
+// TestReverseProxy_InterceptsMintTokenCall proves the mint_token
+// interception is wired into the real reverseProxyHandler request path: a
+// tools/call for mint_token on an oauth2-protected, mint-token-enabled MCP
+// function is answered locally (never forwarded), while an ordinary POST
+// would otherwise reach the stub upstream. See #280.
+func TestReverseProxy_InterceptsMintTokenCall(t *testing.T) {
+	g := NewWithT(t)
+
+	// Stub upstream that must NEVER be called for a mint_token tools/call.
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	hh := newTestHostHandlerForProxy(t, testAuthConfigForMint(t))
+	fn := newServiceBackedMCPFunction(t, upstream.URL)
+	// oauth2ProtectedResources() enumerates hh.functions; the function must be
+	// registered there for reverseProxyHandler to detect it as oauth2-protected
+	// (mirrors patProxyFixture / newE2EHarness).
+	hh.functions = []kdexv1alpha1.KDexFunction{*fn}
+	handler := hh.reverseProxyHandler(fn, mintProxyIssuer)
+
+	body := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mint_token","arguments":{"entitlements":["pages:/:read"]}}}`
+	req := httptest.NewRequest(http.MethodPost, mintProxyBasePath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice", "entitlements": []any{"pages:/:read"},
+	}))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	g.Expect(upstreamHit).To(BeFalse())
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+	var resp jsonRPCResponse
+	g.Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+	g.Expect(resp.Result).ToNot(BeNil())
 }

@@ -18,6 +18,34 @@ import (
 // carrying this claim; ordinary session/FAT tokens never carry it.
 const capUsesClaim = "kdx_cap"
 
+// ctxKey namespaces context values set by the mint_token interception so
+// they can't collide with other packages' context keys.
+type ctxKey int
+
+// mintTokenListMarkerKey marks a request context as carrying a tools/list
+// call on a mint-token-enabled function, so ModifyResponse knows to splice
+// the mint_token descriptor into the (already-forwarded) response body.
+const mintTokenListMarkerKey ctxKey = iota
+
+// stringSliceFromClaim coerces an entitlements claim (which arrives as
+// []any after JSON round-trips, or []string when set in-process) to []string.
+func stringSliceFromClaim(v any) []string {
+	switch vv := v.(type) {
+	case []string:
+		return vv
+	case []any:
+		out := make([]string, 0, len(vv))
+		for _, e := range vv {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // MintTokenRequest is the argument shape of the mint_token MCP tool.
 type MintTokenRequest struct {
 	Entitlements []string `json:"entitlements"`
