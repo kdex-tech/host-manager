@@ -12,6 +12,7 @@ import (
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"kdex.dev/crds/api/v1alpha1"
@@ -1051,4 +1052,22 @@ func TestConfig_OIDC(t *testing.T) {
 			tt.assertions(t, "http://foo")
 		})
 	}
+}
+
+func TestBuild_MintTokenPolicy(t *testing.T) {
+	g := NewWithT(t)
+	cb := newTestConfigBuilder(t) // helper that wires KeyLoader + Audience + Issuer (mirror existing config tests)
+	auth := &kdexv1alpha1.Auth{
+		JWT: kdexv1alpha1.JWT{},
+		MintToken: &kdexv1alpha1.MintToken{
+			Enabled: true, TTLCapSeconds: 45, UsesCap: 8,
+			DestructiveVerbs: []string{"delete"},
+		},
+	}
+	cfg, err := cb.Build(auth)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(cfg.MintTokenEnabled).To(BeTrue())
+	g.Expect(cfg.MintTokenTTLCap).To(Equal(45 * time.Second))
+	g.Expect(cfg.MintTokenUsesCap).To(Equal(8))
+	g.Expect(cfg.MintTokenDestructiveVerbs).To(Equal([]string{"delete"}))
 }

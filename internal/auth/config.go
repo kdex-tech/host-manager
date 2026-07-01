@@ -59,12 +59,16 @@ type Config struct {
 		RedirectURL  string
 		Scopes       []string
 	}
-	DCR             DCRConfig
-	DCRStore        *dcr.Store
-	RefreshTokenTTL time.Duration
-	Signer          sign.Signer
-	TokenManager    *apitoken.TokenManager
-	TokenTTL        time.Duration
+	DCR                       DCRConfig
+	DCRStore                  *dcr.Store
+	MintTokenEnabled          bool
+	MintTokenTTLCap           time.Duration
+	MintTokenUsesCap          int
+	MintTokenDestructiveVerbs []string
+	RefreshTokenTTL           time.Duration
+	Signer                    sign.Signer
+	TokenManager              *apitoken.TokenManager
+	TokenTTL                  time.Duration
 }
 
 type ConfigBuilder struct {
@@ -149,6 +153,24 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		cfg.Audience = cb.Audience
 		cfg.AutoExtendSession = auth.AutoExtendSession
 		cfg.CookieName = utils.IfElse(auth.JWT.CookieName == "", "auth_token", auth.JWT.CookieName)
+
+		if auth.MintToken != nil && auth.MintToken.Enabled {
+			cfg.MintTokenEnabled = true
+			ttlCap := auth.MintToken.TTLCapSeconds
+			if ttlCap <= 0 {
+				ttlCap = 60
+			}
+			cfg.MintTokenTTLCap = time.Duration(ttlCap) * time.Second
+			usesCap := auth.MintToken.UsesCap
+			if usesCap <= 0 {
+				usesCap = 32
+			}
+			cfg.MintTokenUsesCap = usesCap
+			cfg.MintTokenDestructiveVerbs = auth.MintToken.DestructiveVerbs
+			if cfg.MintTokenDestructiveVerbs == nil {
+				cfg.MintTokenDestructiveVerbs = []string{"delete", "own"}
+			}
+		}
 
 		if len(cb.Functions.Items) > 0 {
 			functionURLs := make([]string, 0, len(cb.Functions.Items))
