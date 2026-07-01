@@ -88,9 +88,13 @@ opaque passthrough, preserving the verified streaming behavior in
 - **`tools/call` with `name == "mint_token"`** → handled locally by host-manager;
   **never forwarded** to knowdb.
 
-JSON-RPC batching: a batch request is inspected; a `mint_token` entry is handled
-locally, the remaining entries are forwarded to knowdb, and the two result sets
-are merged back into one JSON-RPC batch response preserving `id` correlation.
+JSON-RPC batching: MCP protocol revision **2025-06-18 removed JSON-RPC batching**
+(and knowdb's MCP runs that revision — see `function_knowdb_mcp.yaml`), so
+`tools/call` arrives as a single request object. Interception therefore only
+needs to handle the single-object shape. A batch (array) body — which a
+2025-06-18 client will not send — is **passed through untouched** to knowdb
+rather than intercepted; knowdb handles/rejects it per protocol. No result
+merging is required.
 
 Interception fires only when the function is (a) oauth2-protected (already
 detected via `oauth2ProtectedResources()`) **and** (b) the host enables the
@@ -104,12 +108,28 @@ caller's resolved held set. Steps:
 1. **Parse** `entitlements: string[]`. Reject any entry that is not well-formed
    per the kdex-entitlements grammar (`<resource>:<resourceName>:<verb>` and its
    medium/short/opaque/wildcard forms).
-2. **Attenuate.** For each requested entitlement, verify the caller's **held
-   set satisfies it** using the existing kdex-entitlements checker (the same
-   wildcard-aware verification used at the request-time gate). Wildcards narrow
-   only: holding `vector_stores:X:write` cannot mint `vector_stores:*:write`;
-   holding `vector_stores::write` can mint `vector_stores:X:write`. Reject the
-   first offending entitlement with a clear, specific error.
+2. **Attenuate.** For each requested entitlement, verify some held entitlement
+   **dominates** it via a new directional predicate added to kdex-entitlements
+   (`Dominates` / `VerifyAttenuation` — see below). Wildcards narrow only:
+   holding `vector_stores:X:write` cannot mint `vector_stores:*:write`; holding
+   `vector_stores::write` can mint `vector_stores:X:write`. Reject the first
+   offending entitlement with a clear, specific error.
+
+   **Correction to the issue's premise — the request-time checker cannot be
+   reused verbatim.** `EntitlementsChecker.entitlementMatches`
+   (entitlements@v0.1.x) treats a wildcard resourceName as a match on *either*
+   side, because at the request-time gate a wildcard *requirement* is meant to
+   be satisfied by any specific holding. For attenuation that direction is
+   backwards: it would let a narrow grant (`vector_stores:X:write`) mint a
+   *wider* wildcard capability (`vector_stores:*:write`) — privilege escalation.
+   Attenuation needs a **directional dominance** check: held `H` dominates
+   requested `R` iff `resource(H)==resource(R)`, `verb(H)=="all"` or
+   `verb(H)==verb(R)`, and `resourceName(H)` is a wildcard (`""`/`*`) **or**
+   exactly equals `resourceName(R)` — i.e. the wildcard is honored only on the
+   *held* side. Opaque scopes (no colon) dominate only by exact match. This is
+   added to the kdex-entitlements **go** implementation (its grammar parser is
+   the correct owner; additive and go-only, so the rust/python parity contract
+   and knowdb — which never mints — are untouched) and consumed via a dep bump.
    - **Held set (Phase 1) = static `KDexRoleBinding` grants only** — exactly what
      the connector PAT bridge already resolves
      (`Exchanger.ResolveInternalRolesAndEntitlements` →
@@ -298,9 +318,12 @@ with step 1; `usesCap` + `destructiveVerbs` are consumed in step 2.
 
 ## Reuse (net-new surface is small)
 
-Already exist and are reused verbatim: the entitlement grammar + checker
-(kdex-entitlements), the FAT signer (`sign.Signer.Project` / `SignProjected`),
-downstream enforcement (proxy identity gate + knowdb `is_allowed`), the
-oauth2-protected-resource detection, and the Valkey-backed cache manager. Net-new:
-the JSON-RPC augmentation on one route, the `mint_token` handler, one atomic cache
-op, a marker claim, and the `spec.auth.mintToken` policy field.
+Already exist and are reused verbatim: the entitlement **grammar/parser**
+(kdex-entitlements), the FAT signer (`sign.Signer` / `NewSigner`), downstream
+enforcement (proxy identity gate + knowdb `is_allowed`), inbound host-audience
+JWT validation (`WithAuthentication`), the oauth2-protected-resource detection,
+and the Valkey-backed cache manager. Net-new: a **directional dominance**
+predicate added to kdex-entitlements go (attenuation is *not* the symmetric
+request-time match — see the Correction above); the JSON-RPC augmentation on one
+route; the `mint_token` handler; one atomic cache op (`DecrementIfPositive`); a
+marker claim; and the `spec.auth.mintToken` policy field.
