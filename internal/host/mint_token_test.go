@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -104,4 +105,26 @@ func TestIsMintTokenCall(t *testing.T) {
 
 	_, _, m3 := isMintTokenCall([]byte(`[{"jsonrpc":"2.0"}]`)) // batch passthrough
 	g.Expect(m3).To(BeFalse())
+}
+
+func TestSpliceMintTokenDescriptor(t *testing.T) {
+	g := NewWithT(t)
+	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search_atoms"}]}}`)
+	out, ok := spliceMintTokenDescriptor(resp)
+	g.Expect(ok).To(BeTrue())
+
+	var parsed jsonRPCResponse
+	g.Expect(json.Unmarshal(out, &parsed)).To(Succeed())
+	result := parsed.Result.(map[string]any)
+	tools := result["tools"].([]any)
+	g.Expect(tools).To(HaveLen(2))
+	names := []string{tools[0].(map[string]any)["name"].(string), tools[1].(map[string]any)["name"].(string)}
+	g.Expect(names).To(ContainElement("mint_token"))
+	g.Expect(names).To(ContainElement("search_atoms"))
+}
+
+func TestIsToolsListCall(t *testing.T) {
+	g := NewWithT(t)
+	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))).To(BeTrue())
+	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))).To(BeFalse())
 }

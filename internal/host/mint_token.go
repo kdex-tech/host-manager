@@ -215,3 +215,77 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessa
 	}
 	_ = json.NewEncoder(w).Encode(payload)
 }
+
+// mintTokenDescriptor is the MCP tools/list entry advertised for mint_token.
+func mintTokenDescriptor() map[string]any {
+	return map[string]any{
+		"name": "mint_token",
+		"description": "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }.",
+		"inputSchema": map[string]any{
+			"type":     "object",
+			"required": []string{"entitlements"},
+			"properties": map[string]any{
+				"entitlements": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "kdex-entitlements patterns (<resource>:<resourceName>:<verb>); each must be held by you.",
+				},
+				"ttl_seconds": map[string]any{"type": "integer", "description": "Requested lifetime; capped server-side."},
+				"uses":        map[string]any{"type": "integer", "description": "Bounded use budget; capped server-side; destructive verbs force 1."},
+			},
+		},
+	}
+}
+
+// isToolsListCall reports whether body is a single JSON-RPC tools/list request.
+func isToolsListCall(body []byte) bool {
+	trimmed := strings.TrimLeft(string(body), " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	var req jsonRPCRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	return req.Method == "tools/list"
+}
+
+// spliceMintTokenDescriptor appends the mint_token descriptor to result.tools of
+// a tools/list JSON-RPC response. Returns (original, false) if the shape isn't a
+// tools array (e.g. an SSE frame or an error response), so callers pass through.
+func spliceMintTokenDescriptor(respBody []byte) ([]byte, bool) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		return respBody, false
+	}
+	rawResult, ok := envelope["result"]
+	if !ok {
+		return respBody, false
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(rawResult, &result); err != nil {
+		return respBody, false
+	}
+	rawTools, ok := result["tools"]
+	if !ok {
+		return respBody, false
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return respBody, false
+	}
+	descBytes, err := json.Marshal(mintTokenDescriptor())
+	if err != nil {
+		return respBody, false
+	}
+	tools = append(tools, descBytes)
+	newTools, _ := json.Marshal(tools)
+	result["tools"] = newTools
+	newResult, _ := json.Marshal(result)
+	envelope["result"] = newResult
+	out, err := json.Marshal(envelope)
+	if err != nil {
+		return respBody, false
+	}
+	return out, true
+}
