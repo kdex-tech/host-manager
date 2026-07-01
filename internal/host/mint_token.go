@@ -90,6 +90,8 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 // reflected in UsesRemaining but no counter is provisioned yet (Phase 2 adds
 // the jti-keyed Valkey counter and the middleware decrement). The capUsesClaim
 // marker is always set so Phase 2 activates without re-minting semantics.
+//
+//nolint:unparam // ctx is unused in Phase 1; Phase 2 threads it into the jti-keyed Valkey counter provisioning call (see doc comment above)
 func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
@@ -247,7 +249,7 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessa
 // mintTokenDescriptor is the MCP tools/list entry advertised for mint_token.
 func mintTokenDescriptor() map[string]any {
 	return map[string]any{
-		"name": "mint_token",
+		"name":        "mint_token",
 		"description": "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }.",
 		"inputSchema": map[string]any{
 			"type":     "object",
@@ -298,7 +300,7 @@ func spliceMintTokenDescriptor(respBody []byte) ([]byte, bool) {
 	if !ok {
 		return respBody, false
 	}
-	var tools []json.RawMessage
+	var tools []json.RawMessage //nolint:prealloc // json.Unmarshal replaces the slice header wholesale; a preallocated cap is discarded
 	if err := json.Unmarshal(rawTools, &tools); err != nil {
 		return respBody, false
 	}
