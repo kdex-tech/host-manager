@@ -128,7 +128,7 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 				},
 			},
 			anonymousGrants: []string{"pages:read"},
-			succeeds:        true,
+			succeeds:        false, // v0.2: anonymousEntitlements no longer leak to an authenticated (non-empty-entitlements) caller
 		},
 		{
 			name:         "CheckPageAccess - claims=pages / req=[{bearer:[]}]",
@@ -185,7 +185,7 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 				},
 			},
 			anonymousGrants: []string{"pages:read"},
-			succeeds:        true,
+			succeeds:        false, // v0.2: anonymousEntitlements no longer leak to an authenticated (non-empty-entitlements) caller
 		},
 		{
 			name:         "CheckPageAccess - claims=pages:1:read / req=[{bearer:[pages:1:read]}]",
