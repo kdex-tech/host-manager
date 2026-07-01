@@ -292,3 +292,38 @@ func TestValkeyCache_IndividualTTL(t *testing.T) {
 	_, ok, _, _ = c.Get(ctx, "default")
 	assert.True(t, ok)
 }
+
+// TestDecrementIfPositive_Valkey mirrors TestDecrementIfPositive_Memory's
+// assertion sequence against the Lua-backed atomic decrement. miniredis
+// runs in-process and supports EVAL, so this exercises the real script
+// rather than a stand-in.
+func TestDecrementIfPositive_Valkey(t *testing.T) {
+	s, err := miniredis.Run()
+	if err != nil {
+		t.Error(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	ttl := time.Minute
+	mgr, err := NewCacheManager(s.Addr(), "foo", &ttl)
+	assert.NoError(t, err)
+	c := mgr.GetCache("cap", CacheOptions{Uncycled: true})
+
+	// missing key -> fail-closed
+	rem, ok, err := c.DecrementIfPositive(ctx, "j1")
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, int64(-1), rem)
+
+	assert.NoError(t, c.Set(ctx, "j1", "2"))
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1")
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), rem)
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1")
+	assert.True(t, ok)
+	assert.Equal(t, int64(0), rem)
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1") // exhausted
+	assert.False(t, ok)
+	assert.Equal(t, int64(-1), rem)
+}

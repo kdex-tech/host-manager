@@ -23,6 +23,11 @@ type Cache interface {
 	// N-1 losers (found=false). Implementations that don't natively
 	// expose an atomic GETDEL must guard with their own lock.
 	GetAndDelete(ctx context.Context, key string) (value string, exists bool, isCurrent bool, err error)
+	// DecrementIfPositive atomically decrements the integer value at key when
+	// it exists and is > 0, returning the remaining count and ok=true. When the
+	// key is missing or already <= 0 it returns (-1, false, nil) WITHOUT
+	// writing — the fail-closed primitive behind bounded-use capability tokens.
+	DecrementIfPositive(ctx context.Context, key string) (remaining int64, ok bool, err error)
 	Host() string
 	Set(ctx context.Context, key string, value string, opts ...SetOption) error
 	TTL() time.Duration

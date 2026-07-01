@@ -482,3 +482,48 @@ func TestInMemoryCache_GetAndDelete_AtomicSingleWinner(t *testing.T) {
 		assert.False(t, found, "trial %d: key must be absent after GetAndDelete", trial)
 	}
 }
+
+func TestDecrementIfPositive_Memory(t *testing.T) {
+	ttl := time.Minute
+	mgr, _ := NewCacheManager("", "", &ttl)
+	c := mgr.GetCache("cap", CacheOptions{Uncycled: true})
+	ctx := context.Background()
+
+	// missing key -> fail-closed
+	rem, ok, err := c.DecrementIfPositive(ctx, "j1")
+	assert.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, int64(-1), rem)
+
+	assert.NoError(t, c.Set(ctx, "j1", "2"))
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1")
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), rem)
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1")
+	assert.True(t, ok)
+	assert.Equal(t, int64(0), rem)
+	rem, ok, _ = c.DecrementIfPositive(ctx, "j1") // exhausted
+	assert.False(t, ok)
+	assert.Equal(t, int64(-1), rem)
+}
+
+func TestDecrementIfPositive_Memory_Concurrent(t *testing.T) {
+	ttl := time.Minute
+	mgr, _ := NewCacheManager("", "", &ttl)
+	c := mgr.GetCache("cap", CacheOptions{Uncycled: true})
+	ctx := context.Background()
+	_ = c.Set(ctx, "j", "100")
+	var wg sync.WaitGroup
+	var success int64
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok, _ := c.DecrementIfPositive(ctx, "j"); ok {
+				atomic.AddInt64(&success, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int64(100), success) // never over-spend
+}

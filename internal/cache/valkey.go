@@ -124,6 +124,41 @@ func (s *ValkeyCache) getDelValue(ctx context.Context, fullKey string) (string, 
 	return val, true, err
 }
 
+// decrIfPositiveScript is the fail-closed atomic decrement behind
+// DecrementIfPositive. A single EVAL avoids the TOCTOU that a
+// GET-then-DECR round trip would have under concurrent callers. Returns
+// the remaining count (>=0) after a successful decrement, or -1 when the
+// key is missing or its value is non-integer or already <= 0.
+const decrIfPositiveScript = `
+local v = redis.call('GET', KEYS[1])
+if not v then return -1 end
+local n = tonumber(v)
+if not n or n <= 0 then return -1 end
+redis.call('DECR', KEYS[1])
+return n - 1`
+
+// DecrementIfPositive atomically decrements the integer value at key when
+// it exists and is > 0, returning the remaining count and ok=true;
+// otherwise it fails closed with (-1, false, nil) WITHOUT writing. This
+// is the bounded-use capability token primitive; callers create these
+// caches with CacheOptions{Uncycled: true}, so — unlike Get/Set — there
+// is no prevPrefix fallback to consider.
+func (s *ValkeyCache) DecrementIfPositive(ctx context.Context, key string) (int64, bool, error) {
+	s.mu.RLock()
+	prefix := s.prefix
+	s.mu.RUnlock()
+
+	cmd := s.client.B().Eval().Script(decrIfPositiveScript).Numkeys(1).Key(prefix + key).Build()
+	rem, err := s.client.Do(ctx, cmd).ToInt64()
+	if err != nil {
+		return -1, false, err
+	}
+	if rem < 0 {
+		return -1, false, nil
+	}
+	return rem, true, nil
+}
+
 func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
 	options := SetOptions{}
 	for _, opt := range opts {

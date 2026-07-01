@@ -3,6 +3,7 @@ package cache
 import (
 	"container/list"
 	"context"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -133,6 +134,66 @@ func (c *InMemoryCache) lookupLocked(key string, evict bool) (string, bool, bool
 	}
 
 	return "", false, true // Not found in either version
+}
+
+// DecrementIfPositive atomically decrements the integer value at key when
+// it exists (in either the current or previous generation, matching the
+// Get/GetAndDelete fallback semantics) and is > 0. It runs the same
+// segment walk as lookupLocked under a single write lock, but — unlike
+// lookupLocked — must know which segment the entry lives in so the
+// decremented value can be written back in place, preserving the
+// existing expiry and LRU element rather than resetting them (mirrors
+// the invariant Set uses when refreshing an existing entry). Missing key
+// or a non-positive/non-integer value fails closed: (-1, false, nil)
+// WITHOUT writing.
+func (c *InMemoryCache) DecrementIfPositive(ctx context.Context, key string) (int64, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// 1. Try Current Generation
+	if seg, ok := c.segments[c.currentChecksum]; ok {
+		if n, done, handled := c.tryDecrementEntry(seg, key); handled {
+			return n, done, nil
+		}
+	}
+
+	// 2. Try Previous Generation (mirrors lookupLocked's fallback walk)
+	for gen, seg := range c.segments {
+		if gen == c.currentChecksum {
+			continue
+		}
+		if n, done, handled := c.tryDecrementEntry(seg, key); handled {
+			return n, done, nil
+		}
+	}
+
+	return -1, false, nil
+}
+
+// tryDecrementEntry looks up key in seg. handled=false means "not found
+// in this segment, keep looking elsewhere". handled=true means the
+// lookup terminated here (either a successful decrement or a fail-closed
+// verdict — expired entry, non-integer value, or value <= 0).
+func (c *InMemoryCache) tryDecrementEntry(seg map[string]memoryCacheEntry, key string) (int64, bool, bool) {
+	entry, found := seg[key]
+	if !found {
+		return -1, false, false
+	}
+	if time.Now().After(entry.expiry) {
+		// LAZY DELETION CHECK, same as lookupLocked: treat as missing.
+		return -1, false, false
+	}
+	n, err := strconv.ParseInt(entry.value, 10, 64)
+	if err != nil || n <= 0 {
+		return -1, false, true
+	}
+	n--
+	entry.value = strconv.FormatInt(n, 10)
+	seg[key] = entry // preserve entry.expiry and entry.element (LRU position)
+	if entry.element != nil {
+		c.lru.MoveToFront(entry.element)
+	}
+	return n, true, true
 }
 
 // Set stores a rendered page in the cache.
