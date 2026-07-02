@@ -127,17 +127,35 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	// Origin path (existing build/deploy state machine) continues below.
 
+	// Snapshot the observed status so the deferred write can be made
+	// conditional on an actual change. (Service-backed functions return before
+	// this defer and guard their own write; this covers the origin-path
+	// build/deploy state machine, which pulses a transient "Reconciling"
+	// condition every pass.)
+	observedStatus := function.Status.DeepCopy()
+
 	// Defer status update
 	defer func() {
 		function.Status.ObservedGeneration = function.Generation
-		updateErr := r.Status().Update(ctx, &function)
-		if updateErr != nil {
-			if kerrors.IsConflict(updateErr) {
-				err = nil
-				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
-			} else {
-				err = updateErr
-				res = ctrl.Result{}
+
+		// Only write status when it actually changed. The origin path pulses a
+		// transient "Reconciling" condition every pass, bumping
+		// LastTransitionTime even when the net settled status is unchanged. An
+		// unconditional Status().Update() would then bump resourceVersion every
+		// reconcile, re-firing the controller's own For() watch and self-looping
+		// (pegs a CPU core). functionStatusEqual ignores LastTransitionTime but
+		// compares every meaningful field (State/URL/conditions/etc.). See
+		// kdex-tech/host-manager#131 (#126 residual).
+		if !functionStatusEqual(observedStatus, &function.Status) {
+			updateErr := r.Status().Update(ctx, &function)
+			if updateErr != nil {
+				if kerrors.IsConflict(updateErr) {
+					err = nil
+					res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+				} else {
+					err = updateErr
+					res = ctrl.Result{}
+				}
 			}
 		}
 
@@ -464,6 +482,26 @@ func (r *KDexFunctionReconciler) markBackendUnready(ctx context.Context, fn *kde
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// functionStatusEqual reports whether two KDexFunctionStatus values are equal
+// ignoring per-condition LastTransitionTime. KDexFunctionStatus embeds
+// KDexObjectStatus but adds function-specific fields (State, URL, Executable,
+// Generator, Source, Detail, ...), so the plain objectStatusEqual helper cannot
+// be used — this compares the whole function status. The origin path pulses a
+// transient "Reconciling" condition every pass, bumping LastTransitionTime; this
+// guard prevents that timestamp churn from triggering a status write while still
+// detecting any real change. See kdex-tech/host-manager#131.
+func functionStatusEqual(a, b *kdexv1alpha1.KDexFunctionStatus) bool {
+	ac := a.DeepCopy()
+	bc := b.DeepCopy()
+	for i := range ac.Conditions {
+		ac.Conditions[i].LastTransitionTime = metav1.Time{}
+	}
+	for i := range bc.Conditions {
+		bc.Conditions[i].LastTransitionTime = metav1.Time{}
+	}
+	return equality.Semantic.DeepEqual(ac, bc)
+}
+
 func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	kPackUn := &unstructured.Unstructured{}
 	kPackUn.SetGroupVersionKind(internal.KPackImageGVK)

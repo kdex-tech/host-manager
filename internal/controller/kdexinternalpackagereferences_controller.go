@@ -78,17 +78,30 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		ipr.Status.Attributes = make(map[string]string)
 	}
 
+	// Snapshot the observed status so the deferred write can be made
+	// conditional on an actual change.
+	observedStatus := ipr.Status.DeepCopy()
+
 	// Defer status update
 	defer func() {
 		ipr.Status.ObservedGeneration = ipr.Generation
-		updateErr := r.Status().Update(ctx, &ipr)
-		if updateErr != nil {
-			if kerrors.IsConflict(updateErr) {
-				err = nil
-				res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
-			} else {
-				err = updateErr
-				res = ctrl.Result{}
+
+		// Only write status when it actually changed. The reconciler pulses a
+		// transient "Reconciling" condition every pass, which bumps
+		// LastTransitionTime even when the net settled status is unchanged. An
+		// unconditional Status().Update() would then bump resourceVersion every
+		// reconcile, re-firing the controller's own For() watch and self-looping
+		// (pegs a CPU core). See kdex-tech/host-manager#131 (#126 residual).
+		if !objectStatusEqual(observedStatus, &ipr.Status) {
+			updateErr := r.Status().Update(ctx, &ipr)
+			if updateErr != nil {
+				if kerrors.IsConflict(updateErr) {
+					err = nil
+					res = ctrl.Result{RequeueAfter: 50 * time.Millisecond}
+				} else {
+					err = updateErr
+					res = ctrl.Result{}
+				}
 			}
 		}
 
