@@ -30,3 +30,7 @@ buildkitd.toml
 
 dist
 chart/charts/*.tgz
+
+# Local agent/session scratch (not part of the codebase)
+.superpowers/
+.claude/
