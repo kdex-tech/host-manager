@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +21,13 @@ import (
 // they can't collide with other packages' context keys.
 type ctxKey int
 
-// mintTokenListMarkerKey marks a request context as carrying a tools/list
-// call on a mint-token-enabled function, so ModifyResponse knows to splice
-// the mint_token descriptor into the (already-forwarded) response body.
-const mintTokenListMarkerKey ctxKey = iota
+// mintTokenListDiscoveryURLKey marks a request context as carrying a tools/list
+// call on a mint-token-enabled function, so ModifyResponse knows to splice the
+// mint_token descriptor into the (already-forwarded) response body. Its value
+// is the caller-facing /-/openapi discovery URL (possibly "" when the runtime
+// address is unknown) resolved from the inbound request — the presence of the
+// key, not the value, is the marker. See kdex-tech/host-manager#133.
+const mintTokenListDiscoveryURLKey ctxKey = iota
 
 // stringSliceFromClaim coerces an entitlements claim (which arrives as
 // []any after JSON round-trips, or []string when set in-process) to []string.
@@ -257,10 +261,21 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessa
 }
 
 // mintTokenDescriptor is the MCP tools/list entry advertised for mint_token.
-func mintTokenDescriptor() map[string]any {
+// When discoveryURL is non-empty it appends a note pointing at the runtime
+// OpenAPI route catalog, so an agent can go mint -> read /-/openapi -> call the
+// right route on the first try. An empty discoveryURL (unknown runtime address)
+// falls back to the static description. See kdex-tech/host-manager#133.
+func mintTokenDescriptor(discoveryURL string) map[string]any {
+	description := "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }."
+	if discoveryURL != "" {
+		description += fmt.Sprintf(
+			" Discover the REST routes this token can call at %s (OpenAPI); pass the token as `Authorization: Bearer <token>`.",
+			discoveryURL,
+		)
+	}
 	return map[string]any{
 		"name":        "mint_token",
-		"description": "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }.",
+		"description": description,
 		"inputSchema": map[string]any{
 			"type":     "object",
 			"required": []string{"entitlements"},
@@ -290,10 +305,58 @@ func isToolsListCall(body []byte) bool {
 	return req.Method == "tools/list"
 }
 
+// firstForwardedValue returns the first entry of a possibly comma-separated
+// forwarded header value (e.g. "dev.knowdrive.ai, traefik.internal" -> the
+// original caller's value), trimmed of surrounding whitespace.
+func firstForwardedValue(v string) string {
+	if i := strings.IndexByte(v, ','); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
+}
+
+// fwdHost returns the caller-facing host, preferring X-Forwarded-Host (set by
+// the GCE ingress / Traefik hop in front of host-manager) over the request's
+// own Host, so the discovery URL names the external address rather than an
+// internal :8090 one.
+func fwdHost(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+		return firstForwardedValue(xfh)
+	}
+	return r.Host
+}
+
+// fwdScheme returns the caller-facing scheme, preferring X-Forwarded-Proto,
+// defaulting to https.
+func fwdScheme(r *http.Request) string {
+	if r != nil {
+		if xfp := r.Header.Get("X-Forwarded-Proto"); xfp != "" {
+			return firstForwardedValue(xfp)
+		}
+	}
+	return "https"
+}
+
+// openapiDiscoveryURL builds the caller-facing /-/openapi discovery URL from the
+// forwarded request address, or "" when the host is unknown (defensive: callers
+// fall back to the static mint_token description). See kdex-tech/host-manager#133.
+func openapiDiscoveryURL(r *http.Request) string {
+	host := fwdHost(r)
+	if host == "" {
+		return ""
+	}
+	return (&url.URL{Scheme: fwdScheme(r), Host: host, Path: "/-/openapi"}).String()
+}
+
 // spliceMintTokenDescriptor appends the mint_token descriptor to result.tools of
-// a tools/list JSON-RPC response. Returns (original, false) if the shape isn't a
-// tools array (e.g. an SSE frame or an error response), so callers pass through.
-func spliceMintTokenDescriptor(respBody []byte) ([]byte, bool) {
+// a tools/list JSON-RPC response, embedding discoveryURL (the caller-facing
+// /-/openapi endpoint, or "" for the static fallback) in its description.
+// Returns (original, false) if the shape isn't a tools array (e.g. an SSE frame
+// or an error response), so callers pass through.
+func spliceMintTokenDescriptor(respBody []byte, discoveryURL string) ([]byte, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return respBody, false
@@ -314,7 +377,7 @@ func spliceMintTokenDescriptor(respBody []byte) ([]byte, bool) {
 	if err := json.Unmarshal(rawTools, &tools); err != nil {
 		return respBody, false
 	}
-	descBytes, err := json.Marshal(mintTokenDescriptor())
+	descBytes, err := json.Marshal(mintTokenDescriptor(discoveryURL))
 	if err != nil {
 		return respBody, false
 	}

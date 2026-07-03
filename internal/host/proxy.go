@@ -262,12 +262,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// fh.Handler when the request was recognized as a tools/list call on
 			// a mint-token-enabled function; non-JSON or non-tools/list bodies
 			// pass through untouched.
-			if v, _ := resp.Request.Context().Value(mintTokenListMarkerKey).(bool); v &&
+			if discoveryURL, isToolsList := resp.Request.Context().Value(mintTokenListDiscoveryURLKey).(string); isToolsList &&
 				strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json") {
 				raw, rerr := io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 				if rerr == nil {
-					if spliced, ok := spliceMintTokenDescriptor(raw); ok {
+					if spliced, ok := spliceMintTokenDescriptor(raw, discoveryURL); ok {
 						raw = spliced
 					}
 					resp.Body = io.NopCloser(bytes.NewReader(raw))
@@ -519,7 +519,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					return
 				}
 				if isToolsListCall(peek) {
-					r = r.WithContext(context.WithValue(r.Context(), mintTokenListMarkerKey, true))
+					// Resolve the caller-facing /-/openapi discovery URL from the
+					// INBOUND request here, where the ingress/Traefik-provided
+					// X-Forwarded-* headers are intact — the outbound request's
+					// SetXForwarded() would clobber them with internal values.
+					r = r.WithContext(context.WithValue(
+						r.Context(), mintTokenListDiscoveryURLKey, openapiDiscoveryURL(r)))
 				}
 			} else {
 				// Oversized (or read error): NEVER truncate the forwarded body.
