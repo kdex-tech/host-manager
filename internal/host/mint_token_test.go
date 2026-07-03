@@ -143,7 +143,7 @@ func TestIsMintTokenCall(t *testing.T) {
 func TestSpliceMintTokenDescriptor(t *testing.T) {
 	g := NewWithT(t)
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search_atoms"}]}}`)
-	out, ok := spliceMintTokenDescriptor(resp)
+	out, ok := spliceMintTokenDescriptor(resp, "https://dev.knowdrive.ai/-/openapi")
 	g.Expect(ok).To(BeTrue())
 
 	var parsed jsonRPCResponse
@@ -151,9 +151,77 @@ func TestSpliceMintTokenDescriptor(t *testing.T) {
 	result := parsed.Result.(map[string]any)
 	tools := result["tools"].([]any)
 	g.Expect(tools).To(HaveLen(2))
-	names := []string{tools[0].(map[string]any)["name"].(string), tools[1].(map[string]any)["name"].(string)}
-	g.Expect(names).To(ContainElement("mint_token"))
-	g.Expect(names).To(ContainElement("search_atoms"))
+
+	byName := map[string]map[string]any{}
+	for _, tool := range tools {
+		m := tool.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+	g.Expect(byName).To(HaveKey("search_atoms"))
+	g.Expect(byName).To(HaveKey("mint_token"))
+
+	// #133: the discovery endpoint (resolved to the caller-facing address) must
+	// be surfaced inside the mint_token description so an agent can go
+	// mint -> read /-/openapi -> call the right route.
+	desc := byName["mint_token"]["description"].(string)
+	g.Expect(desc).To(ContainSubstring("https://dev.knowdrive.ai/-/openapi"))
+	g.Expect(desc).To(ContainSubstring("Authorization: Bearer"))
+}
+
+// TestSpliceMintTokenDescriptor_FallsBackWithoutURL covers the defensive path:
+// an empty discovery URL (unknown runtime address) must render today's static
+// description with no broken "://"-less URL spliced in (#133 acceptance).
+func TestSpliceMintTokenDescriptor_FallsBackWithoutURL(t *testing.T) {
+	g := NewWithT(t)
+	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)
+	out, ok := spliceMintTokenDescriptor(resp, "")
+	g.Expect(ok).To(BeTrue())
+
+	var parsed jsonRPCResponse
+	g.Expect(json.Unmarshal(out, &parsed)).To(Succeed())
+	tools := parsed.Result.(map[string]any)["tools"].([]any)
+	g.Expect(tools).To(HaveLen(1))
+	desc := tools[0].(map[string]any)["description"].(string)
+	g.Expect(desc).To(ContainSubstring("attenuated capability token"))
+	g.Expect(desc).ToNot(ContainSubstring("/-/openapi"))
+}
+
+// TestOpenapiDiscoveryURL pins how the discovery URL is derived from the
+// caller-facing (forwarded) request address (#133): the URL must reflect the
+// forwarded host/scheme so it works behind the GCE ingress / Traefik hop, not
+// the internal :8090 address, and must degrade to "" when the host is unknown.
+func TestOpenapiDiscoveryURL(t *testing.T) {
+	t.Run("prefers X-Forwarded-Host and X-Forwarded-Proto", func(t *testing.T) {
+		g := NewWithT(t)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", nil)
+		r.Host = "host-manager.default.svc.cluster.local:8090"
+		r.Header.Set("X-Forwarded-Host", "dev.knowdrive.ai")
+		r.Header.Set("X-Forwarded-Proto", "https")
+		g.Expect(openapiDiscoveryURL(r)).To(Equal("https://dev.knowdrive.ai/-/openapi"))
+	})
+
+	t.Run("takes the first value of a comma-separated forwarded chain", func(t *testing.T) {
+		g := NewWithT(t)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", nil)
+		r.Host = "internal:8090"
+		r.Header.Set("X-Forwarded-Host", "dev.knowdrive.ai, traefik.internal")
+		r.Header.Set("X-Forwarded-Proto", "https, http")
+		g.Expect(openapiDiscoveryURL(r)).To(Equal("https://dev.knowdrive.ai/-/openapi"))
+	})
+
+	t.Run("falls back to r.Host and https when no forwarded headers", func(t *testing.T) {
+		g := NewWithT(t)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", nil)
+		r.Host = "dev.example"
+		g.Expect(openapiDiscoveryURL(r)).To(Equal("https://dev.example/-/openapi"))
+	})
+
+	t.Run("returns empty when host is unknown", func(t *testing.T) {
+		g := NewWithT(t)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/mcp", nil)
+		r.Host = ""
+		g.Expect(openapiDiscoveryURL(r)).To(Equal(""))
+	})
 }
 
 func TestIsToolsListCall(t *testing.T) {
@@ -264,6 +332,55 @@ func TestReverseProxy_InterceptsMintTokenCall(t *testing.T) {
 	var resp jsonRPCResponse
 	g.Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 	g.Expect(resp.Result).ToNot(BeNil())
+}
+
+// TestReverseProxy_ToolsList_SplicesDiscoveryURL exercises the full proxy path
+// (#133 acceptance #1/#2): a tools/list on a mint-token-enabled host renders a
+// mint_token descriptor whose description names the /-/openapi discovery URL,
+// resolved to the FORWARDED caller-facing address (dev.knowdrive.ai via https)
+// rather than the internal upstream address.
+func TestReverseProxy_ToolsList_SplicesDiscoveryURL(t *testing.T) {
+	g := NewWithT(t)
+
+	// Upstream returns a normal tools/list result; the proxy must splice
+	// mint_token into it on the way back.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"search_atoms"}]}}`))
+	}))
+	defer upstream.Close()
+
+	hh := newTestHostHandlerForProxy(t, testAuthConfigForMint(t))
+	fn := newServiceBackedMCPFunction(t, upstream.URL)
+	hh.functions = []kdexv1alpha1.KDexFunction{*fn}
+	handler := hh.reverseProxyHandler(fn, mintProxyIssuer)
+
+	body := `{"jsonrpc":"2.0","id":7,"method":"tools/list"}`
+	req := httptest.NewRequest(http.MethodPost, mintProxyBasePath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// The GCE ingress / Traefik hop presents the external address here.
+	req.Header.Set("X-Forwarded-Host", "dev.knowdrive.ai")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice", "entitlements": []any{"pages:/:read"},
+	}))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	g.Expect(rr.Code).To(Equal(http.StatusOK))
+	var resp jsonRPCResponse
+	g.Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+	tools := resp.Result.(map[string]any)["tools"].([]any)
+	g.Expect(tools).To(HaveLen(2)) // upstream's search_atoms + spliced mint_token
+
+	var mintDesc string
+	for _, tl := range tools {
+		m := tl.(map[string]any)
+		if m["name"] == "mint_token" {
+			mintDesc = m["description"].(string)
+		}
+	}
+	g.Expect(mintDesc).To(ContainSubstring("https://dev.knowdrive.ai/-/openapi"))
 }
 
 // TestReverseProxy_LargeBodyNotTruncated proves that a POST body larger than
