@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"github.com/kdex-tech/host-manager/internal/keys"
+	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/assert"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -98,5 +101,41 @@ func TestServeHTTP_InitializingPreservesSystemPaths(t *testing.T) {
 		w := httptest.NewRecorder()
 		hh.ServeHTTP(w, req)
 		assert.NotContains(t, w.Body.String(), "ANNOUNCEMENT_CONTENT")
+	})
+}
+
+// TestLoginHandler_CatchAllClientRoute verifies the catch-all subtree route
+// that lets the login page host client-side routing between views. It is
+// registered only when auth is enabled, alongside the exact /-/login route.
+func TestLoginHandler_CatchAllClientRoute(t *testing.T) {
+	newMuxFor := func(hh *HostHandler) *http.ServeMux {
+		mux := http.NewServeMux()
+		hh.loginHandler(mux, map[string]ko.PathInfo{})
+		return mux
+	}
+	pattern := func(mux *http.ServeMux, target string) string {
+		_, p := mux.Handler(httptest.NewRequest("GET", target, nil))
+		return p
+	}
+
+	authOn := &HostHandler{
+		log:        logr.Discard(),
+		authConfig: &auth.Config{ActivePair: &keys.KeyPair{}},
+	}
+	muxOn := newMuxFor(authOn)
+
+	t.Run("exact /-/login still routes to the login handler", func(t *testing.T) {
+		assert.Equal(t, "GET /-/login", pattern(muxOn, "/-/login"))
+	})
+	t.Run("app-router sub-path routes to the catch-all", func(t *testing.T) {
+		assert.Equal(t, "GET /-/login/{path...}", pattern(muxOn, "/-/login/-/main/login-app/forgot"))
+	})
+	t.Run("any sub-path routes to the catch-all", func(t *testing.T) {
+		assert.Equal(t, "GET /-/login/{path...}", pattern(muxOn, "/-/login/anything"))
+	})
+	t.Run("auth disabled registers neither route", func(t *testing.T) {
+		muxOff := newMuxFor(&HostHandler{log: logr.Discard()})
+		assert.Equal(t, "", pattern(muxOff, "/-/login"))
+		assert.Equal(t, "", pattern(muxOff, "/-/login/anything"))
 	})
 }

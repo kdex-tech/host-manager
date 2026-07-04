@@ -10,9 +10,12 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	G "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -65,4 +68,37 @@ func TestHostHandler_openapiHandler(t *testing.T) {
 	g.Expect(pathItem).NotTo(G.BeNil())
 	g.Expect(pathItem.Get).NotTo(G.BeNil())
 	g.Expect(pathItem.Get.Summary).To(G.Equal("OpenAPI 3.0 Spec"))
+}
+
+// TestLoginHandler_CatchAllClientRouteDocumented verifies the catch-all login
+// route appears in the OpenAPI path set (which /-/openapi serializes from), so
+// the login client-routing capability is discoverable rather than hidden.
+func TestLoginHandler_CatchAllClientRouteDocumented(t *testing.T) {
+	hh := &HostHandler{
+		log:        logr.Discard(),
+		authConfig: &auth.Config{ActivePair: &keys.KeyPair{}},
+	}
+	registeredPaths := map[string]ko.PathInfo{}
+	hh.loginHandler(http.NewServeMux(), registeredPaths)
+
+	info, ok := registeredPaths["/-/login/{path...}"]
+	if !ok {
+		t.Fatal("catch-all login route must be documented in the OpenAPI path set that /-/openapi serializes from")
+	}
+	assert.Equal(t, ko.SystemPathType, info.Type)
+
+	item := info.API.Paths["/-/login/{path...}"]
+	if item.Get == nil {
+		t.Fatal("documented catch-all must expose a GET operation")
+	}
+	assert.Equal(t, "login-clientroute-get", item.Get.OperationID)
+
+	var hasWildcardPathParam bool
+	for _, p := range item.Get.Parameters {
+		if p.Value != nil && p.Value.In == "path" && p.Value.Name == "path" {
+			hasWildcardPathParam = true
+		}
+	}
+	assert.True(t, hasWildcardPathParam,
+		"documented catch-all must expose the wildcard {path...} parameter so the client-routing capability is discoverable")
 }

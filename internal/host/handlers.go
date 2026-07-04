@@ -560,6 +560,56 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 		Type: ko.SystemPathType,
 	}, registeredPaths)
 
+	const loginClientRoutePath = "/-/login/{path...}"
+	mux.HandleFunc("GET "+loginClientRoutePath, hh.LoginGet)
+
+	hh.registerPath(loginClientRoutePath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: loginClientRoutePath,
+			Paths: map[string]ko.PathItem{
+				loginClientRoutePath: {
+					Description: "Serves the login page shell for any sub-path beneath /-/login, enabling client-side routing between login views following the @kdex/ui app router pattern.",
+					Get: &openapi.Operation{
+						Description: "GET the login shell for a client-side route. The captured path is not interpreted server-side; every sub-path returns the same shell and the client router selects the active view from the URL. Because the login page is mounted under the reserved /-/ prefix (the app router's default path separator), a client hosting a router here must configure a data-path-separator that does not contain /-/.",
+						OperationID: "login-clientroute-get",
+						Parameters: openapi.Parameters{
+							ko.WildcardPathParam("path", "Client-side route sub-path (e.g. viewport/appId/appPath); consumed by the @kdex/ui app router, not the server"),
+							ko.QueryParam("return", "The URL to redirect to after successful login"),
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Format: "html",
+										Type:   &openapi.Types{openapi.TypeString},
+									},
+									[]string{"text/html"},
+								),
+								Description: new("HTML login page shell"),
+							}),
+							openapi.WithStatus(303, &openapi.ResponseRef{
+								Ref: "#/components/responses/SeeOther",
+							}),
+							openapi.WithStatus(400, &openapi.ResponseRef{
+								Ref: "#/components/responses/BadRequest",
+							}),
+							openapi.WithStatus(404, &openapi.ResponseRef{
+								Ref: "#/components/responses/NotFound",
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Get login experience (client-side route)",
+						Tags:    []string{"system", "login", "auth"},
+					},
+					Summary: "Login experience client-side routing",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+
 	const logoutPath = "/-/logout"
 	mux.HandleFunc("POST "+logoutPath, hh.LogoutPost)
 
