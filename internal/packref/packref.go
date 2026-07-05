@@ -101,6 +101,21 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		},
 	}
 
+	// A per-host PersistentVolumeClaim mounted at /cache persists the
+	// package-manager download cache (npm + bun) across packaging Jobs, so
+	// installs are reusable ("warm"). Empty CacheClaim leaves the ephemeral
+	// EmptyDir (cold installs) — behavior identical to before this field.
+	if p.Packages.CacheClaim != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: internal.CACHE_VOLUME,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: p.Packages.CacheClaim,
+				},
+			},
+		})
+	}
+
 	if p.ImagePushSecret != nil {
 		volumes = append(volumes, corev1.Volume{
 			Name: "image-push-secret",
@@ -128,6 +143,13 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			SubPath:   ".npmrc",
 			ReadOnly:  true,
 		},
+	}
+
+	if p.Packages.CacheClaim != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      internal.CACHE_VOLUME,
+			MountPath: internal.CACHE_DIR,
+		})
 	}
 
 	if p.ImagePushSecret != nil {
@@ -194,6 +216,22 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		})
 	}
 
+	// Redirect the package-manager download caches onto the /cache PVC so they
+	// persist across Jobs. Both installers honor these; without them the cache
+	// falls back to $HOME (the ephemeral WORKDIR EmptyDir).
+	if p.Packages.CacheClaim != "" {
+		env = append(env,
+			corev1.EnvVar{
+				Name:  "NPM_CONFIG_CACHE",
+				Value: internal.CACHE_DIR + "/npm",
+			},
+			corev1.EnvVar{
+				Name:  "BUN_INSTALL_CACHE_DIR",
+				Value: internal.CACHE_DIR + "/bun",
+			},
+		)
+	}
+
 	if p.ImagePushSecret != nil {
 		env = append(env, corev1.EnvVar{
 			Name:  "IMAGE_PUSH_SECRET_PATH",
@@ -214,6 +252,18 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Name:  "DOCKER_CONFIG",
 			Value: internal.WORKDIR,
 		})
+	}
+
+	// A PVC mounts root-owned; fsGroup makes /cache group-writable by the
+	// runtime user (65532) so the installer can populate the cache. Only set
+	// when a cache PVC is attached, so non-cache Jobs are unchanged.
+	podSecurityContext := internal.PSSRestrictedPodSecurityContext()
+	if p.Packages.CacheClaim != "" {
+		podSecurityContext.FSGroup = new(int64(65532))
+		// OnRootMismatch skips a full recursive chown of the (growing) cache
+		// on every mount — it only relabels when the root dir's ownership is
+		// wrong, keeping mount time flat as the cache fills.
+		podSecurityContext.FSGroupChangePolicy = new(corev1.FSGroupChangeOnRootMismatch)
 	}
 
 	job = &batchv1.Job{
@@ -248,7 +298,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 				},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: new(true),
-					SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
+					SecurityContext:              podSecurityContext,
 					Containers: []corev1.Container{
 						{
 							Name: "packager",
