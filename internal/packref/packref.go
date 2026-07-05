@@ -177,6 +177,23 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		},
 	}
 
+	// INSTALLER / RUNTIME select the packaging pipeline's dependency installer
+	// and JS runtime (node-tools >= 0.3.0, kdex-tech/node-tools#3). Emitted
+	// only when configured, so an unset config leaves the image defaults
+	// (npm + node) — byte-identical to prior packaging behavior.
+	if p.Packages.Installer != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "INSTALLER",
+			Value: p.Packages.Installer,
+		})
+	}
+	if p.Packages.Runtime != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  "RUNTIME",
+			Value: p.Packages.Runtime,
+		})
+	}
+
 	if p.ImagePushSecret != nil {
 		env = append(env, corev1.EnvVar{
 			Name:  "IMAGE_PUSH_SECRET_PATH",
