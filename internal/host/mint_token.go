@@ -266,10 +266,10 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessa
 // right route on the first try. An empty discoveryURL (unknown runtime address)
 // falls back to the static description. See kdex-tech/host-manager#133.
 func mintTokenDescriptor(discoveryURL string) map[string]any {
-	description := "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }."
+	description := "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }; pass it as `Authorization: Bearer <token>`. Every entitlement you request must already be held by you — the mint attenuates, never escalates."
 	if discoveryURL != "" {
 		description += fmt.Sprintf(
-			" Discover the REST routes this token can call at %s (OpenAPI); pass the token as `Authorization: Bearer <token>`.",
+			" To find the entitlements a call needs, open the OpenAPI spec at %s, locate the path + method you intend to call, and read its `security` block: each list entry is an alternative requirement (OR) — pick one scheme (e.g. bearer); the scope array inside that entry is the set of entitlements you must supply together (AND), so grant all of them. An entitlement's `<resourceName>` (middle) segment is interpreted by the target API and may require identity replacement — a wildcard or placeholder shown in the spec's scope must usually be resolved to the concrete resource the call targets before you request it (e.g. `functions:*:read` → `functions:/api/v1/files:read` for a specific route).",
 			discoveryURL,
 		)
 	}
