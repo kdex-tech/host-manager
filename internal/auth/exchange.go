@@ -46,8 +46,13 @@ type Exchanger struct {
 	// JTI signals replay (or expiry) and the redemption is rejected. See
 	// kdex-tech/host-manager#65 (RFC 6749 §10.5 single-use requirement).
 	authCodeCache cache.Cache
-	maxSessionAge time.Duration
-	sp            InternalIdentityProvider
+	// subjectClaimsCache holds a subject's login-derived Lookup claims (e.g.
+	// vs_entitlements) so the PAT/OAuth token bridge can re-surface them into
+	// the FAT's signing context — the token path has no password to re-run the
+	// Lookup. Keyed by subject. See kdex-tech/host-manager#137.
+	subjectClaimsCache cache.Cache
+	maxSessionAge      time.Duration
+	sp                 InternalIdentityProvider
 }
 
 // authCodeTTL is the upper bound on how long an unredeemed authorization
@@ -99,6 +104,17 @@ func NewExchanger(
 			TTL:      &ttl,
 			Uncycled: true,
 		})
+		// Subject -> login-derived Lookup claims, re-surfaced on the token
+		// bridge. Lives ~ as long as a session so a PAT minted from a login
+		// can still find them. See #137.
+		scTTL := ex.maxSessionAge
+		if scTTL <= 0 {
+			scTTL = 24 * time.Hour
+		}
+		ex.subjectClaimsCache = cacheManager.GetCache("subject-claims", cache.CacheOptions{
+			TTL:      &scTTL,
+			Uncycled: true,
+		})
 	}
 
 	if cfg.IsOIDCEnabled() {
@@ -141,6 +157,41 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 		return nil, nil, nil
 	}
 	return e.sp.FindInternalRolesAndEntitlements(subject)
+}
+
+// StoreSubjectClaims snapshots a subject's login-derived Lookup claims (e.g.
+// vs_entitlements) into the subject-claims cache, so the PAT/OAuth token bridge
+// can later re-surface them into the FAT's signing context. Best-effort: a
+// marshal or cache error is swallowed (the caller still logs the subject in
+// via the session token). See kdex-tech/host-manager#137.
+func (e *Exchanger) StoreSubjectClaims(subject string, claims jwt.MapClaims) {
+	if e == nil || e.subjectClaimsCache == nil || subject == "" || len(claims) == 0 {
+		return
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return
+	}
+	_ = e.subjectClaimsCache.Set(context.Background(), subject, string(payload))
+}
+
+// CachedSubjectClaims returns the subject's cached login-derived claims, or nil
+// on miss/expiry/error. Fail-safe: an absent entry yields no extra claims, so
+// the token path degrades to role-only entitlements (never MORE than the
+// subject holds). See kdex-tech/host-manager#137.
+func (e *Exchanger) CachedSubjectClaims(subject string) jwt.MapClaims {
+	if e == nil || e.subjectClaimsCache == nil || subject == "" {
+		return nil
+	}
+	raw, found, _, err := e.subjectClaimsCache.Get(context.Background(), subject)
+	if err != nil || !found || raw == "" {
+		return nil
+	}
+	var claims jwt.MapClaims
+	if err := json.Unmarshal([]byte(raw), &claims); err != nil {
+		return nil
+	}
+	return claims
 }
 
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
@@ -413,6 +464,17 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	if err != nil {
 		return TokenSet{}, err
 	}
+
+	// #137: snapshot the subject's login-derived claims (e.g. vs_entitlements)
+	// so a PAT/OAuth token later minted for this subject can re-surface them
+	// into the FAT via ClaimMappings — the token bridge has no password to
+	// re-run the Lookup. Captured here, before scope filtering, keyed by the
+	// resolved subject.
+	subjectKey := username
+	if sub, ok := signingContext["sub"].(string); ok && sub != "" {
+		subjectKey = sub
+	}
+	e.StoreSubjectClaims(subjectKey, signingContext)
 
 	switch authMethod {
 	case AuthMethodLocal:
