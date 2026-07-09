@@ -13,8 +13,8 @@ package controller
 import (
 	"testing"
 
-	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
