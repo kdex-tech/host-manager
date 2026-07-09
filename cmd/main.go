@@ -366,11 +366,19 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "KDexPage")
 		os.Exit(1)
 	}
+	// FUNCTION_IMAGE_PREFIX overrides the function-image path segment before
+	// <func> (default: HostRef.Name+"/"). LookupEnv distinguishes unset
+	// (nil -> host-name default) from set-empty ("" -> flat path).
+	var functionImagePrefix *string
+	if v, ok := os.LookupEnv("FUNCTION_IMAGE_PREFIX"); ok {
+		functionImagePrefix = &v
+	}
 	if err := (&controller.KDexFunctionReconciler{
 		Client:              mgr.GetClient(),
 		Configuration:       conf,
 		ControllerNamespace: controllerNamespace,
 		FocalHost:           focalHost,
+		FunctionImagePrefix: functionImagePrefix,
 		HostHandler:         hostHandler,
 		RequeueDelay:        requeueDelay,
 		Scheme:              mgr.GetScheme(),
