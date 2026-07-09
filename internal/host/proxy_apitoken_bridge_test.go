@@ -57,7 +57,7 @@ const apitokenBridgeHostAudience = "https://api-host.example.com"
 // function and returns the handler plus a TokenManager minting tokens the host
 // will accept. The upstream echoes back the inbound Authorization (FAT) and the
 // preserved X-API-TOKEN cookie so the test can inspect what the function sees.
-func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider) (http.Handler, *apitoken.TokenManager, *string, *string, *auth.Exchanger) {
+func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider) (http.Handler, *apitoken.TokenManager, *string, *string) {
 	t.Helper()
 	logf.SetLogger(logr.Discard())
 
@@ -98,7 +98,7 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 		authExchanger: ex,
 	}
 
-	return hh.reverseProxyHandler(fn, "https://api-host.example.com"), tm, fatHeader, apiTokenCookie, ex
+	return hh.reverseProxyHandler(fn, "https://api-host.example.com"), tm, fatHeader, apiTokenCookie
 }
 
 func apiKeySecuredFunction(basePath string, withAPIKey bool) *kdexv1alpha1.KDexFunction {
@@ -143,7 +143,7 @@ func decodeFAT(t *testing.T, header string) jwt.MapClaims {
 func TestProxy_APITokenBridge_MintsFAT(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
-	handler, tm, fatHeader, apiTokenCookie, _ := apitokenBridgeFixture(t, fn, idp)
+	handler, tm, fatHeader, apiTokenCookie := apitokenBridgeFixture(t, fn, idp)
 
 	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
@@ -170,7 +170,7 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 
 	t.Run("header", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
-		handler, tm, fatHeader, _, _ := apitokenBridgeFixture(t, fn, idp)
+		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api", nil)
@@ -181,7 +181,7 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 
 	t.Run("query", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
-		handler, tm, fatHeader, _, _ := apitokenBridgeFixture(t, fn, idp)
+		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api?api_token="+token, nil)
@@ -196,7 +196,7 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 func TestProxy_APITokenBridge_NoOptIn(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", false)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
-	handler, tm, fatHeader, _, _ := apitokenBridgeFixture(t, fn, idp)
+	handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 
 	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
 	require.NoError(t, err)
@@ -213,7 +213,7 @@ func TestProxy_APITokenBridge_NoOptIn(t *testing.T) {
 func TestProxy_APITokenBridge_InvalidToken(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
-	handler, _, fatHeader, _, _ := apitokenBridgeFixture(t, fn, idp)
+	handler, _, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil)
 	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: "v4.public.not-a-real-token"})
@@ -228,7 +228,7 @@ func TestProxy_APITokenBridge_InvalidToken(t *testing.T) {
 func TestProxy_APITokenBridge_JWTWins(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
-	handler, tm, fatHeader, apiTokenCookie, _ := apitokenBridgeFixture(t, fn, idp)
+	handler, tm, fatHeader, apiTokenCookie := apitokenBridgeFixture(t, fn, idp)
 
 	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
 	require.NoError(t, err)

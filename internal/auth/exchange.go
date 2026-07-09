@@ -46,13 +46,8 @@ type Exchanger struct {
 	// JTI signals replay (or expiry) and the redemption is rejected. See
 	// kdex-tech/host-manager#65 (RFC 6749 §10.5 single-use requirement).
 	authCodeCache cache.Cache
-	// subjectClaimsCache holds a subject's login-derived Lookup claims (e.g.
-	// vs_entitlements) so the PAT/OAuth token bridge can re-surface them into
-	// the FAT's signing context — the token path has no password to re-run the
-	// Lookup. Keyed by subject. See kdex-tech/host-manager#137.
-	subjectClaimsCache cache.Cache
-	maxSessionAge      time.Duration
-	sp                 InternalIdentityProvider
+	maxSessionAge time.Duration
+	sp            InternalIdentityProvider
 }
 
 // authCodeTTL is the upper bound on how long an unredeemed authorization
@@ -60,24 +55,6 @@ type Exchanger struct {
 // AuthorizationCodeClaims so the cache TTL doesn't expire the JTI ahead
 // of the code itself. Codes are typically redeemed within seconds.
 const authCodeTTL = 15 * time.Minute
-
-// subjectClaimsTTL is how long a subject's cached login-derived claims (e.g.
-// vs_entitlements) must live. The cache is written once at login, but a session
-// — and the PAT/OAuth tokens derived from it — can be refreshed up to
-// maxSessionAge without re-running LoginLocal, and a token minted just before
-// that boundary stays valid for its own TTL beyond it. So the cache must outlive
-// maxSessionAge PLUS the refresh window, never just maxSessionAge, or a
-// refreshed token loses its per-VS grants mid-session. Falls back to the
-// documented defaults (24h / 12h) when a duration is unset. See #137.
-func subjectClaimsTTL(maxSessionAge, refreshTokenTTL time.Duration) time.Duration {
-	if maxSessionAge <= 0 {
-		maxSessionAge = 24 * time.Hour
-	}
-	if refreshTokenTTL <= 0 {
-		refreshTokenTTL = 12 * time.Hour
-	}
-	return maxSessionAge + refreshTokenTTL
-}
 
 // RefreshTokenClaims holds the data stored inside a refresh token entry in the cache.
 type RefreshTokenClaims struct {
@@ -122,15 +99,6 @@ func NewExchanger(
 			TTL:      &ttl,
 			Uncycled: true,
 		})
-		// Subject -> login-derived Lookup claims, re-surfaced on the token
-		// bridge. Must outlive the full refreshed-session boundary (see
-		// subjectClaimsTTL) so a PAT refreshed near maxSessionAge still finds
-		// them. See #137.
-		scTTL := subjectClaimsTTL(ex.maxSessionAge, ex.refreshTokenTTL)
-		ex.subjectClaimsCache = cacheManager.GetCache("subject-claims", cache.CacheOptions{
-			TTL:      &scTTL,
-			Uncycled: true,
-		})
 	}
 
 	if cfg.IsOIDCEnabled() {
@@ -173,41 +141,6 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 		return nil, nil, nil
 	}
 	return e.sp.FindInternalRolesAndEntitlements(subject)
-}
-
-// StoreSubjectClaims snapshots a subject's login-derived Lookup claims (e.g.
-// vs_entitlements) into the subject-claims cache, so the PAT/OAuth token bridge
-// can later re-surface them into the FAT's signing context. Best-effort: a
-// marshal or cache error is swallowed (the caller still logs the subject in
-// via the session token). See kdex-tech/host-manager#137.
-func (e *Exchanger) StoreSubjectClaims(subject string, claims jwt.MapClaims) {
-	if e == nil || e.subjectClaimsCache == nil || subject == "" || len(claims) == 0 {
-		return
-	}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return
-	}
-	_ = e.subjectClaimsCache.Set(context.Background(), subject, string(payload))
-}
-
-// CachedSubjectClaims returns the subject's cached login-derived claims, or nil
-// on miss/expiry/error. Fail-safe: an absent entry yields no extra claims, so
-// the token path degrades to role-only entitlements (never MORE than the
-// subject holds). See kdex-tech/host-manager#137.
-func (e *Exchanger) CachedSubjectClaims(subject string) jwt.MapClaims {
-	if e == nil || e.subjectClaimsCache == nil || subject == "" {
-		return nil
-	}
-	raw, found, _, err := e.subjectClaimsCache.Get(context.Background(), subject)
-	if err != nil || !found || raw == "" {
-		return nil
-	}
-	var claims jwt.MapClaims
-	if err := json.Unmarshal([]byte(raw), &claims); err != nil {
-		return nil
-	}
-	return claims
 }
 
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
@@ -480,17 +413,6 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	if err != nil {
 		return TokenSet{}, err
 	}
-
-	// #137: snapshot the subject's login-derived claims (e.g. vs_entitlements)
-	// so a PAT/OAuth token later minted for this subject can re-surface them
-	// into the FAT via ClaimMappings — the token bridge has no password to
-	// re-run the Lookup. Captured here, before scope filtering, keyed by the
-	// resolved subject.
-	subjectKey := username
-	if sub, ok := signingContext["sub"].(string); ok && sub != "" {
-		subjectKey = sub
-	}
-	e.StoreSubjectClaims(subjectKey, signingContext)
 
 	switch authMethod {
 	case AuthMethodLocal:

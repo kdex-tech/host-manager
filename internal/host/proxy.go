@@ -437,7 +437,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 						if rerr != nil {
 							log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
 						} else {
-							ac := auth.AuthContext{
+							r = r.WithContext(auth.SetAuthContext(r.Context(), auth.AuthContext{
 								"sub":          data.Subject,
 								"roles":        roles,
 								"entitlements": ents,
@@ -455,25 +455,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 								// scoped to the PAT path; JWT/cookie/apiKey callers
 								// never carry it. See kdex-tech/host-manager §4.
 								auth.PATBridgeClaim: true,
-							}
-							// #137: re-surface the subject's login-derived Lookup
-							// claims (e.g. vs_entitlements) so the FAT's
-							// ClaimMappings map them into entitlements — the token
-							// path has no password to re-run the Lookup.
-							// Non-conflicting: the freshly-resolved
-							// sub/roles/entitlements/scp always win, so this only
-							// ADDS backend claims. Runs only on the !alreadyLoggedIn
-							// bridge path, so a JWT/cookie caller — including a
-							// downscoped mint_token capability token, whose
-							// attenuated entitlements WithAuthentication already
-							// placed in the authContext — is never re-resolved or
-							// re-inflated here.
-							for k, v := range authExchanger.CachedSubjectClaims(data.Subject) {
-								if _, exists := ac[k]; !exists {
-									ac[k] = v
-								}
-							}
-							r = r.WithContext(auth.SetAuthContext(r.Context(), ac))
+							}))
 						}
 					}
 				}
