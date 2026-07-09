@@ -334,7 +334,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	// field without a CRD default) doesn't take down the whole reconcile.
 	// Durations use Duration.String() so the consumer reads "30s", not the
 	// internal struct rep. See kdex-tech/host-manager#45.
-	if s := function.Status.Executable.Scaling; s != nil {
+	if s := function.Spec.Scaling; s != nil {
 		if s.ActivationScale != nil {
 			env = append(env, corev1.EnvVar{Name: "SCALING_ACTIVATION_SCALE", Value: fmt.Sprintf("%d", *s.ActivationScale)})
 		}

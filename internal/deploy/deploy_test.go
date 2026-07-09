@@ -242,7 +242,7 @@ func indexEnvByName(envs []corev1.EnvVar) map[string]string {
 
 // scalingTestDeployer builds a Deployer + KDexFunction suitable for asserting
 // the SCALING_* env block. Caller customizes the returned function's
-// Status.Executable.Scaling.
+// Spec.Scaling.
 func scalingTestSetup(t *testing.T) (*Deployer, *kdexv1alpha1.KDexFunction) {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -363,7 +363,7 @@ func TestDeploy_NilScalingFields_DoNotPanic_AndAreOmitted(t *testing.T) {
 	one := int32(1)
 	// Scaling block set, but every field nil except MinScale — mirrors the
 	// real-world CR that triggered the crash (scaling: { minScale: 1 }).
-	fn.Status.Executable.Scaling = &kdexv1alpha1.ScalingConfig{
+	fn.Spec.Scaling = &kdexv1alpha1.ScalingConfig{
 		MinScale: &one,
 	}
 
@@ -422,7 +422,7 @@ func TestDeploy_ScalingFieldFormatting(t *testing.T) {
 	sixty := metav1.Duration{Duration: 60 * time.Second}
 	zero := metav1.Duration{Duration: 0}
 
-	fn.Status.Executable.Scaling = &kdexv1alpha1.ScalingConfig{
+	fn.Spec.Scaling = &kdexv1alpha1.ScalingConfig{
 		MinScale:                      &one,
 		MaxScale:                      &five,
 		Target:                        &hundred,
@@ -452,6 +452,33 @@ func TestDeploy_ScalingFieldFormatting(t *testing.T) {
 		if got := envs[k]; got != w {
 			t.Errorf("%s = %q; want %q", k, got, w)
 		}
+	}
+}
+
+// TestDeploy_SourceOrigin_ScalingFromSpec asserts kdex-crds#14: a
+// source-authoritative function (no spec.origin.executable) emits SCALING_*
+// env from the top-level Spec.Scaling. Pre-move, scaling was Executable-only
+// and such a function could not warm-keep.
+func TestDeploy_SourceOrigin_ScalingFromSpec(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+	one := int32(1)
+	fn.Spec.Origin = kdexv1alpha1.FunctionOrigin{
+		Source: &kdexv1alpha1.Source{
+			Repository: "https://example.com/repo.git",
+			Revision:   "main",
+			Path:       "functions/x",
+		},
+	}
+	fn.Spec.Scaling = &kdexv1alpha1.ScalingConfig{MinScale: &one}
+
+	job, err := d.Deploy(context.Background(), fn)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	envs := indexEnvByName(job.Spec.Template.Spec.Containers[0].Env)
+	if v, ok := envs["SCALING_MIN_SCALE"]; !ok || v != "1" {
+		t.Errorf("SCALING_MIN_SCALE = %q (present=%v); want %q", v, ok, "1")
 	}
 }
 
