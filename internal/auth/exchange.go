@@ -61,6 +61,24 @@ type Exchanger struct {
 // of the code itself. Codes are typically redeemed within seconds.
 const authCodeTTL = 15 * time.Minute
 
+// subjectClaimsTTL is how long a subject's cached login-derived claims (e.g.
+// vs_entitlements) must live. The cache is written once at login, but a session
+// — and the PAT/OAuth tokens derived from it — can be refreshed up to
+// maxSessionAge without re-running LoginLocal, and a token minted just before
+// that boundary stays valid for its own TTL beyond it. So the cache must outlive
+// maxSessionAge PLUS the refresh window, never just maxSessionAge, or a
+// refreshed token loses its per-VS grants mid-session. Falls back to the
+// documented defaults (24h / 12h) when a duration is unset. See #137.
+func subjectClaimsTTL(maxSessionAge, refreshTokenTTL time.Duration) time.Duration {
+	if maxSessionAge <= 0 {
+		maxSessionAge = 24 * time.Hour
+	}
+	if refreshTokenTTL <= 0 {
+		refreshTokenTTL = 12 * time.Hour
+	}
+	return maxSessionAge + refreshTokenTTL
+}
+
 // RefreshTokenClaims holds the data stored inside a refresh token entry in the cache.
 type RefreshTokenClaims struct {
 	AuthMethod       AuthMethod `json:"auth_method"`
@@ -105,12 +123,10 @@ func NewExchanger(
 			Uncycled: true,
 		})
 		// Subject -> login-derived Lookup claims, re-surfaced on the token
-		// bridge. Lives ~ as long as a session so a PAT minted from a login
-		// can still find them. See #137.
-		scTTL := ex.maxSessionAge
-		if scTTL <= 0 {
-			scTTL = 24 * time.Hour
-		}
+		// bridge. Must outlive the full refreshed-session boundary (see
+		// subjectClaimsTTL) so a PAT refreshed near maxSessionAge still finds
+		// them. See #137.
+		scTTL := subjectClaimsTTL(ex.maxSessionAge, ex.refreshTokenTTL)
 		ex.subjectClaimsCache = cacheManager.GetCache("subject-claims", cache.CacheOptions{
 			TTL:      &scTTL,
 			Uncycled: true,
