@@ -81,6 +81,10 @@ type KDexFunctionReconciler struct {
 	Configuration       configuration.NexusConfiguration
 	ControllerNamespace string
 	FocalHost           string
+	// FunctionImagePrefix overrides the function-image path segment before
+	// <func>. nil = unset (default to HostRef.Name+"/"); non-nil = literal
+	// (may be "" for a flat path). From FUNCTION_IMAGE_PREFIX env in main.go.
+	FunctionImagePrefix *string
 	HostHandler         *host.HostHandler
 	RequeueDelay        time.Duration
 	Scheme              *runtime.Scheme
@@ -1164,9 +1168,15 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			buildSA = sourceForBuild.Builder.ServiceAccountName
 		}
 
+		imagePrefix := hc.function.Spec.HostRef.Name + "/"
+		if r.FunctionImagePrefix != nil {
+			imagePrefix = *r.FunctionImagePrefix
+		}
+
 		builder := build.Builder{
 			Client:         r.Client,
 			ImageRegistry:  hc.host.Spec.Registries.ImageRegistry,
+			ImagePrefix:    imagePrefix,
 			Scheme:         r.Scheme,
 			ServiceAccount: buildSA,
 			Source:         sourceForBuild,
