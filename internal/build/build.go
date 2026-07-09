@@ -17,9 +17,16 @@ import (
 type Builder struct {
 	client.Client
 	ImageRegistry  string
+	ImagePrefix    string // path segment before <func>, incl. trailing slash: "rsi-dev/", "fn/", or "" (flat)
 	Scheme         *runtime.Scheme
 	ServiceAccount string
 	Source         kdexv1alpha1.Source
+}
+
+// imageRef builds "<registry>/<prefix><name>:<tag>". prefix carries its own
+// trailing slash (or is empty for a flat/root path).
+func imageRef(registry, prefix, name, tag string) string {
+	return fmt.Sprintf("%s/%s%s:%s", registry, prefix, name, tag)
 }
 
 func (b *Builder) GetOrCreateKPackImage(
@@ -49,9 +56,9 @@ func (b *Builder) GetOrCreateKPackImage(
 				},
 				"subPath": b.Source.Path,
 			},
-			"tag": fmt.Sprintf("%s/%s/%s:latest", b.ImageRegistry, function.Spec.HostRef.Name, function.Name),
+			"tag": imageRef(b.ImageRegistry, b.ImagePrefix, function.Name, "latest"),
 			"additionalTags": []any{
-				fmt.Sprintf("%s/%s/%s:%d", b.ImageRegistry, function.Spec.HostRef.Name, function.Name, function.GetGeneration()),
+				imageRef(b.ImageRegistry, b.ImagePrefix, function.Name, fmt.Sprintf("%d", function.GetGeneration())),
 			},
 			// kpack's mutating webhook defaults both history limits to 10
 			// when unspecified, which retains the last 10 success + 10 failed
