@@ -7,11 +7,19 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/dmapper"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// signerLog is a dedicated logger for token-mint diagnostics, independently
+// controllable via --named-log-level=signer=<N>. Every JWT this package issues
+// (FAT, session/access, mint_token) flows through SignProjected, so raising it
+// surfaces exactly what claims went into every minted token.
+var signerLog = logf.Log.WithName("signer")
 
 type Signer struct {
 	audience   string
@@ -163,7 +171,24 @@ func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
 	token.Header["alg"] = method.Alg()
 	token.Header["kid"] = s.kid
 	token.Header["typ"] = "JWT"
-	return token.SignedString(*s.privateKey)
+	signed, err := token.SignedString(*s.privateKey)
+	if err == nil && signerLog.V(2).Enabled() {
+		// Diagnostic: dump the FULL claim set signed into EVERY JWT this signer
+		// issues (FAT, session/access, mint_token). outboundClaims IS exactly
+		// what is signed (aud/sub/iss + entitlements/roles/profile + exp/iat/jti)
+		// — ground truth for verifying that resolved grants (e.g. vs_entitlements,
+		// kdex-tech/host-manager#138) reach the token. It carries identity/profile
+		// claims, so it is gated behind an explicitly-enabled logger:
+		// --named-log-level=signer=2. V(3) additionally attaches the goroutine
+		// stack so the mint's call path (FAT proxy, login, refresh, mint_token, …)
+		// is visible.
+		if signerLog.V(3).Enabled() {
+			signerLog.V(3).Info("minted token", "claims", outboundClaims, "stack", string(debug.Stack()))
+		} else {
+			signerLog.V(2).Info("minted token", "claims", outboundClaims)
+		}
+	}
+	return signed, err
 }
 
 // Sign is a convenience wrapper that runs Project then SignProjected.
