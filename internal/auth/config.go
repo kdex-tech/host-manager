@@ -68,8 +68,14 @@ type Config struct {
 	MintTokenDestructiveVerbs []string
 	RefreshTokenTTL           time.Duration
 	Signer                    sign.Signer
-	TokenManager              *apitoken.TokenManager
-	TokenTTL                  time.Duration
+	// ClaimMappings are the host's spec.auth.claimMappings rules. They shape
+	// EVERY token the host issues: the session Signer above bakes them in, and
+	// the per-function FAT signer (proxy.go) prepends them to its own
+	// fn.Spec.ClaimMappings — so a rule authored once on the host (e.g.
+	// vs_entitlements -> entitlements) applies uniformly. See #138.
+	ClaimMappings []dmapper.MappingRule
+	TokenManager  *apitoken.TokenManager
+	TokenTTL      time.Duration
 }
 
 type ConfigBuilder struct {
@@ -190,6 +196,10 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 			return nil, err
 		}
 		cfg.TokenTTL = tokenTTL
+
+		// Expose the host claimMappings so the per-function FAT signer can apply
+		// them too (they otherwise only shape the session token). See #138.
+		cfg.ClaimMappings = auth.ClaimMappings
 
 		var mapper *dmapper.Mapper
 		if len(auth.ClaimMappings) > 0 {

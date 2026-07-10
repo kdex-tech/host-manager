@@ -101,6 +101,10 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 			ActivePair:   &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
 			Audience:     apitokenBridgeHostAudience,
 			TokenManager: tm,
+			// Production puts the vs_entitlements->entitlements rule on the HOST,
+			// not the function. The FAT signer must apply it too (#138), so the
+			// fixture carries it here rather than on fn.Spec.ClaimMappings.
+			ClaimMappings: vsEntitlementsClaimMapping(),
 		},
 		authExchanger: ex,
 	}

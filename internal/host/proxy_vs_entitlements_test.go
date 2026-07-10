@@ -43,7 +43,9 @@ func vsEntitlementsClaimMapping() []dmapper.MappingRule {
 // resources.
 func TestProxy_PATBridge_FreshResolvesVSEntitlements(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
-	fn.Spec.ClaimMappings = vsEntitlementsClaimMapping()
+	// NB: the vs_entitlements->entitlements rule lives on the HOST (fixture's
+	// authConfig.ClaimMappings), NOT the function — matching production. The FAT
+	// signer must apply the host rule for this to work (#138).
 	idp := stubInternalIdentityProvider{
 		roles:    []string{"api-role"},
 		ents:     []string{"functions:read"},
@@ -74,7 +76,9 @@ func TestProxy_PATBridge_FreshResolvesVSEntitlements(t *testing.T) {
 // subject's broader backend grants, or attenuation is silently defeated.
 func TestProxy_PATBridge_DoesNotReinflateAttenuatedToken(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
-	fn.Spec.ClaimMappings = vsEntitlementsClaimMapping()
+	// NB: the vs_entitlements->entitlements rule lives on the HOST (fixture's
+	// authConfig.ClaimMappings), NOT the function — matching production. The FAT
+	// signer must apply the host rule for this to work (#138).
 	idp := stubInternalIdentityProvider{
 		roles:    []string{"api-role"},
 		ents:     []string{"functions:read"},

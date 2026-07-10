@@ -135,7 +135,54 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 		maps.Copy(projected, extra)
 	}
 
+	// Deduplicate the entitlements claim before it is signed. Role flattening
+	// (a subject bound to several roles that share grants) and the claimMappings
+	// concat (entitlements + vs_entitlements) routinely produce duplicates;
+	// collapse them once here so every minted token carries a clean set. See
+	// kdex-tech/host-manager#138.
+	if ent, ok := projected["entitlements"]; ok {
+		projected["entitlements"] = dedupeStringSlice(ent)
+	}
+
 	return projected, nil
+}
+
+// dedupeStringSlice removes duplicate string elements from the entitlements
+// claim, preserving first-occurrence order. It handles the two shapes the claim
+// takes — []string (role flattening) and []any (JSON round-trip / CEL mapper
+// output) — and returns v unchanged for any other type.
+func dedupeStringSlice(v any) any {
+	switch list := v.(type) {
+	case []string:
+		seen := make(map[string]struct{}, len(list))
+		out := make([]string, 0, len(list))
+		for _, s := range list {
+			if _, dup := seen[s]; dup {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+		return out
+	case []any:
+		seen := make(map[string]struct{}, len(list))
+		out := make([]any, 0, len(list))
+		for _, e := range list {
+			s, ok := e.(string)
+			if !ok {
+				out = append(out, e)
+				continue
+			}
+			if _, dup := seen[s]; dup {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // SignProjected attaches the per-token identifiers (iat/exp/jti) to an

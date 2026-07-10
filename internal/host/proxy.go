@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -115,12 +116,19 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		})
 	}
 
+	// The FAT inherits the HOST's claimMappings (e.g. vs_entitlements ->
+	// entitlements) PLUS any function-specific ones, so a rule authored once on
+	// the host applies to every token the host issues — session AND FAT. Host
+	// rules run first; function rules refine. Without this, a host rule that
+	// merges bridge-resolved grants never runs at FAT mint and the grant is
+	// dropped by the projection allowlist. See kdex-tech/host-manager#138.
 	var mapper *dmapper.Mapper
-	if fn.Spec.ClaimMappings != nil {
-		mapper, err = dmapper.NewMapper(fn.Spec.ClaimMappings)
+	claimMappings := append(slices.Clone(hh.authConfig.ClaimMappings), fn.Spec.ClaimMappings...)
+	if len(claimMappings) > 0 {
+		mapper, err = dmapper.NewMapper(claimMappings)
 		if err != nil {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				hh.log.Error(err, "failed to create mapper", "mapper", fn.Spec.ClaimMappings)
+				hh.log.Error(err, "failed to create mapper", "mapper", claimMappings)
 				http.Error(w, "invalid mapper", http.StatusInternalServerError)
 			})
 		}

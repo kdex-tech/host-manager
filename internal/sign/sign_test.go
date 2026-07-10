@@ -306,3 +306,63 @@ func TestSigner_SignProjected_ProjectionOverridesDefaultExp(t *testing.T) {
 		"projection.exp MUST override the default exp set by SignProjected — auth "+
 			"tests synthesize expired tokens by injecting exp=-1 through a ClaimMappings rule")
 }
+
+// TestSigner_Project_DeduplicatesEntitlements pins that the entitlements claim
+// is deduplicated (first-occurrence order preserved) before signing — role
+// flattening and the claimMappings concat routinely produce duplicates. See #138.
+func TestSigner_Project_DeduplicatesEntitlements(t *testing.T) {
+	s := testSigner(t)
+	p, err := s.Project(jwt.MapClaims{
+		"sub":          "alice",
+		"entitlements": []string{"pages::read", "functions::read", "pages::read", "vector_stores:system:read", "vector_stores:system:read"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pages::read", "functions::read", "vector_stores:system:read"}, p["entitlements"])
+}
+
+// TestSigner_Project_DeduplicatesAfterMapperMerge pins dedup on the PRODUCTION
+// path: the vs_entitlements->entitlements claimMapping concat can reintroduce a
+// grant already present in the role set; the result must still be deduped. Also
+// verifies the []any / CEL mapper-output shape is handled.
+func TestSigner_Project_DeduplicatesAfterMapperMerge(t *testing.T) {
+	kp, err := keys.LoadKeyFromPEM([]byte(`-----BEGIN PRIVATE KEY-----
+KID: kdex-dev-1769451504
+
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXufwXet+BRiqMQDn
+7lWcoIgz6AVTAKOOJXlOz8JfxR2hRANCAASq6yLdpv9BkUW8SumvAkl+13QaAFDY
+L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
+-----END PRIVATE KEY-----`))
+	require.NoError(t, err)
+	mapper, err := dmapper.NewMapper([]dmapper.MappingRule{{
+		SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.vs_entitlements) ? self.vs_entitlements : [])`,
+		TargetPropPath:   "entitlements",
+	}})
+	require.NoError(t, err)
+	s, err := sign.NewSigner("aud-test", time.Minute, "iss-test", &kp.Private, "kid-test", mapper)
+	require.NoError(t, err)
+
+	p, err := s.Project(jwt.MapClaims{
+		"sub":             "alice",
+		"entitlements":    []any{"vector_stores:vs_a:all", "functions::read"},
+		"vs_entitlements": []any{"vector_stores:vs_a:all", "vector_stores:vs_b:read"}, // vs_a:all duplicates a role grant
+	})
+	require.NoError(t, err)
+
+	// Flatten to strings regardless of []any/[]string and assert no dup + all present.
+	got := map[string]int{}
+	switch list := p["entitlements"].(type) {
+	case []any:
+		for _, e := range list {
+			got[e.(string)]++
+		}
+	case []string:
+		for _, e := range list {
+			got[e]++
+		}
+	default:
+		t.Fatalf("unexpected entitlements type %T", p["entitlements"])
+	}
+	assert.Equal(t, 1, got["vector_stores:vs_a:all"], "the grant present in BOTH role and vs sets must appear once")
+	assert.Equal(t, 1, got["functions::read"])
+	assert.Equal(t, 1, got["vector_stores:vs_b:read"])
+}
