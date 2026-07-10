@@ -17,7 +17,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// lookupLog is a dedicated logger for what the configured Lookup impls resolve
+// for a subject (login identity + password-less backend claims). It sits after
+// the lookup loops so it reflects ANY wired impl (http/ldap/secret). Enable with
+// --named-log-level=lookup=2.
+var lookupLog = logf.Log.WithName("lookup")
 
 type Lookup interface {
 	FindInternal(subject string, password string) (bool, jwt.MapClaims, error)
@@ -122,6 +129,11 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 		}
 	}
 
+	// Diagnostic: the claims the wired lookup resolved for this subject at login
+	// (identity + backend claims like vs_entitlements), before roles are merged.
+	// nil ⇒ no lookup matched. See kdex-tech/host-manager#138.
+	lookupLog.V(2).Info("login lookup resolved", "subject", subject, "claims", localIdentity)
+
 	if localIdentity == nil {
 		return nil, fmt.Errorf("invalid credentials '%s'", subject)
 	}
@@ -170,6 +182,10 @@ func (rp *scopeProvider) ResolveClaims(subject string) jwt.MapClaims {
 			}
 		}
 	}
+	// Diagnostic: the merged backend claims (e.g. vs_entitlements) the wired
+	// lookup(s) resolved for this subject on the token-bridge path, before they
+	// reach ClaimMappings. nil ⇒ no lookup supplied any. See #138.
+	lookupLog.V(2).Info("subject claims resolved", "subject", subject, "claims", merged)
 	return merged
 }
 
