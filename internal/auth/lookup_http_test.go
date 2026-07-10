@@ -341,3 +341,80 @@ func TestHTTPLookupSecretType_Constant(t *testing.T) {
 			HTTPLookupSecretType, "http-lookup-auth")
 	}
 }
+
+// TestHTTPLookup_ResolveClaims_Success verifies the password-less subject->claims
+// resolve (#138): POSTs {subject} with the same HMAC contract as FindInternal and
+// returns the backend {claims}.
+func TestHTTPLookup_ResolveClaims_Success(t *testing.T) {
+	var gotBody []byte
+	var gotTS, gotSig string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotTS = r.Header.Get("X-K-CNAS-Lookup-Timestamp")
+		gotSig = r.Header.Get("X-K-CNAS-Lookup-Signature")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"claims":{"vs_entitlements":["vector_stores:vs_bob:all"]}}`))
+	}))
+	defer srv.Close()
+
+	secret := []byte("12345678901234567890123456789012")
+	sec := makeHTTPLookupSecret(t, "http://unused/v1/credential-check", "2000", secret)
+	sec.Data["resolve-url"] = []byte(srv.URL)
+	lookup, err := NewHTTPLookup(sec)
+	if err != nil {
+		t.Fatalf("NewHTTPLookup: %v", err)
+	}
+
+	claims, err := lookup.ResolveClaims("alice@example.com")
+	if err != nil {
+		t.Fatalf("ResolveClaims: %v", err)
+	}
+	ents, _ := claims["vs_entitlements"].([]any)
+	if len(ents) != 1 || ents[0] != "vector_stores:vs_bob:all" {
+		t.Errorf("vs_entitlements = %v; want [vector_stores:vs_bob:all]", claims["vs_entitlements"])
+	}
+	if !strings.Contains(string(gotBody), `"subject":"alice@example.com"`) {
+		t.Errorf("request body = %s; want a subject-only body", gotBody)
+	}
+	if gotTS == "" || gotSig == "" {
+		t.Errorf("resolve request must carry HMAC headers; ts=%q sig=%q", gotTS, gotSig)
+	}
+}
+
+// TestHTTPLookup_ResolveClaims_NoResolveURL_NoOp verifies the feature is inert
+// (no HTTP call, nil claims) when the Secret omits data.resolve-url.
+func TestHTTPLookup_ResolveClaims_NoResolveURL_NoOp(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	sec := makeHTTPLookupSecret(t, srv.URL, "2000", make([]byte, 32)) // no resolve-url
+	lookup, _ := NewHTTPLookup(sec)
+
+	claims, err := lookup.ResolveClaims("alice@example.com")
+	if err != nil || claims != nil {
+		t.Errorf("ResolveClaims with no resolve-url = (%v, %v); want (nil, nil)", claims, err)
+	}
+	if called {
+		t.Error("no HTTP call must be made when resolve-url is unset")
+	}
+}
+
+// TestHTTPLookup_ResolveClaims_5xx surfaces a backend error (fail-open is the
+// caller's job, not the client's).
+func TestHTTPLookup_ResolveClaims_5xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sec := makeHTTPLookupSecret(t, "http://unused", "2000", make([]byte, 32))
+	sec.Data["resolve-url"] = []byte(srv.URL)
+	lookup, _ := NewHTTPLookup(sec)
+
+	if _, err := lookup.ResolveClaims("alice@example.com"); err == nil {
+		t.Error("ResolveClaims must return an error on 5xx")
+	}
+}

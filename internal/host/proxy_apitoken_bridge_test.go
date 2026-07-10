@@ -39,8 +39,9 @@ import (
 // stubInternalIdentityProvider resolves any subject to a fixed set of roles
 // and entitlements, standing in for the cluster-backed scopeProvider.
 type stubInternalIdentityProvider struct {
-	roles []string
-	ents  []string
+	roles    []string
+	ents     []string
+	resolved jwt.MapClaims // #138: fresh-resolved backend claims (e.g. vs_entitlements)
 }
 
 func (s stubInternalIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
@@ -49,6 +50,12 @@ func (s stubInternalIdentityProvider) FindInternal(string, string) (jwt.MapClaim
 
 func (s stubInternalIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
 	return s.roles, s.ents, nil
+}
+
+// ResolveClaims lets the stub satisfy the Exchanger's optional resolve capability
+// (#138), standing in for the cluster-backed scopeProvider's Lookup resolve.
+func (s stubInternalIdentityProvider) ResolveClaims(string) jwt.MapClaims {
+	return s.resolved
 }
 
 const apitokenBridgeHostAudience = "https://api-host.example.com"

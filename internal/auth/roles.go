@@ -21,6 +21,12 @@ import (
 
 type Lookup interface {
 	FindInternal(subject string, password string) (bool, jwt.MapClaims, error)
+	// ResolveClaims returns a subject's backend claims (e.g. vs_entitlements)
+	// WITHOUT a credential check — a password-less lookup the token bridge uses
+	// to re-resolve data-driven grants fresh at request time. Returns
+	// (nil, nil) when this lookup supplies no such claims. See
+	// kdex-tech/host-manager#138.
+	ResolveClaims(subject string) (jwt.MapClaims, error)
 	Type() string
 }
 
@@ -138,6 +144,33 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 func (rp *scopeProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
 	roles := rp.resolveRoles(subject)
 	return roles, rp.collectEntitlements(roles), nil
+}
+
+// ResolveClaims resolves a subject's backend Lookup claims (e.g.
+// vs_entitlements) fresh and password-lessly by asking each configured Lookup,
+// merging their results (first writer wins per key). Fail-open: a lookup error
+// contributes nothing (never MORE than the subject holds). Returns nil when no
+// lookup supplies any claims. See kdex-tech/host-manager#138.
+func (rp *scopeProvider) ResolveClaims(subject string) jwt.MapClaims {
+	if subject == "" {
+		return nil
+	}
+	var merged jwt.MapClaims
+	for _, lookup := range rp.lookups {
+		claims, err := lookup.ResolveClaims(subject)
+		if err != nil || len(claims) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = jwt.MapClaims{}
+		}
+		for k, v := range claims {
+			if _, exists := merged[k]; !exists {
+				merged[k] = v
+			}
+		}
+	}
+	return merged
 }
 
 func (rp *scopeProvider) collectRoles() (*kdexv1alpha1.KDexRoleList, error) {
@@ -343,6 +376,11 @@ func (ll *ldapLookup) Type() string {
 	return "ldap"
 }
 
+// ResolveClaims: LDAP supplies no data-driven backend claims. See #138.
+func (ll *ldapLookup) ResolveClaims(string) (jwt.MapClaims, error) {
+	return nil, nil
+}
+
 type secretLookup struct {
 	secrets kdexv1alpha1.Secrets
 }
@@ -413,6 +451,12 @@ func (sl *secretLookup) FindInternal(subject string, password string) (bool, jwt
 }
 func (sl *secretLookup) Type() string {
 	return "secret"
+}
+
+// ResolveClaims: the Secret-backed subject store supplies no data-driven
+// backend claims. See #138.
+func (sl *secretLookup) ResolveClaims(string) (jwt.MapClaims, error) {
+	return nil, nil
 }
 
 // FormatADGUID converts the raw binary objectGUID from AD into a standard UUID string.

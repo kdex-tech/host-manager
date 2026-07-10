@@ -46,9 +46,19 @@ type Exchanger struct {
 	// JTI signals replay (or expiry) and the redemption is rejected. See
 	// kdex-tech/host-manager#65 (RFC 6749 §10.5 single-use requirement).
 	authCodeCache cache.Cache
-	maxSessionAge time.Duration
-	sp            InternalIdentityProvider
+	// subjectResolveCache briefly memoizes the password-less backend claim
+	// resolve (vs_entitlements) the token bridge does per request, so a burst of
+	// PAT/OAuth calls from one subject doesn't hit the backend every time. Short
+	// TTL keeps grants fresh (the point of #138). Keyed by subject.
+	subjectResolveCache cache.Cache
+	maxSessionAge       time.Duration
+	sp                  InternalIdentityProvider
 }
+
+// subjectResolveCacheTTL bounds how stale a bridged caller's re-resolved backend
+// claims can be. Short by design — the whole point of the fresh resolve is that
+// a membership change reflects quickly (unlike a login-time snapshot).
+const subjectResolveCacheTTL = 60 * time.Second
 
 // authCodeTTL is the upper bound on how long an unredeemed authorization
 // code remains valid. Slightly longer than the 10-minute default Exp on
@@ -99,6 +109,12 @@ func NewExchanger(
 			TTL:      &ttl,
 			Uncycled: true,
 		})
+		// Short-lived memoization of the token-bridge backend claim resolve. See #138.
+		srTTL := subjectResolveCacheTTL
+		ex.subjectResolveCache = cacheManager.GetCache("subject-resolve", cache.CacheOptions{
+			TTL:      &srTTL,
+			Uncycled: true,
+		})
 	}
 
 	if cfg.IsOIDCEnabled() {
@@ -141,6 +157,42 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 		return nil, nil, nil
 	}
 	return e.sp.FindInternalRolesAndEntitlements(subject)
+}
+
+// ResolveSubjectClaims resolves a subject's data-driven backend claims (e.g.
+// vs_entitlements) FRESH and password-lessly for the token bridge, memoized for
+// a short window to bound backend load. Returns nil when the identity provider
+// can't resolve them (e.g. no http-lookup resolve endpoint wired), so the bridge
+// degrades to role-only entitlements. See kdex-tech/host-manager#138.
+func (e *Exchanger) ResolveSubjectClaims(subject string) jwt.MapClaims {
+	if e == nil || subject == "" {
+		return nil
+	}
+	if e.subjectResolveCache != nil {
+		if raw, found, _, err := e.subjectResolveCache.Get(context.Background(), subject); err == nil && found && raw != "" {
+			var claims jwt.MapClaims
+			if json.Unmarshal([]byte(raw), &claims) == nil {
+				return claims
+			}
+		}
+	}
+	// Optional capability: only the cluster-backed scopeProvider resolves
+	// backend claims. Test stubs and other providers simply don't, so the
+	// bridge gets nil (role-only) without every InternalIdentityProvider having
+	// to implement it.
+	resolver, ok := e.sp.(interface {
+		ResolveClaims(string) jwt.MapClaims
+	})
+	if !ok {
+		return nil
+	}
+	claims := resolver.ResolveClaims(subject)
+	if e.subjectResolveCache != nil && len(claims) > 0 {
+		if payload, err := json.Marshal(claims); err == nil {
+			_ = e.subjectResolveCache.Set(context.Background(), subject, string(payload))
+		}
+	}
+	return claims
 }
 
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected

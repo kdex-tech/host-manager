@@ -25,7 +25,12 @@ const (
 )
 
 type httpLookup struct {
-	url          string
+	url string
+	// resolveURL is the optional password-less subject->claims endpoint used by
+	// ResolveClaims (kdex-tech/host-manager#138). Empty when the Secret omits
+	// data.resolve-url — the token bridge then simply gets no fresh backend
+	// claims (no regression). See resolve-entitlements in user-credential-check.
+	resolveURL   string
 	sharedSecret []byte
 	timeout      time.Duration
 	client       *http.Client
@@ -71,10 +76,66 @@ func NewHTTPLookup(secret corev1.Secret) (*httpLookup, error) {
 
 	return &httpLookup{
 		url:          url,
+		resolveURL:   string(secret.Data["resolve-url"]),
 		sharedSecret: sharedSecret,
 		timeout:      timeout,
 		client:       &http.Client{Timeout: timeout},
 	}, nil
+}
+
+type resolveClaimsResponse struct {
+	Claims map[string]any `json:"claims,omitempty"`
+}
+
+// ResolveClaims performs a password-less, subject-only lookup of the subject's
+// backend claims (e.g. vs_entitlements) against resolveURL, signed with the same
+// HMAC contract as FindInternal. Returns (nil, nil) when resolveURL is not
+// configured, so a host without the endpoint wired simply gets no fresh backend
+// claims. See kdex-tech/host-manager#138.
+func (hl *httpLookup) ResolveClaims(subject string) (jwt.MapClaims, error) {
+	if hl.resolveURL == "" || subject == "" {
+		return nil, nil
+	}
+
+	body, err := json.Marshal(struct {
+		Subject string `json:"subject"`
+	}{Subject: subject})
+	if err != nil {
+		return nil, fmt.Errorf("httpLookup: marshal resolve request: %w", err)
+	}
+
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	sig := computeSignature(hl.sharedSecret, ts, body)
+
+	ctx, cancel := context.WithTimeout(context.Background(), hl.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hl.resolveURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("httpLookup: build resolve request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-K-CNAS-Lookup-Timestamp", ts)
+	req.Header.Set("X-K-CNAS-Lookup-Signature", sig)
+
+	resp, err := hl.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("httpLookup: resolve request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("httpLookup: resolve returned status %d", resp.StatusCode)
+	}
+
+	var parsed resolveClaimsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("httpLookup: decode resolve response: %w", err)
+	}
+	if len(parsed.Claims) == 0 {
+		return nil, nil
+	}
+	return jwt.MapClaims(parsed.Claims), nil
 }
 
 func (hl *httpLookup) Type() string {
