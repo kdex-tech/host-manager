@@ -2,6 +2,7 @@ package sign_test
 
 import (
 	"crypto"
+	"maps"
 	"testing"
 	"time"
 
@@ -27,6 +28,26 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 -----END PRIVATE KEY-----`))
 	require.NoError(t, err)
 	s, err := sign.NewSigner("aud-test", time.Minute, "iss-test", &kp.Private, "kid-test", &dmapper.Mapper{})
+	require.NoError(t, err)
+	return s
+}
+
+// testSignerWithMapper returns a Signer wired to the shared test key plus a real
+// dmapper built from rules — used by confinement tests that must exercise the
+// mapper running inside Project.
+func testSignerWithMapper(t *testing.T, rules []dmapper.MappingRule) *sign.Signer {
+	t.Helper()
+	kp, err := keys.LoadKeyFromPEM([]byte(`-----BEGIN PRIVATE KEY-----
+KID: kdex-dev-1769451504
+
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXufwXet+BRiqMQDn
+7lWcoIgz6AVTAKOOJXlOz8JfxR2hRANCAASq6yLdpv9BkUW8SumvAkl+13QaAFDY
+L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
+-----END PRIVATE KEY-----`))
+	require.NoError(t, err)
+	mapper, err := dmapper.NewMapper(rules)
+	require.NoError(t, err)
+	s, err := sign.NewSigner("aud-test", time.Minute, "iss-test", &kp.Private, "kid-test", mapper)
 	require.NoError(t, err)
 	return s
 }
@@ -318,6 +339,72 @@ func TestSigner_Project_DeduplicatesEntitlements(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"pages::read", "functions::read", "vector_stores:system:read"}, p["entitlements"])
+}
+
+// TestSigner_Project_CompactsDominatedEntitlements pins that Project reduces the
+// entitlements claim with entitlements.Compact (lossless, Dominates-defined) —
+// a strictly dominated grant (pages:home:read under pages:*:read) is dropped,
+// which the old exact-dup dedup left in place. First-seen order preserved.
+// See kdex-tech/host-manager#140.
+func TestSigner_Project_CompactsDominatedEntitlements(t *testing.T) {
+	s := testSigner(t)
+	p, err := s.Project(jwt.MapClaims{
+		"sub":          "alice",
+		"entitlements": []string{"pages:*:read", "pages:home:read", "functions::read"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pages:*:read", "functions::read"}, p["entitlements"])
+}
+
+// TestSigner_SignScoped_ConfinesScopeControlledClaims pins that SignScoped
+// strips scope-controlled claim families absent from grantedScopes AFTER the
+// mapper runs. The mapper here injects into entitlements from an arbitrary,
+// NON-vs_entitlements source claim (custom_grants) — proving confinement is
+// generic over any ClaimMappings effect, not coupled to a known source claim.
+// See kdex-tech/host-manager#140.
+func TestSigner_SignScoped_ConfinesScopeControlledClaims(t *testing.T) {
+	s := testSignerWithMapper(t, []dmapper.MappingRule{{
+		SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.custom_grants) ? self.custom_grants : [])`,
+		TargetPropPath:   "entitlements",
+	}})
+
+	base := jwt.MapClaims{
+		"sub":           "alice",
+		"email":         "alice@example.com",
+		"name":          "Alice",
+		"roles":         []string{"admin"},
+		"entitlements":  []any{"functions::read"},
+		"custom_grants": []any{"vector_stores:vs_a:all"},
+	}
+
+	tests := []struct {
+		name          string
+		grantedScopes []string
+		present       map[string]bool // claim -> expected present in signed token
+	}{
+		{"entitlements denied strips mapper-injected grant", []string{"openid"},
+			map[string]bool{"entitlements": false, "email": false, "roles": false, "name": false}},
+		{"entitlements granted keeps grant", []string{"openid", "entitlements"},
+			map[string]bool{"entitlements": true}},
+		{"email+roles granted, entitlements denied", []string{"email", "roles"},
+			map[string]bool{"email": true, "roles": true, "entitlements": false}},
+		{"profile granted keeps name", []string{"profile"},
+			map[string]bool{"name": true, "entitlements": false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := maps.Clone(base)
+			tok, err := s.SignScoped(c, tt.grantedScopes)
+			require.NoError(t, err)
+			parsed, _, err := jwt.NewParser(jwt.WithoutClaimsValidation()).ParseUnverified(tok, jwt.MapClaims{})
+			require.NoError(t, err)
+			claims := parsed.Claims.(jwt.MapClaims)
+			for claim, want := range tt.present {
+				_, got := claims[claim]
+				assert.Equalf(t, want, got, "claim %q present=%v want=%v", claim, got, want)
+			}
+		})
+	}
 }
 
 // TestSigner_Project_DeduplicatesAfterMapperMerge pins dedup on the PRODUCTION

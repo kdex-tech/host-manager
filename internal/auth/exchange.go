@@ -475,70 +475,16 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		return TokenSet{}, fmt.Errorf("unsupported local login auth method: %s", authMethod)
 	}
 
-	// Determine granted scopes and filter claims
-	requestedScopes := strings.Split(scope, " ")
-	if scope == "" {
-		// Default scopes for local login if none requested
-		requestedScopes = []string{"email", "entitlements", "openid", "profile", "roles"}
-	}
-
-	grantedScopes := []string{}
-	hasScope := func(s string) bool {
-		return slices.Contains(requestedScopes, s)
-	}
-
-	// openid scope
-	if hasScope("openid") {
-		grantedScopes = append(grantedScopes, "openid")
-	}
-
-	// email scope
-	if hasScope("email") {
-		grantedScopes = append(grantedScopes, "email")
-	} else {
-		delete(signingContext, "email")
-	}
-
-	// profile scope
-	if hasScope("profile") {
-		grantedScopes = append(grantedScopes, "profile")
-	} else {
-		delete(signingContext, "family_name")
-		delete(signingContext, "given_name")
-		delete(signingContext, "middle_name")
-		delete(signingContext, "name")
-		delete(signingContext, "nickname")
-		delete(signingContext, "picture")
-		delete(signingContext, "updated_at")
-	}
-
-	// entitlements and roles
-	if hasScope("entitlements") {
-		grantedScopes = append(grantedScopes, "entitlements")
-	} else {
-		delete(signingContext, "entitlements")
-	}
-	if hasScope("roles") {
-		grantedScopes = append(grantedScopes, "roles")
-	} else {
-		delete(signingContext, "roles")
-	}
-
-	// Map any remaining identity scopes
-	if sc, ok := signingContext["scope"].(string); ok && sc != "" {
-		for s := range strings.SplitSeq(sc, " ") {
-			if !slices.Contains(grantedScopes, s) {
-				grantedScopes = append(grantedScopes, s)
-			}
-		}
-	}
-
+	// Determine granted scopes; claim confinement of the scope-controlled
+	// families (email/profile/entitlements/roles) happens post-mapper in
+	// SignScoped, so it holds regardless of what ClaimMappings injected — this
+	// also closes the latent leak the old pre-mapper strip had. Default to the
+	// full identity set when the client requested no scope (local-login default).
+	grantedScopes := applyScopeFilter(signingContext, scope,
+		[]string{"email", "entitlements", "openid", "profile", "roles"})
 	grantedScopeStr := strings.Join(grantedScopes, " ")
-	if grantedScopeStr != "" {
-		signingContext["scope"] = grantedScopeStr
-	}
 
-	accessToken, err := e.config.Signer.Sign(signingContext)
+	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
 	}
@@ -549,7 +495,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		maps.Copy(idTokenContext, signingContext)
 		idTokenContext["aud"] = clientID
 		delete(idTokenContext, "scope")
-		idToken, err = e.config.Signer.Sign(idTokenContext)
+		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
 			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
 		}
@@ -822,69 +768,98 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 
 // mintTokensFromCode mints access + id tokens from the claims carried in an authorization code.
 // It also creates a refresh token if storage is configured.
+// subjectSigningContext resolves the full authorization context for a subject
+// used by the non-password subject mints (authorization_code, refresh_token):
+// the static KDexRole-derived roles/entitlements PLUS the fresh data-driven
+// backend claims (e.g. vs_entitlements) that only the credential backend knows.
+// Folding the backend claims into the PRIMARY mint — upstream of every
+// attenuation point — is what lets an OAuth/MCP access token (and everything
+// attenuated from it: FAT, mint_token, scope down-scope) carry per-subject
+// grants. Password login (LoginLocal) receives the same set for free from
+// FindInternal's credential Lookup, so it does not use this. A nil/failed
+// resolve degrades to role-only (never more). See kdex-tech/host-manager#140.
+func (e *Exchanger) subjectSigningContext(subject string) (roles, entitlements []string, backend jwt.MapClaims, err error) {
+	roles, entitlements, err = e.sp.FindInternalRolesAndEntitlements(subject)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return roles, entitlements, e.ResolveSubjectClaims(subject), nil
+}
+
+// mergeBackendClaims folds a subject's data-driven backend claims into the
+// signing context without overwriting anything already set. The subsequent
+// Project runs the host ClaimMappings over the enriched context; this code
+// never names a specific backend claim — vs_entitlements is only today's
+// instance of a mapper input. See kdex-tech/host-manager#140.
+func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
+	for k, v := range backend {
+		if _, exists := signingContext[k]; !exists {
+			signingContext[k] = v
+		}
+	}
+}
+
+// applyScopeFilter computes the granted OAuth scope set for a mint and records
+// it in signingContext["scope"]; it does NOT strip claims. Confinement of the
+// scope-controlled claim families (email/profile/entitlements/roles) happens
+// post-mapper in Signer.SignScoped, so it holds regardless of what ClaimMappings
+// injected. The granted set is the intersection of the requested scopes (or
+// defaultScopes when none was requested) with the known families, plus any other
+// requested scope passed through, plus any identity scopes the resolver already
+// placed on the context (LoginLocal's FindInternal supplies these; code/refresh
+// have none). openid is returned so the caller can decide id_token issuance.
+// See kdex-tech/host-manager#140, #80.
+func applyScopeFilter(signingContext jwt.MapClaims, requestedScope string, defaultScopes []string) []string {
+	requested := strings.Fields(requestedScope)
+	if len(requested) == 0 && len(defaultScopes) > 0 {
+		requested = defaultScopes
+	}
+	granted := []string{}
+	for _, known := range []string{"openid", "email", "profile", "entitlements", "roles"} {
+		if slices.Contains(requested, known) {
+			granted = append(granted, known)
+		}
+	}
+	for _, s := range requested {
+		if s != "" && !slices.Contains(granted, s) {
+			granted = append(granted, s)
+		}
+	}
+	if existing, ok := signingContext["scope"].(string); ok {
+		for s := range strings.FieldsSeq(existing) {
+			if !slices.Contains(granted, s) {
+				granted = append(granted, s)
+			}
+		}
+	}
+	if len(granted) > 0 {
+		signingContext["scope"] = strings.Join(granted, " ")
+	}
+	return granted
+}
+
 func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims AuthorizationCodeClaims) (TokenSet, error) {
-	signingContext := jwt.MapClaims{}
-
-	signingContext["sub"] = claims.Subject
-	signingContext["auth_method"] = claims.AuthMethod
-
-	// Resolve Roles/Entitlements fresh.
-	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(claims.Subject)
+	// Resolve the subject's static roles/entitlements AND fresh data-driven
+	// backend claims, then fold both into the signing context pre-attenuation
+	// (#140). Scope confinement of entitlements/roles happens post-mapper in
+	// SignScoped, so a ClaimMappings-injected grant is governed by scope too.
+	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to resolve roles: %w", err)
 	}
-	signingContext["roles"] = roles
-	signingContext["entitlements"] = entitlements
 
-	// Handle Scopes
-	requestedScopes := strings.Split(claims.Scope, " ")
-	grantedScopes := []string{}
-	hasScope := func(s string) bool {
-		return slices.Contains(requestedScopes, s)
+	signingContext := jwt.MapClaims{
+		"sub":          claims.Subject,
+		"auth_method":  claims.AuthMethod,
+		"roles":        roles,
+		"entitlements": entitlements,
 	}
+	mergeBackendClaims(signingContext, backend)
 
-	if hasScope("openid") {
-		grantedScopes = append(grantedScopes, "openid")
-	}
-	if hasScope("email") {
-		grantedScopes = append(grantedScopes, "email")
-	}
-	if hasScope("profile") {
-		grantedScopes = append(grantedScopes, "profile")
-	}
-	// Mirror mintTokensFromSubject: when the client did not request the
-	// entitlements or roles scope, strip those claims from the signing
-	// context so the access-token JWT doesn't leak them. Pre-fix
-	// mintTokensFromCode set both claims unconditionally and the scope
-	// claim disagreed with the claims actually present — downstream
-	// consumers trusting either side reached different access
-	// decisions, and the same session lost the leaked claims after the
-	// first refresh (since mintTokensFromSubject filters correctly).
-	// See kdex-tech/host-manager#80.
-	if hasScope("entitlements") {
-		grantedScopes = append(grantedScopes, "entitlements")
-	} else {
-		delete(signingContext, "entitlements")
-	}
-	if hasScope("roles") {
-		grantedScopes = append(grantedScopes, "roles")
-	} else {
-		delete(signingContext, "roles")
-	}
-
-	// Pass through any other requested scopes.
-	for _, s := range requestedScopes {
-		if !slices.Contains(grantedScopes, s) && s != "" {
-			grantedScopes = append(grantedScopes, s)
-		}
-	}
-
+	grantedScopes := applyScopeFilter(signingContext, claims.Scope, nil)
 	grantedScopeStr := strings.Join(grantedScopes, " ")
-	if grantedScopeStr != "" {
-		signingContext["scope"] = grantedScopeStr
-	}
 
-	accessToken, err := e.config.Signer.Sign(signingContext)
+	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
 	}
@@ -895,7 +870,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		maps.Copy(idTokenContext, signingContext)
 		idTokenContext["aud"] = claims.ClientID
 		delete(idTokenContext, "scope")
-		idToken, err = e.config.Signer.Sign(idTokenContext)
+		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
 			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
 		}
@@ -926,7 +901,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 // mintTokensFromSubject re-mints tokens for a known-authenticated subject (used by the refresh flow).
 // It re-resolves roles/entitlements to ensure freshness.
 func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod) (TokenSet, error) {
-	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(subject)
+	roles, entitlements, backend, err := e.subjectSigningContext(subject)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to resolve roles: %w", err)
 	}
@@ -937,42 +912,12 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		"roles":        roles,
 		"sub":          subject,
 	}
+	mergeBackendClaims(signingContext, backend)
 
-	requestedScopes := strings.Split(scope, " ")
-	grantedScopes := []string{}
-	hasScope := func(s string) bool { return slices.Contains(requestedScopes, s) }
-
-	if hasScope("openid") {
-		grantedScopes = append(grantedScopes, "openid")
-	}
-	if hasScope("email") {
-		grantedScopes = append(grantedScopes, "email")
-	}
-	if hasScope("profile") {
-		grantedScopes = append(grantedScopes, "profile")
-	}
-	if hasScope("entitlements") {
-		grantedScopes = append(grantedScopes, "entitlements")
-	} else {
-		delete(signingContext, "entitlements")
-	}
-	if hasScope("roles") {
-		grantedScopes = append(grantedScopes, "roles")
-	} else {
-		delete(signingContext, "roles")
-	}
-	for _, s := range requestedScopes {
-		if s != "" && !slices.Contains(grantedScopes, s) {
-			grantedScopes = append(grantedScopes, s)
-		}
-	}
-
+	grantedScopes := applyScopeFilter(signingContext, scope, nil)
 	grantedScope := strings.Join(grantedScopes, " ")
-	if grantedScope != "" {
-		signingContext["scope"] = grantedScope
-	}
 
-	accessToken, err := e.config.Signer.Sign(signingContext)
+	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
 	}
@@ -983,7 +928,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		maps.Copy(idCtx, signingContext)
 		idCtx["aud"] = clientID
 		delete(idCtx, "scope")
-		idToken, err = e.config.Signer.Sign(idCtx)
+		idToken, err = e.config.Signer.SignScoped(idCtx, grantedScopes)
 		if err != nil {
 			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
 		}
