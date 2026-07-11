@@ -195,8 +195,16 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 						SameSite: http.SameSiteLaxMode,
 					})
 
-					// Redirect to root
-					http.Redirect(w, r, "/", http.StatusSeeOther)
+					// Treat an unparseable/expired cookie the same as NO cookie:
+					// the stale cookies are cleared above, then continue
+					// anonymously so the wrapped handler decides the right
+					// response — /-/oauth/authorize -> /-/login?return=<authorize
+					// URL>, a gated page -> its own login redirect, a public page
+					// -> render. Previously this hard-redirected to "/", which for
+					// the OAuth/MCP authorize endpoint dropped the in-flight
+					// authorize request (client_id/redirect_uri/state/…) and
+					// bounced the user to root instead of login. See #141.
+					next.ServeHTTP(w, r)
 					return
 				}
 

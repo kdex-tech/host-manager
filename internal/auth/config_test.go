@@ -534,6 +534,17 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 	}
 }
 
+// authCookieCleared reports whether the response clears the named cookie
+// (Max-Age < 0), i.e. the middleware invalidated a stale session cookie.
+func authCookieCleared(w *httptest.ResponseRecorder, name string) bool {
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == name && ck.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConfig_AddAuthentication(t *testing.T) {
 	logf.SetLogger(zap.New(zap.WriteTo(t.Output()), zap.UseDevMode(true)))
 
@@ -662,8 +673,11 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 				r.Header.Set(COOKIE, "auth_token=foo")
 				handler.ServeHTTP(w, r)
-				assert.Equal(t, 303, w.Code)
-				assert.Contains(t, w.Body.String(), "See Other")
+				// An unparseable cookie is treated like NO cookie: cleared and
+				// passed through anonymously so the wrapped handler decides. The
+				// old behavior hard-redirected to "/". See #141.
+				assert.Equal(t, 200, w.Code)
+				assert.True(t, authCookieCleared(w, "auth_token"), "invalid auth_token cookie must be cleared")
 			},
 		},
 		{
@@ -764,8 +778,52 @@ func TestConfig_AddAuthentication(t *testing.T) {
 
 				r.Header.Set(COOKIE, "auth_token="+token)
 				handler.ServeHTTP(w, r)
-				assert.Equal(t, 303, w.Code)
-				assert.Contains(t, w.Body.String(), "See Other")
+				// Expired cookie -> cleared + anonymous fall-through (was 303 -> "/"). See #141.
+				assert.Equal(t, 200, w.Code)
+				assert.True(t, authCookieCleared(w, "auth_token"), "expired auth_token cookie must be cleared")
+			},
+		},
+		{
+			name: "authentication - #141 expired cookie lets authorize redirect to login not root",
+			args: testargs{
+				c: nil,
+				auth: &kdexv1alpha1.Auth{
+					ClaimMappings: []dmapper.MappingRule{
+						{SourceExpression: "-1", TargetPropPath: "exp", Required: true},
+					},
+				},
+				namespace: "foo",
+				devMode:   true,
+			},
+			assertions: func(t *testing.T, got *Config, gotErr error) {
+				mux := http.NewServeMux()
+				// Mimic AuthorizeHandler's anonymous branch: no auth context -> login.
+				mux.Handle("GET /-/oauth/authorize", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if _, ok := GetAuthContext(r.Context()); !ok {
+						http.Redirect(w, r, "/-/login?return="+r.URL.RequestURI(), http.StatusSeeOther)
+						return
+					}
+					w.WriteHeader(200)
+				}))
+				handler := got.AddAuthentication(mux, nil)
+				w := httptest.NewRecorder()
+				r := httptest.NewRequest("GET", "/-/oauth/authorize?client_id=mcp&response_type=code", http.NoBody)
+
+				token, err := got.Signer.Sign(jwt.MapClaims{
+					"sub": "foo", "iss": got.Issuer, "aud": got.Audience,
+				})
+				assert.Nil(t, err)
+				r.Header.Set(COOKIE, "auth_token="+token) // expired via the exp=-1 mapping
+
+				handler.ServeHTTP(w, r)
+
+				// The stale cookie must NOT abort the OAuth flow to root; it must
+				// fall through so AuthorizeHandler redirects to login, preserving
+				// the in-flight authorize request. See #141.
+				assert.Equal(t, http.StatusSeeOther, w.Code)
+				loc := w.Header().Get("Location")
+				assert.Contains(t, loc, "/-/login", "expired cookie must not abort the OAuth flow to root")
+				assert.Contains(t, loc, "client_id=mcp", "the in-flight authorize request must be preserved")
 			},
 		},
 	}
