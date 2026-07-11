@@ -184,6 +184,44 @@ Requires bumping `github.com/kdex-tech/entitlements/go` `v0.2.1 → v0.3.0`.
 8. ATT-3: `Compact` Dominates round-trip on a dominated set.
 9. `LoginLocal` regression: default-scope behavior unchanged.
 
+## Review hardening (2026-07-11, post-implementation)
+
+A senior security review (two independent passes) confirmed the invariants above
+hold, but found one **Medium** scope-confinement regression the consolidation
+introduced: `applyScopeFilter` folded a context-supplied `scope` claim into the
+*granted* set, and `granted` drives `confineByScope` — so a `scope` claim coming
+from the authoritative user store (`ResolveClaims` for code/refresh via
+`mergeBackendClaims`; `FindInternal` for login) could materialize
+`entitlements`/`roles`/`email` the OAuth client never requested (authz flips
+deny→allow). Not exploitable with today's `vs_entitlements`-only backend, but a
+latent hole.
+
+**Resolution — reserved-claim boundary.** The authoritative user store may
+supplement any claim (`roles`, `entitlements`, `email`, `vs_entitlements`,
+custom) — that is the feature — EXCEPT a reserved set the mint/signer own:
+
+- auth-flow / identity: `scope`, `scp`, `sub`, `grant_type`, `auth_method`, `idp`
+- server mint-time: `iat`, `exp`, `jti`, `iss`, `aud`, `nbf`
+
+Enforced by `reservedMintClaims` in `internal/auth/exchange.go`:
+- `mergeBackendClaims` skips reserved keys (code/refresh backend supplement).
+- `LoginLocal` strips reserved keys (except `sub`, the resolved identity) from the
+  `FindInternal` result.
+- `applyScopeFilter` sets `scope` authoritatively (overwrites/clears any context
+  value) rather than merging it — closing the hijack for every path.
+
+**AMP-7 (new invariant):** the user store cannot set reserved claims; a
+backend-supplied `scope` cannot widen confinement, and `sub`/`idp`/`grant_type`/
+`exp` cannot be injected/rebound. Pinned by
+`TestMint_UserStoreCannotHijackReservedClaims` (per-path) + a "feature not
+castrated" case proving non-reserved supplements still flow.
+
+**Deferred (documented, not fixed here):** ClaimMappings *rule* output writing to
+reserved claims (operator-trusted config; also relied on by the `exp=-1`
+expired-token test technique — needs a separate mechanism); `confineByScope` not
+gating `scp`/`idp`/`grant_type` (now moot for the user-store vector, remains for
+host rules); `LoginClient`/OIDC `ExchangeToken` still on raw `Sign`.
+
 ## Risks
 
 - Moving confinement post-mapper changes behavior only in the previously-leaky

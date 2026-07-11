@@ -1108,6 +1108,85 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 	})
 }
 
+// TestMint_UserStoreCannotHijackReservedClaims pins the #140-review hardening:
+// the authoritative user store (ResolveClaims for code/refresh; FindInternal for
+// login) MAY supplement roles/entitlements/email/vs_entitlements/custom claims,
+// but MUST NOT set reserved auth-flow / identity / mint-time claims. In
+// particular a backend-supplied `scope` must never widen claim confinement, and
+// `sub`/`idp` must never rebind identity.
+func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("code: backend scope cannot materialize entitlements", func(t *testing.T) {
+		sp := &mockScopeProvider{
+			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
+			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"pages:*:admin"}, nil },
+			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"scope": "entitlements roles"} },
+		}
+		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
+		require.NoError(t, err)
+		_, present := tokenClaim(t, ts.AccessToken, "entitlements")
+		assert.False(t, present, "backend-supplied scope must not materialize entitlements the client did not request")
+	})
+
+	t.Run("login: FindInternal scope cannot materialize entitlements", func(t *testing.T) {
+		sp := &mockScopeProvider{
+			resolveIdentity: func(s, _ string) (jwt.MapClaims, error) {
+				return jwt.MapClaims{"sub": s, "scope": "entitlements", "entitlements": []string{"pages:*:admin"}}, nil
+			},
+			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, nil, nil },
+		}
+		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		ts, err := e.LoginLocal(ctx, "alice", "pw", "openid", "c", AuthMethodLocal)
+		require.NoError(t, err)
+		_, present := tokenClaim(t, ts.AccessToken, "entitlements")
+		assert.False(t, present, "identity-supplied scope must not materialize entitlements")
+	})
+
+	t.Run("backend cannot rebind sub or inject idp", func(t *testing.T) {
+		sp := &mockScopeProvider{
+			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
+			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"x:read"}, nil },
+			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"sub": "attacker", "idp": "evil", "grant_type": "hax"} },
+		}
+		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
+		require.NoError(t, err)
+		sub, _ := tokenClaim(t, ts.AccessToken, "sub")
+		assert.Equal(t, "alice", sub, "backend must not rebind sub")
+		_, idpPresent := tokenClaim(t, ts.AccessToken, "idp")
+		assert.False(t, idpPresent, "backend must not inject idp")
+		_, gtPresent := tokenClaim(t, ts.AccessToken, "grant_type")
+		assert.False(t, gtPresent, "backend must not inject grant_type")
+	})
+
+	t.Run("backend cannot extend token lifetime via exp", func(t *testing.T) {
+		sp := &mockScopeProvider{
+			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
+			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"x:read"}, nil },
+			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"exp": int64(9999999999)} },
+		}
+		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
+		require.NoError(t, err)
+		exp, _ := tokenClaim(t, ts.AccessToken, "exp")
+		assert.NotEqual(t, float64(9999999999), exp, "backend must not control exp (server mint-time value)")
+	})
+
+	t.Run("user store CAN supplement non-reserved claims (feature not castrated)", func(t *testing.T) {
+		sp := &mockScopeProvider{
+			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
+			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"functions:x:read"}, nil },
+			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"vs_entitlements": []any{"vector_stores:vs_Y:all"}} },
+		}
+		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "entitlements", ClientID: "c", AuthMethod: AuthMethodOAuth2})
+		require.NoError(t, err)
+		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "vector_stores:vs_Y:all", "non-reserved backend supplement must still flow through ClaimMappings")
+	})
+}
+
 // TestLoginLocal_ClosesLatentPostMapperLeak pins that password login also confines
 // entitlements post-mapper: with a claimMapping that folds a backend claim
 // (vs_entitlements, supplied by FindInternal) into entitlements, a login whose

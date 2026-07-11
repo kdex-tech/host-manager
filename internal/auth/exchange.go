@@ -466,6 +466,17 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		return TokenSet{}, err
 	}
 
+	// The credential store establishes identity (sub) but must not set reserved
+	// auth-flow / mint-time claims — strip them so a misbehaving backend cannot
+	// inject scope/scp/idp/grant_type/exp/… The mint sets auth_method (below) and
+	// scope (applyScopeFilter) authoritatively. See kdex-tech/host-manager#140.
+	for k := range reservedMintClaims {
+		if k == "sub" {
+			continue
+		}
+		delete(signingContext, k)
+	}
+
 	switch authMethod {
 	case AuthMethodLocal:
 		signingContext["auth_method"] = string(AuthMethodLocal)
@@ -786,29 +797,45 @@ func (e *Exchanger) subjectSigningContext(subject string) (roles, entitlements [
 	return roles, entitlements, e.ResolveSubjectClaims(subject), nil
 }
 
+// reservedMintClaims are claims the mint and signer control authoritatively; the
+// authoritative user store (ResolveClaims / FindInternal) and ClaimMappings may
+// supplement ANY other claim (roles, entitlements, email, vs_entitlements, custom
+// …) — that is the feature — but must never set these. They split into
+// auth-flow / identity claims (a backend-supplied `scope` would hijack scope
+// confinement, `sub`/`idp` would rebind identity) and server-controlled mint-time
+// values (`iat`/`exp`/`jti`/…). See kdex-tech/host-manager#140 (review hardening).
+var reservedMintClaims = map[string]struct{}{
+	"scope": {}, "scp": {}, "sub": {}, "grant_type": {}, "auth_method": {}, "idp": {},
+	"iat": {}, "exp": {}, "jti": {}, "iss": {}, "aud": {}, "nbf": {},
+}
+
 // mergeBackendClaims folds a subject's data-driven backend claims into the
-// signing context without overwriting anything already set. The subsequent
-// Project runs the host ClaimMappings over the enriched context; this code
-// never names a specific backend claim — vs_entitlements is only today's
-// instance of a mapper input. See kdex-tech/host-manager#140.
+// signing context, skipping reservedMintClaims and never overwriting a claim
+// already set. The subsequent Project runs the host ClaimMappings over the
+// enriched context; this code never names a specific backend claim —
+// vs_entitlements is only today's instance of a mapper input. See
+// kdex-tech/host-manager#140.
 func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
 	for k, v := range backend {
+		if _, reserved := reservedMintClaims[k]; reserved {
+			continue
+		}
 		if _, exists := signingContext[k]; !exists {
 			signingContext[k] = v
 		}
 	}
 }
 
-// applyScopeFilter computes the granted OAuth scope set for a mint and records
-// it in signingContext["scope"]; it does NOT strip claims. Confinement of the
-// scope-controlled claim families (email/profile/entitlements/roles) happens
-// post-mapper in Signer.SignScoped, so it holds regardless of what ClaimMappings
-// injected. The granted set is the intersection of the requested scopes (or
-// defaultScopes when none was requested) with the known families, plus any other
-// requested scope passed through, plus any identity scopes the resolver already
-// placed on the context (LoginLocal's FindInternal supplies these; code/refresh
-// have none). openid is returned so the caller can decide id_token issuance.
-// See kdex-tech/host-manager#140, #80.
+// applyScopeFilter computes the granted OAuth scope set for a mint from the
+// CLIENT-requested scopes (or defaultScopes when none was requested) and records
+// it authoritatively in signingContext["scope"]; it does NOT strip claims.
+// Confinement of the scope-controlled claim families (email/profile/entitlements/
+// roles) happens post-mapper in Signer.SignScoped, so it holds regardless of what
+// ClaimMappings injected. `scope` is a reserved, mint-controlled claim: this
+// OVERWRITES (or clears) any value a backend or identity store placed on the
+// context, so a user-store-supplied scope can never widen the granted set or the
+// advertised scope. openid is returned so the caller can decide id_token
+// issuance. See kdex-tech/host-manager#140, #80.
 func applyScopeFilter(signingContext jwt.MapClaims, requestedScope string, defaultScopes []string) []string {
 	requested := strings.Fields(requestedScope)
 	if len(requested) == 0 && len(defaultScopes) > 0 {
@@ -825,15 +852,10 @@ func applyScopeFilter(signingContext jwt.MapClaims, requestedScope string, defau
 			granted = append(granted, s)
 		}
 	}
-	if existing, ok := signingContext["scope"].(string); ok {
-		for s := range strings.FieldsSeq(existing) {
-			if !slices.Contains(granted, s) {
-				granted = append(granted, s)
-			}
-		}
-	}
 	if len(granted) > 0 {
 		signingContext["scope"] = strings.Join(granted, " ")
+	} else {
+		delete(signingContext, "scope")
 	}
 	return granted
 }
