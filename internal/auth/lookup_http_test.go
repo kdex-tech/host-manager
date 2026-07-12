@@ -353,7 +353,7 @@ func TestHTTPLookup_ResolveClaims_Success(t *testing.T) {
 		gotTS = r.Header.Get("X-K-CNAS-Lookup-Timestamp")
 		gotSig = r.Header.Get("X-K-CNAS-Lookup-Signature")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"claims":{"vs_entitlements":["vector_stores:vs_bob:all"]}}`))
+		_, _ = w.Write([]byte(`{"claims":{"extra_grants":["resource:r1:all"]}}`))
 	}))
 	defer srv.Close()
 
@@ -369,9 +369,9 @@ func TestHTTPLookup_ResolveClaims_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveClaims: %v", err)
 	}
-	ents, _ := claims["vs_entitlements"].([]any)
-	if len(ents) != 1 || ents[0] != "vector_stores:vs_bob:all" {
-		t.Errorf("vs_entitlements = %v; want [vector_stores:vs_bob:all]", claims["vs_entitlements"])
+	ents, _ := claims["extra_grants"].([]any)
+	if len(ents) != 1 || ents[0] != "resource:r1:all" {
+		t.Errorf("extra_grants = %v; want [resource:r1:all]", claims["extra_grants"])
 	}
 	if !strings.Contains(string(gotBody), `"subject":"alice@example.com"`) {
 		t.Errorf("request body = %s; want a subject-only body", gotBody)

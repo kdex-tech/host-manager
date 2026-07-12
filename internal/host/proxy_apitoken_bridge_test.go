@@ -41,7 +41,7 @@ import (
 type stubInternalIdentityProvider struct {
 	roles    []string
 	ents     []string
-	resolved jwt.MapClaims // #138: fresh-resolved backend claims (e.g. vs_entitlements)
+	resolved jwt.MapClaims // #138: fresh-resolved backend claims (e.g. extra_grants)
 }
 
 func (s stubInternalIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
@@ -64,7 +64,7 @@ const apitokenBridgeHostAudience = "https://api-host.example.com"
 // function and returns the handler plus a TokenManager minting tokens the host
 // will accept. The upstream echoes back the inbound Authorization (FAT) and the
 // preserved X-API-TOKEN cookie so the test can inspect what the function sees.
-func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider) (http.Handler, *apitoken.TokenManager, *string, *string) {
+func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
 	t.Helper()
 	logf.SetLogger(logr.Discard())
 
@@ -91,20 +91,26 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp)
 	require.NoError(t, err)
 
+	// Permissive gate by default (this suite isolates the PASETO->authContext
+	// bridge and the FAT mint, not the identity gate); a test may pass a recording
+	// checker to observe the enriched authContext that reaches the gate/held read.
+	var ac testAuthChecker = &mockAuthChecker{}
+	if len(checker) > 0 && checker[0] != nil {
+		ac = checker[0]
+	}
+
 	hh := &HostHandler{
 		log:          logr.Discard(),
 		cacheManager: cacheManager,
-		// Permissive gate: this suite isolates the PASETO->authContext bridge
-		// and the FAT mint, not the identity gate.
-		authChecker: &mockAuthChecker{},
+		authChecker:  ac,
 		authConfig: &auth.Config{
 			ActivePair:   &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
 			Audience:     apitokenBridgeHostAudience,
 			TokenManager: tm,
-			// Production puts the vs_entitlements->entitlements rule on the HOST,
-			// not the function. The FAT signer must apply it too (#138), so the
-			// fixture carries it here rather than on fn.Spec.ClaimMappings.
-			ClaimMappings: vsEntitlementsClaimMapping(),
+			// The host claimMappings live here (the FAT signer prepends them to
+			// fn.Spec.ClaimMappings); production authors the enrichment rule on the
+			// host. See #138.
+			ClaimMappings: enrichmentClaimMapping(),
 		},
 		authExchanger: ex,
 	}

@@ -17,7 +17,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
-	github.com/kdex-tech/dmapper v0.1.1
+	github.com/kdex-tech/dmapper v0.1.2
 	github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1

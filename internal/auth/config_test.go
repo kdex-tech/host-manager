@@ -14,6 +14,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/keys"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"kdex.dev/crds/api/v1alpha1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -532,6 +533,59 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 			tt.assertions(t, got, gotErr)
 		})
 	}
+}
+
+func claimStrings(v any) []string {
+	out := []string{}
+	switch l := v.(type) {
+	case []any:
+		for _, e := range l {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+	case []string:
+		out = append(out, l...)
+	}
+	return out
+}
+
+// TestEnrichAuthContext pins the auth-context enrichment invariant: the given
+// ClaimMappings mapper is applied to an authContext in place, so any external
+// enrichment a mapping performs (folding a backend-supplied source claim into
+// entitlements) is reflected before anything reads the context. The source claim
+// name is deliberately ARBITRARY (extra_grants) — no claim is special-cased in
+// code; ClaimMappings are the generic enrichment mechanism. See #142.
+func TestEnrichAuthContext(t *testing.T) {
+	mapper, err := dmapper.NewMapper([]dmapper.MappingRule{{
+		SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.extra_grants) ? self.extra_grants : [])`,
+		TargetPropPath:   "entitlements",
+	}})
+	require.NoError(t, err)
+
+	t.Run("folds an arbitrary external source claim into entitlements", func(t *testing.T) {
+		ac := AuthContext{
+			"entitlements": []any{"functions:x:read"},
+			"extra_grants": []any{"resource:r1:all"},
+		}
+		EnrichAuthContext(ac, mapper)
+		got := claimStrings(ac["entitlements"])
+		assert.Contains(t, got, "functions:x:read")
+		assert.Contains(t, got, "resource:r1:all", "the mapping must fold the external claim into entitlements")
+	})
+
+	t.Run("idempotent when the source claim is absent (already-enriched context)", func(t *testing.T) {
+		ac := AuthContext{"entitlements": []any{"functions:x:read"}}
+		EnrichAuthContext(ac, mapper)
+		assert.Equal(t, []string{"functions:x:read"}, claimStrings(ac["entitlements"]))
+	})
+
+	t.Run("nil mapper / nil context is a safe no-op", func(t *testing.T) {
+		require.NotPanics(t, func() {
+			EnrichAuthContext(AuthContext{}, nil)
+			EnrichAuthContext(nil, mapper)
+		})
+	})
 }
 
 // authCookieCleared reports whether the response clears the named cookie

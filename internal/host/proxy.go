@@ -116,7 +116,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		})
 	}
 
-	// The FAT inherits the HOST's claimMappings (e.g. vs_entitlements ->
+	// The FAT inherits the HOST's claimMappings (e.g. a backend claim ->
 	// entitlements) PLUS any function-specific ones, so a rule authored once on
 	// the host applies to every token the host issues — session AND FAT. Host
 	// rules run first; function rules refine. Without this, a host rule that
@@ -464,18 +464,14 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 								// never carry it. See kdex-tech/host-manager §4.
 								auth.PATBridgeClaim: true,
 							}
-							// #138: resolve the subject's data-driven backend
-							// claims (e.g. vs_entitlements) FRESH at request time
-							// and surface them so the FAT's ClaimMappings map them
-							// into entitlements — a PAT/OAuth caller regains their
-							// per-VS grants. Non-conflicting: the freshly-resolved
-							// sub/roles/entitlements/scp always win, so this only
-							// ADDS backend claims. Runs only on the !alreadyLoggedIn
+							// Resolve the subject's data-driven backend claims FRESH
+							// at request time and merge them (non-conflicting) onto
+							// the authContext. Runs only on the !alreadyLoggedIn
 							// bridge path, so a JWT/cookie caller — including a
-							// downscoped mint_token capability token, whose
-							// attenuated entitlements WithAuthentication already
-							// placed in the authContext — is never re-resolved or
-							// re-inflated here.
+							// downscoped capability token whose attenuated
+							// entitlements WithAuthentication already placed in the
+							// authContext — is never re-resolved or re-inflated here.
+							// See #138.
 							for k, v := range authExchanger.ResolveSubjectClaims(data.Subject) {
 								if _, exists := ac[k]; !exists {
 									ac[k] = v
@@ -486,6 +482,19 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					}
 				}
 			}
+		}
+
+		// Enrich the authContext with the SAME host + fn.Spec.ClaimMappings mapper
+		// the FAT signer uses (built above), BEFORE the context is used to derive
+		// `held` (the mint_token attenuation source), the identity gate, or the
+		// FAT — so all three read one consistent, fully-enriched entitlement set.
+		// Covers both a bridged PAT (context assembled above) and a JWT/cookie
+		// caller (context set by the middleware); mutates the context map in place.
+		// Idempotent for an already-enriched context and attenuation-safe: a
+		// downscoped capability token carries no source claims to re-expand. This
+		// is the authContext-enrichment invariant; no claim is special-cased. #142
+		if ac, ok := auth.GetAuthContext(r.Context()); ok {
+			auth.EnrichAuthContext(ac, mapper)
 		}
 
 		if authChecker != nil {

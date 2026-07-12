@@ -88,7 +88,7 @@ type resolveClaimsResponse struct {
 }
 
 // ResolveClaims performs a password-less, subject-only lookup of the subject's
-// backend claims (e.g. vs_entitlements) against resolveURL, signed with the same
+// backend claims against resolveURL, signed with the same
 // HMAC contract as FindInternal. Returns (nil, nil) when resolveURL is not
 // configured, so a host without the endpoint wired simply gets no fresh backend
 // claims. See kdex-tech/host-manager#138.

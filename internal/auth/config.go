@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"time"
@@ -71,11 +72,35 @@ type Config struct {
 	// ClaimMappings are the host's spec.auth.claimMappings rules. They shape
 	// EVERY token the host issues: the session Signer above bakes them in, and
 	// the per-function FAT signer (proxy.go) prepends them to its own
-	// fn.Spec.ClaimMappings — so a rule authored once on the host (e.g.
-	// vs_entitlements -> entitlements) applies uniformly. See #138.
+	// fn.Spec.ClaimMappings — so a rule authored once on the host applies
+	// uniformly. See #138.
 	ClaimMappings []dmapper.MappingRule
 	TokenManager  *apitoken.TokenManager
 	TokenTTL      time.Duration
+}
+
+// EnrichAuthContext applies mapper (compiled ClaimMappings) to the auth context
+// IN PLACE, so any enrichment a mapping performs (e.g. folding a backend-supplied
+// source claim into entitlements) is reflected BEFORE the context is used to
+// derive `held`, the identity gate, or a downstream token. It is the single
+// authContext-enrichment primitive; callers MUST pass the SAME mapper the token
+// or FAT signer uses for that context — host ClaimMappings for a session token,
+// host + fn.Spec.ClaimMappings for a function's proxy path — so the enriched
+// context and the token it yields never disagree. Idempotent for an
+// already-enriched context (no raw source claims remain to re-fold);
+// attenuation-safe (only ADDS mapped output, never removes a claim, and a
+// downscoped capability token carries no source claims to re-expand); fail-safe
+// (a mapping error leaves the context unchanged). No claim name is special-cased
+// — ClaimMappings are the generic enrichment mechanism.
+func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
+	if mapper == nil || ac == nil {
+		return
+	}
+	extra, err := mapper.Execute(map[string]any(ac))
+	if err != nil {
+		return
+	}
+	maps.Copy(ac, extra)
 }
 
 type ConfigBuilder struct {

@@ -221,7 +221,7 @@ func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
 		// Diagnostic: dump the FULL claim set signed into EVERY JWT this signer
 		// issues (FAT, session/access, mint_token). outboundClaims IS exactly
 		// what is signed (aud/sub/iss + entitlements/roles/profile + exp/iat/jti)
-		// — ground truth for verifying that resolved grants (e.g. vs_entitlements,
+		// — ground truth for verifying that resolved grants (e.g. a backend claim,
 		// kdex-tech/host-manager#138) reach the token. It carries identity/profile
 		// claims, so it is gated behind an explicitly-enabled logger:
 		// --named-log-level=signer=2. V(3) additionally attaches the goroutine

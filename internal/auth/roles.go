@@ -28,7 +28,7 @@ var lookupLog = logf.Log.WithName("lookup")
 
 type Lookup interface {
 	FindInternal(subject string, password string) (bool, jwt.MapClaims, error)
-	// ResolveClaims returns a subject's backend claims (e.g. vs_entitlements)
+	// ResolveClaims returns a subject's backend claims
 	// WITHOUT a credential check — a password-less lookup the token bridge uses
 	// to re-resolve data-driven grants fresh at request time. Returns
 	// (nil, nil) when this lookup supplies no such claims. See
@@ -130,7 +130,7 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 	}
 
 	// Diagnostic: the claims the wired lookup resolved for this subject at login
-	// (identity + backend claims like vs_entitlements), before roles are merged.
+	// (identity + backend claims), before roles are merged.
 	// nil ⇒ no lookup matched. See kdex-tech/host-manager#138.
 	lookupLog.V(2).Info("login lookup resolved", "subject", subject, "claims", localIdentity)
 
@@ -159,7 +159,7 @@ func (rp *scopeProvider) FindInternalRolesAndEntitlements(subject string) ([]str
 }
 
 // ResolveClaims resolves a subject's backend Lookup claims (e.g.
-// vs_entitlements) fresh and password-lessly by asking each configured Lookup,
+// a backend claim) fresh and password-lessly by asking each configured Lookup,
 // merging their results (first writer wins per key). Fail-open: a lookup error
 // contributes nothing (never MORE than the subject holds). Returns nil when no
 // lookup supplies any claims. See kdex-tech/host-manager#138.
@@ -182,7 +182,7 @@ func (rp *scopeProvider) ResolveClaims(subject string) jwt.MapClaims {
 			}
 		}
 	}
-	// Diagnostic: the merged backend claims (e.g. vs_entitlements) the wired
+	// Diagnostic: the merged backend claims the wired
 	// lookup(s) resolved for this subject on the token-bridge path, before they
 	// reach ClaimMappings. nil ⇒ no lookup supplied any. See #138.
 	lookupLog.V(2).Info("subject claims resolved", "subject", subject, "claims", merged)

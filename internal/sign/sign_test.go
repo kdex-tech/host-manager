@@ -359,7 +359,7 @@ func TestSigner_Project_CompactsDominatedEntitlements(t *testing.T) {
 // TestSigner_SignScoped_ConfinesScopeControlledClaims pins that SignScoped
 // strips scope-controlled claim families absent from grantedScopes AFTER the
 // mapper runs. The mapper here injects into entitlements from an arbitrary,
-// NON-vs_entitlements source claim (custom_grants) — proving confinement is
+// NON-extra_grants source claim (custom_grants) — proving confinement is
 // generic over any ClaimMappings effect, not coupled to a known source claim.
 // See kdex-tech/host-manager#140.
 func TestSigner_SignScoped_ConfinesScopeControlledClaims(t *testing.T) {
@@ -374,7 +374,7 @@ func TestSigner_SignScoped_ConfinesScopeControlledClaims(t *testing.T) {
 		"name":          "Alice",
 		"roles":         []string{"admin"},
 		"entitlements":  []any{"functions::read"},
-		"custom_grants": []any{"vector_stores:vs_a:all"},
+		"custom_grants": []any{"resource:ra:all"},
 	}
 
 	tests := []struct {
@@ -408,7 +408,7 @@ func TestSigner_SignScoped_ConfinesScopeControlledClaims(t *testing.T) {
 }
 
 // TestSigner_Project_DeduplicatesAfterMapperMerge pins dedup on the PRODUCTION
-// path: the vs_entitlements->entitlements claimMapping concat can reintroduce a
+// path: the extra_grants->entitlements claimMapping concat can reintroduce a
 // grant already present in the role set; the result must still be deduped. Also
 // verifies the []any / CEL mapper-output shape is handled.
 func TestSigner_Project_DeduplicatesAfterMapperMerge(t *testing.T) {
@@ -421,7 +421,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 -----END PRIVATE KEY-----`))
 	require.NoError(t, err)
 	mapper, err := dmapper.NewMapper([]dmapper.MappingRule{{
-		SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.vs_entitlements) ? self.vs_entitlements : [])`,
+		SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.extra_grants) ? self.extra_grants : [])`,
 		TargetPropPath:   "entitlements",
 	}})
 	require.NoError(t, err)
@@ -430,8 +430,8 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 
 	p, err := s.Project(jwt.MapClaims{
 		"sub":             "alice",
-		"entitlements":    []any{"vector_stores:vs_a:all", "functions::read"},
-		"vs_entitlements": []any{"vector_stores:vs_a:all", "vector_stores:vs_b:read"}, // vs_a:all duplicates a role grant
+		"entitlements":    []any{"resource:ra:all", "functions::read"},
+		"extra_grants": []any{"resource:ra:all", "resource:rb:read"}, // resource:ra:all duplicates a role grant
 	})
 	require.NoError(t, err)
 
@@ -449,7 +449,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 	default:
 		t.Fatalf("unexpected entitlements type %T", p["entitlements"])
 	}
-	assert.Equal(t, 1, got["vector_stores:vs_a:all"], "the grant present in BOTH role and vs sets must appear once")
+	assert.Equal(t, 1, got["resource:ra:all"], "the grant present in BOTH role and enrichment sets must appear once")
 	assert.Equal(t, 1, got["functions::read"])
-	assert.Equal(t, 1, got["vector_stores:vs_b:read"])
+	assert.Equal(t, 1, got["resource:rb:read"])
 }

@@ -47,7 +47,7 @@ type Exchanger struct {
 	// kdex-tech/host-manager#65 (RFC 6749 §10.5 single-use requirement).
 	authCodeCache cache.Cache
 	// subjectResolveCache briefly memoizes the password-less backend claim
-	// resolve (vs_entitlements) the token bridge does per request, so a burst of
+	// resolve backend claim the token bridge does per request, so a burst of
 	// PAT/OAuth calls from one subject doesn't hit the backend every time. Short
 	// TTL keeps grants fresh (the point of #138). Keyed by subject.
 	subjectResolveCache cache.Cache
@@ -160,7 +160,7 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 }
 
 // ResolveSubjectClaims resolves a subject's data-driven backend claims (e.g.
-// vs_entitlements) FRESH and password-lessly for the token bridge, memoized for
+// a backend claim) FRESH and password-lessly for the token bridge, memoized for
 // a short window to bound backend load. Returns nil when the identity provider
 // can't resolve them (e.g. no http-lookup resolve endpoint wired), so the bridge
 // degrades to role-only entitlements. See kdex-tech/host-manager#138.
@@ -782,7 +782,7 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 // subjectSigningContext resolves the full authorization context for a subject
 // used by the non-password subject mints (authorization_code, refresh_token):
 // the static KDexRole-derived roles/entitlements PLUS the fresh data-driven
-// backend claims (e.g. vs_entitlements) that only the credential backend knows.
+// backend claims that only the credential backend knows.
 // Folding the backend claims into the PRIMARY mint — upstream of every
 // attenuation point — is what lets an OAuth/MCP access token (and everything
 // attenuated from it: FAT, mint_token, scope down-scope) carry per-subject
@@ -799,7 +799,7 @@ func (e *Exchanger) subjectSigningContext(subject string) (roles, entitlements [
 
 // reservedMintClaims are claims the mint and signer control authoritatively; the
 // authoritative user store (ResolveClaims / FindInternal) and ClaimMappings may
-// supplement ANY other claim (roles, entitlements, email, vs_entitlements, custom
+// supplement ANY other claim (roles, entitlements, email, custom
 // …) — that is the feature — but must never set these. They split into
 // auth-flow / identity claims (a backend-supplied `scope` would hijack scope
 // confinement, `sub`/`idp` would rebind identity) and server-controlled mint-time
@@ -813,7 +813,7 @@ var reservedMintClaims = map[string]struct{}{
 // signing context, skipping reservedMintClaims and never overwriting a claim
 // already set. The subsequent Project runs the host ClaimMappings over the
 // enriched context; this code never names a specific backend claim —
-// vs_entitlements is only today's instance of a mapper input. See
+// such a claim is only an instance of a mapper input. See
 // kdex-tech/host-manager#140.
 func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
 	for k, v := range backend {

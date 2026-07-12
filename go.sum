@@ -175,8 +175,8 @@ github.com/joshdk/go-junit v1.0.0 h1:S86cUKIdwBHWwA6xCmFlf3RTLfVXYQfvanM5Uh+K6GE
 github.com/joshdk/go-junit v1.0.0/go.mod h1:TiiV0PqkaNfFXjEiyjWM3XXrhVyCa1K4Zfga6W52ung=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
-github.com/kdex-tech/dmapper v0.1.1 h1:Mr2Dndq23/vVrpG6wJcTNzwdNLuz0/UTbaexojp6XfA=
-github.com/kdex-tech/dmapper v0.1.1/go.mod h1:XkyK23pcd11UHZdzPpf01JozQAKRJy1CsSYV2Zr9kLg=
+github.com/kdex-tech/dmapper v0.1.2 h1:NaFomCoZbNoOeiyXNpQExvXOH/6eJllNNDb4B1HaCis=
+github.com/kdex-tech/dmapper v0.1.2/go.mod h1:XkyK23pcd11UHZdzPpf01JozQAKRJy1CsSYV2Zr9kLg=
 github.com/kdex-tech/entitlements/go v0.3.0 h1:Q2zWAKAv2zaA1aoOEePp6R3V9ejeXEtjZQGDJUVnfxE=
 github.com/kdex-tech/entitlements/go v0.3.0/go.mod h1:6LfVbBhhIkgRy/Kz3C4zXUAN9pfi/pRwai8rlO+XdNM=
 github.com/kdex-tech/kdex-crds v0.14.231 h1:iLvRjI2ghhIaN077MCsWoc3tB3Tp2TZteJa98d+85Ms=

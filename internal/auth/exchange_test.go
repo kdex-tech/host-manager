@@ -966,12 +966,12 @@ func (m *mockScopeProvider) ResolveClaims(subject string) jwt.MapClaims {
 	return m.resolveClaims(subject)
 }
 
-// vsClaimMappingConfig returns the production-shaped host claimMapping that folds
-// a data-driven backend claim (vs_entitlements) into entitlements at mint time.
-func vsClaimMappingConfig() *v1alpha1.Auth {
+// enrichmentClaimMappingConfig returns the production-shaped host claimMapping that folds
+// a data-driven backend claim (extra_grants) into entitlements at mint time.
+func enrichmentClaimMappingConfig() *v1alpha1.Auth {
 	return &v1alpha1.Auth{
 		ClaimMappings: []dmapper.MappingRule{{
-			SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.vs_entitlements) ? self.vs_entitlements : [])`,
+			SourceExpression: `(has(self.entitlements) ? self.entitlements : []) + (has(self.extra_grants) ? self.extra_grants : [])`,
 			TargetPropPath:   "entitlements",
 		}},
 	}
@@ -1027,8 +1027,8 @@ func tokenEntitlements(t *testing.T, token string) []string {
 
 // TestMint_SubjectMints_MergeBackendClaimsPreAttenuation pins kdex-tech/host-manager#140:
 // the OAuth authorization-code mint and the refresh mint fold the subject's
-// data-driven backend claims (here vs_entitlements) into the signing context
-// pre-attenuation, so the access token carries the per-VS grant — and the same
+// data-driven backend claims (here extra_grants) into the signing context
+// pre-attenuation, so the access token carries the resolved grant — and the same
 // scope gate that governs static entitlements governs the mapped result.
 func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 	ctx := context.Background()
@@ -1041,32 +1041,32 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 		}
 		if withClaims {
 			sp.resolveClaims = func(string) jwt.MapClaims {
-				return jwt.MapClaims{"vs_entitlements": []any{"vector_stores:vs_X:all"}}
+				return jwt.MapClaims{"extra_grants": []any{"resource:rx:all"}}
 			}
 		}
 		return sp
 	}
 
 	t.Run("oauth code mint carries backend grant (entitlements scope)", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(true), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{
 			Subject: "alice", Scope: "entitlements", ClientID: "c", AuthMethod: AuthMethodOAuth2,
 		})
 		require.NoError(t, err)
 		ents := tokenEntitlements(t, ts.AccessToken)
-		assert.Contains(t, ents, "vector_stores:vs_X:all", "OAuth token must carry the resolved per-VS grant (#140)")
+		assert.Contains(t, ents, "resource:rx:all", "OAuth token must carry the resolved resolved grant (#140)")
 		assert.Contains(t, ents, "functions:/api/v1/ingest:read", "and still carry static role entitlements")
 	})
 
 	t.Run("refresh mint carries backend grant", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(true), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromSubject("alice", "c", "entitlements", AuthMethodOAuth2)
 		require.NoError(t, err)
-		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "vector_stores:vs_X:all")
+		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "resource:rx:all")
 	})
 
 	t.Run("AMP-2 entitlements scope denied strips backend + static grants", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(true), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{
 			Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2,
 		})
@@ -1076,7 +1076,7 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 	})
 
 	t.Run("AMP-5 empty scope grants no entitlements", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(true), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{
 			Subject: "alice", Scope: "", ClientID: "c", AuthMethod: AuthMethodOAuth2,
 		})
@@ -1086,18 +1086,18 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 	})
 
 	t.Run("AMP-1 nil resolver degrades to role-only, no crash", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(false), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(false), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{
 			Subject: "alice", Scope: "entitlements", ClientID: "c", AuthMethod: AuthMethodOAuth2,
 		})
 		require.NoError(t, err)
 		ents := tokenEntitlements(t, ts.AccessToken)
 		assert.Contains(t, ents, "functions:/api/v1/ingest:read")
-		assert.NotContains(t, ents, "vector_stores:vs_X:all")
+		assert.NotContains(t, ents, "resource:rx:all")
 	})
 
 	t.Run("AMP-6 id_token confined too when entitlements scope denied", func(t *testing.T) {
-		e := newTestExchanger(t, newSP(true), vsClaimMappingConfig())
+		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{
 			Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2,
 		})
@@ -1110,7 +1110,7 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 
 // TestMint_UserStoreCannotHijackReservedClaims pins the #140-review hardening:
 // the authoritative user store (ResolveClaims for code/refresh; FindInternal for
-// login) MAY supplement roles/entitlements/email/vs_entitlements/custom claims,
+// login) MAY supplement roles/entitlements/email/extra_grants/custom claims,
 // but MUST NOT set reserved auth-flow / identity / mint-time claims. In
 // particular a backend-supplied `scope` must never widen claim confinement, and
 // `sub`/`idp` must never rebind identity.
@@ -1123,7 +1123,7 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"pages:*:admin"}, nil },
 			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"scope": "entitlements roles"} },
 		}
-		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
 		require.NoError(t, err)
 		_, present := tokenClaim(t, ts.AccessToken, "entitlements")
@@ -1137,7 +1137,7 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 			},
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, nil, nil },
 		}
-		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.LoginLocal(ctx, "alice", "pw", "openid", "c", AuthMethodLocal)
 		require.NoError(t, err)
 		_, present := tokenClaim(t, ts.AccessToken, "entitlements")
@@ -1150,7 +1150,7 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"x:read"}, nil },
 			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"sub": "attacker", "idp": "evil", "grant_type": "hax"} },
 		}
-		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
 		require.NoError(t, err)
 		sub, _ := tokenClaim(t, ts.AccessToken, "sub")
@@ -1167,7 +1167,7 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"x:read"}, nil },
 			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"exp": int64(9999999999)} },
 		}
-		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
 		require.NoError(t, err)
 		exp, _ := tokenClaim(t, ts.AccessToken, "exp")
@@ -1178,18 +1178,18 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 		sp := &mockScopeProvider{
 			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"functions:x:read"}, nil },
-			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"vs_entitlements": []any{"vector_stores:vs_Y:all"}} },
+			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"extra_grants": []any{"resource:ry:all"}} },
 		}
-		e := newTestExchanger(t, sp, vsClaimMappingConfig())
+		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "entitlements", ClientID: "c", AuthMethod: AuthMethodOAuth2})
 		require.NoError(t, err)
-		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "vector_stores:vs_Y:all", "non-reserved backend supplement must still flow through ClaimMappings")
+		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "resource:ry:all", "non-reserved backend supplement must still flow through ClaimMappings")
 	})
 }
 
 // TestLoginLocal_ClosesLatentPostMapperLeak pins that password login also confines
 // entitlements post-mapper: with a claimMapping that folds a backend claim
-// (vs_entitlements, supplied by FindInternal) into entitlements, a login whose
+// (extra_grants, supplied by FindInternal) into entitlements, a login whose
 // scope omits `entitlements` must emit NO entitlements claim — the pre-mapper
 // strip the old code used could not guarantee this. See kdex-tech/host-manager#140.
 func TestLoginLocal_ClosesLatentPostMapperLeak(t *testing.T) {
@@ -1198,14 +1198,14 @@ func TestLoginLocal_ClosesLatentPostMapperLeak(t *testing.T) {
 			return jwt.MapClaims{
 				"sub":             s,
 				"entitlements":    []string{"pages:*:read"},
-				"vs_entitlements": []any{"vector_stores:vs_X:all"},
+				"extra_grants": []any{"resource:rx:all"},
 			}, nil
 		},
 		resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, nil, nil },
 	}
-	e := newTestExchanger(t, sp, vsClaimMappingConfig())
+	e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 
-	// scope omits "entitlements" -> mapper would fold vs_entitlements into
+	// scope omits "entitlements" -> mapper would fold extra_grants into
 	// entitlements, but post-mapper confinement must strip the whole family.
 	ts, err := e.LoginLocal(context.Background(), "alice", "pw", "openid", "c", AuthMethodLocal)
 	require.NoError(t, err)
@@ -1215,5 +1215,5 @@ func TestLoginLocal_ClosesLatentPostMapperLeak(t *testing.T) {
 	// scope grants entitlements -> the folded grant is present.
 	ts2, err := e.LoginLocal(context.Background(), "alice", "pw", "entitlements", "c", AuthMethodLocal)
 	require.NoError(t, err)
-	assert.Contains(t, tokenEntitlements(t, ts2.AccessToken), "vector_stores:vs_X:all")
+	assert.Contains(t, tokenEntitlements(t, ts2.AccessToken), "resource:rx:all")
 }
