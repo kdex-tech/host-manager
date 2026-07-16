@@ -13,6 +13,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -93,6 +94,75 @@ func TestHostHandler_CheckHandler(t *testing.T) {
 			assert.ElementsMatch(t, tt.expectedPassed, resp.Passed)
 		})
 	}
+}
+
+// TestCheck_ExcludesInstanceScopedRequirements pins the instance-free contract
+// of /-/check. A DELETE op declares vector_stores:{vector_store_id}:own, and the
+// caller holds the function grant plus ONE specific store. The check string
+// names a function and a verb but no store, so the instance-scoped requirement
+// is not applicable to the question asked and must be excluded -- the caller
+// passes on the function gate.
+//
+// Without the fix the unbound {vector_store_id} verifies as an ordinary
+// literal, the specific holder fails to match it, and the endpoint wrongly
+// reports "not passed" for a request the caller would actually be allowed to
+// make -- hiding UI they can legitimately use. The gate (proxy.go) still
+// enforces the instance check on the real request, where a binding exists.
+func TestCheck_ExcludesInstanceScopedRequirements(t *testing.T) {
+	cacheManager, err := cache.NewCacheManager("", "foo", nil)
+	require.NoError(t, err)
+
+	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+
+	// A REAL checker rather than checkAuthChecker: this test turns on the
+	// library's actual bind AND verify semantics -- ErrUnboundPlaceholder for
+	// an unbound {param}, and a specific holder failing to match a placeholder
+	// left as a literal. checkAuthChecker answers VerifyResourceParsedEntitlements
+	// from a fixture map and ignores the requirements entirely, so it cannot
+	// exhibit either behaviour. *auth.AuthorizationChecker satisfies the
+	// authChecker interface directly.
+	realChecker := auth.NewAuthorizationChecker(nil, logr.Discard())
+	hh.authChecker = realChecker
+
+	const basePath = "/api/v1/vector_stores"
+	const check = "functions:" + basePath + ":delete"
+
+	// `delete` is the only entitlement verb whose uppercased form spells an HTTP
+	// method, so it is the only verb that reaches check.go's parsedRequirements
+	// lookup at all (check.go keys by ToUpper(verb), proxy.go by HTTP method).
+	hh.functionHandlers = map[string]*KDexFunctionHandler{
+		basePath: {
+			parsedRequirements: map[string]entitlements.ParsedRequirements{
+				"DELETE " + basePath: realChecker.ParseRequirements(
+					[]kdexv1alpha1.SecurityRequirement{
+						{"bearer": {"vector_stores:{vector_store_id}:own"}},
+					},
+				),
+			},
+		},
+	}
+
+	// The function grant plus ONE specific store -- not a wildcard.
+	held := []string{check, "vector_stores:vs_alice:own"}
+
+	reqBody, err := json.Marshal(CheckRequest{Checks: []string{check}})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/-/check", bytes.NewBuffer(reqBody))
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub":          "alice",
+		"entitlements": held,
+	}))
+	w := httptest.NewRecorder()
+
+	hh.CheckHandler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp CheckResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+
+	assert.Contains(t, resp.Passed, "functions:/api/v1/vector_stores:delete")
 }
 
 type checkAuthChecker struct {
