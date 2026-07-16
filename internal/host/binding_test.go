@@ -1,6 +1,7 @@
 package host
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -93,5 +94,89 @@ func TestParseBindingSpec(t *testing.T) {
 	t.Run("rejects a non-object extension", func(t *testing.T) {
 		_, err := parseBindingSpec(map[string]any{"x-entitlement-binding": "nonsense"})
 		assert.Error(t, err)
+	})
+}
+
+func TestResolveBinding(t *testing.T) {
+	t.Run("path identity match with no spec", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/vector_stores/vs_abc", nil)
+		got := resolveBinding(r, "/v1/vector_stores/{vector_store_id}", nil, []string{"vector_store_id"})
+		assert.Equal(t, "vs_abc", got["vector_store_id"])
+	})
+
+	t.Run("declared header source", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/v1/ingest", nil)
+		r.Header.Set("X-Vector-Store-Id", "vs_abc")
+		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		got := resolveBinding(r, "/v1/ingest", spec, []string{"vector_store_id"})
+		assert.Equal(t, "vs_abc", got["vector_store_id"])
+	})
+
+	t.Run("chain: first link wins", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/search?vector_store_id=vs_query", nil)
+		r.Header.Set("X-Vector-Store-Id", "vs_header")
+		spec := bindingSpec{"vector_store_id": {
+			{In: "query", Name: "vector_store_id"},
+			{In: "header", Name: "X-Vector-Store-Id"},
+		}}
+		got := resolveBinding(r, "/v1/search", spec, []string{"vector_store_id"})
+		assert.Equal(t, "vs_query", got["vector_store_id"], "query must outrank header")
+	})
+
+	t.Run("chain: falls through to the second link", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/search", nil)
+		r.Header.Set("X-Vector-Store-Id", "vs_header")
+		spec := bindingSpec{"vector_store_id": {
+			{In: "query", Name: "vector_store_id"},
+			{In: "header", Name: "X-Vector-Store-Id"},
+		}}
+		got := resolveBinding(r, "/v1/search", spec, []string{"vector_store_id"})
+		assert.Equal(t, "vs_header", got["vector_store_id"])
+	})
+
+	t.Run("unresolvable key is ABSENT, never defaulted", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/v1/ingest", nil)
+		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		got := resolveBinding(r, "/v1/ingest", spec, []string{"vector_store_id"})
+		_, present := got["vector_store_id"]
+		assert.False(t, present, "unresolved key must be absent so BindRequirements errors")
+	})
+
+	t.Run("blank header is absent, not empty", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/v1/ingest", nil)
+		r.Header.Set("X-Vector-Store-Id", "   ")
+		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		got := resolveBinding(r, "/v1/ingest", spec, []string{"vector_store_id"})
+		_, present := got["vector_store_id"]
+		assert.False(t, present, "a blank value would be ErrInvalidBoundValue; it must not bind")
+	})
+
+	t.Run("resolves only requested keys", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/vector_stores/vs_abc/files/f_1", nil)
+		got := resolveBinding(r, "/v1/vector_stores/{vector_store_id}/files/{file_id}", nil, []string{"vector_store_id"})
+		_, present := got["file_id"]
+		assert.False(t, present)
+	})
+
+	t.Run("no keys yields a nil binding", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/ingest", nil)
+		assert.Nil(t, resolveBinding(r, "/v1/ingest", nil, nil))
+	})
+}
+
+func TestPlaceholderKeys(t *testing.T) {
+	t.Run("union of declared keys and pattern params, deduped", func(t *testing.T) {
+		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		got := placeholderKeys(spec, "/v1/vector_stores/{vector_store_id}/files/{file_id}")
+		assert.ElementsMatch(t, []string{"vector_store_id", "file_id"}, got)
+	})
+
+	t.Run("catch-all is not a key", func(t *testing.T) {
+		got := placeholderKeys(nil, "/v1/vector_stores/{vector_store_id}/path/content/{uri...}")
+		assert.ElementsMatch(t, []string{"vector_store_id"}, got)
+	})
+
+	t.Run("no spec and no params yields empty", func(t *testing.T) {
+		assert.Empty(t, placeholderKeys(nil, "/v1/ingest"))
 	})
 }
