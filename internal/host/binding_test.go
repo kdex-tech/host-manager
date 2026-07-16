@@ -34,3 +34,64 @@ func TestPathParamFromMatch(t *testing.T) {
 		})
 	}
 }
+
+func TestParseBindingSpec(t *testing.T) {
+	t.Run("absent extension yields nil spec and no error", func(t *testing.T) {
+		got, err := parseBindingSpec(map[string]any{})
+		assert.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("single header source", func(t *testing.T) {
+		ext := map[string]any{"x-entitlement-binding": map[string]any{
+			"vector_store_id": []any{map[string]any{"in": "header", "name": "X-Vector-Store-Id"}},
+		}}
+		got, err := parseBindingSpec(ext)
+		assert.NoError(t, err)
+		assert.Equal(t, []bindingSource{{In: "header", Name: "X-Vector-Store-Id"}}, got["vector_store_id"])
+	})
+
+	t.Run("ordered chain preserves order", func(t *testing.T) {
+		ext := map[string]any{"x-entitlement-binding": map[string]any{
+			"vector_store_id": []any{
+				map[string]any{"in": "query", "name": "vector_store_id"},
+				map[string]any{"in": "header", "name": "X-Vector-Store-Id"},
+			},
+		}}
+		got, err := parseBindingSpec(ext)
+		assert.NoError(t, err)
+		assert.Equal(t, []bindingSource{
+			{In: "query", Name: "vector_store_id"},
+			{In: "header", Name: "X-Vector-Store-Id"},
+		}, got["vector_store_id"])
+	})
+
+	t.Run("rejects an AS-unreadable location", func(t *testing.T) {
+		ext := map[string]any{"x-entitlement-binding": map[string]any{
+			"vector_store_id": []any{map[string]any{"in": "body", "name": "vector_store_id"}},
+		}}
+		_, err := parseBindingSpec(ext)
+		assert.Error(t, err)
+	})
+
+	t.Run("rejects an empty name", func(t *testing.T) {
+		ext := map[string]any{"x-entitlement-binding": map[string]any{
+			"vector_store_id": []any{map[string]any{"in": "header", "name": ""}},
+		}}
+		_, err := parseBindingSpec(ext)
+		assert.Error(t, err)
+	})
+
+	t.Run("rejects an empty chain", func(t *testing.T) {
+		ext := map[string]any{"x-entitlement-binding": map[string]any{
+			"vector_store_id": []any{},
+		}}
+		_, err := parseBindingSpec(ext)
+		assert.Error(t, err)
+	})
+
+	t.Run("rejects a non-object extension", func(t *testing.T) {
+		_, err := parseBindingSpec(map[string]any{"x-entitlement-binding": "nonsense"})
+		assert.Error(t, err)
+	})
+}
