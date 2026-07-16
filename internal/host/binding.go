@@ -1,6 +1,7 @@
 package host
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -73,4 +74,68 @@ func percentDecode(s string) string {
 		return d
 	}
 	return s
+}
+
+// bindingExtensionKey is the operation-level OpenAPI extension declaring where
+// a requirement placeholder's value comes from. It sits beside `security` and
+// `x-required-entitlement` so an author reads all three together.
+const bindingExtensionKey = "x-entitlement-binding"
+
+// bindingSource is one link in a placeholder's precedence chain.
+// In is one of: path, query, header.
+type bindingSource struct {
+	In   string
+	Name string
+}
+
+// bindingSpec maps a placeholder key to its ordered source chain, mirroring the
+// BACKEND's own precedence -- first match wins.
+//
+// Only sources the AS can read are expressible, and that is the point: an op
+// whose backend resolves the identity from a request body or a database row
+// must not declare a placeholder at all (the design doc's legality rule),
+// because deriving a lower-precedence fallback is not deriving the target.
+type bindingSpec map[string][]bindingSource
+
+func parseBindingSpec(ext map[string]any) (bindingSpec, error) {
+	raw, ok := ext[bindingExtensionKey]
+	if !ok {
+		return nil, nil
+	}
+
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object mapping a placeholder key to a source chain", bindingExtensionKey)
+	}
+
+	spec := make(bindingSpec, len(obj))
+	for key, v := range obj {
+		list, ok := v.([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s.%s must be an array of sources", bindingExtensionKey, key)
+		}
+		if len(list) == 0 {
+			return nil, fmt.Errorf("%s.%s must declare at least one source", bindingExtensionKey, key)
+		}
+		chain := make([]bindingSource, 0, len(list))
+		for i, item := range list {
+			m, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("%s.%s[%d] must be an object with 'in' and 'name'", bindingExtensionKey, key, i)
+			}
+			in, _ := m["in"].(string)
+			name, _ := m["name"].(string)
+			switch in {
+			case "path", "query", "header":
+			default:
+				return nil, fmt.Errorf("%s.%s[%d]: 'in' must be path, query, or header (got %q) -- a source the AS cannot read must not be declared", bindingExtensionKey, key, i, in)
+			}
+			if name == "" {
+				return nil, fmt.Errorf("%s.%s[%d]: 'name' must not be empty", bindingExtensionKey, key, i)
+			}
+			chain = append(chain, bindingSource{In: in, Name: name})
+		}
+		spec[key] = chain
+	}
+	return spec, nil
 }
