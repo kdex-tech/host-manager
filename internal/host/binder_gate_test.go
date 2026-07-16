@@ -154,15 +154,14 @@ func TestGate_UnboundPlaceholderDenies(t *testing.T) {
 		},
 	}
 	h, reached := binderFixture(t, fn)
-	// The `functions:` grant must use the `all` verb: the gate's identity
-	// requirement is built as functions:<basePath>:read (verb defaults to
-	// "read"), so a `create`-only grant would deny on IDENTITY and never reach
-	// the placeholder -- passing the assertion below for the wrong reason and
-	// hiding the very hole this test exists to prove.
+	// The `functions:` grant must use `all`, not `create`: the gate's identity
+	// requirement defaults to verb "read", so a `create`-only grant would deny
+	// on IDENTITY for the bound-header assertion below (expected 200) -- unlike
+	// the pre-fix belief, this never depends on the placeholder outcome.
 	held := []string{"functions:/api/v1/ingest:all", "vector_stores::all"} // wildcard holder
 
 	code := requestAs(t, h, "POST", "/api/v1/ingest", held, nil) // no header -> unbound
-	assert.NotEqual(t, http.StatusOK, code, "unbound placeholder must deny even a wildcard holder")
+	assert.Equal(t, http.StatusForbidden, code, "unbound placeholder must hit the bind-error branch (403), not the verify deny (404)")
 	assert.False(t, *reached)
 
 	*reached = false
