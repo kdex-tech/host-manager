@@ -142,6 +142,14 @@ func TestResolveBinding(t *testing.T) {
 		assert.False(t, present, "unresolved key must be absent so BindRequirements errors")
 	})
 
+	t.Run("declared chain that fails must NOT fall back to the path", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/vector_stores/vs_attacker", nil)
+		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		got := resolveBinding(r, "/v1/vector_stores/{vector_store_id}", spec, []string{"vector_store_id"})
+		_, present := got["vector_store_id"]
+		assert.False(t, present, "a declared chain that fails to resolve must not fall back to the path identity match, or a caller-controlled path segment could satisfy a header-declared placeholder")
+	})
+
 	t.Run("blank header is absent, not empty", func(t *testing.T) {
 		r := httptest.NewRequest("POST", "/v1/ingest", nil)
 		r.Header.Set("X-Vector-Store-Id", "   ")
