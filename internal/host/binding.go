@@ -2,8 +2,11 @@ package host
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
+
+	entitlements "github.com/kdex-tech/entitlements/go"
 )
 
 // pathParamFromMatch extracts a path parameter's value by re-matching the route
@@ -138,4 +141,103 @@ func parseBindingSpec(ext map[string]any) (bindingSpec, error) {
 		spec[key] = chain
 	}
 	return spec, nil
+}
+
+// resolveBinding builds the per-request Binding for the placeholder keys a
+// requirement set may need.
+//
+// Per key: the declared chain if the op has one, else a path identity match
+// against the route pattern (a {vector_store_id} in `security` matching a
+// {vector_store_id} in the path is not a convention -- it is an identity match
+// against a pattern present in the CR).
+//
+// A key that cannot be resolved is ABSENT from the result, never defaulted.
+// BindRequirements then returns ErrUnboundPlaceholder and the gate denies. That
+// is the contract working: a binder that cannot resolve a value must fail like
+// an unbound placeholder rather than widen. Do NOT add a `system` or `*`
+// fallback here -- those are knowdb's policy, not the binder's.
+func resolveBinding(r *http.Request, pattern string, spec bindingSpec, keys []string) entitlements.Binding {
+	if len(keys) == 0 {
+		return nil
+	}
+	b := make(entitlements.Binding, len(keys))
+	for _, key := range keys {
+		if v, ok := resolveKey(r, pattern, spec, key); ok {
+			b[key] = v
+		}
+	}
+	return b
+}
+
+func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (string, bool) {
+	if chain, ok := spec[key]; ok {
+		for _, src := range chain {
+			if v, ok := readSource(r, pattern, src); ok {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	// Undeclared: the only legal implicit source is the path, where the pattern
+	// itself names the param. A header is NEVER inferred -- host-manager is
+	// generic across every function and must not guess the header spelling of a
+	// backend it does not control.
+	return pathParamFromMatch(pattern, r.URL.Path, key)
+}
+
+func readSource(r *http.Request, pattern string, src bindingSource) (string, bool) {
+	var v string
+	switch src.In {
+	case "path":
+		pv, ok := pathParamFromMatch(pattern, r.URL.Path, src.Name)
+		if !ok {
+			return "", false
+		}
+		v = pv
+	case "query":
+		v = r.URL.Query().Get(src.Name)
+	case "header":
+		v = r.Header.Get(src.Name)
+	default:
+		return "", false
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", false
+	}
+	return v, true
+}
+
+// placeholderKeys returns the placeholder names worth resolving for a route:
+// every key the op declares a chain for, plus every {name} segment in the route
+// pattern. ParsedRequirements does not expose its placeholder names, so this is
+// a superset -- safe and cheap, because BindRequirements ignores binding keys
+// that match no placeholder.
+func placeholderKeys(spec bindingSpec, pattern string) []string {
+	seen := make(map[string]struct{}, len(spec)+2)
+	keys := make([]string, 0, len(spec)+2)
+	add := func(k string) {
+		if k == "" {
+			return
+		}
+		if _, ok := seen[k]; ok {
+			return
+		}
+		seen[k] = struct{}{}
+		keys = append(keys, k)
+	}
+	for k := range spec {
+		add(k)
+	}
+	for _, seg := range splitPath(pattern) {
+		if !strings.HasPrefix(seg, "{") || !strings.HasSuffix(seg, "}") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(seg, "{"), "}")
+		if strings.HasSuffix(name, "...") {
+			continue // a catch-all is a path remainder, not an identity
+		}
+		add(name)
+	}
+	return keys
 }
