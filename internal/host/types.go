@@ -191,7 +191,12 @@ type KDexFunctionHandler struct {
 	Function           *kdexv1alpha1.KDexFunction
 	Handler            http.Handler
 	parsedRequirements map[string]entitlements.ParsedRequirements
-	patternMux         *http.ServeMux
+	// bindingSpecs holds each route's x-entitlement-binding declaration, keyed
+	// identically to parsedRequirements (method + " " + pattern). Parsed once at
+	// mux-build, not per request. A route with no declaration is absent, and its
+	// placeholders (if any) bind by path identity match.
+	bindingSpecs map[string]bindingSpec
+	patternMux   *http.ServeMux
 	// acceptsAPIKey is set at handler-build time when at least one operation
 	// on the function's API declares an apiKey* security scheme (apiKeyCookie /
 	// apiKeyHeader / apiKeyQuery). It opts the per-function handler into the
