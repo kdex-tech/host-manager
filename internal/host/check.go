@@ -2,6 +2,7 @@ package host
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -86,7 +87,21 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 			if fh, ok := hh.functionHandlers[resourceName]; ok {
 				key := strings.ToUpper(verb) + " " + resourceName
 				if pr, ok := fh.parsedRequirements[key]; ok {
-					requirements = pr
+					// /-/check asks an instance-FREE question: its check strings
+					// name a function and a verb, never a store. So an
+					// instance-scoped ({param}) requirement is not applicable
+					// here -- we have no request to bind it from. Probe with an
+					// empty binding: a placeholder-free set returns unchanged; a
+					// placeholder-bearing one reports ErrUnboundPlaceholder.
+					//
+					// Exclude rather than fail: failing would hide UI a caller
+					// can legitimately use. The gate still enforces the instance
+					// check on the real request.
+					if _, err := hh.authChecker.BindRequirements(pr, nil); errors.Is(err, entitlements.ErrUnboundPlaceholder) {
+						requirements = hh.authChecker.ParseRequirements(nil)
+					} else {
+						requirements = pr
+					}
 					found = true
 				} else {
 					// Default to empty requirements for the function identity check
