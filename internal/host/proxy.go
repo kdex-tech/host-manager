@@ -314,6 +314,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 	patternMux := http.NewServeMux()
 	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
+	bindingSpecs := make(map[string]bindingSpec)
 
 	// acceptsAPIKey opts this function into the PASETO->authContext bridge when
 	// any operation declares an apiKey* security scheme. Per-function (not
@@ -327,7 +328,22 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 		for _, method := range []string{"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"} {
 			op := item.GetOp(method)
-			if op != nil && op.Security != nil {
+			if op == nil {
+				continue
+			}
+			key := method + " " + p
+
+			// Parse the binding declaration even when the op has no security
+			// block: a malformed declaration is an authoring error worth
+			// surfacing wherever it appears.
+			if spec, err := parseBindingSpec(op.Extensions); err != nil {
+				hh.log.Error(err, "invalid x-entitlement-binding; placeholders on this route will not bind",
+					"function", fn.Name, "route", key)
+			} else if spec != nil {
+				bindingSpecs[key] = spec
+			}
+
+			if op.Security != nil {
 				raw := make([]kdexv1alpha1.SecurityRequirement, 0, len(*op.Security))
 				for _, s := range *op.Security {
 					sr := kdexv1alpha1.SecurityRequirement(s)
@@ -338,7 +354,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 						}
 					}
 				}
-				parsedRequirements[method+" "+p] = hh.authChecker.ParseRequirements(raw)
+				parsedRequirements[key] = hh.authChecker.ParseRequirements(raw)
 			}
 		}
 	}
@@ -346,6 +362,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	fh := &KDexFunctionHandler{
 		Function:           fn,
 		parsedRequirements: parsedRequirements,
+		bindingSpecs:       bindingSpecs,
 		patternMux:         patternMux,
 		acceptsAPIKey:      acceptsAPIKey,
 		issuer:             issuer,
@@ -507,6 +524,30 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// Default to empty requirements (allows access if identity matches)
 				reqs = authChecker.ParseRequirements(nil)
 			}
+
+			// Bind {param} requirements from the request before verifying, so the
+			// gate checks the store actually being addressed rather than a
+			// wildcard any single-store grant satisfies (entitlements#4).
+			//
+			// A bind error DENIES and must never fall through to Verify: an
+			// unbound placeholder is an ordinary literal there, and a held
+			// wildcard matches any literal, so falling through would silently
+			// admit every wildcard holder. The error is the invariant enforcing
+			// itself -- it means the CR declared an identity this layer cannot
+			// supply.
+			//
+			// BindRequirements is a no-op for placeholder-free requirement sets,
+			// so this is safe to call unconditionally -- no guard needed.
+			spec := fh.bindingSpecs[key]
+			binding := resolveBinding(r, pattern, spec, placeholderKeys(spec, pattern))
+			boundReqs, bindErr := authChecker.BindRequirements(reqs, binding)
+			if bindErr != nil {
+				log.Error(bindErr, "requirement binding failed; denying",
+					"function", fn.Name, "route", key)
+				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
+			}
+			reqs = boundReqs
 
 			parsedUserEntitlements := authChecker.GetParsedEntitlements(r.Context())
 			authorized, err := authChecker.VerifyResourceParsedEntitlements(
