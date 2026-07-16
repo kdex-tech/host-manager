@@ -52,6 +52,10 @@ func (p *panickingAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirem
 	panic("simulated ParseRequirements panic (kdex-tech/host-manager#26)")
 }
 
+func (p *panickingAuthChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (p *panickingAuthChecker) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
 	return false, nil
 }

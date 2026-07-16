@@ -116,6 +116,10 @@ func (m *checkAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement)
 	return entitlements.ParsedRequirements{}
 }
 
+func (m *checkAuthChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (m *checkAuthChecker) VerifyResourceParsedEntitlements(resource, resourceName string, ent entitlements.ParsedEntitlements, req entitlements.ParsedRequirements, verbs ...string) (bool, error) {
 	verb := "read"
 	if len(verbs) > 0 {

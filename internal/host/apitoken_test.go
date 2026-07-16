@@ -308,6 +308,9 @@ func (m *mockApitokenAuthChecker) GetParsedEntitlements(ctx context.Context) ent
 func (m *mockApitokenAuthChecker) ParseRequirements(sr []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
 	return entitlements.ParsedRequirements{}
 }
+func (m *mockApitokenAuthChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
 func (m *mockApitokenAuthChecker) VerifyResourceParsedEntitlements(s1, s2 string, pe entitlements.ParsedEntitlements, pr entitlements.ParsedRequirements, s3 ...string) (bool, error) {
 	return false, nil
 }

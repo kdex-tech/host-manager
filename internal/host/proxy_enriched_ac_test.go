@@ -31,6 +31,7 @@ import (
 type testAuthChecker interface {
 	CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error)
 	CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error)
+	BindRequirements(entitlements.ParsedRequirements, entitlements.Binding) (entitlements.ParsedRequirements, error)
 	GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements
 	ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 	VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)

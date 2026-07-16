@@ -52,6 +52,10 @@ func (m *snifferGateChecker) ParseRequirements([]kdexv1alpha1.SecurityRequiremen
 	return entitlements.ParsedRequirements{}
 }
 
+func (m *snifferGateChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (m *snifferGateChecker) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
 	return m.allow, nil
 }

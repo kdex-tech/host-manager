@@ -71,6 +71,10 @@ func (entitlementGateChecker) ParseRequirements([]kdexv1alpha1.SecurityRequireme
 	return entitlements.ParsedRequirements{}
 }
 
+func (entitlementGateChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (g *entitlementGateChecker) VerifyResourceParsedEntitlements(_, _ string, _ entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements, _ ...string) (bool, error) {
 	return g.authed, nil
 }
