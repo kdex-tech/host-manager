@@ -84,6 +84,15 @@ func percentDecode(s string) string {
 // `x-required-entitlement` so an author reads all three together.
 const bindingExtensionKey = "x-entitlement-binding"
 
+// Binding source kinds -- the OpenAPI parameter `in` values the AS can read
+// from a request. A body/table source is deliberately not expressible here
+// (the design doc's legality rule).
+const (
+	bindingInPath   = "path"
+	bindingInQuery  = "query"
+	bindingInHeader = "header"
+)
+
 // bindingSource is one link in a placeholder's precedence chain.
 // In is one of: path, query, header.
 type bindingSource struct {
@@ -129,7 +138,7 @@ func parseBindingSpec(ext map[string]any) (bindingSpec, error) {
 			in, _ := m["in"].(string)
 			name, _ := m["name"].(string)
 			switch in {
-			case "path", "query", "header":
+			case bindingInPath, bindingInQuery, bindingInHeader:
 			default:
 				return nil, fmt.Errorf("%s.%s[%d]: 'in' must be path, query, or header (got %q) -- a source the AS cannot read must not be declared", bindingExtensionKey, key, i, in)
 			}
@@ -188,15 +197,15 @@ func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (
 func readSource(r *http.Request, pattern string, src bindingSource) (string, bool) {
 	var v string
 	switch src.In {
-	case "path":
+	case bindingInPath:
 		pv, ok := pathParamFromMatch(pattern, r.URL.Path, src.Name)
 		if !ok {
 			return "", false
 		}
 		v = pv
-	case "query":
+	case bindingInQuery:
 		v = r.URL.Query().Get(src.Name)
-	case "header":
+	case bindingInHeader:
 		v = r.Header.Get(src.Name)
 	default:
 		return "", false
