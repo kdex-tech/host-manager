@@ -162,6 +162,12 @@ does not need removing — it needs ordering.
 
 ## Resolution
 
+> **Implemented** 2026-07-16 in `internal/host/binding.go` + `internal/host/proxy.go`.
+> Binding specs parse at mux-build and cache on `KDexFunctionHandler.bindingSpecs`;
+> the gate binds immediately before `VerifyResourceParsedEntitlements`. `/-/check`
+> excludes instance-scoped requirements (it has no request to bind from). No CR
+> declares a `{param}` yet, so the change is inert until the migration.
+
 ### The grammar
 
 **The placeholder key is a logical identity, not a source.** It stays

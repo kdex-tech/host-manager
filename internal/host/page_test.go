@@ -37,6 +37,9 @@ func (m *pageMockAuthChecker) GetParsedEntitlements(ctx context.Context) entitle
 func (m *pageMockAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
 	return entitlements.ParsedRequirements{}
 }
+func (m *pageMockAuthChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
 func (m *pageMockAuthChecker) VerifyResourceParsedEntitlements(kind string, name string, ent entitlements.ParsedEntitlements, req entitlements.ParsedRequirements, extra ...string) (bool, error) {
 	if m.verifyFn != nil {
 		return m.verifyFn(kind, name, ent, req, extra...)

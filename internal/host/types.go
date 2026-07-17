@@ -64,6 +64,7 @@ type HostHandler struct {
 	authChecker   interface {
 		CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error)
 		CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error)
+		BindRequirements(entitlements.ParsedRequirements, entitlements.Binding) (entitlements.ParsedRequirements, error)
 		GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements
 		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 		VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)
@@ -190,7 +191,12 @@ type KDexFunctionHandler struct {
 	Function           *kdexv1alpha1.KDexFunction
 	Handler            http.Handler
 	parsedRequirements map[string]entitlements.ParsedRequirements
-	patternMux         *http.ServeMux
+	// bindingSpecs holds each route's x-entitlement-binding declaration, keyed
+	// identically to parsedRequirements (method + " " + pattern). Parsed once at
+	// mux-build, not per request. A route with no declaration is absent, and its
+	// placeholders (if any) bind by path identity match.
+	bindingSpecs map[string]bindingSpec
+	patternMux   *http.ServeMux
 	// acceptsAPIKey is set at handler-build time when at least one operation
 	// on the function's API declares an apiKey* security scheme (apiKeyCookie /
 	// apiKeyHeader / apiKeyQuery). It opts the per-function handler into the

@@ -115,6 +115,10 @@ func (g *e2eEntitlementGateChecker) ParseRequirements(reqs []kdexv1alpha1.Securi
 	return g.real.ParseRequirements(reqs)
 }
 
+func (g *e2eEntitlementGateChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (g *e2eEntitlementGateChecker) VerifyResourceParsedEntitlements(resource, resourceName string, ents entitlements.ParsedEntitlements, reqs entitlements.ParsedRequirements, verbs ...string) (bool, error) {
 	// Pass the function's REAL parsed requirements through verbatim. The proxy
 	// gate computes these from the operation's {oauth2: [...]} security and the

@@ -140,6 +140,17 @@ func (ac *AuthorizationChecker) ParseRequirements(kdexreqs []kdexv1alpha1.Securi
 	return ac.ec.ParseRequirements(requirements)
 }
 
+// BindRequirements substitutes each {placeholder} resourceName in reqs with its
+// bound value. Delegates to the entitlements checker; see its doc comment for
+// the error contract (ErrUnboundPlaceholder / ErrInvalidBoundValue /
+// ErrWildcardRequirement).
+func (ac *AuthorizationChecker) BindRequirements(
+	reqs entitlements.ParsedRequirements,
+	binding entitlements.Binding,
+) (entitlements.ParsedRequirements, error) {
+	return ac.ec.BindRequirements(reqs, binding)
+}
+
 func (ac *AuthorizationChecker) VerifyResourceParsedEntitlements(
 	resource string,
 	resourceName string,

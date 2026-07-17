@@ -170,6 +170,10 @@ func (m *mockAuthChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement) 
 	return entitlements.ParsedRequirements{}
 }
 
+func (m *mockAuthChecker) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
 func (m *mockAuthChecker) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
 	return true, nil
 }
