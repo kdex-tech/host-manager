@@ -13,6 +13,7 @@ import (
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/host/ico"
@@ -387,7 +388,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		// RLock-release is the last line of defense if recovery is bypassed.
 		if hh.authChecker != nil {
 			reqs := hh.pageRequirements(&ph)
-			parsed := hh.authChecker.ParseRequirements(reqs)
+			parsed := hh.parsePageRequirementsFailClosed(reqs, ph.Name, basePath)
 			hh.Pages.UpdateParsedRequirements(ph.Name, parsed)
 			ph.ParsedRequirements = &parsed // Also update the local copy used for rendering
 		}
@@ -780,6 +781,57 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.translationHandler(mux, registeredPaths)
 
 	return mux
+}
+
+// unbindablePageDenyScheme is a security scheme no caller is ever granted:
+// GetParsedEntitlements only ever populates the bearer/oauth2/oidc buckets, and
+// base/anonymous patterns apply only under the default "bearer" scheme. A
+// requirement published under it is therefore unsatisfiable for EVERY caller --
+// including a wildcard (vector_stores::all) or super-wildcard (*:*:*) holder --
+// because satisfaction is evaluated per scheme and this scheme is absent from
+// every caller's entitlement map. It is the only fail-closed requirement value
+// available in non-strict mode, where a held wildcard matches any literal
+// resourceName. Reserved; must not collide with a real securityScheme name.
+const unbindablePageDenyScheme = "__kdex_unbindable_placeholder_deny__"
+
+// unbindablePageDenyRequirements is the requirement set substituted for a page
+// whose security block declares a {placeholder} the page layer cannot bind. Its
+// single requirement lives under unbindablePageDenyScheme, so verification
+// denies every caller.
+var unbindablePageDenyRequirements = []kdexv1alpha1.SecurityRequirement{
+	{unbindablePageDenyScheme: {unbindablePageDenyScheme + ":deny:deny"}},
+}
+
+// parsePageRequirementsFailClosed parses a page's security requirements and
+// fails closed on an unbindable {placeholder}.
+//
+// A page (or host-level) security requirement may reference an instance-scoped
+// resource via a {placeholder}, e.g. `vector_stores:{vector_store_id}:read`.
+// Unlike a KDexFunction operation, a page has NO per-request store identity and
+// NO x-entitlement-binding, so the three page readers (page render,
+// navigation, /-/check) never bind it -- the placeholder would verify as the
+// LITERAL resourceName "{vector_store_id}", which a held wildcard
+// (vector_stores::all) matches, silently admitting every wildcard holder with
+// no error and no log.
+//
+// So probe the parsed set with an empty binding: a placeholder-free set is a
+// no-op (err == nil); a placeholder-bearing one errors. On ANY bind error,
+// substitute an unsatisfiable requirement so all three readers deny at one
+// site. The guard is err != nil rather than errors.Is(ErrUnboundPlaceholder)
+// so the future strict flip -- which makes BindRequirements also return
+// ErrWildcardRequirement here -- stays fail-closed instead of falling through.
+func (hh *HostHandler) parsePageRequirementsFailClosed(
+	reqs []kdexv1alpha1.SecurityRequirement,
+	pageName string,
+	basePath string,
+) entitlements.ParsedRequirements {
+	parsed := hh.authChecker.ParseRequirements(reqs)
+	if _, err := hh.authChecker.BindRequirements(parsed, nil); err != nil {
+		hh.log.Error(err, "page security requirement declares an unbindable {placeholder}; denying all access to this page",
+			"page", pageName, "basePath", basePath)
+		return hh.authChecker.ParseRequirements(unbindablePageDenyRequirements)
+	}
+	return parsed
 }
 
 func (hh *HostHandler) pageRequirements(ph *page.PageHandler) []kdexv1alpha1.SecurityRequirement {
