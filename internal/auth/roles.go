@@ -214,6 +214,11 @@ func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map
 		table[role.Name] = []string{}
 
 		for _, rule := range role.Spec.Rules {
+			if len(rule.Scopes) > 0 {
+				table[role.Name] = append(table[role.Name], rule.Scopes...) // colon-less -> opaque
+				continue
+			}
+
 			resourceNames := rule.ResourceNames
 
 			if len(resourceNames) == 0 {
