@@ -397,6 +397,38 @@ func TestNewRoleProvider(t *testing.T) {
 			},
 		},
 		{
+			name: "ResolveScopes - opaque scope emitted verbatim, structured unchanged",
+			c: cb().WithObjects(
+				&kdexv1alpha1.KDexRole{
+					ObjectMeta: metav1.ObjectMeta{Name: "opaque-role", Namespace: "foo"},
+					Spec: kdexv1alpha1.KDexRoleSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Rules: []kdexv1alpha1.PolicyRule{
+							{Scopes: []string{"vector_stores_create"}},
+							{Resources: []string{"vector_stores"}, ResourceNames: []string{"vs_alice"}, Verbs: []string{"read"}},
+						},
+					},
+				},
+				&kdexv1alpha1.KDexRoleBinding{
+					ObjectMeta: metav1.ObjectMeta{Name: "opaque-binding", Namespace: "foo"},
+					Spec: kdexv1alpha1.KDexRoleBindingSpec{
+						HostRef: v1.LocalObjectReference{Name: "foo"},
+						Subject: "alice",
+						Roles:   []string{"opaque-role"},
+					},
+				},
+			).Build(),
+			focalHost:           "foo",
+			controllerNamespace: "foo",
+			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
+				assert.Nil(t, gotErr)
+				_, entitlements, err := got.FindInternalRolesAndEntitlements("alice")
+				assert.Nil(t, err)
+				// opaque scope is verbatim (no colons injected); structured stays colon-joined.
+				assert.Equal(t, []string{"vector_stores_create", "vector_stores:vs_alice:read"}, entitlements)
+			},
+		},
+		{
 			name: "VerifyLocalIdentity - wrong password",
 			c: cb().WithObjects(
 				&kdexv1alpha1.KDexRole{
