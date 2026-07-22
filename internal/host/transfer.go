@@ -151,5 +151,20 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 	r2.URL.RawPath = ""
 	r2.URL.RawQuery = "" // bound target only — recipient cannot append query params
 	r2.RequestURI = ""
+
+	// Strip recipient-controlled headers before re-dispatch — symmetric with the
+	// RawQuery clear above. A capability URL pins ONE operation; the recipient
+	// must not steer the forwarded request (header-sourced entitlement bindings,
+	// FAT ClaimMappings, backend auth) via inbound headers. Keep only a
+	// download-safe allowlist.
+	allowedHeaders := []string{"Accept", "Accept-Encoding", "Range", "If-Range", "If-Modified-Since", "If-None-Match"}
+	clean := make(http.Header, len(allowedHeaders))
+	for _, h := range allowedHeaders {
+		if vs := r2.Header.Values(h); len(vs) > 0 {
+			clean[http.CanonicalHeaderKey(h)] = vs
+		}
+	}
+	r2.Header = clean
+
 	mux.ServeHTTP(w, r2)
 }
