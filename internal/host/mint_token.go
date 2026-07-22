@@ -53,6 +53,9 @@ func validateTransferTarget(t *TransferTarget) error {
 	if !strings.HasPrefix(t.Path, "/") {
 		return fmt.Errorf("target path must be an absolute path beginning with /")
 	}
+	if strings.HasPrefix(t.Path, "//") {
+		return fmt.Errorf("target path must not be scheme-relative (must not begin with //)")
+	}
 	if strings.HasPrefix(t.Path, "/-/") {
 		return fmt.Errorf("target path must not be under the reserved /-/ prefix")
 	}
@@ -80,10 +83,10 @@ func stringSliceFromClaim(v any) []string {
 
 // MintTokenRequest is the argument shape of the mint_token MCP tool.
 type MintTokenRequest struct {
-	Entitlements []string       `json:"entitlements"`
-	TTLSeconds   int            `json:"ttl_seconds,omitempty"`
-	Uses         int            `json:"uses,omitempty"`
-	Delivery     string         `json:"delivery,omitempty"`
+	Entitlements []string        `json:"entitlements"`
+	TTLSeconds   int             `json:"ttl_seconds,omitempty"`
+	Uses         int             `json:"uses,omitempty"`
+	Delivery     string          `json:"delivery,omitempty"`
 	Target       *TransferTarget `json:"target,omitempty"`
 }
 
