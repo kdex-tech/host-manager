@@ -520,3 +520,11 @@ func TestValidateTransferTarget(t *testing.T) {
 	g.Expect(validateTransferTarget(&TransferTarget{Method: "GET", Path: "/-/transfer/abc"})).To(HaveOccurred())  // reserved
 	g.Expect(validateTransferTarget(&TransferTarget{Method: "get", Path: "/api/v1/files/x/content"})).ToNot(HaveOccurred())
 }
+
+func TestMintTokenDescriptor_AdvertisesURLDelivery(t *testing.T) {
+	g := NewWithT(t)
+	d := mintTokenDescriptor("")
+	props := d["inputSchema"].(map[string]any)["properties"].(map[string]any)
+	g.Expect(props).To(HaveKey("delivery"))
+	g.Expect(props).To(HaveKey("target"))
+}

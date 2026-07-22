@@ -763,6 +763,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	mux := http.NewServeMux()
 
 	hh.apitokensHandler(mux, registeredPaths)
+	hh.transferHandler(mux, registeredPaths)
 	hh.authorizeHandler(mux, registeredPaths)
 	hh.checkHandler(mux, registeredPaths)
 	hh.discoveryHandler(mux, registeredPaths)

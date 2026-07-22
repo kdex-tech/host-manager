@@ -341,7 +341,7 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request,
 // right route on the first try. An empty discoveryURL (unknown runtime address)
 // falls back to the static description. See kdex-tech/host-manager#133.
 func mintTokenDescriptor(discoveryURL string) map[string]any {
-	description := "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }; pass it as `Authorization: Bearer <token>`. Every entitlement you request must already be held by you — the mint attenuates, never escalates."
+	description := "Mint a short-lived, attenuated capability token carrying a subset of your own entitlements, for off-context/credential-less use against the REST API. Returns { token, expires_at, entitlements, uses_remaining }; pass it as `Authorization: Bearer <token>`. Every entitlement you request must already be held by you — the mint attenuates, never escalates. Pass delivery:\"url\" with a target:{method:\"GET\",path} to instead receive a single-use, credential-less /-/transfer/<handle> download link (host policy permitting)."
 	if discoveryURL != "" {
 		description += fmt.Sprintf(
 			" To find the entitlements a call needs, open the OpenAPI spec at %s, locate the path + method you intend to call, and read its `security` block: each list entry is an alternative requirement (OR) — pick one scheme (e.g. bearer); the scope array inside that entry is the set of entitlements you must supply together (AND), so grant all of them. An entitlement's `<resourceName>` (middle) segment is interpreted by the target API and may require identity replacement — a wildcard or placeholder shown in the spec's scope must usually be resolved to the concrete resource the call targets before you request it (e.g. `functions:*:read` → `functions:/api/v1/files:read` for a specific route).",
@@ -362,6 +362,20 @@ func mintTokenDescriptor(discoveryURL string) map[string]any {
 				},
 				"ttl_seconds": map[string]any{"type": "integer", "description": "Requested lifetime; capped server-side."},
 				"uses":        map[string]any{"type": "integer", "description": "Bounded use budget; capped server-side; destructive verbs force 1."},
+				"delivery": map[string]any{
+					"type":        "string",
+					"enum":        []string{"bearer", "url"},
+					"description": "How to deliver the capability. \"bearer\" (default) returns a token. \"url\" returns a single-use, credential-less /-/transfer/<handle> download link and requires `target`.",
+				},
+				"target": map[string]any{
+					"type":        "object",
+					"description": "Required when delivery==\"url\": the single concrete operation the link performs. Download-only: method must be GET; path must be an absolute non-/-/ path (e.g. /api/v1/files/<id>/content).",
+					"properties": map[string]any{
+						"method": map[string]any{"type": "string", "enum": []string{"GET"}},
+						"path":   map[string]any{"type": "string"},
+					},
+					"required": []string{"method", "path"},
+				},
 			},
 		},
 	}
