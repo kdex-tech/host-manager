@@ -128,16 +128,19 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 		gone()
 		return
 	}
-	if _, ok, err := c.DecrementIfPositive(ctx, "uses:"+rec.JTI); err != nil || !ok {
-		gone() // spent / expired / missing counter -> fail-closed
-		return
-	}
-
+	// Snapshot the mux and confirm we can actually serve BEFORE spending the
+	// single use — otherwise a transiently-nil mux would burn an
+	// otherwise-valid link and then 410. All non-serve preconditions
+	// (record, method, cache, mux) are checked ahead of the decrement.
 	hh.mu.RLock()
 	mux := hh.Mux
 	hh.mu.RUnlock()
 	if mux == nil {
 		gone()
+		return
+	}
+	if _, ok, err := c.DecrementIfPositive(ctx, "uses:"+rec.JTI); err != nil || !ok {
+		gone() // spent / expired / missing counter -> fail-closed
 		return
 	}
 
