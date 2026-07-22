@@ -67,6 +67,7 @@ type Config struct {
 	MintTokenTTLCap           time.Duration
 	MintTokenUsesCap          int
 	MintTokenDestructiveVerbs []string
+	MintTokenURLDelivery      bool
 	RefreshTokenTTL           time.Duration
 	Signer                    sign.Signer
 	// ClaimMappings are the host's spec.auth.claimMappings rules. They shape
@@ -364,6 +365,8 @@ func applyMintTokenPolicy(cfg *Config, mintToken *kdexv1alpha1.MintToken) {
 	if cfg.MintTokenDestructiveVerbs == nil {
 		cfg.MintTokenDestructiveVerbs = []string{"delete", "own"}
 	}
+
+	cfg.MintTokenURLDelivery = mintToken.URLDelivery
 }
 
 func (c *Config) AddAuthentication(mux http.Handler, exchanger *Exchanger) http.Handler {

@@ -1183,3 +1183,16 @@ func TestBuild_MintTokenPolicy(t *testing.T) {
 	g.Expect(cfg.MintTokenUsesCap).To(Equal(8))
 	g.Expect(cfg.MintTokenDestructiveVerbs).To(Equal([]string{"delete"}))
 }
+
+func TestApplyMintTokenPolicy_URLDelivery(t *testing.T) {
+	g := NewWithT(t)
+
+	on := &Config{}
+	applyMintTokenPolicy(on, &kdexv1alpha1.MintToken{Enabled: true, URLDelivery: true})
+	g.Expect(on.MintTokenEnabled).To(BeTrue())
+	g.Expect(on.MintTokenURLDelivery).To(BeTrue())
+
+	off := &Config{}
+	applyMintTokenPolicy(off, &kdexv1alpha1.MintToken{Enabled: true})
+	g.Expect(off.MintTokenURLDelivery).To(BeFalse())
+}
