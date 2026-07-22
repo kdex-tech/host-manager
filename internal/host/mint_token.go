@@ -129,7 +129,7 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 // the jti-keyed Valkey counter and the middleware decrement). The
 // auth.CapUsesClaim marker is always set so Phase 2 activates without
 // re-minting semantics.
-func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest) (MintTokenResult, error) {
+func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
 		return MintTokenResult{}, fmt.Errorf("mint_token is not enabled on this host")
@@ -139,6 +139,19 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	}
 	if len(req.Entitlements) == 0 {
 		return MintTokenResult{}, fmt.Errorf("mint_token requires at least one entitlement")
+	}
+
+	isURL := req.Delivery == deliveryURL
+	if isURL {
+		if !cfg.MintTokenURLDelivery {
+			return MintTokenResult{}, fmt.Errorf("url delivery is not enabled on this host")
+		}
+		if err := validateTransferTarget(req.Target); err != nil {
+			return MintTokenResult{}, err
+		}
+		if hh.capCache() == nil {
+			return MintTokenResult{}, errNoCache
+		}
 	}
 
 	// Attenuation: every requested entitlement must be dominated by the held set.
@@ -169,6 +182,9 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 			ttl = 10 * time.Second
 		}
 	}
+	if isURL {
+		uses = 1
+	}
 
 	signer, err := sign.NewSigner(cfg.Audience, ttl, cfg.Issuer, &cfg.ActivePair.Private, cfg.ActivePair.KeyId, nil)
 	if err != nil {
@@ -192,12 +208,15 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		return MintTokenResult{}, fmt.Errorf("mint sign: %w", err)
 	}
 
-	// Provision the bounded-use counter keyed by the token's jti.
+	// Provision the bounded-use counter keyed by the token's jti; keep the jti
+	// for URL delivery's handle record.
+	var jti string
 	if hh.cacheManager != nil {
 		parsed, _, perr := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
 		if perr == nil {
 			if mc, ok := parsed.Claims.(jwt.MapClaims); ok {
-				if jti, ok := mc["jti"].(string); ok && jti != "" {
+				if j, ok := mc["jti"].(string); ok && j != "" {
+					jti = j
 					capCache := hh.cacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
 					_ = capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl))
 				}
@@ -205,12 +224,32 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		}
 	}
 
-	return MintTokenResult{
-		Token:         token,
+	result := MintTokenResult{
 		ExpiresAt:     time.Now().Add(ttl).Unix(),
 		Entitlements:  req.Entitlements,
 		UsesRemaining: uses,
-	}, nil
+	}
+	if isURL {
+		if jti == "" {
+			return MintTokenResult{}, errNoCache
+		}
+		handle, herr := newTransferHandle()
+		if herr != nil {
+			return MintTokenResult{}, fmt.Errorf("mint handle: %w", herr)
+		}
+		if serr := hh.storeTransferRecord(ctx, handle, transferRecord{
+			JTI:          jti,
+			Sub:          sub,
+			Entitlements: req.Entitlements,
+			Target:       *req.Target,
+		}, ttl); serr != nil {
+			return MintTokenResult{}, serr
+		}
+		result.URL = baseURL + "/-/transfer/" + handle
+		return result, nil
+	}
+	result.Token = token
+	return result, nil
 }
 
 type jsonRPCRequest struct {
@@ -281,9 +320,9 @@ func mustJSON(v any) string {
 // writeMintTokenRPC executes the mint and writes a JSON-RPC response. Attenuation
 // / policy failures are returned as an MCP tool error result (isError=true) with
 // HTTP 200, matching how MCP tools surface domain errors.
-func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, id json.RawMessage, sub string, held []string, args MintTokenRequest) {
+func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage, sub string, held []string, args MintTokenRequest) {
 	w.Header().Set("Content-Type", "application/json")
-	res, err := hh.mintCapabilityToken(context.Background(), sub, held, args)
+	res, err := hh.mintCapabilityToken(context.Background(), sub, held, args, transferBaseURL(r))
 	var payload jsonRPCResponse
 	if err != nil {
 		payload = jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: map[string]any{

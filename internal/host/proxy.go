@@ -591,7 +591,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					ac, _ := auth.GetAuthContext(r.Context())
 					sub, _ := ac["sub"].(string)
 					held := stringSliceFromClaim(ac["entitlements"])
-					hh.writeMintTokenRPC(w, id, sub, held, args)
+					hh.writeMintTokenRPC(w, r, id, sub, held, args)
 					return
 				}
 				if isToolsListCall(peek) {

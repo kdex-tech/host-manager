@@ -43,7 +43,7 @@ func TestMintCapabilityToken_AttenuatesAndSignsHostAudience(t *testing.T) {
 	res, err := hh.mintCapabilityToken(context.Background(), "alice", held, MintTokenRequest{
 		Entitlements: []string{"functions:/api/v1/files:write"},
 		TTLSeconds:   30,
-	})
+	}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.Entitlements).To(Equal([]string{"functions:/api/v1/files:write"}))
 
@@ -65,7 +65,7 @@ func TestMintCapabilityToken_RejectsOverBroad(t *testing.T) {
 
 	_, err := hh.mintCapabilityToken(context.Background(), "alice", held, MintTokenRequest{
 		Entitlements: []string{"functions:/api/v1/files:*"},
-	})
+	}, "")
 	g.Expect(err).To(MatchError(ContainSubstring("functions:/api/v1/files:*")))
 }
 
@@ -73,7 +73,7 @@ func TestMintCapabilityToken_ClampsTTL(t *testing.T) {
 	g := NewWithT(t)
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
 	res, err := hh.mintCapabilityToken(context.Background(), "alice",
-		[]string{"pages:/:read"}, MintTokenRequest{Entitlements: []string{"pages:/:read"}, TTLSeconds: 99999})
+		[]string{"pages:/:read"}, MintTokenRequest{Entitlements: []string{"pages:/:read"}, TTLSeconds: 99999}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(61*time.Second).Unix()))
 }
@@ -86,7 +86,7 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 	// the caller asked for uses=5 and a 60s ttl.
 	res, err := hh.mintCapabilityToken(context.Background(), "alice",
 		[]string{"vector_stores:X:delete"},
-		MintTokenRequest{Entitlements: []string{"vector_stores:X:delete"}, Uses: 5, TTLSeconds: 60})
+		MintTokenRequest{Entitlements: []string{"vector_stores:X:delete"}, Uses: 5, TTLSeconds: 60}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.UsesRemaining).To(Equal(1))
 	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
@@ -94,7 +94,7 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 	// Wildcard verb encompasses destructive verbs -> same forcing.
 	res2, err := hh.mintCapabilityToken(context.Background(), "alice",
 		[]string{"vector_stores:X:all"},
-		MintTokenRequest{Entitlements: []string{"vector_stores:X:all"}, Uses: 5, TTLSeconds: 60})
+		MintTokenRequest{Entitlements: []string{"vector_stores:X:all"}, Uses: 5, TTLSeconds: 60}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res2.UsesRemaining).To(Equal(1))
 	g.Expect(res2.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
@@ -108,7 +108,7 @@ func TestMintCapabilityToken_ProvisionsCounter(t *testing.T) {
 
 	res, err := hh.mintCapabilityToken(context.Background(), "alice",
 		[]string{"functions:/api/v1/files:write"},
-		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, Uses: 3})
+		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, Uses: 3}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.UsesRemaining).To(Equal(3))
 
@@ -429,6 +429,66 @@ func TestReverseProxy_LargeBodyNotTruncated(t *testing.T) {
 	g.Expect(upstreamHit).To(BeTrue())
 	g.Expect(rr.Code).To(Equal(http.StatusOK))
 	g.Expect(upstreamBodyLen).To(Equal(sentLen))
+}
+
+func testURLAuthConfig(t *testing.T) *auth.Config {
+	c := testAuthConfigForMint(t)
+	c.MintTokenURLDelivery = true
+	return c
+}
+
+func TestMintCapabilityToken_URLDelivery(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr}
+
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"functions:/api/v1/files:read"},
+		MintTokenRequest{
+			Entitlements: []string{"functions:/api/v1/files:read"},
+			Delivery:     "url",
+			Uses:         5, // must be forced to 1
+			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+		},
+		"https://dev.example")
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.Token).To(BeEmpty())
+	g.Expect(res.UsesRemaining).To(Equal(1))
+	g.Expect(res.URL).To(HavePrefix("https://dev.example/-/transfer/"))
+
+	// The handle resolves to a stored record with the bound target.
+	handle := strings.TrimPrefix(res.URL, "https://dev.example/-/transfer/")
+	rec, ok := hh.loadTransferRecord(context.Background(), handle)
+	g.Expect(ok).To(BeTrue())
+	g.Expect(rec.Sub).To(Equal("alice"))
+	g.Expect(rec.Target.Path).To(Equal("/api/v1/files/abc/content"))
+	g.Expect(rec.Entitlements).To(Equal([]string{"functions:/api/v1/files:read"}))
+}
+
+func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	ent := []string{"functions:/api/v1/files:read"}
+
+	// Feature off.
+	off := &HostHandler{authConfig: testAuthConfigForMint(t), cacheManager: mgr}
+	_, err := off.mintCapabilityToken(context.Background(), "alice", ent,
+		MintTokenRequest{Entitlements: ent, Delivery: "url",
+			Target: &TransferTarget{Method: "GET", Path: "/api/v1/files/x"}}, "https://dev.example")
+	g.Expect(err).To(HaveOccurred())
+
+	on := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr}
+	// Missing target.
+	_, err = on.mintCapabilityToken(context.Background(), "alice", ent,
+		MintTokenRequest{Entitlements: ent, Delivery: "url"}, "https://dev.example")
+	g.Expect(err).To(HaveOccurred())
+	// Reserved /-/ target.
+	_, err = on.mintCapabilityToken(context.Background(), "alice", ent,
+		MintTokenRequest{Entitlements: ent, Delivery: "url",
+			Target: &TransferTarget{Method: "GET", Path: "/-/state/"}}, "https://dev.example")
+	g.Expect(err).To(HaveOccurred())
 }
 
 func TestValidateTransferTarget(t *testing.T) {
