@@ -94,6 +94,18 @@ cd kdex-host-manager && go build ./... && rg -n 'URLDelivery' $(go env GOMODCACH
 ```
 Expected: build succeeds; `URLDelivery` present in the resolved module.
 
+- [ ] **Step 7: Cut a nexus-manager release (serialization continuity)**
+
+`updateCrdUsage.sh -t` bumps nexus-manager's `go.mod`/`go.sum` but does **not** release it. nexus-manager also deserializes `KDexHost`, so a **deployed** nexus build compiled against the *old* crds would **prune `spec.auth.mintToken.urlDelivery`** on any reconcile round-trip — silently disabling the feature. Release nexus-manager so a fresh image builds against the new crds:
+
+```bash
+cd ../kdex-nexus-manager
+git log --oneline -1        # confirm the updateCrdUsage go.mod bump commit is present
+# cut the next patch tag per this repo's release convention, e.g.:
+#   git tag v0.3.63 && git push origin v0.3.63
+```
+Expected: a new nexus-manager tag pushed; CI builds + publishes the image. (Confirm the exact next tag with `git tag --sort=-creatordate | head -1` before tagging. host-manager is released separately at the end — see the Release section.)
+
 ---
 
 ## Task 2: Config policy wiring (`MintTokenURLDelivery`)
@@ -1005,6 +1017,16 @@ cd kdex-host-manager
 git add internal/host/transfer_test.go
 git commit -m "test(minttoken): end-to-end url delivery + bearer regression (#151)"
 ```
+
+---
+
+## Release (after all tasks pass and the feature branch is merged)
+
+Per the "CRD schema change → release ALL actors" invariant, a new CRD field must **release** every controller that deserializes the CR, not just bump its `go.mod` — an old build prunes the unknown field on round-trip.
+
+- [ ] **nexus-manager** — released in Task 1 Step 7 (serialization continuity; no code change, just the crds dep bump + a new tag/image).
+- [ ] **host-manager** — release after the feature branch merges to `main`: cut the next patch tag (confirm with `git tag --sort=-creatordate | head -1`) so a fresh image carries the mint + `/-/transfer` code.
+- [ ] **Deploy** both new images to the target env(s), then enable per host with `spec.auth.mintToken.urlDelivery: true`. Observe the apply-and-verify timing (host `spec.auth` changes roll via helm upgrade, ~60–90s).
 
 ---
 
