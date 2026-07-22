@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -58,6 +59,11 @@ func validateTransferTarget(t *TransferTarget) error {
 	}
 	if strings.HasPrefix(t.Path, "/-/") {
 		return fmt.Errorf("target path must not be under the reserved /-/ prefix")
+	}
+	for _, seg := range strings.Split(t.Path, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("target path must not contain . or .. segments")
+		}
 	}
 	return nil
 }
@@ -186,42 +192,23 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		uses = 1
 	}
 
-	signer, err := sign.NewSigner(cfg.Audience, ttl, cfg.Issuer, &cfg.ActivePair.Private, cfg.ActivePair.KeyId, nil)
+	// Signing (and the jti-extraction-by-reparsing-the-JWT that follows) only
+	// matters for bearer delivery, whose caller-facing result IS the signed
+	// token. URL delivery never returns a Token — its jti is purely an
+	// internal cache key (uses:<jti> + transferRecord.JTI), never embedded in
+	// a JWT and never verified, so signing a token just to throw it away is
+	// wasted work; mintTokenOrJTI generates the jti directly instead. See
+	// kdex-tech/host-manager#151.
+	token, jti, err := hh.mintTokenOrJTI(cfg, isURL, sub, req.Entitlements, ttl)
 	if err != nil {
-		return MintTokenResult{}, fmt.Errorf("mint signer: %w", err)
+		return MintTokenResult{}, err
 	}
 
-	// signer.Project runs the claim allowlist (which passes "entitlements" and
-	// "sub" but NOT auth.CapUsesClaim). Inject the capability marker into the
-	// PROJECTED claims so it survives into the signed token — SignProjected
-	// gives the projection the last word. (signer.Sign would drop auth.CapUsesClaim.)
-	projected, err := signer.Project(jwt.MapClaims{
-		"sub":          sub,
-		"entitlements": req.Entitlements,
-	})
-	if err != nil {
-		return MintTokenResult{}, fmt.Errorf("mint project: %w", err)
-	}
-	projected[auth.CapUsesClaim] = true
-	token, err := signer.SignProjected(projected)
-	if err != nil {
-		return MintTokenResult{}, fmt.Errorf("mint sign: %w", err)
-	}
-
-	// Provision the bounded-use counter keyed by the token's jti; keep the jti
-	// for URL delivery's handle record.
-	var jti string
-	if hh.cacheManager != nil {
-		parsed, _, perr := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
-		if perr == nil {
-			if mc, ok := parsed.Claims.(jwt.MapClaims); ok {
-				if j, ok := mc["jti"].(string); ok && j != "" {
-					jti = j
-					capCache := hh.cacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
-					_ = capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl))
-				}
-			}
-		}
+	// Provision the bounded-use counter keyed by jti (the signed token's jti
+	// for bearer delivery, directly-generated above for URL delivery).
+	if hh.cacheManager != nil && jti != "" {
+		capCache := hh.cacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
+		_ = capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl))
 	}
 
 	result := MintTokenResult{
@@ -250,6 +237,58 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	}
 	result.Token = token
 	return result, nil
+}
+
+// mintTokenOrJTI produces the jti (cache key for the bounded-use counter) and,
+// for bearer delivery only, the signed capability token itself.
+//
+// Bearer delivery's caller-facing result IS the signed token, so it signs a
+// host-audience JWT (with the auth.CapUsesClaim marker injected past the
+// projection allowlist) and extracts its jti by re-parsing the token
+// unverified — the signer doesn't hand back the jti it generated internally.
+//
+// URL delivery returns no Token — its jti is only ever used as a cache key
+// (uses:<jti>) and a transferRecord.JTI field, never a JWT and never
+// verified — so signing a token just to throw it away is wasted work; a
+// directly-generated random id is sufficient. See kdex-tech/host-manager#151.
+func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, reqEntitlements []string, ttl time.Duration) (token, jti string, err error) {
+	if isURL {
+		return "", rand.Text(), nil
+	}
+
+	signer, err := sign.NewSigner(cfg.Audience, ttl, cfg.Issuer, &cfg.ActivePair.Private, cfg.ActivePair.KeyId, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("mint signer: %w", err)
+	}
+
+	// signer.Project runs the claim allowlist (which passes "entitlements" and
+	// "sub" but NOT auth.CapUsesClaim). Inject the capability marker into the
+	// PROJECTED claims so it survives into the signed token — SignProjected
+	// gives the projection the last word. (signer.Sign would drop auth.CapUsesClaim.)
+	projected, err := signer.Project(jwt.MapClaims{
+		"sub":          sub,
+		"entitlements": reqEntitlements,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("mint project: %w", err)
+	}
+	projected[auth.CapUsesClaim] = true
+	token, err = signer.SignProjected(projected)
+	if err != nil {
+		return "", "", fmt.Errorf("mint sign: %w", err)
+	}
+
+	if hh.cacheManager != nil {
+		parsed, _, perr := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+		if perr == nil {
+			if mc, ok := parsed.Claims.(jwt.MapClaims); ok {
+				if j, ok := mc["jti"].(string); ok && j != "" {
+					jti = j
+				}
+			}
+		}
+	}
+	return token, jti, nil
 }
 
 type jsonRPCRequest struct {
