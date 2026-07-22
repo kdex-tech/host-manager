@@ -8,9 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestTransferRecordRoundTrip(t *testing.T) {
@@ -224,4 +229,104 @@ func TestTransferGet_NilMux410(t *testing.T) {
 	rw := httptest.NewRecorder()
 	hh.TransferGet(rw, req)
 	g.Expect(rw.Code).To(Equal(http.StatusGone))
+}
+
+// TestURLDelivery_ThroughRealProxy exercises URL-delivery redemption through
+// the REAL reverseProxyHandler (identity gate + FAT re-mint + header
+// allowlist) rather than a stub function handler — all other redemption
+// tests in this file stub the target handler, leaving that leg untested. It
+// also proves FIX #1 (recipient-header stripping in TransferGet) and the
+// real identity gate work together: a recipient cannot smuggle its own
+// Authorization/X-Api-Token/arbitrary headers into the forwarded request,
+// yet an allowlisted header (Range) still reaches the backend. See
+// kdex-tech/host-manager#151.
+func TestURLDelivery_ThroughRealProxy(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+	g := NewWithT(t)
+
+	// Capturing upstream: records the inbound Authorization header (the FAT)
+	// and the presence/absence of Range, X-Api-Token, and a custom
+	// X-Vector-Store-Id header.
+	var fatHeader, rangeHeader, apiTokenHeader, vectorStoreHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fatHeader = r.Header.Get("Authorization")
+		rangeHeader = r.Header.Get("Range")
+		apiTokenHeader = r.Header.Get("X-Api-Token")
+		vectorStoreHeader = r.Header.Get("X-Vector-Store-Id")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("FILEBYTES"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	ttl := time.Minute
+	cacheManager, err := cache.NewCacheManager("", "url-delivery-real-proxy-test", &ttl)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	hh := &HostHandler{
+		log:          logr.Discard(),
+		authConfig:   testURLAuthConfig(t), // real ECDSA ActivePair + Audience/Issuer + MintTokenURLDelivery
+		cacheManager: cacheManager,
+		authChecker:  auth.NewAuthorizationChecker(nil, logr.Discard()),
+	}
+
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-files", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			API: kdexv1alpha1.API{BasePath: "/api/v1/files"},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
+	}
+
+	handler := hh.reverseProxyHandler(fn, hh.authConfig.Issuer)
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/files", handler)
+	mux.Handle("/api/v1/files/", handler)
+	hh.Mux = mux
+	hh.transferHandler(mux, nil)
+
+	held := []string{"functions:/api/v1/files:read"}
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", held,
+		MintTokenRequest{
+			Entitlements: held,
+			Delivery:     "url",
+			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+		}, "https://dev.example")
+	g.Expect(err).ToNot(HaveOccurred())
+	path := strings.TrimPrefix(res.URL, "https://dev.example")
+
+	req := httptest.NewRequest("GET", path, nil)
+	req.Header.Set("Authorization", "Bearer recipient-token")
+	req.Header.Set("X-Api-Token", "recipient-key")
+	req.Header.Set("X-Vector-Store-Id", "evil")
+	req.Header.Set("Range", "bytes=0-10")
+
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, req)
+
+	g.Expect(rw.Code).To(Equal(http.StatusOK), "identity gate must have admitted the request and reached upstream")
+	g.Expect(rw.Body.String()).To(Equal("FILEBYTES"))
+
+	// The FAT reaching upstream is a non-empty, distinct Bearer credential —
+	// the minted Function Access Token, never the recipient's own header.
+	g.Expect(fatHeader).ToNot(BeEmpty())
+	g.Expect(fatHeader).To(HavePrefix("Bearer "))
+	g.Expect(fatHeader).ToNot(Equal("Bearer recipient-token"))
+
+	// Confirm it's genuinely the minted FAT: parses and verifies against the
+	// host's own public key, with the expected audience/issuer.
+	var claims jwt.MapClaims
+	_, verr := jwt.ParseWithClaims(strings.TrimPrefix(fatHeader, "Bearer "), &claims, func(*jwt.Token) (any, error) {
+		return hh.authConfig.ActivePair.Private.Public(), nil
+	}, jwt.WithAudience(fatAudienceFor(fn)), jwt.WithIssuer(hh.authConfig.Issuer))
+	g.Expect(verr).ToNot(HaveOccurred())
+	g.Expect(claims["sub"]).To(Equal("alice"))
+
+	// Range is download-safe and allowlisted — it reaches the backend.
+	g.Expect(rangeHeader).To(Equal("bytes=0-10"))
+
+	// X-Api-Token (recipient credential) and the arbitrary X-Vector-Store-Id
+	// header are NOT allowlisted — FIX #1 strips them before re-dispatch, so
+	// they never reach the backend.
+	g.Expect(apiTokenHeader).To(BeEmpty())
+	g.Expect(vectorStoreHeader).To(BeEmpty())
 }
