@@ -489,6 +489,25 @@ func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {
 		MintTokenRequest{Entitlements: ent, Delivery: "url",
 			Target: &TransferTarget{Method: "GET", Path: "/-/state/"}}, "https://dev.example")
 	g.Expect(err).To(HaveOccurred())
+
+	// Over-broad entitlement on the URL path must fail attenuation — a URL can
+	// never carry more than the caller holds (regression for the URL branch;
+	// TestMintCapabilityToken_RejectsOverBroad only covers the bearer path).
+	var overBroad MintTokenResult
+	overBroad, err = on.mintCapabilityToken(context.Background(), "alice",
+		ent, // held: files:read
+		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, // requested: not held
+			Delivery: "url",
+			Target:   &TransferTarget{Method: "GET", Path: "/api/v1/files/x"}}, "https://dev.example")
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(overBroad.URL).To(BeEmpty())
+
+	// Feature on + valid target but NO cache manager -> errNoCache precondition.
+	noCache := &HostHandler{authConfig: testURLAuthConfig(t)} // cacheManager nil
+	_, err = noCache.mintCapabilityToken(context.Background(), "alice", ent,
+		MintTokenRequest{Entitlements: ent, Delivery: "url",
+			Target: &TransferTarget{Method: "GET", Path: "/api/v1/files/x"}}, "https://dev.example")
+	g.Expect(err).To(HaveOccurred())
 }
 
 func TestValidateTransferTarget(t *testing.T) {
