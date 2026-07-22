@@ -235,11 +235,13 @@ func TestTransferGet_NilMux410(t *testing.T) {
 // the REAL reverseProxyHandler (identity gate + FAT re-mint + header
 // allowlist) rather than a stub function handler — all other redemption
 // tests in this file stub the target handler, leaving that leg untested. It
-// also proves FIX #1 (recipient-header stripping in TransferGet) and the
-// real identity gate work together: a recipient cannot smuggle its own
-// Authorization/X-Api-Token/arbitrary headers into the forwarded request,
-// yet an allowlisted header (Range) still reaches the backend. See
-// kdex-tech/host-manager#151.
+// also proves FIX #1 (recipient-header stripping in TransferGet): a recipient
+// cannot smuggle its own non-allowlisted headers (X-Api-Token, an arbitrary
+// X-Vector-Store-Id) into the forwarded request, yet an allowlisted header
+// (Range) still reaches the backend. (The forwarded Authorization is the
+// minted FAT rather than the recipient's token because the proxy re-mints it
+// unconditionally — that is FAT re-mint, a separate protection from #1's
+// stripping.) See kdex-tech/host-manager#151.
 func TestURLDelivery_ThroughRealProxy(t *testing.T) {
 	logf.SetLogger(logr.Discard())
 	g := NewWithT(t)

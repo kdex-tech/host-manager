@@ -208,7 +208,13 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 	// for bearer delivery, directly-generated above for URL delivery).
 	if hh.cacheManager != nil && jti != "" {
 		capCache := hh.cacheManager.GetCache("cap", cache.CacheOptions{Uncycled: true})
-		_ = capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl))
+		if serr := capCache.Set(ctx, "uses:"+jti, strconv.Itoa(uses), cache.WithTTL(ttl)); serr != nil {
+			// A failed counter write yields a token/URL that fail-closes on
+			// first use (missing counter -> DecrementIfPositive !ok -> reject),
+			// so don't let the resulting DOA capability be silent. See
+			// kdex-tech/host-manager#151.
+			hh.log.Error(serr, "mint_token: failed to provision bounded-use counter", "jti", jti)
+		}
 	}
 
 	result := MintTokenResult{
@@ -217,9 +223,9 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		UsesRemaining: uses,
 	}
 	if isURL {
-		if jti == "" {
-			return MintTokenResult{}, errNoCache
-		}
+		// jti is guaranteed non-empty here: URL delivery requires a cache
+		// manager (checked above -> errNoCache) and mintTokenOrJTI's URL branch
+		// returns a non-empty rand.Text() id — so no jti=="" guard is needed.
 		handle, herr := newTransferHandle()
 		if herr != nil {
 			return MintTokenResult{}, fmt.Errorf("mint handle: %w", herr)
