@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,4 +121,107 @@ func TestTransferHandler_GatedOnPolicy(t *testing.T) {
 	offMux := http.NewServeMux()
 	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: false}}).transferHandler(offMux, nil)
 	g.Expect(patternRegistered(offMux, "GET "+transferPath)).To(BeFalse())
+}
+
+func TestURLDelivery_EndToEnd(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+
+	mux := http.NewServeMux()
+	served := 0
+	mux.HandleFunc("GET /api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		served++
+		_, _ = w.Write([]byte("BYTES"))
+	})
+
+	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr, Mux: mux}
+	hh.transferHandler(mux, nil) // register /-/transfer on the same mux
+
+	// Mint a URL capability.
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"functions:/api/v1/files:read"},
+		MintTokenRequest{
+			Entitlements: []string{"functions:/api/v1/files:read"},
+			Delivery:     "url",
+			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+		}, "https://dev.example")
+	g.Expect(err).ToNot(HaveOccurred())
+	path := strings.TrimPrefix(res.URL, "https://dev.example")
+
+	// Redeem through the registered route: streams the bytes once.
+	rw := httptest.NewRecorder()
+	mux.ServeHTTP(rw, httptest.NewRequest("GET", path, nil))
+	g.Expect(rw.Code).To(Equal(http.StatusOK))
+	g.Expect(rw.Body.String()).To(Equal("BYTES"))
+	g.Expect(served).To(Equal(1))
+
+	// Second redeem: single-use spent -> 410, backend not hit again.
+	rw2 := httptest.NewRecorder()
+	mux.ServeHTTP(rw2, httptest.NewRequest("GET", path, nil))
+	g.Expect(rw2.Code).To(Equal(http.StatusGone))
+	g.Expect(served).To(Equal(1))
+}
+
+func TestBearerDelivery_Unchanged(t *testing.T) {
+	g := NewWithT(t)
+	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"functions:/api/v1/files:read"},
+		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:read"}}, "")
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.Token).ToNot(BeEmpty())
+	g.Expect(res.URL).To(BeEmpty())
+}
+
+func TestLoadTransferRecord_CorruptJSON(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	hh := &HostHandler{cacheManager: mgr}
+	ctx := context.Background()
+	c := mgr.GetCache("cap", cache.CacheOptions{Uncycled: true})
+	_ = c.Set(ctx, transferKeyPrefix+"bad", "{not json")
+	_, ok := hh.loadTransferRecord(ctx, "bad")
+	g.Expect(ok).To(BeFalse()) // fail-closed on decode error
+}
+
+func TestTransferGet_WrongMethod410(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	hh := &HostHandler{cacheManager: mgr, Mux: http.NewServeMux()}
+	ctx := context.Background()
+	c := mgr.GetCache("cap", cache.CacheOptions{Uncycled: true})
+	_ = c.Set(ctx, "uses:jm", "1")
+	_ = hh.storeTransferRecord(ctx, "hm", transferRecord{
+		JTI: "jm", Sub: "alice",
+		Entitlements: []string{"functions:/api/v1/files:read"},
+		Target:       TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+	}, time.Minute)
+	req := httptest.NewRequest("POST", "/-/transfer/hm", nil) // method mismatch vs stored GET
+	req.SetPathValue("handle", "hm")
+	rw := httptest.NewRecorder()
+	hh.TransferGet(rw, req)
+	g.Expect(rw.Code).To(Equal(http.StatusGone))
+}
+
+func TestTransferGet_NilMux410(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+	hh := &HostHandler{cacheManager: mgr, Mux: nil} // nil mux -> fail-closed
+	ctx := context.Background()
+	c := mgr.GetCache("cap", cache.CacheOptions{Uncycled: true})
+	_ = c.Set(ctx, "uses:jn", "1")
+	_ = hh.storeTransferRecord(ctx, "hn", transferRecord{
+		JTI: "jn", Sub: "alice",
+		Entitlements: []string{"functions:/api/v1/files:read"},
+		Target:       TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+	}, time.Minute)
+	req := httptest.NewRequest("GET", "/-/transfer/hn", nil)
+	req.SetPathValue("handle", "hn")
+	rw := httptest.NewRecorder()
+	hh.TransferGet(rw, req)
+	g.Expect(rw.Code).To(Equal(http.StatusGone))
 }
