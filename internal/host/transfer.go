@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	ko "github.com/kdex-tech/host-manager/internal/openapi"
 )
 
 // transferKeyPrefix namespaces URL-delivery records in the shared "cap" cache
@@ -89,3 +92,61 @@ func transferBaseURL(r *http.Request) string {
 // errNoCache is returned when URL delivery is requested but no cache manager is
 // available to hold the handle record / budget counter.
 var errNoCache = fmt.Errorf("mint_token url delivery requires a configured cache")
+
+// transferPath is the redemption route for URL-delivered capabilities.
+const transferPath = "/-/transfer/{handle}"
+
+// transferHandler registers the redemption route, but only when URL delivery is
+// enabled — a disabled host has no /-/transfer surface at all.
+func (hh *HostHandler) transferHandler(mux *http.ServeMux, _ map[string]ko.PathInfo) {
+	if hh.authConfig == nil || !hh.authConfig.MintTokenURLDelivery {
+		return
+	}
+	mux.HandleFunc("GET "+transferPath, hh.TransferGet)
+}
+
+// TransferGet redeems a /-/transfer/<handle> capability: resolve the handle,
+// spend one budget unit, inject the stored identity, and re-dispatch the bound
+// target through the mux (which runs the proxy identity gate + per-op security
+// against the injected entitlements). All non-redeemable cases return an
+// identical 410 to preserve anti-enumeration.
+func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
+	gone := func() { http.Error(w, "This transfer link is no longer valid.", http.StatusGone) }
+
+	ctx := r.Context()
+	rec, ok := hh.loadTransferRecord(ctx, r.PathValue("handle"))
+	if !ok {
+		gone()
+		return
+	}
+	if !strings.EqualFold(r.Method, rec.Target.Method) {
+		gone()
+		return
+	}
+	c := hh.capCache()
+	if c == nil {
+		gone()
+		return
+	}
+	if _, ok, err := c.DecrementIfPositive(ctx, "uses:"+rec.JTI); err != nil || !ok {
+		gone() // spent / expired / missing counter -> fail-closed
+		return
+	}
+
+	hh.mu.RLock()
+	mux := hh.Mux
+	hh.mu.RUnlock()
+	if mux == nil {
+		gone()
+		return
+	}
+
+	ac := auth.AuthContext{"sub": rec.Sub, "entitlements": rec.Entitlements}
+	r2 := r.Clone(auth.SetAuthContext(ctx, ac))
+	r2.Method = rec.Target.Method
+	r2.URL.Path = rec.Target.Path
+	r2.URL.RawPath = ""
+	r2.URL.RawQuery = "" // bound target only — recipient cannot append query params
+	r2.RequestURI = ""
+	mux.ServeHTTP(w, r2)
+}
