@@ -430,3 +430,13 @@ func TestReverseProxy_LargeBodyNotTruncated(t *testing.T) {
 	g.Expect(rr.Code).To(Equal(http.StatusOK))
 	g.Expect(upstreamBodyLen).To(Equal(sentLen))
 }
+
+func TestValidateTransferTarget(t *testing.T) {
+	g := NewWithT(t)
+
+	g.Expect(validateTransferTarget(nil)).To(HaveOccurred())
+	g.Expect(validateTransferTarget(&TransferTarget{Method: "POST", Path: "/api/v1/files/x/content"})).To(HaveOccurred())
+	g.Expect(validateTransferTarget(&TransferTarget{Method: "GET", Path: "api/v1/files/x"})).To(HaveOccurred())        // relative
+	g.Expect(validateTransferTarget(&TransferTarget{Method: "GET", Path: "/-/transfer/abc"})).To(HaveOccurred())       // reserved
+	g.Expect(validateTransferTarget(&TransferTarget{Method: "get", Path: "/api/v1/files/x/content"})).ToNot(HaveOccurred())
+}

@@ -29,6 +29,36 @@ type ctxKey int
 // key, not the value, is the marker. See kdex-tech/host-manager#133.
 const mintTokenListDiscoveryURLKey ctxKey = iota
 
+// deliveryURL is the MintTokenRequest.Delivery value selecting redeemable-URL
+// delivery. Any other value (including "" / "bearer") selects the default
+// bearer-token delivery.
+const deliveryURL = "url"
+
+// TransferTarget is the single concrete operation a delivery:"url" capability
+// authorizes. Download-only in this release: Method must be GET.
+type TransferTarget struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+}
+
+// validateTransferTarget enforces the download-only, non-reserved, absolute-path
+// contract for a URL-delivery target.
+func validateTransferTarget(t *TransferTarget) error {
+	if t == nil {
+		return fmt.Errorf(`delivery "url" requires a target`)
+	}
+	if !strings.EqualFold(strings.TrimSpace(t.Method), http.MethodGet) {
+		return fmt.Errorf("unsupported target method %q (only GET is supported)", t.Method)
+	}
+	if !strings.HasPrefix(t.Path, "/") {
+		return fmt.Errorf("target path must be an absolute path beginning with /")
+	}
+	if strings.HasPrefix(t.Path, "/-/") {
+		return fmt.Errorf("target path must not be under the reserved /-/ prefix")
+	}
+	return nil
+}
+
 // stringSliceFromClaim coerces an entitlements claim (which arrives as
 // []any after JSON round-trips, or []string when set in-process) to []string.
 func stringSliceFromClaim(v any) []string {
@@ -50,14 +80,17 @@ func stringSliceFromClaim(v any) []string {
 
 // MintTokenRequest is the argument shape of the mint_token MCP tool.
 type MintTokenRequest struct {
-	Entitlements []string `json:"entitlements"`
-	TTLSeconds   int      `json:"ttl_seconds,omitempty"`
-	Uses         int      `json:"uses,omitempty"`
+	Entitlements []string       `json:"entitlements"`
+	TTLSeconds   int            `json:"ttl_seconds,omitempty"`
+	Uses         int            `json:"uses,omitempty"`
+	Delivery     string         `json:"delivery,omitempty"`
+	Target       *TransferTarget `json:"target,omitempty"`
 }
 
 // MintTokenResult is the mint_token success payload.
 type MintTokenResult struct {
-	Token         string   `json:"token"`
+	Token         string   `json:"token,omitempty"`
+	URL           string   `json:"url,omitempty"`
 	ExpiresAt     int64    `json:"expires_at"`
 	Entitlements  []string `json:"entitlements"`
 	UsesRemaining int      `json:"uses_remaining"`
