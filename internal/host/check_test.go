@@ -165,6 +165,72 @@ func TestCheck_ExcludesInstanceScopedRequirements(t *testing.T) {
 	assert.Contains(t, resp.Passed, "functions:/api/v1/vector_stores:delete")
 }
 
+// TestCheck_ExcludesWildcardRequirementUnderStrict pins the same instance-free
+// contract as TestCheck_ExcludesInstanceScopedRequirements, but for the OTHER
+// bind-error class the guard must handle: a wildcard resourceName. Once
+// kdex-entitlements runs strict, BindRequirements(pr, nil) returns
+// ErrWildcardRequirement (NOT ErrUnboundPlaceholder) for a wildcard requirement.
+// The guard must still EXCLUDE it and fall back to the identity-only check, so a
+// caller holding the function grant passes.
+//
+// With a narrow ErrUnboundPlaceholder-only guard the wildcard requirement is
+// instead retained; the strict verify backstop then denies it unconditionally,
+// and /-/check wrongly reports "not passed" -- hiding UI the caller can
+// legitimately use. (Without strict the guard makes no difference: a wildcard
+// requirement binds to a nil error, so both guards take the else branch. Strict
+// is the only mode that exercises the non-placeholder bind error, which is
+// exactly why this fix must land before the v1.0.0 strict flip.)
+func TestCheck_ExcludesWildcardRequirementUnderStrict(t *testing.T) {
+	cacheManager, err := cache.NewCacheManager("", "foo", nil)
+	require.NoError(t, err)
+
+	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+
+	// A REAL checker in STRICT mode: strict is the only mode in which
+	// BindRequirements returns ErrWildcardRequirement for a wildcard resourceName.
+	realChecker := auth.NewAuthorizationChecker(nil, logr.Discard()).WithStrictRequirements(true)
+	hh.authChecker = realChecker
+
+	const basePath = "/api/v1/vector_stores"
+	const check = "functions:" + basePath + ":delete"
+
+	// `delete` is the only verb whose uppercased form spells an HTTP method, so it
+	// is the only verb that reaches check.go's parsedRequirements lookup.
+	hh.functionHandlers = map[string]*KDexFunctionHandler{
+		basePath: {
+			parsedRequirements: map[string]entitlements.ParsedRequirements{
+				"DELETE " + basePath: realChecker.ParseRequirements(
+					[]kdexv1alpha1.SecurityRequirement{
+						{"bearer": {"vector_stores:*:own"}}, // wildcard resourceName
+					},
+				),
+			},
+		},
+	}
+
+	// The caller holds the function grant -- nothing store-specific.
+	held := []string{check}
+
+	reqBody, err := json.Marshal(CheckRequest{Checks: []string{check}})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/-/check", bytes.NewBuffer(reqBody))
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub":          "alice",
+		"entitlements": held,
+	}))
+	w := httptest.NewRecorder()
+
+	hh.CheckHandler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp CheckResponse
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+
+	assert.Contains(t, resp.Passed, check)
+}
+
 type checkAuthChecker struct {
 	allowed            map[string]bool
 	parsedEntitlements entitlements.ParsedEntitlements

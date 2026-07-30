@@ -2,7 +2,6 @@ package host
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -91,13 +90,19 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 					// name a function and a verb, never a store. So an
 					// instance-scoped ({param}) requirement is not applicable
 					// here -- we have no request to bind it from. Probe with an
-					// empty binding: a placeholder-free set returns unchanged; a
-					// placeholder-bearing one reports ErrUnboundPlaceholder.
+					// empty binding: a placeholder-free, non-wildcard set returns
+					// unchanged; anything the AS cannot resolve to a concrete
+					// instance-free requirement reports a bind error
+					// (ErrUnboundPlaceholder for a {param}; ErrWildcardRequirement
+					// for a wildcard resourceName once strict is on).
 					//
-					// Exclude rather than fail: failing would hide UI a caller
-					// can legitimately use. The gate still enforces the instance
-					// check on the real request.
-					if _, err := hh.authChecker.BindRequirements(pr, nil); errors.Is(err, entitlements.ErrUnboundPlaceholder) {
+					// Exclude on ANY bind error rather than fail: failing would
+					// hide UI a caller can legitimately use, and retaining a
+					// wildcard requirement lets the strict verify backstop deny it
+					// unconditionally. Mirrors the pages path
+					// (parsePageRequirementsFailClosed, #146). The gate still
+					// enforces the instance check on the real request.
+					if _, err := hh.authChecker.BindRequirements(pr, nil); err != nil {
 						requirements = hh.authChecker.ParseRequirements(nil)
 					} else {
 						requirements = pr
