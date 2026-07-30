@@ -31,6 +31,26 @@ func TestGetLang_NoHeaderFallsBackToDefault(t *testing.T) {
 	g.Expect(got).To(Equal(language.Make("en")))
 }
 
+func TestGetLang_WidensRegionalVariantToAvailableBase(t *testing.T) {
+	// A browser asking for a regional variant (en-CA) that is NOT in the
+	// supported set must widen to the available base language (en), not echo
+	// en-CA back. This is the contract that makes trimming the duplicate
+	// en-CA/fr-CA blocks from the bundled default translation correct: once
+	// en-CA is no longer an exact match, an en-CA visitor resolves to en and
+	// gets /en/... (or the bare default path) instead of /en-CA/...
+	supported := []language.Tag{
+		language.Make("de"),
+		language.Make("en"),
+		language.Make("fr"),
+	}
+	g := NewGomegaWithT(t)
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept-Language", "en-CA")
+	got, err := GetLang(req, "en", supported)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(got).To(Equal(language.Make("en")))
+}
+
 func TestDecodeJSONBody(t *testing.T) {
 	type Thing struct {
 		Name string `json:"name"`
