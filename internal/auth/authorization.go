@@ -23,17 +23,6 @@ func NewAuthorizationChecker(anonymousEntitlements []string, log logr.Logger) *A
 	}
 }
 
-// WithStrictRequirements toggles the underlying checker's strict-requirements
-// mode, in which a wildcard resourceName on the requirement side is illegal:
-// BindRequirements returns ErrWildcardRequirement and verification denies it
-// unconditionally. Delegates to the entitlements checker and returns the
-// receiver for chaining. Off by default; must stay off until kdex-entitlements
-// v1.0.0 flips strict on globally.
-func (ac *AuthorizationChecker) WithStrictRequirements(strict bool) *AuthorizationChecker {
-	ac.ec.WithStrictRequirements(strict)
-	return ac
-}
-
 func (ac *AuthorizationChecker) CheckAccess(
 	ctx context.Context,
 	resource string,

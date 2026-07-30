@@ -5,9 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	entitlements "github.com/kdex-tech/entitlements/go"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
-	"kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -52,8 +50,17 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Pre-parse user entitlements once
+	// /-/check is a batch entitlement-membership test: each check string passes
+	// iff the caller holds a grant satisfying that exact
+	// <resource>:<resourceName>:<verb>, using ordinary entitlement matching. The
+	// check string IS the thing tested -- there is no per-resource branching and
+	// no lookup of a page's or function's declared security. Consulting a
+	// resource's own requirements is the gate's job on the real request; /-/check
+	// only answers "does the caller hold this grant?" (An empty requirement set
+	// reduces VerifyResourceParsedEntitlements to exactly that grant check for
+	// the given verb.)
 	parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())
+	noRequirements := hh.authChecker.ParseRequirements(nil)
 	passed := []string{}
 
 	for _, check := range req.Checks {
@@ -66,64 +73,8 @@ func (hh *HostHandler) CheckHandler(w http.ResponseWriter, r *http.Request) {
 		resourceName := parts[1]
 		verb := parts[2]
 
-		var requirements entitlements.ParsedRequirements
-		found := false
-
-		switch resource {
-		case "pages":
-			// Try to find the page handler to get pre-parsed requirements
-			for _, ph := range hh.Pages.List() {
-				if ph.BasePath() == resourceName {
-					if ph.ParsedRequirements != nil {
-						requirements = *ph.ParsedRequirements
-						found = true
-					}
-					break
-				}
-			}
-		case "functions":
-			// Try to find the function handler to get pre-parsed requirements
-			if fh, ok := hh.functionHandlers[resourceName]; ok {
-				key := strings.ToUpper(verb) + " " + resourceName
-				if pr, ok := fh.parsedRequirements[key]; ok {
-					// /-/check asks an instance-FREE question: its check strings
-					// name a function and a verb, never a store. So an
-					// instance-scoped ({param}) requirement is not applicable
-					// here -- we have no request to bind it from. Probe with an
-					// empty binding: a placeholder-free, non-wildcard set returns
-					// unchanged; anything the AS cannot resolve to a concrete
-					// instance-free requirement reports a bind error
-					// (ErrUnboundPlaceholder for a {param}; ErrWildcardRequirement
-					// for a wildcard resourceName once strict is on).
-					//
-					// Exclude on ANY bind error rather than fail: failing would
-					// hide UI a caller can legitimately use, and retaining a
-					// wildcard requirement lets the strict verify backstop deny it
-					// unconditionally. Mirrors the pages path
-					// (parsePageRequirementsFailClosed, #146). The gate still
-					// enforces the instance check on the real request.
-					if _, err := hh.authChecker.BindRequirements(pr, nil); err != nil {
-						requirements = hh.authChecker.ParseRequirements(nil)
-					} else {
-						requirements = pr
-					}
-					found = true
-				} else {
-					// Default to empty requirements for the function identity check
-					requirements = hh.authChecker.ParseRequirements(nil)
-					found = true
-				}
-			}
-		}
-
-		if !found {
-			// Fallback: Just check if user has the identity entitlement for an unknown resource
-			// using empty requirements.
-			requirements = hh.authChecker.ParseRequirements([]v1alpha1.SecurityRequirement{})
-		}
-
 		authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
-			resource, resourceName, parsedUserEntitlements, requirements, verb)
+			resource, resourceName, parsedUserEntitlements, noRequirements, verb)
 
 		if err == nil && authorized {
 			passed = append(passed, check)
