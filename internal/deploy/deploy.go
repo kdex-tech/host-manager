@@ -10,6 +10,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -441,53 +442,35 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 	return job, nil
 }
 
-func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunction) (client.Object, error) {
-	if d.FaaSAdaptor.Observer == nil {
-		return nil, nil // No observer configured
-	}
+// ObservedByLabel marks a KDexFunction as a member of a host's observer set.
+// The per-host observer CronJob lists by it, so the observed set stays exactly
+// the adaptor-deployed functions -- service-backed functions never had an
+// observer and still don't. Must match the constant in knative-deployer's
+// cmd/main.go. See kdex-tech/host-manager#156.
+const ObservedByLabel = "kdex.dev/observed-by"
 
-	// Create CronJob name
-	cronJobName := fmt.Sprintf("%s-observer", function.Name)
+// HostObserverName is the per-host observer CronJob's name.
+func HostObserverName(host string) string {
+	return fmt.Sprintf("%s-observer", host)
+}
 
-	cronJob := &batchv1.CronJob{}
-	err := d.Client.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: cronJobName}, cronJob)
-	if err == nil {
-		if d.FaaSAdaptor.Observer.Schedule != cronJob.Spec.Schedule {
-			cronJob.Spec.Schedule = d.FaaSAdaptor.Observer.Schedule
-			err = d.Client.Update(ctx, cronJob)
-			if err != nil {
-				return nil, fmt.Errorf("failed to update observation cronjob: %w", err)
-			}
-		}
-
-		return cronJob, nil
-	}
-	if !errors.IsNotFound(err) {
-		return nil, err
-	}
-
-	// Reuse deployment environment variables where appropriate
-	env := make([]corev1.EnvVar, 0, 6+len(d.FaaSAdaptor.Observer.Env))
+// observerEnv builds the observer container's env vars from the
+// FaaSAdaptor's Observer spec. Split out of Observe so the desired state
+// can be recomputed on every reconcile, not just on create (#143).
+//
+// One CronJob now covers every function on the host, so this carries no
+// per-function values -- the observer resolves its set from FUNCTION_HOST +
+// the observed-by label and reads each function's basePath off its CR (#156).
+func (d *Deployer) observerEnv() []corev1.EnvVar {
+	env := make([]corev1.EnvVar, 0, 4+len(d.FaaSAdaptor.Observer.Env))
 	env = append(env, []corev1.EnvVar{
 		{
-			Name:  "FUNCTION_BASEPATH",
-			Value: function.Spec.API.BasePath,
-		},
-		{
-			Name:  "FUNCTION_GENERATION",
-			Value: fmt.Sprintf("%d", function.Generation),
-		},
-		{
 			Name:  "FUNCTION_HOST",
-			Value: function.Spec.HostRef.Name,
-		},
-		{
-			Name:  "FUNCTION_NAME",
-			Value: function.Name,
+			Value: d.Host.Name,
 		},
 		{
 			Name:  "FUNCTION_NAMESPACE",
-			Value: function.Namespace,
+			Value: d.Host.Namespace,
 		},
 	}...)
 
@@ -510,66 +493,212 @@ func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunct
 
 	env = append(env, d.FaaSAdaptor.Observer.Env...)
 
+	return env
+}
+
+// observerCronJobSpec builds the desired CronJobSpec for a function's observer.
+// Every field an operator can influence via FaaSAdaptor.Observer is set here, so
+// that Observe can converge an existing CronJob onto it rather than freezing it
+// at whatever the adaptor happened to say when the function was created (#143).
+func (d *Deployer) observerCronJobSpec() batchv1.CronJobSpec {
+	serviceAccount := d.ServiceAccount
+
+	return batchv1.CronJobSpec{
+		ConcurrencyPolicy: batchv1.ForbidConcurrent,
+		JobTemplate: batchv1.JobTemplateSpec{
+			Spec: batchv1.JobSpec{
+				Completions: new(int32(1)),
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						AutomountServiceAccountToken: new(true),
+						SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
+						Containers: []corev1.Container{
+							{
+								Args:            d.FaaSAdaptor.Observer.Args,
+								Command:         d.FaaSAdaptor.Observer.Command,
+								Env:             d.observerEnv(),
+								Image:           d.FaaSAdaptor.Observer.Image,
+								Name:            "observer",
+								SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
+							},
+						},
+						ImagePullSecrets: d.ImagePullSecrets,
+						// Steer observer Job pods to the operator-intended
+						// node pool. Cluster-default-only: read from the
+						// FaaSAdaptor's Observer. Empty values are no-ops, so
+						// observers keep their prior scheduler-picks-anything
+						// behavior unless an operator sets them.
+						NodeSelector:       d.FaaSAdaptor.Observer.NodeSelector,
+						RestartPolicy:      corev1.RestartPolicyOnFailure,
+						ServiceAccountName: serviceAccount,
+						Tolerations:        d.FaaSAdaptor.Observer.Tolerations,
+					},
+				},
+				TTLSecondsAfterFinished: new(int32(0)),
+			},
+		},
+		Schedule:                   d.FaaSAdaptor.Observer.Schedule,
+		SuccessfulJobsHistoryLimit: new(int32(1)),
+	}
+}
+
+// Observe converges the host's observer CronJob onto the current
+// FaaSAdaptor.Observer spec and enrolls the function in its observed set.
+//
+// Two defects are addressed here.
+//
+// #143: this used to reconcile only Spec.Schedule on an existing CronJob and
+// apply the full pod template only on the create path, so an adaptor edit
+// (image, tolerations, nodeSelector, env, securityContext) never reached
+// functions that already had an observer. The desired spec is now rebuilt every
+// pass and written whenever it differs, so any triggered reconcile -- including
+// the periodic resync -- heals a stale observer.
+//
+// #156: observers used to be one CronJob per function, all sharing the adaptor's
+// single schedule, so every observer in a namespace fired in the same second and
+// object count grew with the fleet. There is now one CronJob per host; the
+// function is marked with ObservedByLabel and the observer resolves its set from
+// that label. Any legacy per-function CronJob found is retired.
+func (d *Deployer) Observe(ctx context.Context, function *kdexv1alpha1.KDexFunction) (client.Object, error) {
+	if d.FaaSAdaptor.Observer == nil {
+		return nil, nil // No observer configured
+	}
+
+	if err := d.markObserved(ctx, function); err != nil {
+		return nil, err
+	}
+
+	cronJob, err := d.reconcileHostObserver(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := d.retireLegacyObserver(ctx, function); err != nil {
+		return nil, err
+	}
+
+	return cronJob, nil
+}
+
+// markObserved stamps ObservedByLabel on the function so the per-host observer
+// picks it up. Patched rather than Updated so it can't clobber a concurrent
+// write to the function by its own reconciler.
+func (d *Deployer) markObserved(ctx context.Context, function *kdexv1alpha1.KDexFunction) error {
+	if function.Labels[ObservedByLabel] == d.Host.Name {
+		return nil
+	}
+
+	patch := client.MergeFrom(function.DeepCopy())
+	if function.Labels == nil {
+		function.Labels = map[string]string{}
+	}
+	function.Labels[ObservedByLabel] = d.Host.Name
+
+	if err := d.Client.Patch(ctx, function, patch); err != nil {
+		return fmt.Errorf("failed to label function for observation: %w", err)
+	}
+	return nil
+}
+
+// reconcileHostObserver creates or converges the single CronJob that observes
+// every function on this host. Owned by the KDexInternalHost, so it is garbage
+// collected with the host rather than with whichever function happened to
+// create it.
+func (d *Deployer) reconcileHostObserver(ctx context.Context) (client.Object, error) {
+	cronJobName := HostObserverName(d.Host.Name)
+
+	desiredSpec := d.observerCronJobSpec()
+	desiredLabels := map[string]string{
+		"app":  "observer",
+		"host": d.Host.Name,
+	}
+
+	cronJob := &batchv1.CronJob{}
+	err := d.Client.Get(ctx, client.ObjectKey{Namespace: d.Host.Namespace, Name: cronJobName}, cronJob)
+	if err == nil {
+		// Converge the whole spec, not just the schedule. Compare before
+		// writing so a byte-stable observer doesn't generate an Update on
+		// every reconcile (and, via the CronJob watch, re-trigger us) --
+		// the same self-amplification #102 fixed for status writes.
+		if equality.Semantic.DeepEqual(cronJob.Spec, desiredSpec) &&
+			labelsMatch(cronJob.Labels, desiredLabels) {
+			return cronJob, nil
+		}
+
+		cronJob.Spec = desiredSpec
+		if cronJob.Labels == nil {
+			cronJob.Labels = map[string]string{}
+		}
+		for k, v := range desiredLabels {
+			cronJob.Labels[k] = v
+		}
+
+		if err = d.Client.Update(ctx, cronJob); err != nil {
+			return nil, fmt.Errorf("failed to update observation cronjob: %w", err)
+		}
+
+		return cronJob, nil
+	}
+	if !errors.IsNotFound(err) {
+		return nil, err
+	}
+
 	cronJob = &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cronJobName,
-			Namespace: function.Namespace,
-			Labels: map[string]string{
-				"app":      "observer",
-				"function": function.Name,
-			},
+			Namespace: d.Host.Namespace,
+			Labels:    desiredLabels,
 		},
-		Spec: batchv1.CronJobSpec{
-			ConcurrencyPolicy: batchv1.ForbidConcurrent,
-			JobTemplate: batchv1.JobTemplateSpec{
-				Spec: batchv1.JobSpec{
-					Completions: new(int32(1)),
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							AutomountServiceAccountToken: new(true),
-							SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
-							Containers: []corev1.Container{
-								{
-									Args:            d.FaaSAdaptor.Observer.Args,
-									Command:         d.FaaSAdaptor.Observer.Command,
-									Env:             env,
-									Image:           d.FaaSAdaptor.Observer.Image,
-									Name:            "observer",
-									SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
-								},
-							},
-							ImagePullSecrets: d.ImagePullSecrets,
-							// Steer observer Job pods to the operator-intended
-							// node pool. Cluster-default-only: read from the
-							// FaaSAdaptor's Observer. Empty values are no-ops, so
-							// observers keep their prior scheduler-picks-anything
-							// behavior unless an operator sets them.
-							NodeSelector:       d.FaaSAdaptor.Observer.NodeSelector,
-							RestartPolicy:      corev1.RestartPolicyOnFailure,
-							ServiceAccountName: d.ServiceAccount,
-							Tolerations:        d.FaaSAdaptor.Observer.Tolerations,
-						},
-					},
-					TTLSecondsAfterFinished: new(int32(0)),
-				},
-			},
-			Schedule:                   d.FaaSAdaptor.Observer.Schedule,
-			SuccessfulJobsHistoryLimit: new(int32(1)),
-		},
+		Spec: desiredSpec,
 	}
 
-	// Default service account if not set in observer spec
-	if cronJob.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName == "" {
-		cronJob.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName = d.ServiceAccount
-	}
-
-	if err = ctrl.SetControllerReference(function, cronJob, d.Scheme); err != nil {
+	host := d.Host
+	if err = ctrl.SetControllerReference(&host, cronJob, d.Scheme); err != nil {
 		return nil, fmt.Errorf("failed to create observation cronjob: %w", err)
 	}
 
 	if err = d.Client.Create(ctx, cronJob); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Another function on this host won the race; converge next pass.
+			return cronJob, nil
+		}
 		return nil, fmt.Errorf("failed to create observation cronjob: %w", err)
 	}
 
 	return cronJob, nil
+}
+
+// retireLegacyObserver deletes the pre-#156 per-function CronJob. It is owned by
+// the KDexFunction, so ownership GC will never remove it while the function
+// lives -- without this, the old and new observers both run.
+func (d *Deployer) retireLegacyObserver(ctx context.Context, function *kdexv1alpha1.KDexFunction) error {
+	legacyName := fmt.Sprintf("%s-observer", function.Name)
+	if legacyName == HostObserverName(d.Host.Name) {
+		// A function named identically to its host: the "legacy" name IS the
+		// per-host name. Never delete the CronJob we just converged.
+		return nil
+	}
+
+	legacy := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      legacyName,
+			Namespace: function.Namespace,
+		},
+	}
+	if err := d.Client.Delete(ctx, legacy); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to retire legacy observer cronjob: %w", err)
+	}
+	return nil
+}
+
+// labelsMatch reports whether every desired label is present on have with the
+// same value. Labels set by other controllers or by an operator are ignored, so
+// convergence doesn't fight them.
+func labelsMatch(have, desired map[string]string) bool {
+	for k, v := range desired {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
 }

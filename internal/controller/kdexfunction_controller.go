@@ -571,7 +571,103 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return reqs
 	}
 
+	// An edit to a FaaSAdaptor changes the desired observer CronJob (image,
+	// schedule, tolerations, nodeSelector, env) for every function resolving
+	// to it, but nothing was watching the adaptor -- so an adaptor edit
+	// enqueued no reconciles and existing functions kept stale observers until
+	// some unrelated event happened to touch them. See
+	// kdex-tech/host-manager#143.
+	mapFaaSAdaptorToFunctions := func(ctx context.Context, obj client.Object) []reconcile.Request {
+		hosts := &kdexv1alpha1.KDexInternalHostList{}
+		if err := r.List(ctx, hosts); err != nil {
+			return nil
+		}
+
+		// Whether this adaptor is the one an unreferenced host falls back to.
+		// Mirrors ResolveOrDefaultFaaSAdaptor: the oldest cluster adaptor
+		// labelled kdex.dev/default=true.
+		isDefault := false
+		if _, ok := obj.(*kdexv1alpha1.KDexClusterFaaSAdaptor); ok {
+			defaults := &kdexv1alpha1.KDexClusterFaaSAdaptorList{}
+			if err := r.List(ctx, defaults, client.MatchingLabels{"kdex.dev/default": "true"}); err == nil &&
+				len(defaults.Items) != 0 {
+				slices.SortFunc(defaults.Items, func(a, b kdexv1alpha1.KDexClusterFaaSAdaptor) int {
+					return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
+				})
+				isDefault = defaults.Items[0].Name == obj.GetName()
+			}
+		}
+
+		adaptorKind := obj.GetObjectKind().GroupVersionKind().Kind
+		if adaptorKind == "" {
+			// Typed objects off the cache often carry an empty GVK.
+			switch obj.(type) {
+			case *kdexv1alpha1.KDexClusterFaaSAdaptor:
+				adaptorKind = "KDexClusterFaaSAdaptor"
+			case *kdexv1alpha1.KDexFaaSAdaptor:
+				adaptorKind = "KDexFaaSAdaptor"
+			}
+		}
+
+		matchedHosts := map[string]bool{}
+		for _, h := range hosts.Items {
+			ref := h.Spec.FaaSAdaptorRef
+			if ref == nil {
+				// No explicit ref -- this host uses the cluster default.
+				if isDefault {
+					matchedHosts[h.Namespace+"/"+h.Name] = true
+				}
+				continue
+			}
+			if ref.Kind != adaptorKind || ref.Name != obj.GetName() {
+				continue
+			}
+			// Cluster-scoped adaptors have no namespace to disambiguate.
+			if !strings.Contains(adaptorKind, "Cluster") {
+				ns := ref.Namespace
+				if ns == "" {
+					ns = h.Namespace
+				}
+				if ns != obj.GetNamespace() {
+					continue
+				}
+			}
+			matchedHosts[h.Namespace+"/"+h.Name] = true
+		}
+
+		if len(matchedHosts) == 0 {
+			return nil
+		}
+
+		functions := &kdexv1alpha1.KDexFunctionList{}
+		if err := r.List(ctx, functions); err != nil {
+			return nil
+		}
+
+		reqs := make([]reconcile.Request, 0, len(functions.Items))
+		for _, fn := range functions.Items {
+			// HostRef is a LocalObjectReference -- the host always lives in
+			// the function's own namespace.
+			if matchedHosts[fn.Namespace+"/"+fn.Spec.HostRef.Name] {
+				reqs = append(reqs, reconcile.Request{
+					NamespacedName: client.ObjectKey{Name: fn.Name, Namespace: fn.Namespace},
+				})
+			}
+		}
+		return reqs
+	}
+
 	builder = builder.
+		Watches(
+			&kdexv1alpha1.KDexClusterFaaSAdaptor{},
+			handler.EnqueueRequestsFromMapFunc(mapFaaSAdaptorToFunctions),
+			// Adaptor status writes must not fan out to every function on
+			// every pass; only spec changes alter the desired observer.
+			ctrlbuilder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&kdexv1alpha1.KDexFaaSAdaptor{},
+			handler.EnqueueRequestsFromMapFunc(mapFaaSAdaptorToFunctions),
+			ctrlbuilder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&kdexv1alpha1.KDexInternalHost{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexFunction{}, &kdexv1alpha1.KDexFunctionList{}, "{.Spec.HostRef}"),

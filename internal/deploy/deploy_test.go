@@ -9,9 +9,11 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -524,8 +526,9 @@ func TestObserve_SteersObserverPodsViaNodeSelectorAndTolerations(t *testing.T) {
 	}
 	nodeSelector := map[string]string{"kubernetes.io/arch": "arm64"}
 
+	fn := newObserverFunction()
 	d := &Deployer{
-		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build(),
 		FaaSAdaptor: kdexv1alpha1.KDexFaaSAdaptorSpec{
 			Observer: &kdexv1alpha1.Observer{
 				Image:        "ghcr.io/kdex-tech/knative-deployer:test",
@@ -534,11 +537,14 @@ func TestObserve_SteersObserverPodsViaNodeSelectorAndTolerations(t *testing.T) {
 				Tolerations:  tolerations,
 			},
 		},
+		Host: kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: "rsi-dev", Namespace: "dev", UID: "host-uid"},
+		},
 		Scheme:         scheme,
 		ServiceAccount: "observer-sa",
 	}
 
-	obj, err := d.Observe(context.Background(), newObserverFunction())
+	obj, err := d.Observe(context.Background(), fn)
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
@@ -565,19 +571,23 @@ func TestObserve_SteersObserverPodsViaNodeSelectorAndTolerations(t *testing.T) {
 func TestObserve_OmitsPlacementWhenUnset(t *testing.T) {
 	scheme := newObserverTestScheme(t)
 
+	fn := newObserverFunction()
 	d := &Deployer{
-		Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build(),
 		FaaSAdaptor: kdexv1alpha1.KDexFaaSAdaptorSpec{
 			Observer: &kdexv1alpha1.Observer{
 				Image:    "ghcr.io/kdex-tech/knative-deployer:test",
 				Schedule: "*/5 * * * *",
 			},
 		},
+		Host: kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: "rsi-dev", Namespace: "dev", UID: "host-uid"},
+		},
 		Scheme:         scheme,
 		ServiceAccount: "observer-sa",
 	}
 
-	obj, err := d.Observe(context.Background(), newObserverFunction())
+	obj, err := d.Observe(context.Background(), fn)
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
@@ -589,5 +599,315 @@ func TestObserve_OmitsPlacementWhenUnset(t *testing.T) {
 	}
 	if podSpec.Tolerations != nil {
 		t.Errorf("expected nil Tolerations when unset, got %+v", podSpec.Tolerations)
+	}
+}
+
+// newObserverDeployer builds a Deployer whose Observer carries the given
+// image/placement, sharing one fake client across calls so a second Observe
+// sees what the first wrote.
+func newObserverDeployer(
+	t *testing.T,
+	c client.Client,
+	scheme *runtime.Scheme,
+	image string,
+	nodeSelector map[string]string,
+	tolerations []corev1.Toleration,
+	env []corev1.EnvVar,
+	schedule string,
+) *Deployer {
+	t.Helper()
+	return &Deployer{
+		Client: c,
+		FaaSAdaptor: kdexv1alpha1.KDexFaaSAdaptorSpec{
+			Observer: &kdexv1alpha1.Observer{
+				Image:        image,
+				Schedule:     schedule,
+				NodeSelector: nodeSelector,
+				Tolerations:  tolerations,
+				Env:          env,
+			},
+		},
+		Host: kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: "rsi-dev", Namespace: "dev", UID: "host-uid"},
+		},
+		Scheme:         scheme,
+		ServiceAccount: "observer-sa",
+	}
+}
+
+// observerKey is the per-host observer CronJob's key (#156).
+func observerKey() client.ObjectKey {
+	return client.ObjectKey{Namespace: "dev", Name: "rsi-dev-observer"}
+}
+
+// TestObserve_ReconcilesFullSpecOnExistingCronJob is the regression for
+// kdex-tech/host-manager#143. Observe used to reconcile only Spec.Schedule on
+// an existing CronJob and apply the full pod template only on the create path,
+// so an adaptor edit (image / tolerations / nodeSelector / env) never reached
+// functions that already had an observer -- they stayed pinned to the adaptor
+// config as of their creation. A second Observe with a changed adaptor must now
+// converge every one of those fields.
+func TestObserve_ReconcilesFullSpecOnExistingCronJob(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fn := newObserverFunction()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build()
+	ctx := context.Background()
+
+	// First pass: the "old" adaptor, with no placement at all -- the shape of
+	// the May-era functions in the issue.
+	old := newObserverDeployer(t, c, scheme, "deployer:0.1.11", nil, nil, nil, "*/5 * * * *")
+	if _, err := old.Observe(ctx, fn); err != nil {
+		t.Fatalf("first Observe: %v", err)
+	}
+
+	// Operator edits the cluster adaptor: new image, pin to the warm pool,
+	// extra env, different schedule.
+	tolerations := []corev1.Toleration{
+		{Key: "component", Operator: corev1.TolerationOpEqual, Value: "workload", Effect: corev1.TaintEffectNoSchedule},
+	}
+	nodeSelector := map[string]string{"pool": "warm"}
+	extraEnv := []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}
+	updated := newObserverDeployer(t, c, scheme, "deployer:0.1.28", nodeSelector, tolerations, extraEnv, "*/10 * * * *")
+
+	obj, err := updated.Observe(ctx, fn)
+	if err != nil {
+		t.Fatalf("second Observe: %v", err)
+	}
+	if obj == nil {
+		t.Fatal("Observe returned nil CronJob")
+	}
+
+	// Read back from the API, not the returned object, so we prove the write
+	// actually landed.
+	got := &batchv1.CronJob{}
+	if err := c.Get(ctx, observerKey(), got); err != nil {
+		t.Fatalf("get cronjob: %v", err)
+	}
+
+	podSpec := got.Spec.JobTemplate.Spec.Template.Spec
+	if got.Spec.Schedule != "*/10 * * * *" {
+		t.Errorf("schedule not converged: %q", got.Spec.Schedule)
+	}
+	if podSpec.Containers[0].Image != "deployer:0.1.28" {
+		t.Errorf("image not converged: %q -- this is the #143 defect", podSpec.Containers[0].Image)
+	}
+	if podSpec.NodeSelector["pool"] != "warm" {
+		t.Errorf("nodeSelector not converged: %+v -- this is the #143 defect", podSpec.NodeSelector)
+	}
+	if len(podSpec.Tolerations) != 1 || podSpec.Tolerations[0].Key != "component" {
+		t.Errorf("tolerations not converged: %+v -- this is the #143 defect", podSpec.Tolerations)
+	}
+	var sawLogLevel bool
+	for _, e := range podSpec.Containers[0].Env {
+		if e.Name == "LOG_LEVEL" && e.Value == "debug" {
+			sawLogLevel = true
+		}
+	}
+	if !sawLogLevel {
+		t.Errorf("adaptor env not converged: %+v -- this is the #143 defect", podSpec.Containers[0].Env)
+	}
+}
+
+// TestObserve_NoWriteWhenAlreadyConverged guards the other side of #143: now
+// that Observe writes the whole spec, it must still not issue an Update when
+// nothing changed. An unconditional write would bump ResourceVersion every
+// reconcile and, via the controller's Owns(&CronJob{}) watch, re-trigger the
+// reconcile that wrote it -- the self-amplification #102 fixed for status.
+func TestObserve_NoWriteWhenAlreadyConverged(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fn := newObserverFunction()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build()
+	ctx := context.Background()
+
+	d := newObserverDeployer(t, c, scheme, "deployer:0.1.28",
+		map[string]string{"pool": "warm"},
+		[]corev1.Toleration{{Key: "component", Operator: corev1.TolerationOpEqual, Value: "workload"}},
+		[]corev1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}},
+		"*/5 * * * *")
+
+	if _, err := d.Observe(ctx, fn); err != nil {
+		t.Fatalf("first Observe: %v", err)
+	}
+	first := &batchv1.CronJob{}
+	if err := c.Get(ctx, observerKey(), first); err != nil {
+		t.Fatalf("get after create: %v", err)
+	}
+
+	// Re-run with an identical adaptor several times.
+	for i := range 3 {
+		if _, err := d.Observe(ctx, fn); err != nil {
+			t.Fatalf("Observe #%d: %v", i+2, err)
+		}
+	}
+
+	after := &batchv1.CronJob{}
+	if err := c.Get(ctx, observerKey(), after); err != nil {
+		t.Fatalf("get after resyncs: %v", err)
+	}
+	if first.ResourceVersion != after.ResourceVersion {
+		t.Errorf("converged observer was rewritten: rv %s -> %s (reconcile storm)",
+			first.ResourceVersion, after.ResourceVersion)
+	}
+}
+
+// secondObserverFunction is a second function on the same host as
+// newObserverFunction, used to prove the observer is per-host, not per-function.
+func secondObserverFunction() *kdexv1alpha1.KDexFunction {
+	return &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tenancy-service",
+			Namespace: "dev",
+			UID:       "fn-uid-2",
+		},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "rsi-dev"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/tenancy"},
+		},
+	}
+}
+
+// TestObserve_OneCronJobPerHost is the core of kdex-tech/host-manager#156.
+// Observers used to be one CronJob per function, every one carrying the
+// adaptor's single schedule -- so N functions in a namespace meant N Jobs
+// firing in the same second, and object count grew with the fleet. Observing
+// two functions on one host must now yield exactly one CronJob.
+func TestObserve_OneCronJobPerHost(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fnA := newObserverFunction()
+	fnB := secondObserverFunction()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fnA, fnB).Build()
+	ctx := context.Background()
+
+	d := newObserverDeployer(t, c, scheme, "deployer:0.1.28", nil, nil, nil, "*/5 * * * *")
+
+	for _, fn := range []*kdexv1alpha1.KDexFunction{fnA, fnB} {
+		if _, err := d.Observe(ctx, fn); err != nil {
+			t.Fatalf("Observe(%s): %v", fn.Name, err)
+		}
+	}
+
+	list := &batchv1.CronJobList{}
+	if err := c.List(ctx, list, client.InNamespace("dev")); err != nil {
+		t.Fatalf("list cronjobs: %v", err)
+	}
+	if len(list.Items) != 1 {
+		names := []string{}
+		for _, cj := range list.Items {
+			names = append(names, cj.Name)
+		}
+		t.Fatalf("want exactly 1 observer CronJob for the host, got %d: %v", len(list.Items), names)
+	}
+	if list.Items[0].Name != "rsi-dev-observer" {
+		t.Errorf("observer name = %q; want rsi-dev-observer", list.Items[0].Name)
+	}
+
+	// It must carry no per-function identity -- one Job covers many functions.
+	env := list.Items[0].Spec.JobTemplate.Spec.Template.Spec.Containers[0].Env
+	for _, e := range env {
+		if e.Name == "FUNCTION_NAME" || e.Name == "FUNCTION_BASEPATH" || e.Name == "FUNCTION_GENERATION" {
+			t.Errorf("per-host observer still carries per-function env %s=%q", e.Name, e.Value)
+		}
+	}
+	var host, ns string
+	for _, e := range env {
+		switch e.Name {
+		case "FUNCTION_HOST":
+			host = e.Value
+		case "FUNCTION_NAMESPACE":
+			ns = e.Value
+		}
+	}
+	if host != "rsi-dev" || ns != "dev" {
+		t.Errorf("observer env FUNCTION_HOST=%q FUNCTION_NAMESPACE=%q; want rsi-dev/dev", host, ns)
+	}
+}
+
+// TestObserve_OwnedByHostNotFunction pins #156 point 1: the per-host CronJob
+// must be garbage-collected with the KDexInternalHost. Owning it by whichever
+// function happened to create it would delete every other function's observer
+// when that one function is removed.
+func TestObserve_OwnedByHostNotFunction(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fn := newObserverFunction()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build()
+	ctx := context.Background()
+
+	d := newObserverDeployer(t, c, scheme, "deployer:0.1.28", nil, nil, nil, "*/5 * * * *")
+	if _, err := d.Observe(ctx, fn); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	got := &batchv1.CronJob{}
+	if err := c.Get(ctx, observerKey(), got); err != nil {
+		t.Fatalf("get cronjob: %v", err)
+	}
+	owners := got.GetOwnerReferences()
+	if len(owners) != 1 {
+		t.Fatalf("want exactly 1 owner, got %+v", owners)
+	}
+	if owners[0].Kind != "KDexInternalHost" || owners[0].Name != "rsi-dev" {
+		t.Errorf("owner = %s/%s; want KDexInternalHost/rsi-dev", owners[0].Kind, owners[0].Name)
+	}
+}
+
+// TestObserve_EnrollsFunctionViaLabel pins the selection contract: the observer
+// resolves its set from this label, so a function that isn't labelled is never
+// observed.
+func TestObserve_EnrollsFunctionViaLabel(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fn := newObserverFunction()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn).Build()
+	ctx := context.Background()
+
+	d := newObserverDeployer(t, c, scheme, "deployer:0.1.28", nil, nil, nil, "*/5 * * * *")
+	if _, err := d.Observe(ctx, fn); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	got := &kdexv1alpha1.KDexFunction{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "dev", Name: "user-service"}, got); err != nil {
+		t.Fatalf("get function: %v", err)
+	}
+	if got.Labels[ObservedByLabel] != "rsi-dev" {
+		t.Errorf("%s = %q; want rsi-dev", ObservedByLabel, got.Labels[ObservedByLabel])
+	}
+}
+
+// TestObserve_RetiresLegacyPerFunctionCronJob covers the migration. The old
+// <fn>-observer CronJobs are owned by their KDexFunction, so ownership GC will
+// never remove them while the function exists -- without an explicit delete the
+// old and new observers both fire, preserving the exact herd #156 is about.
+func TestObserve_RetiresLegacyPerFunctionCronJob(t *testing.T) {
+	scheme := newObserverTestScheme(t)
+	fn := newObserverFunction()
+
+	legacy := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "user-service-observer",
+			Namespace: "dev",
+			Labels:    map[string]string{"app": "observer", "function": "user-service"},
+		},
+		Spec: batchv1.CronJobSpec{Schedule: "*/5 * * * *"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fn, legacy).Build()
+	ctx := context.Background()
+
+	d := newObserverDeployer(t, c, scheme, "deployer:0.1.28", nil, nil, nil, "*/5 * * * *")
+	if _, err := d.Observe(ctx, fn); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+
+	stale := &batchv1.CronJob{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: "dev", Name: "user-service-observer"}, stale)
+	if err == nil {
+		t.Fatal("legacy per-function observer CronJob still exists; both observers would fire")
+	}
+	if !kerrors.IsNotFound(err) {
+		t.Fatalf("unexpected error getting legacy cronjob: %v", err)
+	}
+
+	// ...and the per-host one is in its place.
+	if err := c.Get(ctx, observerKey(), &batchv1.CronJob{}); err != nil {
+		t.Fatalf("per-host observer missing: %v", err)
 	}
 }
