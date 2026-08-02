@@ -29,6 +29,10 @@ import (
 	"strings"
 )
 
+// tarGzMediaType is the OCI layer media type both the importmap selection and
+// the pinned-version verification walk.
+const tarGzMediaType = "application/vnd.oci.image.layer.v1.tar+gzip"
+
 // VersionMismatch records one package whose installed version in a built
 // packages image disagrees with the version pinned in the KIPR spec.
 type VersionMismatch struct {
@@ -86,7 +90,7 @@ func VerifyPinnedVersions(
 	// dedicated importmap layer. Stop as soon as every pin has been seen.
 	candidates := make([]ImportmapLayer, 0, len(layers))
 	for _, l := range layers {
-		if l.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip" {
+		if l.MediaType == tarGzMediaType {
 			candidates = append(candidates, l)
 		}
 	}
@@ -159,7 +163,8 @@ func collectInstalledVersions(
 		if err != nil {
 			return fmt.Errorf("read tar entry in %s: %w", layer.Digest, err)
 		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		// archive/tar normalizes the historical TypeRegA to TypeReg on read.
+		if header.Typeflag != tar.TypeReg {
 			continue
 		}
 

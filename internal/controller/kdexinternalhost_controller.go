@@ -48,7 +48,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
-	remoteauth "oras.land/oras-go/v2/registry/remote/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -2050,13 +2049,6 @@ func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef
 		return "", fmt.Errorf("find importmap in %s: %w", imageRef, err)
 	}
 	return body, nil
-}
-
-// getRegistryCredential delegates to the package-level registryCredential.
-// Kept as a method because the credential suite exercises it through the
-// reconciler.
-func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.Secrets) remoteauth.Credential {
-	return registryCredential(registry, secrets)
 }
 
 type resolvedBackend struct {

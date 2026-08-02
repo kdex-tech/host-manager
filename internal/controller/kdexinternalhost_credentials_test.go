@@ -41,19 +41,18 @@ func mkDockerConfigSecret(name string, created time.Time, body string) corev1.Se
 	}
 }
 
-var _ = Describe("getRegistryCredential", func() {
-	r := &KDexInternalHostReconciler{}
+var _ = Describe("registryCredential", func() {
 
 	It("returns empty when no dockerconfigjson secrets exist", func() {
 		secrets := kdexv1alpha1.Secrets{}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
 	})
 
 	It("returns the credential when username/password are present", func() {
 		secrets := kdexv1alpha1.Secrets{
 			mkDockerConfigSecret("a", time.Unix(1, 0), `{"auths":{"registry.example.com":{"username":"u","password":"p"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "u", Password: "p"},
 		))
 	})
@@ -63,7 +62,7 @@ var _ = Describe("getRegistryCredential", func() {
 		secrets := kdexv1alpha1.Secrets{
 			mkDockerConfigSecret("a", time.Unix(1, 0), `{"auths":{"registry.example.com":{"auth":"`+auth+`"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "u", Password: "p"},
 		))
 	})
@@ -74,7 +73,7 @@ var _ = Describe("getRegistryCredential", func() {
 		secrets := kdexv1alpha1.Secrets{
 			mkDockerConfigSecret("a", time.Unix(1, 0), `{"auths":{"registry.example.com":{"auth":"`+auth+`"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "user", Password: "p:q"},
 		))
 	})
@@ -85,7 +84,7 @@ var _ = Describe("getRegistryCredential", func() {
 			mkDockerConfigSecret("newest", time.Unix(2, 0), `{"auths":{"registry.example.com":{"auth":"!!not-base64!!"}}}`),
 			mkDockerConfigSecret("older", time.Unix(1, 0), `{"auths":{"registry.example.com":{"auth":"`+good+`"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "u", Password: "p"},
 		))
 	})
@@ -95,7 +94,7 @@ var _ = Describe("getRegistryCredential", func() {
 			mkDockerConfigSecret("newest", time.Unix(2, 0), `{"auths":{"other.example.com":{"username":"x","password":"y"}}}`),
 			mkDockerConfigSecret("older", time.Unix(1, 0), `{"auths":{"registry.example.com":{"username":"u","password":"p"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "u", Password: "p"},
 		))
 	})
@@ -104,7 +103,7 @@ var _ = Describe("getRegistryCredential", func() {
 		secrets := kdexv1alpha1.Secrets{
 			mkDockerConfigSecret("a", time.Unix(1, 0), `{"auths":{"other.example.com":{"username":"u","password":"p"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
 	})
 
 	It("skips secrets with malformed JSON and continues searching", func() {
@@ -112,7 +111,7 @@ var _ = Describe("getRegistryCredential", func() {
 			mkDockerConfigSecret("newest", time.Unix(2, 0), `not-json`),
 			mkDockerConfigSecret("older", time.Unix(1, 0), `{"auths":{"registry.example.com":{"username":"u","password":"p"}}}`),
 		}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(
 			remoteauth.Credential{Username: "u", Password: "p"},
 		))
 	})
@@ -124,6 +123,6 @@ var _ = Describe("getRegistryCredential", func() {
 			Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"registry.example.com":{"username":"u","password":"p"}}}`)},
 		}
 		secrets := kdexv1alpha1.Secrets{opaque}
-		Expect(r.getRegistryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
+		Expect(registryCredential("registry.example.com", secrets)).To(Equal(remoteauth.EmptyCredential))
 	})
 })
