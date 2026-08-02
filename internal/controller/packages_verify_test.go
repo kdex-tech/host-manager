@@ -19,8 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const tarGzMediaType = "application/vnd.oci.image.layer.v1.tar+gzip"
-
 func pkgJSON(name, version string) string {
 	return fmt.Sprintf(`{"name":%q,"version":%q}`, name, version)
 }

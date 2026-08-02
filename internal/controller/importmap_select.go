@@ -82,7 +82,7 @@ func FindImportmapInLayers(ctx context.Context, layers []ImportmapLayer, fetch L
 	// Rule 3: tar+gzip candidates, sorted ascending by Size.
 	candidates := make([]ImportmapLayer, 0, len(layers))
 	for _, l := range layers {
-		if l.MediaType == "application/vnd.oci.image.layer.v1.tar+gzip" {
+		if l.MediaType == tarGzMediaType {
 			candidates = append(candidates, l)
 		}
 	}
