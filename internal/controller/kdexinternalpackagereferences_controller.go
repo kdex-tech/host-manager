@@ -338,9 +338,58 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
-		ipr.Status.Attributes["image"] = fmt.Sprintf(
+		builtImage := fmt.Sprintf(
 			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
 		)
+
+		// The Job reported success, but "success" has been observed to mean
+		// "shipped the PREVIOUS version's bytes": during the npm propagation
+		// window the aggregation can retain a package's prior content instead
+		// of failing. Verify the built image actually carries the pinned
+		// versions BEFORE publishing status.image, so a poisoned build is
+		// never promoted onto the serving Deployment.
+		// See kdex-tech/host-manager#161.
+		if mismatches, verifyErr := r.verifyBuiltImage(ctx, &ipr, builtImage, secrets); verifyErr != nil {
+			// Could not verify (registry unreachable, unfamiliar image shape).
+			// Do NOT treat unverifiable as poisoned — that would fail every
+			// build on a registry blip. Publish and record the gap.
+			log.V(1).Info("could not verify pinned versions in packages image; publishing unverified",
+				"image", builtImage, "error", verifyErr.Error())
+			ipr.Status.Attributes["verified"] = "unknown"
+		} else if len(mismatches) > 0 {
+			msgs := make([]string, 0, len(mismatches))
+			for _, m := range mismatches {
+				msgs = append(msgs, m.String())
+			}
+			err := fmt.Errorf(
+				"packages image %s does not match its pins: %s — refusing to publish (likely an npm propagation-window aggregation; the next reconcile rebuilds)",
+				builtImage, strings.Join(msgs, "; "),
+			)
+			kdexv1alpha1.SetConditions(
+				&ipr.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionTrue,
+					Progressing: metav1.ConditionFalse,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileError,
+				err.Error(),
+			)
+			log.Error(err, "stale packages image rejected", "image", builtImage)
+
+			// Delete the Job so the next pass rebuilds rather than reusing this
+			// build. status.image is deliberately left untouched: the host
+			// keeps serving the last KNOWN-GOOD image instead of promoting
+			// stale bytes.
+			if delErr := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(delErr) != nil {
+				return ctrl.Result{}, delErr
+			}
+			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+		} else {
+			ipr.Status.Attributes["verified"] = "pins"
+		}
+
+		ipr.Status.Attributes["image"] = builtImage
 		ipr.Status.Attributes["importmap"] = importmap
 	}
 
@@ -489,6 +538,33 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobConfigMap(
 	)
 
 	return op, configmap, err
+}
+
+// verifyBuiltImage reports which pinned packages the built image fails to
+// satisfy. An error means verification could not be performed at all, which is
+// distinct from — and must not be conflated with — a confirmed mismatch.
+//
+// Split out so the propagation-window guard (kdex-tech/host-manager#161) is
+// exercised directly by tests; VerifyPinnedVersions itself is registry-free.
+func (r *KDexInternalPackageReferencesReconciler) verifyBuiltImage(
+	ctx context.Context,
+	ipr *kdexv1alpha1.KDexInternalPackageReferences,
+	imageRef string,
+	secrets kdexv1alpha1.Secrets,
+) ([]VersionMismatch, error) {
+	pins := make(map[string]string, len(ipr.Spec.PackageReferences))
+	for _, pkg := range ipr.Spec.PackageReferences {
+		pins[pkg.Name] = pkg.Version
+	}
+	if len(pins) == 0 {
+		return nil, nil
+	}
+
+	layers, fetch, err := openImageLayers(ctx, imageRef, secrets)
+	if err != nil {
+		return nil, fmt.Errorf("open packages image %s: %w", imageRef, err)
+	}
+	return VerifyPinnedVersions(ctx, layers, pins, fetch)
 }
 
 func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
