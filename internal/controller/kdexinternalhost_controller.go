@@ -18,12 +18,8 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -39,8 +35,6 @@ import (
 
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/sniffer"
-	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -54,10 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
-	"oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/registry/remote"
 	remoteauth "oras.land/oras-go/v2/registry/remote/auth"
-	"oras.land/oras-go/v2/registry/remote/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -749,6 +740,35 @@ var functionHostWatchPredicate = predicate.Funcs{
 	},
 }
 
+// hasFocalHost reports whether an event object belongs to the host this
+// controller instance serves. It backs the controller-wide event filter, so a
+// false here drops the event for EVERY source — Owns() included.
+//
+// That reach is why the KDexInternalPackageReferences arm matters: the KIPR is
+// created with the HOST's name, and matching it against "<host>-packages" (the
+// serving Deployment's name) matched nothing. Every KIPR event was discarded,
+// including the status.attributes.image write that promotes a freshly built
+// packages:N — so the packages Deployment kept serving N-1 until some unrelated
+// reconcile happened to fire. See kdex-tech/host-manager#160.
+//
+// Types not named here fall through to true: this filter narrows to one host,
+// it does not decide relevance.
+func hasFocalHost(focalHost string, o client.Object) bool {
+	switch t := o.(type) {
+	case *kdexv1alpha1.KDexInternalHost:
+		return t.Name == focalHost
+	case *kdexv1alpha1.KDexInternalPackageReferences:
+		// Name equality is the real invariant (the KIPR is created as
+		// <host>); spec.hostRef is accepted too as the object's own
+		// statement of ownership.
+		return t.Name == focalHost || t.Spec.HostRef.Name == focalHost
+	case *kdexv1alpha1.KDexPage:
+		return t.Spec.HostRef.Name == focalHost
+	default:
+		return true
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	err := r.indexers(mgr)
@@ -756,31 +776,18 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	hasFocalHost := func(o client.Object) bool {
-		switch t := o.(type) {
-		case *kdexv1alpha1.KDexInternalHost:
-			return t.Name == r.FocalHost
-		case *kdexv1alpha1.KDexInternalPackageReferences:
-			return t.Name == fmt.Sprintf("%s-packages", r.FocalHost)
-		case *kdexv1alpha1.KDexPage:
-			return t.Spec.HostRef.Name == r.FocalHost
-		default:
-			return true
-		}
-	}
-
 	var enabledFilter = predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return hasFocalHost(e.Object)
+			return hasFocalHost(r.FocalHost, e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			return hasFocalHost(e.ObjectNew)
+			return hasFocalHost(r.FocalHost, e.ObjectNew)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			return hasFocalHost(e.Object)
+			return hasFocalHost(r.FocalHost, e.Object)
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
-			return hasFocalHost(e.Object)
+			return hasFocalHost(r.FocalHost, e.Object)
 		},
 	}
 
@@ -2030,88 +2037,14 @@ func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.K
 
 func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef string, secrets kdexv1alpha1.Secrets) (string, error) {
 	log := logf.FromContext(ctx)
+	log.V(3).Info("[PullImportMap]", "imageRef", imageRef)
 
-	repo, err := remote.NewRepository(imageRef)
+	layers, fetch, err := openImageLayers(ctx, imageRef, secrets)
 	if err != nil {
-		return "", fmt.Errorf("failed to create repository client: %w", err)
+		return "", err
 	}
 
-	log.V(3).Info("[PullImportMap]", "registry", repo.Reference.Registry)
-
-	registryURL, err := url.Parse("//" + repo.Reference.Registry)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse registry URL: %w", err)
-	}
-
-	log.V(3).Info("[PullImportMap]", "hostname", registryURL.Hostname())
-
-	// Determine if we should use HTTP for local registries
-	if strings.HasSuffix(registryURL.Hostname(), ".local") {
-		repo.PlainHTTP = true
-	}
-
-	// Handle Authentication
-	cred := r.getRegistryCredential(repo.Reference.Registry, secrets)
-	if cred.Username != "" {
-		repo.Client = &remoteauth.Client{
-			Client: retry.DefaultClient,
-			Cache:  remoteauth.NewCache(),
-			Credential: func(ctx context.Context, s string) (remoteauth.Credential, error) {
-				return cred, nil
-			},
-		}
-	}
-
-	log.V(3).Info("[PullImportMap]", "repo.reference", repo.Reference.String())
-
-	// 1. Resolve to a manifest (handles OCI index/multi-arch)
-	descriptor, err := oras.Resolve(ctx, repo, repo.Reference.Reference, oras.ResolveOptions{})
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve image: %w", err)
-	}
-
-	// 2. Fetch Manifest
-	rc, err := repo.Fetch(ctx, descriptor)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch manifest: %w", err)
-	}
-	manifestData, err := io.ReadAll(rc)
-	_ = rc.Close()
-	if err != nil {
-		return "", fmt.Errorf("failed to read manifest: %w", err)
-	}
-
-	var manifest struct {
-		Layers []struct {
-			MediaType string `json:"mediaType"`
-			Digest    string `json:"digest"`
-			Size      int64  `json:"size"`
-		} `json:"layers"`
-	}
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return "", fmt.Errorf("failed to parse manifest: %w", err)
-	}
-
-	// Project the parsed manifest into the layer descriptors
-	// FindImportmapInLayers operates on, then defer to its tested
-	// selection algorithm (importmap_select.go).
-	layers := make([]ImportmapLayer, 0, len(manifest.Layers))
-	for _, l := range manifest.Layers {
-		layers = append(layers, ImportmapLayer{
-			MediaType: l.MediaType,
-			Digest:    digest.Digest(l.Digest),
-			Size:      l.Size,
-		})
-	}
-
-	fetch := func(ctx context.Context, l ImportmapLayer) (io.ReadCloser, error) {
-		return repo.Fetch(ctx, ocispec.Descriptor{
-			MediaType: l.MediaType,
-			Digest:    l.Digest,
-			Size:      l.Size,
-		})
-	}
-
+	// Defer to the tested selection algorithm (importmap_select.go).
 	body, err := FindImportmapInLayers(ctx, layers, fetch)
 	if err != nil {
 		return "", fmt.Errorf("find importmap in %s: %w", imageRef, err)
@@ -2119,44 +2052,11 @@ func (r *KDexInternalHostReconciler) PullImportMap(ctx context.Context, imageRef
 	return body, nil
 }
 
+// getRegistryCredential delegates to the package-level registryCredential.
+// Kept as a method because the credential suite exercises it through the
+// reconciler.
 func (r *KDexInternalHostReconciler) getRegistryCredential(registry string, secrets kdexv1alpha1.Secrets) remoteauth.Credential {
-	dockerSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Type == corev1.SecretTypeDockerConfigJson })
-
-	for _, s := range dockerSecrets {
-		var config struct {
-			Auths map[string]struct {
-				Username string `json:"username"`
-				Password string `json:"password"`
-				Auth     string `json:"auth"`
-			} `json:"auths"`
-		}
-
-		if err := json.Unmarshal(s.Data[corev1.DockerConfigJsonKey], &config); err != nil {
-			continue
-		}
-
-		a, ok := config.Auths[registry]
-		if !ok {
-			continue
-		}
-
-		if a.Username == "" && a.Password == "" && a.Auth != "" {
-			decoded, err := base64.StdEncoding.DecodeString(a.Auth)
-			if err != nil {
-				continue
-			}
-			i := strings.IndexByte(string(decoded), ':')
-			if i < 0 {
-				continue
-			}
-			a.Username = string(decoded[:i])
-			a.Password = string(decoded[i+1:])
-		}
-
-		return remoteauth.Credential{Username: a.Username, Password: a.Password}
-	}
-
-	return remoteauth.EmptyCredential
+	return registryCredential(registry, secrets)
 }
 
 type resolvedBackend struct {
