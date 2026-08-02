@@ -77,7 +77,18 @@ type RefreshTokenClaims struct {
 	Subject          string     `json:"sub"`
 }
 
-// TokenSet is the result of any successful token minting operation.
+// TokenSet is the result of a token minting operation.
+//
+// On success every field is populated as the grant allows. On failure the
+// zero value is returned EXCEPT for Subject, which is set whenever the
+// failing operation had already established a server-vouched subject --
+// decrypted authorization-code claims, a stored refresh-token record, a
+// credential-store hit, or an authenticated client. This lets the token
+// endpoint attribute a rejected exchange to an identity instead of logging
+// `"subject": ""`. See kdex-tech/host-manager#158.
+//
+// Callers must still gate on the returned error: a non-empty Subject says
+// who the request was about, never that it succeeded.
 type TokenSet struct {
 	AccessToken  string
 	IDToken      string
@@ -396,6 +407,16 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 		return TokenSet{}, fmt.Errorf("invalid client_secret")
 	}
 
+	// The client has now authenticated, so clientID is a vouched subject --
+	// this grant's subject IS the client (see `sub` below). Deliberately not
+	// set on the two rejections above: an unauthenticated caller can assert
+	// any client_id, and an audit log that cannot distinguish an asserted
+	// identity from a verified one is worse than one that stays silent.
+	// See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: clientID}, fmt.Errorf(format, args...)
+	}
+
 	signingContext := jwt.MapClaims{
 		"sub":         clientID,
 		"azp":         clientID,
@@ -411,7 +432,7 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 			continue
 		}
 		if len(client.AllowedScopes) > 0 && !slices.Contains(client.AllowedScopes, s) {
-			return TokenSet{}, fmt.Errorf("scope %s not allowed for this client", s)
+			return failed("scope %s not allowed for this client", s)
 		}
 		grantedScopes = append(grantedScopes, s)
 	}
@@ -433,7 +454,7 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 	if wantRoles || wantEntitlements {
 		roles, entitlements, rerr := e.ResolveInternalRolesAndEntitlements(clientID)
 		if rerr != nil {
-			return TokenSet{}, fmt.Errorf("failed to resolve roles/entitlements for client %s: %w", clientID, rerr)
+			return failed("failed to resolve roles/entitlements for client %s: %w", clientID, rerr)
 		}
 		if wantRoles {
 			signingContext["roles"] = roles
@@ -445,7 +466,7 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 
 	accessToken, err := e.config.Signer.Sign(signingContext)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
+		return failed("failed to sign access token: %w", err)
 	}
 
 	// client_credentials does not issue refresh tokens (M2M flows re-authenticate directly).
@@ -463,7 +484,19 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 
 	signingContext, err := e.sp.FindInternal(username, password)
 	if err != nil {
+		// Credentials did not resolve, so there is no vouched subject to
+		// report. The handler still logs `username`, which is the only
+		// identity handle that exists at this point.
 		return TokenSet{}, err
+	}
+
+	// The credential store has vouched for this identity, so from here the
+	// subject is known. Use `username` to match this function's success path
+	// (and the refresh-token claims it mints), so the same request reports
+	// the same subject whether it succeeds or fails.
+	// See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: username}, fmt.Errorf(format, args...)
 	}
 
 	// The credential store establishes identity (sub) but must not set reserved
@@ -483,7 +516,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	case AuthMethodOAuth2:
 		signingContext["auth_method"] = string(AuthMethodOAuth2)
 	default:
-		return TokenSet{}, fmt.Errorf("unsupported local login auth method: %s", authMethod)
+		return failed("unsupported local login auth method: %s", authMethod)
 	}
 
 	// Determine granted scopes; claim confinement of the scope-controlled
@@ -497,7 +530,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
+		return failed("failed to sign access token: %w", err)
 	}
 
 	var idToken string
@@ -508,7 +541,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		delete(idTokenContext, "scope")
 		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
+			return failed("failed to sign id token: %w", err)
 		}
 	}
 
@@ -560,32 +593,41 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		return TokenSet{}, fmt.Errorf("failed to unmarshal auth code claims: %w", err)
 	}
 
+	// From here the subject is known and server-vouched: it came out of a
+	// JWE we minted and just decrypted with our own block key, so it is not
+	// caller-assertable. Every failure below returns it for audit logging --
+	// a rejected redemption is exactly when an operator needs to know WHOSE
+	// code was rejected. See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
+	}
+
 	// 4. Validate
 	if time.Now().Unix() > claims.Exp {
-		return TokenSet{}, fmt.Errorf("authorization code expired")
+		return failed("authorization code expired")
 	}
 
 	if claims.ClientID != clientID {
-		return TokenSet{}, fmt.Errorf("client_id mismatch")
+		return failed("client_id mismatch")
 	}
 
 	if claims.RedirectURI != redirectURI {
-		return TokenSet{}, fmt.Errorf("redirect_uri mismatch")
+		return failed("redirect_uri mismatch")
 	}
 
 	client, ok := e.GetClient(clientID)
 	if !ok {
-		return TokenSet{}, fmt.Errorf("invalid client_id")
+		return failed("invalid client_id")
 	}
 
 	// PKCE verification
 	if client.RequirePKCE && claims.CodeChallenge == "" {
-		return TokenSet{}, fmt.Errorf("PKCE is required for this client")
+		return failed("PKCE is required for this client")
 	}
 
 	if claims.CodeChallenge != "" {
 		if codeVerifier == "" {
-			return TokenSet{}, fmt.Errorf("code_verifier is required for PKCE")
+			return failed("code_verifier is required for PKCE")
 		}
 
 		// Only S256 is accepted. Pre-#96 the `plain` and empty-method
@@ -595,12 +637,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		// verifier of their choosing — a PKCE downgrade. RFC 7636
 		// §4.2 has considered plain unsafe since 2015.
 		if claims.CodeChallengeMethod != PKCE_METHOD_S256 {
-			return TokenSet{}, fmt.Errorf("unsupported code_challenge_method: only S256 is accepted")
+			return failed("unsupported code_challenge_method: only S256 is accepted")
 		}
 		h := sha256.Sum256([]byte(codeVerifier))
 		challenge := base64.RawURLEncoding.EncodeToString(h[:])
 		if challenge != claims.CodeChallenge {
-			return TokenSet{}, fmt.Errorf("invalid code_verifier")
+			return failed("invalid code_verifier")
 		}
 	}
 
@@ -617,14 +659,16 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 			// rather than honour them — the upgrade window is the
 			// 10-minute code expiry, well under the typical deploy
 			// rollout.
-			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
+			return failed("authorization code already consumed or expired")
 		}
 		_, found, _, err := e.authCodeCache.GetAndDelete(ctx, claims.JTI)
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to check auth code consumption: %w", err)
+			return failed("failed to check auth code consumption: %w", err)
 		}
 		if !found {
-			return TokenSet{}, fmt.Errorf("authorization code already consumed or expired")
+			// Replay, or a legitimate code past its window. Either way the
+			// subject is the operationally interesting part.
+			return failed("authorization code already consumed or expired")
 		}
 	}
 
@@ -657,27 +701,36 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("failed to parse refresh token: %w", err)
 	}
 
+	// The stored record is ours, so from here the subject is known and
+	// server-vouched. Carry it on every rejection below -- these are the
+	// cases an operator most needs attributed (a client stuck refreshing
+	// against the wrong client_id, a session hitting its absolute cap).
+	// See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
+	}
+
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
 	// The token is already consumed by GetAndDelete above, so we just
 	// reject and let the caller re-authenticate.
 	if time.Now().Unix() > claims.ExpiresAt {
-		return TokenSet{}, fmt.Errorf("refresh token expired")
+		return failed("refresh token expired")
 	}
 
 	// Validate absolute session timeout
 	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
-		return TokenSet{}, fmt.Errorf("session absolute timeout reached")
+		return failed("session absolute timeout reached")
 	}
 
 	// Validate the client matches what was issued.
 	if claims.ClientID != clientID {
-		return TokenSet{}, fmt.Errorf("refresh token was not issued to this client")
+		return failed("refresh token was not issued to this client")
 	}
 
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.
 	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to mint tokens from refresh: %w", err)
+		return failed("failed to mint tokens from refresh: %w", err)
 	}
 
 	// Rotate: issue a new refresh token.
@@ -689,7 +742,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		Subject:          claims.Subject,
 	})
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to rotate refresh token: %w", err)
+		return failed("failed to rotate refresh token: %w", err)
 	}
 
 	return ts, nil
@@ -865,9 +918,16 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	// backend claims, then fold both into the signing context pre-attenuation
 	// (#140). Scope confinement of entitlements/roles happens post-mapper in
 	// SignScoped, so a ClaimMappings-injected grant is governed by scope too.
+	// The subject is an input here, so it is known before anything can fail.
+	// Mint failures (resolver down, signer misconfigured) are precisely the
+	// ones worth attributing. See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
+	}
+
 	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to resolve roles: %w", err)
+		return failed("failed to resolve roles: %w", err)
 	}
 
 	signingContext := jwt.MapClaims{
@@ -883,7 +943,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
+		return failed("failed to sign access token: %w", err)
 	}
 
 	var idToken string
@@ -894,7 +954,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		delete(idTokenContext, "scope")
 		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
+			return failed("failed to sign id token: %w", err)
 		}
 	}
 
@@ -923,9 +983,15 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 // mintTokensFromSubject re-mints tokens for a known-authenticated subject (used by the refresh flow).
 // It re-resolves roles/entitlements to ensure freshness.
 func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod) (TokenSet, error) {
+	// As in mintTokensFromCode: subject is an input, so every failure below
+	// can be attributed. See kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: subject}, fmt.Errorf(format, args...)
+	}
+
 	roles, entitlements, backend, err := e.subjectSigningContext(subject)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to resolve roles: %w", err)
+		return failed("failed to resolve roles: %w", err)
 	}
 
 	signingContext := jwt.MapClaims{
@@ -941,7 +1007,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to sign access token: %w", err)
+		return failed("failed to sign access token: %w", err)
 	}
 
 	var idToken string
@@ -952,7 +1018,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		delete(idCtx, "scope")
 		idToken, err = e.config.Signer.SignScoped(idCtx, grantedScopes)
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to sign id token: %w", err)
+			return failed("failed to sign id token: %w", err)
 		}
 	}
 
