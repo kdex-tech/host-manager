@@ -301,7 +301,15 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log := logf.FromContext(r.Context())
 
-			log.Error(err, "PROXY: backend failure", "url", r.URL.String())
+			// Redact the query string before logging: the proxy forwards
+			// arbitrary function requests, whose query params can carry
+			// credentials (tokens, codes), and this is Error-level so it is
+			// always emitted. Log the path only. See #11.
+			loggedURL := *r.URL
+			loggedURL.RawQuery = ""
+			loggedURL.Fragment = ""
+
+			log.Error(err, "PROXY: backend failure", "url", loggedURL.String())
 
 			code := http.StatusBadGateway
 			if errors.Is(err, context.DeadlineExceeded) {
