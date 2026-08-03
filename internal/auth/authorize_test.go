@@ -8,15 +8,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth/idtoken"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	G "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestHostHandler_AuthorizeHandler(t *testing.T) {
@@ -189,6 +192,99 @@ func TestHostHandler_AuthorizeHandler(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAuthorizeHandler_DoesNotLogAuthorizationCode is a regression guard for the
+// #11 leak: AuthorizeHandler used to log the full callback URL, which embeds the
+// freshly issued authorization code and the state in its query string. It captures
+// everything the handler logs and asserts the live code, the state, the callback_url
+// field, and the full redirect URL never appear.
+func TestAuthorizeHandler_DoesNotLogAuthorizationCode(t *testing.T) {
+	g := G.NewGomegaWithT(t)
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	g.Expect(err).NotTo(G.HaveOccurred())
+	var signerInterface crypto.Signer = privateKey
+
+	cfg := &Config{
+		Clients: map[string]AuthClient{
+			"client-1": {
+				ClientID:     "test-client",
+				ClientSecret: "test-secret",
+				RedirectURIs: []string{"http://localhost/cb"},
+			},
+		},
+		OIDC: struct {
+			BlockKey     string
+			ClientID     string
+			ClientSecret string
+			IDTokenStore idtoken.IDTokenStore
+			Name         string
+			ProviderURL  string
+			RedirectURL  string
+			Scopes       []string
+		}{
+			BlockKey: "01234567890123456789012345678901", // 32 bytes
+		},
+		CookieName: "kdex-auth",
+		ActivePair: &keys.KeyPair{
+			ActiveKey: true,
+			KeyId:     "test-kid",
+			Private:   privateKey,
+		},
+	}
+	signer, err := sign.NewSigner("test-audience", time.Hour, "test-issuer", &signerInterface, "test-kid", nil)
+	g.Expect(err).NotTo(G.HaveOccurred())
+	cfg.Signer = *signer
+
+	exchanger, err := NewExchanger(context.Background(), *cfg, nil, nil)
+	g.Expect(err).NotTo(G.HaveOccurred())
+
+	o := &OAuth2{AuthConfig: cfg, AuthExchanger: exchanger}
+
+	const stateVal = "csrf-state-sentinel"
+
+	// Logged-in authorize request -> a real code is minted and the handler logs.
+	u, _ := url.Parse("/-/oauth/authorize")
+	q := u.Query()
+	q.Set("client_id", "client-1")
+	q.Set("response_type", "code")
+	q.Set("redirect_uri", "http://localhost/cb")
+	q.Set("state", stateVal)
+	u.RawQuery = q.Encode()
+	req := httptest.NewRequest("GET", u.String(), nil)
+
+	// Capture everything the handler logs (Verbosity 2 enables the V(1) event).
+	var logBuf strings.Builder
+	logger := funcr.New(func(prefix, args string) {
+		logBuf.WriteString(args)
+		logBuf.WriteString("\n")
+	}, funcr.Options{Verbosity: 2})
+
+	ctx := logf.IntoContext(req.Context(), logger)
+	ctx = SetAuthContext(ctx, AuthContext(jwt.MapClaims{"sub": "user-1"}))
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	o.AuthorizeHandler(w, req)
+
+	resp := w.Result()
+	g.Expect(resp.StatusCode).To(G.Equal(http.StatusFound))
+
+	loc, err := resp.Location()
+	g.Expect(err).NotTo(G.HaveOccurred())
+	code := loc.Query().Get("code")
+	g.Expect(code).NotTo(G.BeEmpty(), "a real authorization code should have been minted")
+
+	logged := logBuf.String()
+	// Sanity: the handler DID log the authorize event (else the assertions below
+	// would pass vacuously).
+	g.Expect(logged).To(G.ContainSubstring("OAuth2 authorization"))
+	// The actual guard: no live secret / CSRF token / secret-bearing URL in logs.
+	g.Expect(logged).NotTo(G.ContainSubstring(code), "authorization code must never be logged")
+	g.Expect(logged).NotTo(G.ContainSubstring(stateVal), "state must never be logged")
+	g.Expect(logged).NotTo(G.ContainSubstring("callback_url"), "the callback URL field re-leaks code+state")
+	g.Expect(logged).NotTo(G.ContainSubstring(loc.String()), "the full redirect URL embeds code+state")
 }
 
 // Mock client required for NewHostHandler if we used it, but we constructed manually.

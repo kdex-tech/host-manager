@@ -34,22 +34,22 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
 	defer func() {
-		callbackURLStr := ""
-		if callbackURL != nil {
-			callbackURLStr = callbackURL.String()
-		}
-		// Intentionally omitted from the log: code, code_challenge, state — these are
-		// either live secrets (auth code) or attacker-controlled values we don't want
-		// echoed into logs (#11).
+		// Intentionally omitted from the log: code, code_challenge, state, and the
+		// callback URL itself. The callback URL is built (below) by appending the
+		// freshly issued `code` and the `state` to redirect_uri as query params, so
+		// logging it re-leaks exactly the live authorization code and CSRF token this
+		// handler must never echo (#11). redirect_uri already carries the structural
+		// destination; log only whether a code/state was produced.
 		log.V(1).Info(
 			"OAuth2 authorization",
-			"callback_url", callbackURLStr,
 			"client_id", clientId,
 			"code_challenge_method", codeChallengeMethod,
+			"code_issued", code != "",
 			"error", err,
 			"redirect_uri", redirectURI,
 			"response_type", responseType,
 			"scope", scope,
+			"state_present", state != "",
 			"subject", subject)
 	}()
 
