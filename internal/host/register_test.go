@@ -198,3 +198,94 @@ func TestRegisterRejectsPrivateUseSchemeWhenNotEnabled(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestRegisterAcceptsCursorLiteralScheme covers the freeform (deterministic
+// literal) scheme model: an allowedRedirectSchemes entry that is neither
+// "http-loopback" nor "private-use" is matched as a literal URI scheme, so
+// listing "cursor" permits Cursor's bare custom-scheme callback
+// (cursor://anysphere.cursor-mcp/oauth/callback) that private-use's reverse-DNS
+// SHOULD would otherwise reject.
+func TestRegisterAcceptsCursorLiteralScheme(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "cursor"})
+	rr := postRegister(t, hh, `{"redirect_uris":["cursor://anysphere.cursor-mcp/oauth/callback"],"client_name":"Cursor"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"client_id"`) {
+		t.Fatalf("missing client_id: %s", rr.Body.String())
+	}
+}
+
+// TestRegisterRejectsCursorSchemeWhenNotListed keeps the freeform scheme
+// opt-in: a "cursor" redirect is rejected when the host does not list it.
+func TestRegisterRejectsCursorSchemeWhenNotListed(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, `{"redirect_uris":["cursor://anysphere.cursor-mcp/oauth/callback"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterRejectsBareHTTPLiteralEvenIfListed guards the one scheme the
+// freeform literal model must never honor: bare "http" (cleartext,
+// non-loopback) is an open-redirect vector, so it is refused even if explicitly
+// listed — "http-loopback" is the only way to permit http, and only to a
+// loopback host.
+func TestRegisterRejectsBareHTTPLiteralEvenIfListed(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"http", "https"})
+	rr := postRegister(t, hh, `{"redirect_uris":["http://evil.example/cb"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterRejectsDangerousSchemeEvenIfListed guards that code-exec / exfil
+// schemes are never honored as a freeform literal even if listed.
+func TestRegisterRejectsDangerousSchemeEvenIfListed(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "javascript"})
+	rr := postRegister(t, hh, `{"redirect_uris":["javascript:alert(1)"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterAcceptsHTTPSViaLiteral pins that https still registers under the
+// freeform literal model (https is matched as a plain scheme literal).
+func TestRegisterAcceptsHTTPSViaLiteral(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, `{"redirect_uris":["https://app.example/cb"]}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterKeepsAllowedSubsetWhenSomeRedirectsInvalid covers filter-not-fail:
+// a client (e.g. Cursor) may send several redirect URIs expecting the AS to keep
+// the ones it supports. A mix of allowed and disallowed redirect_uris succeeds,
+// registering only the allowed subset (RFC 7591 §3.2.1 lets the AS return an
+// adjusted set), rather than failing the whole request on the disallowed one.
+func TestRegisterKeepsAllowedSubsetWhenSomeRedirectsInvalid(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, `{"redirect_uris":["http://127.0.0.1:33418/cb","http://evil.example/cb"],"client_name":"Cursor"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "127.0.0.1") {
+		t.Fatalf("registered set should keep the allowed loopback redirect: %s", body)
+	}
+	if strings.Contains(body, "evil.example") {
+		t.Fatalf("registered set must not contain the disallowed redirect: %s", body)
+	}
+}
+
+// TestRegisterFailsWhenAllRedirectsInvalid pins the lower bound of
+// filter-not-fail: if NONE of the redirect_uris has an allowed scheme, the
+// registration is still rejected (nothing to pin).
+func TestRegisterFailsWhenAllRedirectsInvalid(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "dev.knowdrive.ai", []string{"https", "http-loopback"})
+	rr := postRegister(t, hh, `{"redirect_uris":["http://evil.example/cb","gopher://x/y"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
