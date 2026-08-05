@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
@@ -66,6 +67,13 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
+	// Login-CSRF defense: reject a cross-origin submission before touching
+	// credentials. See originAllowed / kdex-tech/host-manager#163.
+	if !hh.originAllowed(r) {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		return
+	}
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
@@ -118,6 +126,13 @@ func (hh *HostHandler) LoginPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
+	// Login-CSRF defense (forced logout): reject a cross-origin submission.
+	// See originAllowed / kdex-tech/host-manager#163.
+	if !hh.originAllowed(r) {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		return
+	}
+
 	returnURL := "/"
 
 	hh.mu.RLock()
@@ -192,4 +207,45 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 	} else {
 		http.Redirect(w, r, returnURL, http.StatusFound)
 	}
+}
+
+// originAllowed enforces a same-origin check on state-changing POSTs
+// (login/logout) to defend against login CSRF (kdex-tech/host-manager#163).
+// SameSite=Lax does NOT cover this: the attacker submits their OWN credentials,
+// and the browser stores the resulting Set-Cookie from the cross-site POST, so
+// the victim ends up browsing as the attacker. Browsers always send Origin on a
+// cross-site POST, so a present-but-cross-origin Origin (or Referer, when Origin
+// is absent) is rejected. Both headers absent → allowed: that is a non-browser
+// client (curl, server-to-server) which carries no ambient credentials and so is
+// not subject to CSRF. A same-origin programmatic login — e.g. the signup app's
+// post-claim-invite auto-login — sends a matching Origin and passes unchanged.
+func (hh *HostHandler) originAllowed(r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o != "" {
+		return hh.isSameOrigin(o)
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		return hh.isSameOrigin(ref)
+	}
+	return true
+}
+
+// isSameOrigin reports whether raw (an Origin header value or a Referer URL) has
+// the host's scheme and exactly one of its configured domains. It compares
+// against the host's own Routing.Domains — authoritative — rather than the
+// request Host header, which the caller can influence.
+func (hh *HostHandler) isSameOrigin(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	if u.Scheme != hh.scheme || hh.host == nil {
+		return false
+	}
+	host := u.Hostname()
+	for _, d := range hh.host.Routing.Domains {
+		if strings.EqualFold(host, d) {
+			return true
+		}
+	}
+	return false
 }
