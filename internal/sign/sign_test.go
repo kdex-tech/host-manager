@@ -429,8 +429,8 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 	require.NoError(t, err)
 
 	p, err := s.Project(jwt.MapClaims{
-		"sub":             "alice",
-		"entitlements":    []any{"resource:ra:all", "functions::read"},
+		"sub":          "alice",
+		"entitlements": []any{"resource:ra:all", "functions::read"},
 		"extra_grants": []any{"resource:ra:all", "resource:rb:read"}, // resource:ra:all duplicates a role grant
 	})
 	require.NoError(t, err)

@@ -1148,7 +1148,9 @@ func TestMint_UserStoreCannotHijackReservedClaims(t *testing.T) {
 		sp := &mockScopeProvider{
 			resolveIdentity:             func(s, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": s}, nil },
 			resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, []string{"x:read"}, nil },
-			resolveClaims:               func(string) jwt.MapClaims { return jwt.MapClaims{"sub": "attacker", "idp": "evil", "grant_type": "hax"} },
+			resolveClaims: func(string) jwt.MapClaims {
+				return jwt.MapClaims{"sub": "attacker", "idp": "evil", "grant_type": "hax"}
+			},
 		}
 		e := newTestExchanger(t, sp, enrichmentClaimMappingConfig())
 		ts, err := e.mintTokensFromCode(ctx, AuthorizationCodeClaims{Subject: "alice", Scope: "openid", ClientID: "c", AuthMethod: AuthMethodOAuth2})
@@ -1196,8 +1198,8 @@ func TestLoginLocal_ClosesLatentPostMapperLeak(t *testing.T) {
 	sp := &mockScopeProvider{
 		resolveIdentity: func(s, _ string) (jwt.MapClaims, error) {
 			return jwt.MapClaims{
-				"sub":             s,
-				"entitlements":    []string{"pages:*:read"},
+				"sub":          s,
+				"entitlements": []string{"pages:*:read"},
 				"extra_grants": []any{"resource:rx:all"},
 			}, nil
 		},

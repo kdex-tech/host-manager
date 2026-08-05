@@ -130,9 +130,9 @@ func TestCheck_TestsChecksAgainstUserEntitlementsOnly(t *testing.T) {
 	}
 
 	held := []string{
-		"pages:/home:read",                 // exact grant
-		"functions:" + fnBase + ":delete",  // function grant (DELETE op requires users:*:admin, ignored here)
-		"reports::read",                    // wildcard grant -> satisfies reports:/q3:read
+		"pages:/home:read",                // exact grant
+		"functions:" + fnBase + ":delete", // function grant (DELETE op requires users:*:admin, ignored here)
+		"reports::read",                   // wildcard grant -> satisfies reports:/q3:read
 	}
 
 	checks := []string{
