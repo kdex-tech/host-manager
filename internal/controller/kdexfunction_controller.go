@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -723,6 +724,141 @@ func resolveDefaultBuilder(faas *kdexv1alpha1.KDexFaaSAdaptorSpec) (*kdexv1alpha
 	return nil, fmt.Errorf("no Builder named %q supporting language %q found in FaaSAdaptor.spec.builders (defaultBuilderGenerator=%q)", name, language, faas.DefaultBuilderGenerator)
 }
 
+// resolveBuilderByName looks a Builder up in the FaaSAdaptor's catalog by
+// name. `name` is the CRD's own listMapKey for spec.builders, so it is unique
+// and is the right join key between an inline builder and cluster policy.
+// Returns nil when nothing matches — an inline builder may legitimately name
+// a kpack Builder that is not in the adaptor's catalog.
+func resolveBuilderByName(faas *kdexv1alpha1.KDexFaaSAdaptorSpec, name string) *kdexv1alpha1.Builder {
+	if faas == nil || name == "" {
+		return nil
+	}
+	for i := range faas.Builders {
+		if faas.Builders[i].Name == name {
+			return &faas.Builders[i]
+		}
+	}
+	return nil
+}
+
+// mergeBuilder layers an inline Builder over an adaptor-provided one and
+// returns a NEW Builder: inline wins, the adaptor fills what inline leaves
+// unset. Neither input is mutated — hc.faasAdaptorSpec is shared across every
+// function reconciled in the namespace, so mutating `base` would leak one
+// function's builder into the next function's merge base.
+//
+// kdex-tech/host-manager#165: this used to be a wholesale replace, which made
+// adaptor-level policy (notably builders[].tolerations / nodeSelector)
+// unreachable for any function declaring its builder inline.
+//
+// The merge is deep, at each field's natural key, because the shallow form
+// reproduces the same class of bug one level down: an inline `resources` that
+// pins only memory would still discard the adaptor's cpu, and a function that
+// sets a toleration of its own would still lose the cluster's.
+func mergeBuilder(base, inline *kdexv1alpha1.Builder) *kdexv1alpha1.Builder {
+	if base == nil {
+		return inline.DeepCopy()
+	}
+	if inline == nil {
+		return base.DeepCopy()
+	}
+
+	merged := base.DeepCopy()
+
+	// Required scalars: an inline builder always carries these, but guard
+	// anyway so a partially-populated Status.Source.Builder can't blank them.
+	if inline.Name != "" {
+		merged.Name = inline.Name
+	}
+	if inline.BuilderRef != (kdexv1alpha1.KDexObjectReference{}) {
+		merged.BuilderRef = inline.BuilderRef
+	}
+	if len(inline.Languages) > 0 {
+		merged.Languages = slices.Clone(inline.Languages)
+	}
+	if inline.ServiceAccountName != "" {
+		merged.ServiceAccountName = inline.ServiceAccountName
+	}
+	if inline.Cache != nil {
+		merged.Cache = inline.Cache.DeepCopy()
+	}
+
+	// Tolerations are additive by nature: a cluster-wide taint tolerance and
+	// a function's own are not in conflict, so union rather than replace.
+	// Deduped on the whole value, since two tolerations differing only in
+	// effect or seconds are genuinely different.
+	for _, t := range inline.Tolerations {
+		if !slices.ContainsFunc(merged.Tolerations, func(e corev1.Toleration) bool { return e == t }) {
+			merged.Tolerations = append(merged.Tolerations, t)
+		}
+	}
+
+	// Maps merge per key.
+	if len(inline.NodeSelector) > 0 {
+		if merged.NodeSelector == nil {
+			merged.NodeSelector = make(map[string]string, len(inline.NodeSelector))
+		}
+		maps.Copy(merged.NodeSelector, inline.NodeSelector)
+	}
+
+	// Env merges by variable name, keeping base order and appending
+	// inline-only vars, so the resulting kpack Image spec is stable across
+	// reconciles instead of churning on map iteration order.
+	for _, e := range inline.Env {
+		if i := slices.IndexFunc(merged.Env, func(x corev1.EnvVar) bool { return x.Name == e.Name }); i >= 0 {
+			merged.Env[i] = e
+		} else {
+			merged.Env = append(merged.Env, e)
+		}
+	}
+
+	// Resources merge per resource name within Requests and Limits. This is
+	// the case from the issue: an inline block pinning only memory must not
+	// discard the adaptor's cpu.
+	if inline.Resources != nil {
+		if merged.Resources == nil {
+			merged.Resources = &corev1.ResourceRequirements{}
+		}
+		merged.Resources.Requests = mergeResourceList(merged.Resources.Requests, inline.Resources.Requests)
+		merged.Resources.Limits = mergeResourceList(merged.Resources.Limits, inline.Resources.Limits)
+		if len(inline.Resources.Claims) > 0 {
+			merged.Resources.Claims = slices.Clone(inline.Resources.Claims)
+		}
+	}
+
+	return merged
+}
+
+func mergeResourceList(base, inline corev1.ResourceList) corev1.ResourceList {
+	if len(inline) == 0 {
+		return base
+	}
+	if base == nil {
+		base = make(corev1.ResourceList, len(inline))
+	}
+	maps.Copy(base, inline)
+	return base
+}
+
+// builderForBuild returns the Builder to construct the kpack Image from,
+// combining the function's inline spec.origin.source.builder with the
+// FaaSAdaptor's cluster-level policy.
+//
+//   - no inline builder: the generator-mode happy path — codegen Jobs populate
+//     Status.Source.{Repository,Revision,Path} but not Builder, so the adaptor's
+//     defaultBuilderGenerator supplies it. An unresolvable default is an error
+//     so the caller can degrade cleanly rather than nil-deref downstream.
+//   - inline builder naming a catalog entry: merged over it (see mergeBuilder).
+//   - inline builder naming something outside the catalog: used as-is. There is
+//     no cluster policy to inherit, and inheriting an unrelated entry's would be
+//     worse than inheriting nothing.
+func builderForBuild(faas *kdexv1alpha1.KDexFaaSAdaptorSpec, inline *kdexv1alpha1.Builder) (*kdexv1alpha1.Builder, error) {
+	if inline == nil {
+		return resolveDefaultBuilder(faas)
+	}
+	return mergeBuilder(resolveBuilderByName(faas, inline.Name), inline), nil
+}
+
 // sourceRegenerate returns true when the function's origin.source asks
 // to re-run codegen on every reconcile. Default false: source is
 // treated as authoritative and codegen is skipped.
@@ -1226,32 +1362,47 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 			return ctrl.Result{}, err
 		}
 
-		// If the source carries no inline Builder, resolve it from the
-		// FaaSAdaptor's defaultBuilderGenerator. This is the
+		// Combine the inline Builder (if any) with the FaaSAdaptor's
+		// cluster-level policy. With no inline Builder this is the
 		// generator-mode happy path: codegen Jobs set
 		// function.Status.Source.{Repository,Revision,Path} but not
 		// Builder, and the kpack-Image construction below derefs the
 		// Builder fields unconditionally. Resolving up front lets the
 		// caller see a clean degraded condition instead of a panic
 		// from build.GetOrCreateKPackImage.
+		//
+		// With one, the adaptor's matching builders[] entry fills the
+		// fields the inline block leaves unset — see builderForBuild and
+		// kdex-tech/host-manager#165, where the inline block replaced the
+		// adaptor entry wholesale and cluster scheduling policy was
+		// silently dropped for every function that builds.
 		sourceForBuild := *source
-		if sourceForBuild.Builder == nil {
-			resolved, err := resolveDefaultBuilder(&hc.faasAdaptorSpec)
-			if err != nil {
-				kdexv1alpha1.SetConditions(
-					&hc.function.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
-				)
-				return ctrl.Result{}, err
-			}
-			sourceForBuild.Builder = resolved
+		if b := sourceForBuild.Builder; b != nil && resolveBuilderByName(&hc.faasAdaptorSpec, b.Name) == nil {
+			// The one case merging leaves silent: a name that matches no
+			// catalog entry inherits nothing. Legitimate for a function
+			// pointing outside the catalog, but also what a typo looks
+			// like. V(1) so it is available when debugging a build pod
+			// that will not schedule, without spamming every reconcile.
+			logf.FromContext(hc.ctx).V(1).Info(
+				"inline builder names no FaaSAdaptor catalog entry; no cluster-level builder policy will be inherited",
+				"builder", b.Name,
+			)
 		}
+		resolvedBuilder, err := builderForBuild(&hc.faasAdaptorSpec, sourceForBuild.Builder)
+		if err != nil {
+			kdexv1alpha1.SetConditions(
+				&hc.function.Status.Conditions,
+				kdexv1alpha1.ConditionStatuses{
+					Degraded:    metav1.ConditionTrue,
+					Progressing: metav1.ConditionFalse,
+					Ready:       metav1.ConditionFalse,
+				},
+				kdexv1alpha1.ConditionReasonReconcileError,
+				err.Error(),
+			)
+			return ctrl.Result{}, err
+		}
+		sourceForBuild.Builder = resolvedBuilder
 
 		// The build pod's ServiceAccount governs git-source clone and
 		// registry push credentials (via the SA's .secrets[] and
