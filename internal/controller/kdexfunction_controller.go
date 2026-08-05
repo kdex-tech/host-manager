@@ -1599,6 +1599,19 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
+	// A source-authoritative function that reached Ready without Status.Source is
+	// invisible to the kpack drift check at the top of Reconcile (it is gated on
+	// Status.Source != nil), so its builds advance Image.status.latestImage but
+	// never deploy — silently, forever (kdex-tech/host-manager#136). Repair the
+	// derived field here, mirroring the #77 Executable self-heal above, and
+	// requeue so the next loop's drift check promotes the already-built image with
+	// no rebuild. Only when nil: never overwrite a codegen-resolved revision (#38).
+	if hc.function.Spec.Origin.Source != nil && hc.function.Status.Source == nil {
+		log.V(2).Info("Source is nil on a source-authoritative Ready function, re-deriving from Spec.Origin.Source")
+		hc.function.Status.Source = hc.function.Spec.Origin.Source
+		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+	}
+
 	deployer := deploy.Deployer{
 		Client:      r.Client,
 		FaaSAdaptor: hc.faasAdaptorSpec,
