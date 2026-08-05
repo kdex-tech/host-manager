@@ -423,9 +423,16 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 							SecurityContext: internal.PSSRestrictedContainerSecurityContext(),
 						},
 					},
-					ImagePullSecrets:   d.ImagePullSecrets,
+					ImagePullSecrets: d.ImagePullSecrets,
+					// Steer the deployer JOB pod itself onto a specific pool
+					// (kdex-tech/host-manager#164). Distinct from
+					// Deployer.{NodeSelector,Tolerations}, which are payload
+					// forwarded onto the Knative runtime pod. Mirrors the
+					// observer CronJob wire-up below.
+					NodeSelector:       d.FaaSAdaptor.Deployer.JobNodeSelector,
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: d.ServiceAccount,
+					Tolerations:        d.FaaSAdaptor.Deployer.JobTolerations,
 				},
 			},
 		},
