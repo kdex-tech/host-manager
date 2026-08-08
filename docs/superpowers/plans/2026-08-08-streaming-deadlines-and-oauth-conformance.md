@@ -601,16 +601,14 @@ func (s *streamWriter) WriteHeader(code int) {
 func (s *streamWriter) Write(p []byte) (int, error) {
 	// A handler may Write without an explicit WriteHeader; the stdlib
 	// implies 200 on the INNER writer, which would skip our policy.
+	//
+	// Deliberately NOT touched here: the deadline. http.response.Write
+	// only copies into its internal bufio buffer for small payloads — it
+	// does not necessarily touch the socket — so a deadline extension
+	// keyed off Write() would arm a fresh window at a time that has
+	// nothing to do with when bytes actually left the process. The
+	// extension belongs where the real I/O happens: Flush.
 	s.applyDeadlinePolicyOnce()
-
-	if s.sliding {
-		// Push the deadline forward on every write. This removes the
-		// total-duration cap (the #167 defect) while keeping a stall cap:
-		// a response that goes silent for longer than writeTimeout is
-		// still cut.
-		_ = http.NewResponseController(s.ResponseWriter).
-			SetWriteDeadline(time.Now().Add(s.writeTimeout))
-	}
 	return s.ResponseWriter.Write(p)
 }
 
@@ -625,7 +623,7 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 	}
 	s.wroteHeader = true
 
-	h := s.ResponseWriter.Header()
+	h := s.Header()
 
 	// 1. Server-Sent Events: clear the deadline outright. The keep-alive
 	//    cadence belongs to the backend and may exceed anything we pick.
@@ -643,9 +641,31 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 	// 3. Fixed-length: leave the connection-level deadline alone.
 }
 
-// Flush keeps ReverseProxy's maxLatencyWriter flushing per chunk.
+// Flush keeps ReverseProxy's maxLatencyWriter flushing per chunk, and is
+// also where the sliding deadline is extended.
+//
+// The extension has to live here rather than in Write: Write only copies
+// into http.response's internal bufio buffer for small payloads and does
+// not necessarily touch the socket, so a deadline set relative to Write's
+// call time would always land in the future regardless of how long the
+// handler had been silent beforehand — the stale, already-elapsed deadline
+// would be overwritten right before the real I/O ever happens, and the
+// stall cap (#167's "sliding, not clearing" requirement for chunked
+// responses) would never fire. Flush is where bytes actually reach the
+// connection, so extending AFTER it succeeds means the deadline armed here
+// is what governs the gap before the *next* real flush: if that gap
+// exceeds writeTimeout, the runtime's own timer has already marked the
+// deadline expired by the time the next Flush is attempted, so it fails
+// immediately instead of getting a fresh window.
 func (s *streamWriter) Flush() {
-	_ = http.NewResponseController(s.ResponseWriter).Flush()
+	s.applyDeadlinePolicyOnce()
+
+	rc := http.NewResponseController(s.ResponseWriter)
+	_ = rc.Flush()
+
+	if s.sliding {
+		_ = rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	}
 }
 
 // Hijack delegates so httputil.ReverseProxy can still service Upgrade

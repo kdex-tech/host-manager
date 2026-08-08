@@ -51,7 +51,7 @@ rather than the sliding one:
    deadline is cleared outright. The keep-alive cadence is chosen by the backend
    and may legitimately exceed any deadline we would pick.
 2. **No `Content-Length` header** (chunked / unknown length) → **sliding mode**:
-   before each `Write`, reset the deadline to `now + writeTimeout`.
+   after each successful `Flush`, re-arm the deadline to `now + writeTimeout`.
 3. **Everything else** → untouched; the connection-level `WriteTimeout` applies
    as it does today.
 
@@ -59,6 +59,28 @@ Sliding rather than clearing is deliberate for the chunked case. It removes the
 *total-duration* cap, which is the defect, while retaining a *stall* cap: a
 connection that goes silent mid-body for longer than `writeTimeout` is still cut.
 A stream that is actively making progress runs unbounded.
+
+**The re-arm must happen after a flush, not before a write** — this is the one
+place where the obvious implementation does not work. `http.response.Write`
+copies into an internal `bufio` buffer and need not touch the socket at all, and
+a deadline set to `now + writeTimeout` immediately *before* an I/O attempt is by
+construction always in the future. Together those mean a write-keyed extension
+overwrites the stale, already-elapsed deadline microseconds before the only code
+that would have observed it — so the stall cap never fires and sliding mode
+degrades silently into clearing. `Flush` is where bytes actually reach the
+connection, so arming *after* a successful flush makes the armed window govern
+the gap until the *next* flush: if that gap exceeds `writeTimeout`, the deadline
+has already elapsed when the next flush is attempted and the connection is cut.
+
+*(Corrected 2026-08-08 during implementation. The design originally specified
+"before each `Write`"; `TestWithStreamDeadline_ChunkedStallIsStillCut` is what
+catches the difference, and it exists precisely because the stall cap is the
+property that distinguishes sliding from clearing.)*
+
+A consequence worth stating: a chunked handler that **never** flushes gets no
+extension, so the connection-level `WriteTimeout` still bounds it. That is
+correct — streaming implies flushing, and `httputil.ReverseProxy` auto-flushes
+for `ContentLength == -1`, which is every proxied streaming backend.
 
 `WriteTimeout <= 0` disables the middleware's adjustments entirely (there is no
 deadline to slide).
@@ -76,11 +98,12 @@ is a functional break if omitted:
    hijacks the connection to service `Upgrade` requests. A wrapper that does not
    delegate `Hijack` breaks WebSocket proxying.
 3. **No `io.ReaderFrom`** — deliberately *not* implemented. `io.Copy` prefers
-   `ReadFrom` when available, which would bypass `Write` entirely and the sliding
-   deadline would never fire.
+   `ReadFrom` when available, which would bypass `Write` and `Flush` entirely,
+   so the deadline policy would never be applied at all.
 
-`Flush()` is delegated as well, so `ReverseProxy`'s `maxLatencyWriter` keeps
-flushing per chunk.
+`Flush()` is delegated as well — it is both what keeps `ReverseProxy`'s
+`maxLatencyWriter` flushing per chunk *and*, per the correction above, where the
+sliding deadline is re-armed.
 
 ### Configuration
 
