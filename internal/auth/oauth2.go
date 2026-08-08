@@ -257,18 +257,19 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != http.MethodPost {
 		err = fmt.Errorf("method not allowed")
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		writeOAuthError(w, http.StatusMethodNotAllowed, errCodeInvalidRequest, "the token endpoint requires POST")
 		return
 	}
 
 	if err = r.ParseForm(); err != nil {
 		err = fmt.Errorf("failed to parse form: %w", err)
-		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "malformed request body")
 		return
 	}
 
 	// client_id and client_secret may arrive through basic auth
-	clientId, clientSecret, _ = r.BasicAuth()
+	var usedBasicAuth bool
+	clientId, clientSecret, usedBasicAuth = r.BasicAuth()
 
 	/*
 		grant_type          |Client Type |Required Parameters                                |Optional Parameters
@@ -290,7 +291,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		err = fmt.Errorf("invalid client_id")
-		http.Error(w, "Invalid client_id", http.StatusBadRequest)
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidClient, "unknown client_id")
 		return
 	}
 
@@ -300,7 +301,19 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if clientSecret != client.ClientSecret {
 			err = fmt.Errorf("invalid client_secret")
-			http.Error(w, "Invalid client_secret", http.StatusBadRequest)
+			if usedBasicAuth {
+				// 5.2: 401 applies only when client authentication was
+				// attempted via the Authorization header, and then obliges
+				// a WWW-Authenticate challenge.
+				w.Header().Set("WWW-Authenticate", `Basic realm="token"`)
+				writeOAuthError(w, http.StatusUnauthorized, errCodeInvalidClient, "client authentication failed")
+			} else {
+				// Public PKCE clients send no Authorization header, so 5.2
+				// permits 400 — and we would have no meaningful challenge to
+				// put in WWW-Authenticate anyway. This is the path every
+				// current client takes.
+				writeOAuthError(w, http.StatusBadRequest, errCodeInvalidClient, "client authentication failed")
+			}
 			return
 		}
 	}
@@ -312,7 +325,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	if len(client.AllowedGrantTypes) > 0 && !slices.Contains(client.AllowedGrantTypes, grantType) {
 		err = fmt.Errorf("grant_type %s not allowed for this client", grantType)
-		http.Error(w, "Unauthorized grant type", http.StatusUnauthorized)
+		writeOAuthError(w, http.StatusBadRequest, errCodeUnauthorizedClient, "this client is not authorized for that grant_type")
 		return
 	}
 
@@ -320,7 +333,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		for s := range strings.SplitSeq(scope, " ") {
 			if s != "" && !slices.Contains(client.AllowedScopes, s) {
 				err = fmt.Errorf("scope %s not allowed for this client", s)
-				http.Error(w, "Unauthorized scope", http.StatusUnauthorized)
+				writeOAuthError(w, http.StatusBadRequest, errCodeInvalidScope, "requested scope is not allowed for this client")
 				return
 			}
 		}
@@ -331,20 +344,20 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		code = r.FormValue("code")
 		if code == "" {
 			err = fmt.Errorf("code is required")
-			http.Error(w, "code is required", http.StatusBadRequest)
+			writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "code is required")
 			return
 		}
 		redirectURI = r.FormValue("redirect_uri")
 		if redirectURI == "" {
 			err = fmt.Errorf("redirect_uri is required")
-			http.Error(w, "redirect_uri is required", http.StatusBadRequest)
+			writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "redirect_uri is required")
 			return
 		}
 		ts, err = o.AuthExchanger.RedeemAuthorizationCode(r.Context(), code, clientId, redirectURI, codeVerifier)
 	case "client_credentials":
 		if client.Public {
 			err = fmt.Errorf("client_credentials grant_type is not supported for public clients")
-			http.Error(w, "client_credentials grant_type is not supported for public clients", http.StatusBadRequest)
+			writeOAuthError(w, http.StatusBadRequest, errCodeUnauthorizedClient, "client_credentials is not supported for public clients")
 			return
 		}
 		ts, err = o.AuthExchanger.LoginClient(r.Context(), clientId, clientSecret, scope)
@@ -356,19 +369,22 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		tokenID := r.FormValue("refresh_token")
 		if tokenID == "" {
 			err = fmt.Errorf("refresh_token is required")
-			http.Error(w, "refresh_token is required", http.StatusBadRequest)
+			writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "refresh_token is required")
 			return
 		}
 		ts, err = o.AuthExchanger.RedeemRefreshToken(r.Context(), tokenID, clientId)
 	default:
 		err = fmt.Errorf("unsupported grant_type")
-		http.Error(w, "Unsupported grant_type", http.StatusBadRequest)
+		writeOAuthError(w, http.StatusBadRequest, errCodeUnsupportedGrantType, "unsupported grant_type")
 		return
 	}
 
 	if err != nil {
-		err = fmt.Errorf("authentication failed: %w", err)
-		http.Error(w, "Authentication failed", http.StatusUnauthorized)
+		status, code, description := oauthErrorForRedemption(err)
+		// Keep the full wrapped cause on `err` for the deferred log; only
+		// the classified description reaches the client.
+		err = fmt.Errorf("token request failed: %w", err)
+		writeOAuthError(w, status, code, description)
 		return
 	}
 
@@ -390,9 +406,11 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if err = json.NewEncoder(w).Encode(resp); err != nil {
 		err = fmt.Errorf("failed to encode token response: %w", err)
-		http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
 		return
 	}
 }
