@@ -237,18 +237,55 @@ var ErrServerError = errors.New("server error")
 The Exchanger wraps it at the infrastructure-failure sites — cache read failure,
 `mintTokensFromSubject` failure, `createRefreshToken` failure, JSON unmarshal
 failure of a stored record. The handler does `errors.Is(err, ErrServerError)` and
-emits `500 server_error`; every other error out of a redemption path is
-`invalid_grant` by definition, since §5.2 defines that code as covering invalid,
-expired, revoked, mismatched-client and mismatched-redirect-URI grants — which is
-exactly the remaining set.
+emits `500 server_error`.
 
-**`error_description` content differs by class.** For the `4xx` codes it carries
-the existing internal message — those already go to the debug log and describe
-the *grant's* state (`refresh token not found or expired`,
-`refresh token was not issued to this client`), not server internals. For
-`server_error` it carries a **fixed generic string** and the wrapped cause is
-logged only; a signing or cache failure must not have its internals reflected to
-an unauthenticated caller.
+**The classifier is default-closed.** An earlier revision of this design said
+"every other error out of a redemption path is `invalid_grant` by definition" and
+had the handler echo `err.Error()` for that case. That is wrong, and unsafe on an
+unauthenticated endpoint. The reasoning only covers errors raised *inside*
+`RedeemRefreshToken` and `RedeemAuthorizationCode`; both call out to
+`mintTokensFromCode`, `LoginLocal` and `LoginClient`, whose own infrastructure
+failures were never wrapped and would reach the caller verbatim — including, on
+the HTTP-lookup path, an internal service URL and pod IP
+(`httpLookup: request: Post "http://<svc>": dial tcp <ip>:8080: connect:
+connection refused`). Signer and role-resolver failures leak unconditionally on
+every `authorization_code` redemption, and are simultaneously misclassified as
+`400 invalid_grant` — the precise "discard your working credentials during an
+outage" failure `ErrServerError` exists to prevent.
+
+So the rule is an allowlist, not a fallthrough:
+
+| Error carries | Response | `error_description` |
+|---|---|---|
+| `ErrServerError` | 500 `server_error` | fixed generic string |
+| `ErrGrantFailure` | 400 `invalid_grant` | the wrapped message — these are deliberately client-facing |
+| neither | 400 `invalid_grant` | fixed generic string; full cause to the log only |
+
+`ErrGrantFailure` marks the rejections that are *about the presented grant* and
+are safe to describe: token not found, token expired, client mismatch, session
+cap reached, code already consumed, PKCE mismatch. Both redemption functions
+already funnel their rejections through a local `failed(...)` helper, which is
+the natural single place to apply it.
+
+The property that matters is the direction of the default: a future callee that
+raises a new, unwrapped error discloses nothing. Under the old fallthrough it
+would leak the moment it was written, with no test failing.
+
+*(Corrected 2026-08-08 during implementation, after review found the callee
+leak.)*
+
+**`error_description` content is opt-in, per the allowlist above.** A message
+reaches the caller only when its error is explicitly marked `ErrGrantFailure` —
+those describe the *grant's* state (`refresh token not found or expired`,
+`refresh token was not issued to this client`) and already go to the debug log.
+Everything else — `server_error`, and any unmarked error — carries a fixed
+generic string with the cause logged only. A signing, cache, or identity-provider
+failure must never have its internals reflected to an unauthenticated caller.
+
+The non-redemption failures in the handler itself (missing parameter, unknown
+`client_id`, disallowed scope) keep the fixed descriptions given in the mapping
+table above; they are authored constants, not propagated errors, so the
+allowlist does not apply to them.
 
 ### Success path
 
