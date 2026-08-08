@@ -37,9 +37,11 @@ func New(address string, hostHandler *host.HostHandler, timeouts Timeouts) *http
 	handler := middleware.WithLogger(
 		logf.Log.WithName("server"),
 	)(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hostHandler.ServeHTTP(w, r)
-		}),
+		middleware.WithStreamDeadline(timeouts.WriteTimeout)(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hostHandler.ServeHTTP(w, r)
+			}),
+		),
 	)
 
 	return &http.Server{
