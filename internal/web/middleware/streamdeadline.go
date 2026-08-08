@@ -87,6 +87,23 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 	}
 
 	// 2. Chunked / unknown length: slide the deadline on each write.
+	//
+	//    "Progress" here means an explicit Flush call, not bytes handed to
+	//    Write. A handler that Writes a large body and never calls Flush
+	//    still sets sliding = true but the deadline is never extended: the
+	//    wrapper only observes Flush (see Flush below), while
+	//    http.response's internal bufio buffer auto-flushes to the socket
+	//    on its own once it fills, doing real I/O the wrapper never sees.
+	//    Such a handler is therefore still bounded by whatever deadline
+	//    was last set (typically the server's original connection-level
+	//    one) even though it is genuinely making progress. Not a
+	//    regression — the pre-#167 behavior was "always bounded" — but it
+	//    means the sliding cap only helps handlers that flush. The one
+	//    production consumer of this path, httputil.ReverseProxy, always
+	//    does: ReverseProxy.flushInterval returns -1 (flush after every
+	//    write) whenever ContentLength == -1, which is exactly this case.
+	//    See TestWithStreamDeadline_ChunkedWithoutFlushStaysBounded, which
+	//    pins this boundary rather than leaving it assumed.
 	if h.Get("Content-Length") == "" {
 		s.sliding = true
 		return
@@ -111,6 +128,18 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 // exceeds writeTimeout, the runtime's own timer has already marked the
 // deadline expired by the time the next Flush is attempted, so it fails
 // immediately instead of getting a fresh window.
+//
+// One deadline, two jobs — a known, accepted trade-off: the same window
+// bounds both "how long can the handler stay silent between flushes" AND
+// "how long may this flush's own socket write take once TCP backpressure
+// makes it block." A flush at T sets the deadline to T+writeTimeout; a
+// flush that then lands at T+Δ has only writeTimeout-Δ left for its own
+// write to complete. A cadence that runs right up against writeTimeout
+// therefore leaves near-zero budget for the write itself, and a slow
+// client's ordinary backpressure — not just a genuine stall — can cut the
+// response. This is benign at the ~60s default (production cadences are
+// far below that), but it means writeTimeout is implicitly a ceiling on
+// how close together flushes may usefully be, not just a stall cap.
 func (s *streamWriter) Flush() {
 	s.applyDeadlinePolicyOnce()
 

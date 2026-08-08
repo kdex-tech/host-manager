@@ -102,6 +102,41 @@ func TestWithStreamDeadline_ChunkedStallIsStillCut(t *testing.T) {
 		"a chunked response that stalls past writeTimeout must still be cut")
 }
 
+// TestWithStreamDeadline_ChunkedWithoutFlushStaysBounded pins the boundary
+// documented in applyDeadlinePolicyOnce and Flush: the sliding deadline is
+// only extended by an explicit Flush, not by bytes handed to Write. After
+// an initial flush establishes the response (so the client actually
+// receives it), a handler that keeps writing — genuinely making progress
+// from its own point of view — but never flushes again leaves the deadline
+// exactly where that first Flush left it. The response is therefore still
+// bounded by that stale deadline, the same as the pre-#167 behavior, even
+// though writes kept happening. Not a regression: the one production
+// consumer of the sliding path, httputil.ReverseProxy, always flushes for
+// a response with no Content-Length (see applyDeadlinePolicyOnce) — but
+// the boundary must be asserted here, not assumed.
+func TestWithStreamDeadline_ChunkedWithoutFlushStaysBounded(t *testing.T) {
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "before-stall\n")
+		_ = http.NewResponseController(w).Flush()
+
+		time.Sleep(4 * testWriteTimeout)
+
+		// Deliberately no Flush after this write: Write alone must not
+		// extend the deadline armed by the flush above.
+		_, _ = fmt.Fprint(w, "after-stall\n")
+	})
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.NotContains(t, string(body), "after-stall",
+		"a chunked response that writes without flushing again must remain bounded by the last-armed deadline")
+}
+
 // TestWithStreamDeadline_FixedLengthStillBounded confirms the middleware
 // leaves ordinary responses alone: with a Content-Length set, the
 // connection-level WriteTimeout still applies.
