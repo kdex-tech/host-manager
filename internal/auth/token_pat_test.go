@@ -163,6 +163,13 @@ func TestOAuth2TokenHandlerMintsPATForResource(t *testing.T) {
 		assert.Equal(t, "Bearer", resp["token_type"])
 		// A resource PAT carries no id_token.
 		assert.Empty(t, resp["id_token"])
+		// RFC 6749 5.1: this response bypasses the standard success path
+		// (writeResourcePATResponse writes directly), and was missing both
+		// headers entirely before kdex-tech/host-manager#168 review.
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"),
+			"resource-PAT success response must be no-store (#168)")
+		assert.Equal(t, "no-cache", w.Header().Get("Pragma"),
+			"resource-PAT success response must carry Pragma: no-cache (#168)")
 	})
 
 	t.Run("no resource falls back to standard JWT", func(t *testing.T) {
@@ -294,5 +301,10 @@ func TestOAuth2TokenHandlerMintsPATForResourceOnRefresh(t *testing.T) {
 		assert.Equal(t, "Bearer", resp["token_type"])
 		// Rotation: a fresh refresh token is handed back.
 		assert.NotEmpty(t, resp["refresh_token"], "refresh must rotate the refresh token")
+		// RFC 6749 5.1, same as the authorization_code case above (#168).
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"),
+			"resource-PAT success response must be no-store (#168)")
+		assert.Equal(t, "no-cache", w.Header().Get("Pragma"),
+			"resource-PAT success response must carry Pragma: no-cache (#168)")
 	})
 }

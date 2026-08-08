@@ -31,6 +31,22 @@ import (
 // kdex-tech/host-manager#168.
 var ErrServerError = errors.New("server error")
 
+// ErrGrantFailure marks a rejection that is genuinely ABOUT the grant the
+// caller presented — not found, expired, mismatched, already consumed — and
+// is therefore safe to describe back to an unauthenticated caller. This is
+// an opt-in allowlist, not a fallthrough: RedeemRefreshToken and
+// RedeemAuthorizationCode call out to mintTokensFromCode, LoginLocal and
+// LoginClient, whose infrastructure failures (signer down, identity-provider
+// HTTP lookup down, resolver down) are NOT marked with this and must not
+// have their message echoed — a raw HTTP dial error can carry an internal
+// service URL and pod IP. The token endpoint's classifier
+// (oauthErrorForRedemption) treats anything carrying neither this nor
+// ErrServerError as a grant failure too, but with a fixed generic
+// description rather than its own message: a future error added anywhere in
+// the call graph that forgets to mark itself must disclose nothing. See
+// kdex-tech/host-manager#168.
+var ErrGrantFailure = errors.New("grant failure")
+
 type AuthMethod string
 
 const (
@@ -586,7 +602,9 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	// 1. Parse JWE
 	object, err := jose.ParseEncrypted(code, []jose.KeyAlgorithm{jose.DIRECT}, []jose.ContentEncryption{jose.A256GCM})
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to parse auth code: %w", err)
+		// The presented code itself is malformed -- that is ABOUT the
+		// grant, not our infrastructure, so it is safe to describe.
+		return TokenSet{}, fmt.Errorf("%w: failed to parse auth code: %v", ErrGrantFailure, err)
 	}
 
 	// 2. Derive Key
@@ -595,7 +613,9 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	// 3. Decrypt
 	decrypted, err := object.Decrypt(key[:])
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to decrypt auth code: %w", err)
+		// Same reasoning: a caller-presented ciphertext that does not
+		// decrypt against our current key is an invalid grant.
+		return TokenSet{}, fmt.Errorf("%w: failed to decrypt auth code: %v", ErrGrantFailure, err)
 	}
 
 	var claims AuthorizationCodeClaims
@@ -612,17 +632,22 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
 	}
 
-	// 4. Validate
+	// 4. Validate. These rejections are all genuinely ABOUT the presented
+	// grant (expiry, binding mismatches, PKCE), so they are marked
+	// ErrGrantFailure and their message reaches the caller. "invalid
+	// client_id" just below is deliberately left unmarked: it fires only if
+	// the client was deleted between the handler's earlier lookup and here,
+	// is not one of the enumerated safe categories, and defaults closed.
 	if time.Now().Unix() > claims.Exp {
-		return failed("authorization code expired")
+		return failed("%w: authorization code expired", ErrGrantFailure)
 	}
 
 	if claims.ClientID != clientID {
-		return failed("client_id mismatch")
+		return failed("%w: client_id mismatch", ErrGrantFailure)
 	}
 
 	if claims.RedirectURI != redirectURI {
-		return failed("redirect_uri mismatch")
+		return failed("%w: redirect_uri mismatch", ErrGrantFailure)
 	}
 
 	client, ok := e.GetClient(clientID)
@@ -632,12 +657,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 
 	// PKCE verification
 	if client.RequirePKCE && claims.CodeChallenge == "" {
-		return failed("PKCE is required for this client")
+		return failed("%w: PKCE is required for this client", ErrGrantFailure)
 	}
 
 	if claims.CodeChallenge != "" {
 		if codeVerifier == "" {
-			return failed("code_verifier is required for PKCE")
+			return failed("%w: code_verifier is required for PKCE", ErrGrantFailure)
 		}
 
 		// Only S256 is accepted. Pre-#96 the `plain` and empty-method
@@ -647,12 +672,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		// verifier of their choosing — a PKCE downgrade. RFC 7636
 		// §4.2 has considered plain unsafe since 2015.
 		if claims.CodeChallengeMethod != PKCE_METHOD_S256 {
-			return failed("unsupported code_challenge_method: only S256 is accepted")
+			return failed("%w: unsupported code_challenge_method: only S256 is accepted", ErrGrantFailure)
 		}
 		h := sha256.Sum256([]byte(codeVerifier))
 		challenge := base64.RawURLEncoding.EncodeToString(h[:])
 		if challenge != claims.CodeChallenge {
-			return failed("invalid code_verifier")
+			return failed("%w: invalid code_verifier", ErrGrantFailure)
 		}
 	}
 
@@ -669,7 +694,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 			// rather than honour them — the upgrade window is the
 			// 10-minute code expiry, well under the typical deploy
 			// rollout.
-			return failed("authorization code already consumed or expired")
+			return failed("%w: authorization code already consumed or expired", ErrGrantFailure)
 		}
 		_, found, _, err := e.authCodeCache.GetAndDelete(ctx, claims.JTI)
 		if err != nil {
@@ -678,7 +703,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		if !found {
 			// Replay, or a legitimate code past its window. Either way the
 			// subject is the operationally interesting part.
-			return failed("authorization code already consumed or expired")
+			return failed("%w: authorization code already consumed or expired", ErrGrantFailure)
 		}
 	}
 
@@ -703,7 +728,10 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("%w: failed to read refresh token: %v", ErrServerError, err)
 	}
 	if !found {
-		return TokenSet{}, fmt.Errorf("refresh token not found or expired")
+		// This is the literal kdex-tech/host-manager#168 reproduction: a
+		// dead/unknown refresh token is squarely ABOUT the presented grant,
+		// so it is marked safe to describe.
+		return TokenSet{}, fmt.Errorf("%w: refresh token not found or expired", ErrGrantFailure)
 	}
 
 	var claims RefreshTokenClaims
@@ -722,19 +750,21 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
 	// The token is already consumed by GetAndDelete above, so we just
-	// reject and let the caller re-authenticate.
+	// reject and let the caller re-authenticate. All three rejections below
+	// are genuinely ABOUT the presented grant, so they are marked
+	// ErrGrantFailure and their message reaches the caller.
 	if time.Now().Unix() > claims.ExpiresAt {
-		return failed("refresh token expired")
+		return failed("%w: refresh token expired", ErrGrantFailure)
 	}
 
 	// Validate absolute session timeout
 	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
-		return failed("session absolute timeout reached")
+		return failed("%w: session absolute timeout reached", ErrGrantFailure)
 	}
 
 	// Validate the client matches what was issued.
 	if claims.ClientID != clientID {
-		return failed("refresh token was not issued to this client")
+		return failed("%w: refresh token was not issued to this client", ErrGrantFailure)
 	}
 
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.

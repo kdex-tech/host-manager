@@ -183,3 +183,41 @@ func TestTokenHandler_NoStoreOnBothPaths(t *testing.T) {
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"),
 		"success responses from the token endpoint must be no-store (5.1)")
 }
+
+// TestTokenHandler_ResourcePATErrorPathIsJSON pins the #168 review finding
+// that writeResourcePATResponse — the code path serving MCP clients, the
+// exact client class #168 was filed about — still used http.Error and
+// carried no no-store headers on its own failure branch after the rest of
+// the handler was fixed. It drives a real MintResourcePAT failure (the
+// rotation-test Exchanger's config carries no TokenManager) through a
+// resource-bound refresh_token redemption, which only enters
+// writeResourcePATResponse when ResourceAudiences actually contains the
+// requested resource.
+func TestTokenHandler_ResourcePATErrorPathIsJSON(t *testing.T) {
+	o := newTokenErrorTestHandler(t)
+	resource := "https://mcp.example.test/tools"
+	o.ResourceAudiences[resource] = true
+
+	tokenID, err := o.AuthExchanger.createRefreshToken(context.Background(), RefreshTokenClaims{
+		AuthMethod: AuthMethodLocal,
+		ClientID:   "app",
+		Subject:    "alice",
+		Scope:      "openid",
+	})
+	require.NoError(t, err)
+
+	rec := postToken(t, o, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tokenID},
+		"client_id":     {"app"},
+		"resource":      {resource},
+	})
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"),
+		"the resource-PAT error path must be no-store too, not just the standard path (#168)")
+	body := decodeOAuthError(t, rec)
+	assert.Equal(t, "server_error", body["error"])
+	assert.NotContains(t, body["error_description"], "token manager",
+		"the resource-PAT error path must not echo internals either (#168)")
+}

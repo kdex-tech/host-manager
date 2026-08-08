@@ -439,7 +439,11 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 
 	pat, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
 	if err != nil {
-		http.Error(w, "Failed to mint resource token", http.StatusInternalServerError)
+		// This is the SAME token response MCP clients receive from the
+		// standard-JWT path just below — the exact client class #168 was
+		// filed about — so it gets the same RFC 6749 5.2 JSON shape, not
+		// text/plain.
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
 		return true, fmt.Errorf("failed to mint resource PAT: %w", err)
 	}
 
@@ -451,8 +455,13 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 		TokenType:    "Bearer",
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// RFC 6749 5.1 requires no-store on the token endpoint's success
+	// response; this path bypasses the standard success path below and was
+	// missing both headers entirely before #168 review.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if err = json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "Failed to encode token response", http.StatusInternalServerError)
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
 		return true, fmt.Errorf("failed to encode token response: %w", err)
 	}
 	return true, nil
