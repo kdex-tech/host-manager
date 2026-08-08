@@ -44,13 +44,19 @@ func TestOAuthErrorForRedemption(t *testing.T) {
 		err         error
 		wantStatus  int
 		wantCode    string
+		wantDesc    string
 		wantDescNot string
 	}{
 		{
-			name:       "explicit grant failure echoes its own message",
+			name:       "explicit grant failure echoes its own message, with no sentinel wording",
 			err:        errGrantFailureForTest(),
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "invalid_grant",
+			// Pins the #168 round 2 regression: fmt.Errorf("%w: ...",
+			// ErrGrantFailure) would render as "grant failure: refresh
+			// token not found or expired", leading with the sentinel's own
+			// text. grantFailuref must produce exactly the grant message.
+			wantDesc: "refresh token not found or expired",
 		},
 		{
 			name:        "infrastructure failure is a server error",
@@ -66,6 +72,9 @@ func TestOAuthErrorForRedemption(t *testing.T) {
 			status, code, desc := oauthErrorForRedemption(tc.err)
 			assert.Equal(t, tc.wantStatus, status)
 			assert.Equal(t, tc.wantCode, code)
+			if tc.wantDesc != "" {
+				assert.Equal(t, tc.wantDesc, desc)
+			}
 			if tc.wantDescNot != "" {
 				assert.NotContains(t, desc, tc.wantDescNot,
 					"server_error must not echo internals to an unauthenticated caller")
@@ -105,10 +114,12 @@ func TestOAuthErrorForRedemption_DefaultIsClosed(t *testing.T) {
 
 // errGrantFailureForTest is the shape RedeemRefreshToken/RedeemAuthorizationCode
 // now produce for a rejection genuinely about the presented grant (e.g. a
-// dead refresh token) — explicitly marked, so its message is client-facing
-// by design.
+// dead refresh token) — explicitly marked via grantFailuref (NOT
+// fmt.Errorf("%w: ...", ErrGrantFailure), which would put the sentinel's
+// own "grant failure" text on the wire ahead of the message; see #168
+// round 2), so its message is client-facing by design, verbatim.
 func errGrantFailureForTest() error {
-	return fmt.Errorf("%w: refresh token not found or expired", ErrGrantFailure)
+	return grantFailuref("refresh token not found or expired")
 }
 
 // errUnmarkedInternalForTest is the shape an infrastructure failure produces

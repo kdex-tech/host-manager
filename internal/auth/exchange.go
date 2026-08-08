@@ -45,7 +45,37 @@ var ErrServerError = errors.New("server error")
 // description rather than its own message: a future error added anywhere in
 // the call graph that forgets to mark itself must disclose nothing. See
 // kdex-tech/host-manager#168.
+//
+// Errors are classified against this sentinel via errors.Is, but are never
+// built by wrapping it with fmt.Errorf("%w: ...", ErrGrantFailure) — doing
+// so would put ErrGrantFailure's own "grant failure" text on the wire ahead
+// of the actual message (e.g. "grant failure: refresh token not found or
+// expired" instead of the exact string #168's reporter is matching on).
+// Build grant-failure errors with grantFailuref instead: it classifies
+// against this sentinel via the errors.Is opt-in Is(error) bool hook, with
+// the message left untouched.
 var ErrGrantFailure = errors.New("grant failure")
+
+// grantFailureError carries a client-facing rejection message and classifies
+// as ErrGrantFailure without that sentinel's own text ever appearing in
+// Error(). See grantFailuref and the ErrGrantFailure doc comment above.
+type grantFailureError string
+
+func (e grantFailureError) Error() string { return string(e) }
+
+// Is implements the errors.Is opt-in hook documented on the errors package:
+// errors.Is(err, ErrGrantFailure) calls this method with target set to
+// ErrGrantFailure, letting a plain string-backed error type classify as the
+// sentinel without embedding the sentinel's text.
+func (e grantFailureError) Is(target error) bool { return target == ErrGrantFailure }
+
+// grantFailuref builds a grantFailureError, printf-style. Use it (directly,
+// or via a function-local grantFailed closure that also attaches the known
+// Subject, mirroring the existing failed closures) at rejections that are
+// genuinely ABOUT the presented grant.
+func grantFailuref(format string, args ...any) error {
+	return grantFailureError(fmt.Sprintf(format, args...))
+}
 
 type AuthMethod string
 
@@ -417,11 +447,13 @@ func (e *Exchanger) createRefreshToken(ctx context.Context, claims RefreshTokenC
 
 func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, scope string) (TokenSet, error) {
 	if e == nil {
-		return TokenSet{}, fmt.Errorf("auth not configured")
+		// Deployment/config facts, not anything the client presented. See
+		// kdex-tech/host-manager#168 review round 2.
+		return TokenSet{}, fmt.Errorf("%w: auth not configured", ErrServerError)
 	}
 
 	if !e.config.IsM2MEnabled() {
-		return TokenSet{}, fmt.Errorf("M2M auth not configured")
+		return TokenSet{}, fmt.Errorf("%w: M2M auth not configured", ErrServerError)
 	}
 
 	client, ok := e.GetClient(clientID)
@@ -480,7 +512,9 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 	if wantRoles || wantEntitlements {
 		roles, entitlements, rerr := e.ResolveInternalRolesAndEntitlements(clientID)
 		if rerr != nil {
-			return failed("failed to resolve roles/entitlements for client %s: %w", clientID, rerr)
+			// Resolver failure, not a fact about the presented client
+			// credentials (already verified above). See #168 round 2.
+			return failed("%w: failed to resolve roles/entitlements for client %s: %v", ErrServerError, clientID, rerr)
 		}
 		if wantRoles {
 			signingContext["roles"] = roles
@@ -492,7 +526,7 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 
 	accessToken, err := e.config.Signer.Sign(signingContext)
 	if err != nil {
-		return failed("failed to sign access token: %w", err)
+		return failed("%w: failed to sign access token: %v", ErrServerError, err)
 	}
 
 	// client_credentials does not issue refresh tokens (M2M flows re-authenticate directly).
@@ -505,7 +539,9 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 
 func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, clientID string, authMethod AuthMethod) (TokenSet, error) {
 	if e == nil || !e.config.IsAuthEnabled() {
-		return TokenSet{}, fmt.Errorf("local auth not configured")
+		// Deployment/config fact, not anything the client presented. See
+		// kdex-tech/host-manager#168 review round 2.
+		return TokenSet{}, fmt.Errorf("%w: local auth not configured", ErrServerError)
 	}
 
 	signingContext, err := e.sp.FindInternal(username, password)
@@ -513,6 +549,24 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		// Credentials did not resolve, so there is no vouched subject to
 		// report. The handler still logs `username`, which is the only
 		// identity handle that exists at this point.
+		//
+		// Deliberately NOT marked ErrServerError, even though #168 round
+		// 2's review flagged this as "the httpLookup dial case": this same
+		// return value ALSO carries genuinely client-caused rejections.
+		// scopeProvider.FindInternal (roles.go) folds a lookup's transport
+		// failure and its explicit "backend says these credentials are
+		// wrong" answer into the identical `error` return -- see
+		// httpLookup.FindInternal in lookup_http.go, whose `!parsed.OK`
+		// branch (an ordinary wrong-password rejection, HTTP 200 from the
+		// backend) and its dial/decode failures both surface as `err` here
+		// with no way to tell them apart. Marking ErrServerError would
+		// turn every routine bad-password ROPC attempt into 500
+		// server_error. The classifier's post-#168-round-1 safe default
+		// (neither sentinel -> 400 invalid_grant, fixed generic
+		// description, cause logged only) already closes the disclosure
+		// this was flagged for, without that misclassification cost.
+		// Flagged for the repo owner rather than guessed at; see the task
+		// report.
 		return TokenSet{}, err
 	}
 
@@ -556,7 +610,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return failed("failed to sign access token: %w", err)
+		return failed("%w: failed to sign access token: %v", ErrServerError, err)
 	}
 
 	var idToken string
@@ -567,7 +621,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		delete(idTokenContext, "scope")
 		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
-			return failed("failed to sign id token: %w", err)
+			return failed("%w: failed to sign id token: %v", ErrServerError, err)
 		}
 	}
 
@@ -586,7 +640,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 			Subject:    username,
 		})
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to create refresh token: %w", err)
+			return TokenSet{}, fmt.Errorf("%w: failed to create refresh token: %v", ErrServerError, err)
 		}
 	}
 
@@ -604,7 +658,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	if err != nil {
 		// The presented code itself is malformed -- that is ABOUT the
 		// grant, not our infrastructure, so it is safe to describe.
-		return TokenSet{}, fmt.Errorf("%w: failed to parse auth code: %v", ErrGrantFailure, err)
+		return TokenSet{}, grantFailuref("failed to parse auth code: %v", err)
 	}
 
 	// 2. Derive Key
@@ -615,7 +669,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	if err != nil {
 		// Same reasoning: a caller-presented ciphertext that does not
 		// decrypt against our current key is an invalid grant.
-		return TokenSet{}, fmt.Errorf("%w: failed to decrypt auth code: %v", ErrGrantFailure, err)
+		return TokenSet{}, grantFailuref("failed to decrypt auth code: %v", err)
 	}
 
 	var claims AuthorizationCodeClaims
@@ -631,23 +685,28 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	failed := func(format string, args ...any) (TokenSet, error) {
 		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
 	}
+	// grantFailed is `failed` for rejections that are genuinely ABOUT the
+	// presented grant (expiry, binding mismatches, PKCE): same Subject
+	// attribution, but the error classifies as ErrGrantFailure so the token
+	// endpoint's classifier echoes the message. "invalid client_id" below
+	// deliberately still goes through plain `failed`: it fires only if the
+	// client was deleted between the handler's earlier lookup and here, is
+	// not one of the enumerated safe categories, and defaults closed.
+	grantFailed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: claims.Subject}, grantFailuref(format, args...)
+	}
 
-	// 4. Validate. These rejections are all genuinely ABOUT the presented
-	// grant (expiry, binding mismatches, PKCE), so they are marked
-	// ErrGrantFailure and their message reaches the caller. "invalid
-	// client_id" just below is deliberately left unmarked: it fires only if
-	// the client was deleted between the handler's earlier lookup and here,
-	// is not one of the enumerated safe categories, and defaults closed.
+	// 4. Validate.
 	if time.Now().Unix() > claims.Exp {
-		return failed("%w: authorization code expired", ErrGrantFailure)
+		return grantFailed("authorization code expired")
 	}
 
 	if claims.ClientID != clientID {
-		return failed("%w: client_id mismatch", ErrGrantFailure)
+		return grantFailed("client_id mismatch")
 	}
 
 	if claims.RedirectURI != redirectURI {
-		return failed("%w: redirect_uri mismatch", ErrGrantFailure)
+		return grantFailed("redirect_uri mismatch")
 	}
 
 	client, ok := e.GetClient(clientID)
@@ -657,12 +716,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 
 	// PKCE verification
 	if client.RequirePKCE && claims.CodeChallenge == "" {
-		return failed("%w: PKCE is required for this client", ErrGrantFailure)
+		return grantFailed("PKCE is required for this client")
 	}
 
 	if claims.CodeChallenge != "" {
 		if codeVerifier == "" {
-			return failed("%w: code_verifier is required for PKCE", ErrGrantFailure)
+			return grantFailed("code_verifier is required for PKCE")
 		}
 
 		// Only S256 is accepted. Pre-#96 the `plain` and empty-method
@@ -672,12 +731,12 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		// verifier of their choosing — a PKCE downgrade. RFC 7636
 		// §4.2 has considered plain unsafe since 2015.
 		if claims.CodeChallengeMethod != PKCE_METHOD_S256 {
-			return failed("%w: unsupported code_challenge_method: only S256 is accepted", ErrGrantFailure)
+			return grantFailed("unsupported code_challenge_method: only S256 is accepted")
 		}
 		h := sha256.Sum256([]byte(codeVerifier))
 		challenge := base64.RawURLEncoding.EncodeToString(h[:])
 		if challenge != claims.CodeChallenge {
-			return failed("%w: invalid code_verifier", ErrGrantFailure)
+			return grantFailed("invalid code_verifier")
 		}
 	}
 
@@ -694,7 +753,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 			// rather than honour them — the upgrade window is the
 			// 10-minute code expiry, well under the typical deploy
 			// rollout.
-			return failed("%w: authorization code already consumed or expired", ErrGrantFailure)
+			return grantFailed("authorization code already consumed or expired")
 		}
 		_, found, _, err := e.authCodeCache.GetAndDelete(ctx, claims.JTI)
 		if err != nil {
@@ -703,7 +762,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		if !found {
 			// Replay, or a legitimate code past its window. Either way the
 			// subject is the operationally interesting part.
-			return failed("%w: authorization code already consumed or expired", ErrGrantFailure)
+			return grantFailed("authorization code already consumed or expired")
 		}
 	}
 
@@ -715,7 +774,10 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 // then returns a fresh TokenSet including a rotated refresh token.
 func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID string) (TokenSet, error) {
 	if !e.IsRefreshTokenEnabled() {
-		return TokenSet{}, fmt.Errorf("refresh token storage not configured")
+		// This is a server misconfiguration (refresh tokens were never set
+		// up), not a fact about the presented token — the client did
+		// nothing wrong. See kdex-tech/host-manager#168 review round 2.
+		return TokenSet{}, fmt.Errorf("%w: refresh token storage not configured", ErrServerError)
 	}
 
 	// Atomic GetAndDelete is what makes rotation actually single-use
@@ -731,7 +793,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		// This is the literal kdex-tech/host-manager#168 reproduction: a
 		// dead/unknown refresh token is squarely ABOUT the presented grant,
 		// so it is marked safe to describe.
-		return TokenSet{}, fmt.Errorf("%w: refresh token not found or expired", ErrGrantFailure)
+		return TokenSet{}, grantFailuref("refresh token not found or expired")
 	}
 
 	var claims RefreshTokenClaims
@@ -747,6 +809,11 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	failed := func(format string, args ...any) (TokenSet, error) {
 		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
 	}
+	// grantFailed is `failed` for rejections genuinely ABOUT the presented
+	// grant; see the identical comment in RedeemAuthorizationCode above.
+	grantFailed := func(format string, args ...any) (TokenSet, error) {
+		return TokenSet{Subject: claims.Subject}, grantFailuref(format, args...)
+	}
 
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
 	// The token is already consumed by GetAndDelete above, so we just
@@ -754,17 +821,17 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// are genuinely ABOUT the presented grant, so they are marked
 	// ErrGrantFailure and their message reaches the caller.
 	if time.Now().Unix() > claims.ExpiresAt {
-		return failed("%w: refresh token expired", ErrGrantFailure)
+		return grantFailed("refresh token expired")
 	}
 
 	// Validate absolute session timeout
 	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
-		return failed("%w: session absolute timeout reached", ErrGrantFailure)
+		return grantFailed("session absolute timeout reached")
 	}
 
 	// Validate the client matches what was issued.
 	if claims.ClientID != clientID {
-		return failed("%w: refresh token was not issued to this client", ErrGrantFailure)
+		return grantFailed("refresh token was not issued to this client")
 	}
 
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.
@@ -967,7 +1034,10 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 
 	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject)
 	if err != nil {
-		return failed("failed to resolve roles: %w", err)
+		// The subject is already known/vouched (decrypted from our own
+		// auth code); this is a role-resolver failure, not anything the
+		// client presented. See kdex-tech/host-manager#168 review round 2.
+		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
 	}
 
 	signingContext := jwt.MapClaims{
@@ -983,7 +1053,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return failed("failed to sign access token: %w", err)
+		return failed("%w: failed to sign access token: %v", ErrServerError, err)
 	}
 
 	var idToken string
@@ -994,7 +1064,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		delete(idTokenContext, "scope")
 		idToken, err = e.config.Signer.SignScoped(idTokenContext, grantedScopes)
 		if err != nil {
-			return failed("failed to sign id token: %w", err)
+			return failed("%w: failed to sign id token: %v", ErrServerError, err)
 		}
 	}
 
@@ -1013,7 +1083,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 			Subject:    claims.Subject,
 		})
 		if err != nil {
-			return TokenSet{}, fmt.Errorf("failed to create refresh token: %w", err)
+			return TokenSet{}, fmt.Errorf("%w: failed to create refresh token: %v", ErrServerError, err)
 		}
 	}
 

@@ -55,6 +55,14 @@ func newTokenErrorTestHandler(t *testing.T) *OAuth2 {
 // start a fresh authorization flow. Before the fix this was 401 +
 // text/plain "Authentication failed", and one MCP client retried the same
 // dead token 290 times as a result.
+//
+// It also pins the exact error_description text: a #168 review round found
+// that wrapping the message with ErrGrantFailure via
+// fmt.Errorf("%w: ...", ErrGrantFailure) put the sentinel's OWN text
+// ("grant failure: ...") on the wire ahead of the grant message, so the
+// response no longer matched what #168's reporter is matching on. No test
+// asserted error_description end-to-end, so it slipped through; this is
+// that assertion, on the endpoint's literal flagship reproduction.
 func TestTokenHandler_DeadRefreshTokenIsInvalidGrant(t *testing.T) {
 	o := newTokenErrorTestHandler(t)
 
@@ -66,7 +74,10 @@ func TestTokenHandler_DeadRefreshTokenIsInvalidGrant(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code,
 		"5.2 reserves 401 for failed client authentication via the Authorization header")
-	assert.Equal(t, "invalid_grant", decodeOAuthError(t, rec)["error"])
+	body := decodeOAuthError(t, rec)
+	assert.Equal(t, "invalid_grant", body["error"])
+	assert.Equal(t, "refresh token not found or expired", body["error_description"],
+		"the description must be exactly the grant message, with no sentinel wording prepended (#168 round 2)")
 }
 
 // TestTokenHandler_ErrorMapping walks the rest of the 5.2 table.
