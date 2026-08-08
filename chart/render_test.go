@@ -137,3 +137,44 @@ func TestWaitOnValkeyImage_Overridable(t *testing.T) {
 		t.Fatalf("overridden wait-on-valkey image = %q, want %q", img, custom)
 	}
 }
+
+// TestServerTimeoutArgs pins that chart server.* values reach the binary's
+// --server-* flags (kdex-tech/host-manager#167). The zero case matters most:
+// an operator disabling the write deadline must produce an explicit
+// `--server-write-timeout=0`, not an omitted flag that silently restores the
+// 60s default.
+func TestServerTimeoutArgs(t *testing.T) {
+	manifests := renderChart(t,
+		"server.readHeaderTimeout=5s",
+		"server.readTimeout=30s",
+		"server.writeTimeout=0",
+		"server.idleTimeout=45s",
+	)
+
+	for _, want := range []string{
+		"--server-read-header-timeout=5s",
+		"--server-read-timeout=30s",
+		"--server-write-timeout=0",
+		"--server-idle-timeout=45s",
+	} {
+		if !strings.Contains(manifests, want) {
+			t.Errorf("rendered manifests missing %q:\n%s", want, manifests)
+		}
+	}
+}
+
+// TestServerTimeoutArgs_Defaults pins that the shipped defaults render.
+func TestServerTimeoutArgs_Defaults(t *testing.T) {
+	manifests := renderChart(t)
+
+	for _, want := range []string{
+		"--server-read-header-timeout=10s",
+		"--server-read-timeout=60s",
+		"--server-write-timeout=60s",
+		"--server-idle-timeout=120s",
+	} {
+		if !strings.Contains(manifests, want) {
+			t.Errorf("rendered manifests missing default %q:\n%s", want, manifests)
+		}
+	}
+}

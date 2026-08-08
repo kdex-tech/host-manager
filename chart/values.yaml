@@ -57,6 +57,19 @@ proxy:
   responseHeaderTimeout: 60s
   idleConnTimeout: 90s
 
+# Inbound webserver timeouts. These bound exposure on every accepted
+# connection (kdex-tech/host-manager#49). Streaming responses are exempted
+# from writeTimeout per-request — text/event-stream has its deadline cleared
+# outright, and a chunked response that keeps making progress has its
+# deadline pushed forward on every write — so SSE and MCP streams are no
+# longer severed at writeTimeout (#167). Set any value to "0" to disable that
+# deadline entirely.
+server:
+  readHeaderTimeout: 10s
+  readTimeout: 60s
+  writeTimeout: 60s
+  idleTimeout: 120s
+
 fullnameOverride: ""
 
 image:

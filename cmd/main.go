@@ -95,6 +95,10 @@ func main() {
 	var proxyDialTimeout time.Duration
 	var proxyResponseHeaderTimeout time.Duration
 	var proxyIdleConnTimeout time.Duration
+	var serverReadHeaderTimeout time.Duration
+	var serverReadTimeout time.Duration
+	var serverWriteTimeout time.Duration
+	var serverIdleTimeout time.Duration
 	var secureMetrics bool
 	var tlsOpts []func(*tls.Config)
 	var webhookCertKey, webhookCertName, webhookCertPath string
@@ -120,6 +124,18 @@ func main() {
 			"scale-from-zero cold start (gRPC + cloudsqlconn + OTel); bump higher for heavier functions.")
 	flag.DurationVar(&proxyIdleConnTimeout, "proxy-idle-conn-timeout", 90*time.Second,
 		"How long an unused keep-alive connection lingers in the proxy transport's pool.")
+
+	srvDefaults := server.DefaultTimeouts()
+	flag.DurationVar(&serverReadHeaderTimeout, "server-read-header-timeout", srvDefaults.ReadHeaderTimeout,
+		"How long the inbound webserver waits for a request's headers. 0 disables the deadline.")
+	flag.DurationVar(&serverReadTimeout, "server-read-timeout", srvDefaults.ReadTimeout,
+		"How long the inbound webserver allows for reading a whole request. 0 disables the deadline.")
+	flag.DurationVar(&serverWriteTimeout, "server-write-timeout", srvDefaults.WriteTimeout,
+		"Connection-level write deadline for the inbound webserver. Streaming responses "+
+			"(text/event-stream, and chunked responses that keep making progress) are exempted "+
+			"per-request; see kdex-tech/host-manager#167. 0 disables the deadline entirely.")
+	flag.DurationVar(&serverIdleTimeout, "server-idle-timeout", srvDefaults.IdleTimeout,
+		"How long an idle keep-alive connection to the inbound webserver lingers. 0 disables the deadline.")
 
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
@@ -407,7 +423,12 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	srv := server.New(webserverAddr, hostHandler)
+	srv := server.New(webserverAddr, hostHandler, server.Timeouts{
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	})
 
 	go func() {
 		setupLog.Info("starting web server")

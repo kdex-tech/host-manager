@@ -50,6 +50,12 @@ spec:
             - --proxy-idle-conn-timeout={{ . }}
             {{- end }}
             {{- end }}
+            {{- with .Values.server }}
+            - --server-read-header-timeout={{ .readHeaderTimeout }}
+            - --server-read-timeout={{ .readTimeout }}
+            - --server-write-timeout={{ .writeTimeout }}
+            - --server-idle-timeout={{ .idleTimeout }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
