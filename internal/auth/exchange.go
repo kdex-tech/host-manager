@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -20,6 +21,15 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"golang.org/x/oauth2"
 )
+
+// ErrServerError marks a failure of OUR infrastructure — a cache read, a
+// signing operation, a stored-record unmarshal — as distinct from a failure
+// of the client's grant. The token endpoint maps it to RFC 6749 5.2's
+// server_error (500) rather than invalid_grant (400), because telling a
+// client its credential is dead during a transient outage makes it discard
+// a working refresh token and re-authorize for no reason. See
+// kdex-tech/host-manager#168.
+var ErrServerError = errors.New("server error")
 
 type AuthMethod string
 
@@ -570,7 +580,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 // RedeemAuthorizationCode validates and exchanges an authorization code for a TokenSet.
 func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID, redirectURI, codeVerifier string) (TokenSet, error) {
 	if e == nil {
-		return TokenSet{}, fmt.Errorf("auth not configured")
+		return TokenSet{}, fmt.Errorf("%w: auth not configured", ErrServerError)
 	}
 
 	// 1. Parse JWE
@@ -590,7 +600,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 
 	var claims AuthorizationCodeClaims
 	if err := json.Unmarshal(decrypted, &claims); err != nil {
-		return TokenSet{}, fmt.Errorf("failed to unmarshal auth code claims: %w", err)
+		return TokenSet{}, fmt.Errorf("%w: failed to unmarshal auth code claims: %v", ErrServerError, err)
 	}
 
 	// From here the subject is known and server-vouched: it came out of a
@@ -663,7 +673,7 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		}
 		_, found, _, err := e.authCodeCache.GetAndDelete(ctx, claims.JTI)
 		if err != nil {
-			return failed("failed to check auth code consumption: %w", err)
+			return failed("%w: failed to check auth code consumption: %v", ErrServerError, err)
 		}
 		if !found {
 			// Replay, or a legitimate code past its window. Either way the
@@ -690,7 +700,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// session lineages that rotation never detected.
 	raw, found, _, err := e.refreshTokenCache.GetAndDelete(ctx, tokenID)
 	if err != nil {
-		return TokenSet{}, fmt.Errorf("failed to read refresh token: %w", err)
+		return TokenSet{}, fmt.Errorf("%w: failed to read refresh token: %v", ErrServerError, err)
 	}
 	if !found {
 		return TokenSet{}, fmt.Errorf("refresh token not found or expired")
@@ -698,7 +708,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 
 	var claims RefreshTokenClaims
 	if err := json.Unmarshal([]byte(raw), &claims); err != nil {
-		return TokenSet{}, fmt.Errorf("failed to parse refresh token: %w", err)
+		return TokenSet{}, fmt.Errorf("%w: failed to parse refresh token: %v", ErrServerError, err)
 	}
 
 	// The stored record is ours, so from here the subject is known and
@@ -730,7 +740,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.
 	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod)
 	if err != nil {
-		return failed("failed to mint tokens from refresh: %w", err)
+		return failed("%w: failed to mint tokens from refresh: %v", ErrServerError, err)
 	}
 
 	// Rotate: issue a new refresh token.
@@ -742,7 +752,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		Subject:          claims.Subject,
 	})
 	if err != nil {
-		return failed("failed to rotate refresh token: %w", err)
+		return failed("%w: failed to rotate refresh token: %v", ErrServerError, err)
 	}
 
 	return ts, nil
