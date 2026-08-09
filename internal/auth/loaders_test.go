@@ -24,6 +24,51 @@ func authClientSecret(data map[string]string) corev1.Secret {
 	}
 }
 
+// TestAuthClientLoaderRejectsEmptyClientID pins the guard from
+// kdex-tech/host-manager#173.
+//
+// A client authored with no client_id loads under the "" key. There is no
+// live path to it from the token endpoint today — a caller cannot present
+// client_id="" because GetClient("") must succeed first — but the ""-keyed
+// entry is a bridge to the cookie-path grace records, which are the records
+// minted with ClientID: "". A public client authored with no id would
+// therefore become reachable by exactly the client-binding check #169 added
+// to keep a rotated refresh token away from a caller that never owned the
+// session.
+//
+// Fail closed at load time rather than carry an entry whose only consumer is
+// a bug.
+func TestAuthClientLoaderRejectsEmptyClientID(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_secret": "s3cret",
+		"redirect_uris": "https://example.test/callback",
+	})}
+
+	if _, err := AuthClientLoader(secrets); err == nil {
+		t.Fatal("expected an error for an auth-client secret with no client_id")
+	} else if !strings.Contains(err.Error(), "client_id") {
+		t.Fatalf("error should name client_id so an operator can find the offending secret, got: %v", err)
+	}
+}
+
+// TestAuthClientLoaderAcceptsNonEmptyClientID proves the guard above is
+// specific to the empty id and does not reject ordinary clients.
+func TestAuthClientLoaderAcceptsNonEmptyClientID(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_id":     "ordinary",
+		"client_secret": "s3cret",
+		"redirect_uris": "https://example.test/callback",
+	})}
+
+	clients, err := AuthClientLoader(secrets)
+	if err != nil {
+		t.Fatalf("a client with a non-empty id must load: %v", err)
+	}
+	if _, ok := clients["ordinary"]; !ok {
+		t.Fatalf("expected client %q to be loaded, got keys: %v", "ordinary", clients)
+	}
+}
+
 // TestAuthClientLoaderRejectsPublicCustomSchemeWithoutPKCE pins the footgun
 // guard: a statically-configured public client whose redirect uses an RFC 8252
 // private-use (custom) URI scheme is open to authorization-code interception

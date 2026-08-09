@@ -46,7 +46,7 @@ func TestDefaultTimeouts(t *testing.T) {
 
 // TestNew_AppliesDefaultTimeouts checks the defaults reach the http.Server.
 func TestNew_AppliesDefaultTimeouts(t *testing.T) {
-	srv := New(":0", nil, DefaultTimeouts())
+	srv, _ := New(":0", nil, DefaultTimeouts())
 
 	assert.Equal(t, 10*time.Second, srv.ReadHeaderTimeout)
 	assert.Equal(t, 60*time.Second, srv.ReadTimeout)
@@ -58,7 +58,7 @@ func TestNew_AppliesDefaultTimeouts(t *testing.T) {
 // http.Server verbatim, including zero, which is stdlib for "no deadline"
 // and is the documented escape hatch for #167.
 func TestNew_HonorsExplicitTimeouts(t *testing.T) {
-	srv := New(":0", nil, Timeouts{
+	srv, _ := New(":0", nil, Timeouts{
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0,

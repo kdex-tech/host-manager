@@ -440,13 +440,29 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	srv := server.New(webserverAddr, hostHandler, server.Timeouts{
+	srv, appliedTimeouts := server.New(webserverAddr, hostHandler, server.Timeouts{
 		ReadHeaderTimeout:  serverReadHeaderTimeout,
 		ReadTimeout:        serverReadTimeout,
 		WriteTimeout:       serverWriteTimeout,
 		IdleTimeout:        serverIdleTimeout,
 		StreamStallTimeout: serverStreamStallTimeout,
 	})
+
+	// Report an applied stall window that differs from what the operator
+	// wrote. Clamped rather than rejected for the same reason
+	// --refresh-grace-window is (see internal/auth/exchange.go): this
+	// process is the site's serving path. Logged loudly because a running
+	// config that silently disagrees with the flags is exactly what makes
+	// the inversion hard to find. See kdex-tech/host-manager#173.
+	if appliedTimeouts.StreamStallTimeout != serverStreamStallTimeout {
+		setupLog.Info(
+			"--server-stream-stall-timeout was below --server-write-timeout and has been clamped up to it; "+
+				"the stall window is the SSE-specific sliding deadline and is meant to be the LARGER of the two, "+
+				"so a lower value made text/event-stream responses more fragile than ordinary chunked responses",
+			"requested", serverStreamStallTimeout.String(),
+			"applied", appliedTimeouts.StreamStallTimeout.String(),
+			"server-write-timeout", serverWriteTimeout.String())
+	}
 
 	go func() {
 		setupLog.Info("starting web server")

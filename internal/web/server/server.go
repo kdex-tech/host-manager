@@ -45,7 +45,44 @@ func DefaultTimeouts() Timeouts {
 	}
 }
 
-func New(address string, hostHandler *host.HostHandler, timeouts Timeouts) *http.Server {
+// Normalized returns t with StreamStallTimeout clamped UP to WriteTimeout
+// when an operator has configured the stall window below it, and reports
+// whether that clamp happened.
+//
+// StreamStallTimeout is the window a text/event-stream response slides on;
+// WriteTimeout is the window every other chunked response slides on. The
+// design intent is that the stall window is much larger (5m against 60s by
+// default). Setting it lower makes SSE strictly MORE fragile than the
+// ordinary chunked responses it exists to protect — the exact inversion of
+// what the setting is for. See kdex-tech/host-manager#173.
+//
+// Clamped rather than rejected, following the --refresh-grace-window
+// precedent in internal/auth/exchange.go: this process is the site's serving
+// path, and refusing to start over one flag takes the whole host down, which
+// is a worse outcome than running with a safe window. The caller reports the
+// clamp so an operator whose applied config no longer matches what they wrote
+// can see it.
+//
+// Zero is MEANINGFUL in both fields and is never clamped: a zero
+// StreamStallTimeout clears the SSE deadline outright (the documented
+// --server-stream-stall-timeout setting), and a zero WriteTimeout disables
+// deadlines entirely, leaving no window for SSE to be more fragile than.
+func (t Timeouts) Normalized() (Timeouts, bool) {
+	if t.WriteTimeout > 0 && t.StreamStallTimeout > 0 && t.StreamStallTimeout < t.WriteTimeout {
+		t.StreamStallTimeout = t.WriteTimeout
+		return t, true
+	}
+	return t, false
+}
+
+// New builds the inbound webserver and returns it alongside the timeouts it
+// actually applied. The second return exists because Normalized may clamp an
+// inverted stall window (#173): an operator whose applied configuration no
+// longer matches what they wrote must be able to see that in the logs, and
+// only the caller has the startup logger.
+func New(address string, hostHandler *host.HostHandler, timeouts Timeouts) (*http.Server, Timeouts) {
+	timeouts, _ = timeouts.Normalized()
+
 	handler := middleware.WithLogger(
 		logf.Log.WithName("server"),
 	)(
@@ -63,5 +100,5 @@ func New(address string, hostHandler *host.HostHandler, timeouts Timeouts) *http
 		ReadTimeout:       timeouts.ReadTimeout,
 		WriteTimeout:      timeouts.WriteTimeout,
 		IdleTimeout:       timeouts.IdleTimeout,
-	}
+	}, timeouts
 }

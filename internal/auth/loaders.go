@@ -20,6 +20,18 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 			clientID = string(secret.Data["client-id"])
 		}
 
+		// Fail closed on an id-less client rather than load it under the ""
+		// key. Nothing reaches a ""-keyed client from the token endpoint
+		// today (a caller cannot present client_id="" because GetClient("")
+		// must succeed first), but "" is the ClientID the cookie path mints
+		// its grace records with — so an id-less entry here is a bridge
+		// straight past the client binding #169 added to keep a rotated
+		// refresh token away from a caller that never owned the session.
+		// See kdex-tech/host-manager#173.
+		if clientID == "" {
+			return nil, fmt.Errorf("auth-client secret %q has no client_id", secret.Name)
+		}
+
 		clientSecret := string(secret.Data["client_secret"])
 		if clientSecret == "" {
 			clientSecret = string(secret.Data["client-secret"])
