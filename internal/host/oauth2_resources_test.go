@@ -56,6 +56,33 @@ func newReadyFunctionWithOAuth2(_ *testing.T, basePath string, scopes []string) 
 	}
 }
 
+// newReadyFunctionWithOAuth2AndAPIKey returns a Ready KDexFunction whose single
+// POST operation declares oauth2 AND apiKey* alternatives. This is the shape
+// knowdb-mcp ships (knowdrive-site k8s/dev/function_knowdb_mcp.yaml): an MCP
+// client authenticates through the RFC 8707 authorization-code flow, while a
+// developer key authenticates through apiKeyHeader/apiKeyQuery. The two carry
+// DIFFERENT audiences — resource URI vs. host — so the bridge must accept both.
+func newReadyFunctionWithOAuth2AndAPIKey(_ *testing.T, basePath string, scopes []string) kdexv1alpha1.KDexFunction {
+	scopeJSON, _ := json.Marshal(scopes)
+	s := string(scopeJSON)
+	raw := []byte(`{"security":[{"oauth2":` + s + `},{"bearer":` + s + `},{"apiKeyHeader":` + s + `},{"apiKeyQuery":` + s + `}],"responses":{"200":{"description":"ok"}}}`)
+	return kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-oauth2-apikey", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: basePath,
+				Paths: map[string]kdexv1alpha1.PathItem{
+					basePath: {Post: &runtime.RawExtension{Raw: raw}},
+				},
+			},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{
+			State: kdexv1alpha1.KDexFunctionStateReady,
+		},
+	}
+}
+
 // newReadyFunctionBearerOnly returns a KDexFunction that is Ready and has a
 // single POST operation on basePath whose Security contains only {"bearer": []}.
 func newReadyFunctionBearerOnly(_ *testing.T, basePath string) kdexv1alpha1.KDexFunction {

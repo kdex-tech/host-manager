@@ -446,19 +446,44 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// X-API-TOKEN header and api_token query pass through untouched). See
 		// kdex-tech/host-manager#103.
 		//
-		// For oauth2-protected functions the MCP/oauth2 scheme set does NOT include
-		// an apiKey* scheme, so acceptsAPIKey is false; the bridge must still run.
-		// The token is validated against the function's RESOURCE audience (RFC 8707
-		// audience binding): a PAT minted for a different resource fails here. See
-		// Plan B Task 9.
+		// An oauth2-protected function may declare no apiKey* scheme at all
+		// (acceptsAPIKey false), so the bridge must still run for it.
+		//
+		// Resource binding is a property of the TOKEN, not of the function. Only
+		// one issuer mints a resource-path audience: the RFC 8707 branch of the
+		// token endpoint (auth.OAuth2.writeResourcePATResponse), reached when an
+		// authorization_code/refresh_token request carries a recognized `resource`
+		// — the DCR/MCP-client flow. Every other issuer mints the HOST audience,
+		// notably /-/apitokens/mint, which backs the developer-keys UI. So the
+		// acceptable audiences are derived from what the function's schemes admit,
+		// tried most-specific first:
+		//
+		//   oauth2-protected  -> its RFC 8707 resource URI (Plan B Task 9)
+		//   apiKey-accepting  -> the host audience
+		//
+		// Both apply to a function declaring both (knowdb-mcp does). Accepting the
+		// host audience there does NOT weaken RFC 8707: a PAT bound to resource A
+		// presented at resource B fails every entry (A != B, A != host), so
+		// cross-resource replay stays blocked. Conditioning the resource audience
+		// on the function alone instead made a CR's own apiKeyHeader/apiKeyQuery
+		// alternatives unsatisfiable — no minted developer key could ever pass.
 		if (fh.acceptsAPIKey || fh.oauth2Protected) && authConfig != nil && authConfig.TokenManager != nil {
 			if _, alreadyLoggedIn := auth.GetAuthContext(r.Context()); !alreadyLoggedIn {
-				expectedAud := authConfig.Audience
-				if fh.oauth2Protected {
-					expectedAud = fh.oauth2Resource
+				expectedAuds := make([]string, 0, 2)
+				if fh.oauth2Protected && fh.oauth2Resource != "" {
+					expectedAuds = append(expectedAuds, fh.oauth2Resource)
 				}
-				if tok := extractBearerOrAPIToken(r, authConfig.TokenPrefix()); tok != "" {
-					data, err := authConfig.TokenManager.ValidateToken(r.Context(), tok, expectedAud)
+				if fh.acceptsAPIKey || !fh.oauth2Protected {
+					expectedAuds = append(expectedAuds, authConfig.Audience)
+				}
+				if tok := extractBearerOrAPIToken(r, authConfig.TokenPrefix()); tok != "" && len(expectedAuds) > 0 {
+					data, err := authConfig.TokenManager.ValidateToken(r.Context(), tok, expectedAuds[0])
+					for _, aud := range expectedAuds[1:] {
+						if err == nil {
+							break
+						}
+						data, err = authConfig.TokenManager.ValidateToken(r.Context(), tok, aud)
+					}
 					if err != nil {
 						// Invalid / expired / revoked / audience-mismatch token:
 						// leave the request anonymous and let the gate decide.

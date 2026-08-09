@@ -85,6 +85,14 @@ func (g *entitlementGateChecker) VerifyResourceParsedEntitlements(_, _ string, _
 // resource. backendReached reports whether the upstream was hit (gate passed).
 func patProxyFixture(t *testing.T, idp auth.InternalIdentityProvider) (http.Handler, *apitoken.TokenManager, *bool) {
 	t.Helper()
+	return patProxyFixtureFor(t, idp,
+		newReadyFunctionWithOAuth2(t, patProxyBasePath, []string{"functions:" + patProxyBasePath + ":read"}))
+}
+
+// patProxyFixtureFor is patProxyFixture over an explicit KDexFunction, so a test
+// can vary the declared security schemes (oauth2-only vs. oauth2+apiKey).
+func patProxyFixtureFor(t *testing.T, idp auth.InternalIdentityProvider, fn kdexv1alpha1.KDexFunction) (http.Handler, *apitoken.TokenManager, *bool) {
+	t.Helper()
 	logf.SetLogger(logr.Discard())
 
 	backendReached := new(bool)
@@ -109,7 +117,6 @@ func patProxyFixture(t *testing.T, idp auth.InternalIdentityProvider) (http.Hand
 	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp)
 	require.NoError(t, err)
 
-	fn := newReadyFunctionWithOAuth2(t, patProxyBasePath, []string{"functions:" + patProxyBasePath + ":read"})
 	fn.Status.URL = upstream.URL
 
 	hh := &HostHandler{
@@ -175,5 +182,74 @@ func TestProxyPAT_BearerResourceBound(t *testing.T) {
 		// oauth2-protected functions; assert exact status and header presence.
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		assert.NotEmpty(t, rec.Header().Get("WWW-Authenticate"), "oauth2-protected gate must emit WWW-Authenticate challenge")
+	})
+}
+
+// TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction covers the case where a
+// function is BOTH oauth2-protected and apiKey-accepting — the shape knowdb-mcp
+// ships. Resource binding is a property of the TOKEN, not of the function: only
+// the RFC 8707 branch of the token endpoint (writeResourcePATResponse) mints a
+// resource-path audience. Every other issuer — notably /-/apitokens/mint, which
+// backs the developer-keys UI — mints the HOST audience. Expecting the resource
+// audience unconditionally therefore made the CR's own apiKeyHeader/apiKeyQuery
+// alternatives unsatisfiable: no key the mint endpoint issues could ever pass.
+//
+// Both audiences must be accepted here, and accepting both does not weaken
+// RFC 8707: a PAT bound to resource A presented at resource B still fails both
+// checks (A != B, A != host) — see the wrong-audience case above.
+func TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction(t *testing.T) {
+	idp := stubInternalIdentityProvider{
+		roles: []string{"mcp-role"},
+		ents:  []string{"functions:" + patProxyBasePath + ":read"},
+	}
+	scopes := []string{"functions:" + patProxyBasePath + ":read"}
+
+	t.Run("host-audience PAT reaches backend", func(t *testing.T) {
+		handler, tm, backendReached := patProxyFixtureFor(t, idp,
+			newReadyFunctionWithOAuth2AndAPIKey(t, patProxyBasePath, scopes))
+		// What the developer-keys UI mints: aud = the host origin.
+		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-bob", "act", "scope:x", time.Hour)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", patProxyBasePath, nil)
+		req.Header.Set("Authorization", "Bearer "+pat)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.True(t, *backendReached, "host-audience PAT must reach a function that declares apiKey* schemes")
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("resource-bound PAT still reaches backend", func(t *testing.T) {
+		handler, tm, backendReached := patProxyFixtureFor(t, idp,
+			newReadyFunctionWithOAuth2AndAPIKey(t, patProxyBasePath, scopes))
+		// What the DCR/authorization-code flow mints: aud = the resource URI.
+		pat, err := tm.MintStatelessKey(patProxyResource, "mcp-bob", "act", "scope:x", time.Hour)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", patProxyBasePath, nil)
+		req.Header.Set("Authorization", "Bearer "+pat)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.True(t, *backendReached, "adding the host-audience fallback must not break resource-bound PATs")
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("host-audience PAT rejected when the function declares no apiKey scheme", func(t *testing.T) {
+		// oauth2-only: the CR never invited API-key callers, so the resource
+		// audience stays the only acceptable one.
+		handler, tm, backendReached := patProxyFixtureFor(t, idp,
+			newReadyFunctionWithOAuth2(t, patProxyBasePath, scopes))
+		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-eve", "act", "scope:x", time.Hour)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", patProxyBasePath, nil)
+		req.Header.Set("Authorization", "Bearer "+pat)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		assert.False(t, *backendReached, "host-audience PAT must NOT reach an oauth2-only function")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
