@@ -330,8 +330,27 @@ becomes:
 2. **Winner:** validate, mint, and rotate exactly as today. Before returning,
    `Set(refresh-grace, id, json(TokenSet), WithTTL(window))`.
 3. **Loser** (`found == false`), when the window is enabled: read
-   `refresh-grace, id`. On a hit, unmarshal and return the byte-identical
-   `TokenSet`. On a miss, return today's `refresh token not found or expired`.
+   `refresh-grace, id`. On a hit **whose recorded `client_id` matches the
+   caller's**, unmarshal and return the byte-identical `TokenSet`. On a
+   client-id mismatch, reject exactly as strict rotation does
+   (`refresh token was not issued to this client`). On a miss, return today's
+   `refresh token not found or expired`.
+
+**The grace record must carry the client id, and the replay must check it.**
+This is not optional hardening — without it the window *removes* a validation
+the strict path performs. Strict rotation consumes the record, unmarshals it,
+and rejects when `claims.ClientID != clientID`. The replay path never reaches
+that comparison, and a bare `TokenSet` carries no client id to compare against,
+so a caller presenting a valid token id under a **different registered
+client_id** would be handed the winner's access token, ID token, and *live
+rotated refresh token* — and could then rotate that lineage indefinitely.
+Registering a client is not a meaningful barrier: public clients need no
+secret, and DCR lets a caller register one. So the stored value is
+`{client_id, TokenSet}`, not a bare `TokenSet`, and a mismatch is a
+`grantFailuref` rejection carrying the same message strict mode uses.
+
+*(Added 2026-08-08 during implementation, after review found the replay was
+keyed on the token id alone.)*
 
 ### Why #71's guarantee survives
 
