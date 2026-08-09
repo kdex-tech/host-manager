@@ -104,7 +104,18 @@ func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entit
 		case AuthMethodOIDC:
 			userEntitlements["oidc"] = contextScopes
 		case AuthMethodOAuth2:
-			userEntitlements["oauth2"] = contextScopes
+			// APPEND, never assign. This is the second write to the "oauth2"
+			// bucket: the first, above, is the PAT-bridge mirror that puts the
+			// caller's role-resolved entitlements here so a PAT can satisfy an
+			// operation declaring only {oauth2: [...]} — the mirror that makes
+			// `Authorization: Bearer <api key>` work on an oauth2-protected
+			// function (aa73843).
+			//
+			// Assigning clobbered it. Nothing carries both a PATBridgeClaim and
+			// a scope claim today, so this never fired in production, but the
+			// two writes describe different things about the SAME caller and
+			// one added scope claim would have silently un-fixed aa73843.
+			userEntitlements["oauth2"] = append(userEntitlements["oauth2"], contextScopes...)
 		}
 	}
 
