@@ -87,7 +87,7 @@ func (s *streamWriter) WriteHeader(code int) {
 	// landed in the CHUNKED window (writeTimeout) rather than the SSE one
 	// (stallTimeout), silently re-severing exactly the streams #167
 	// exists to keep alive. See #167 and
-	// TestWithStreamDeadline_EarlyHintsBeforeSSEStillGetsSSEWindow, which
+	// TestWithStreamDeadline_EarlyHintsBeforeSSEGetsSSEWindow, which
 	// discriminates on WHICH window was chosen, not merely on survival.
 	//
 	// 101 Switching Protocols takes this path too: an upgraded connection
