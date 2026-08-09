@@ -145,7 +145,7 @@ func (hl *httpLookup) Type() string {
 func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.MapClaims, error) {
 	body, err := json.Marshal(credentialCheckRequest{Subject: subject, Password: password})
 	if err != nil {
-		return false, nil, fmt.Errorf("httpLookup: marshal request: %w", err)
+		return false, nil, fmt.Errorf("%w: httpLookup: marshal request: %w", ErrLookupUnavailable, err)
 	}
 
 	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
@@ -156,7 +156,7 @@ func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.M
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, hl.url, bytes.NewReader(body))
 	if err != nil {
-		return false, nil, fmt.Errorf("httpLookup: build request: %w", err)
+		return false, nil, fmt.Errorf("%w: httpLookup: build request: %w", ErrLookupUnavailable, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-K-CNAS-Lookup-Timestamp", ts)
@@ -164,17 +164,17 @@ func (hl *httpLookup) FindInternal(subject string, password string) (bool, jwt.M
 
 	resp, err := hl.client.Do(req)
 	if err != nil {
-		return false, nil, fmt.Errorf("httpLookup: request: %w", err)
+		return false, nil, fmt.Errorf("%w: httpLookup: request: %w", ErrLookupUnavailable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, nil, fmt.Errorf("httpLookup: server returned status %d", resp.StatusCode)
+		return false, nil, fmt.Errorf("%w: httpLookup: server returned status %d", ErrLookupUnavailable, resp.StatusCode)
 	}
 
 	var parsed credentialCheckResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return false, nil, fmt.Errorf("httpLookup: decode response: %w", err)
+		return false, nil, fmt.Errorf("%w: httpLookup: decode response: %w", ErrLookupUnavailable, err)
 	}
 
 	if !parsed.OK {

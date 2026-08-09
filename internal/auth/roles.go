@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -25,6 +26,20 @@ import (
 // the lookup loops so it reflects ANY wired impl (http/ldap/secret). Enable with
 // --named-log-level=lookup=2.
 var lookupLog = logf.Log.WithName("lookup")
+
+// ErrLookupUnavailable marks a Lookup failure as "this backend could not give
+// us an answer" — a dial failure, a timeout, a 5xx, an undecodable response, a
+// broken service account — as distinct from "this backend answered, and the
+// credential is bad".
+//
+// The interface's (bool, claims, error) shape looks like it separates those
+// already, but it does not: `ok=false` means only "this subject is not present
+// in this lookup", and every implementation returns a wrong password as an
+// `error`. Without this marker a credential backend outage is indistinguishable
+// from a bad password, so the token endpoint answers 400 invalid_grant during
+// an outage and clients discard working refresh tokens and force users to
+// re-authenticate. See kdex-tech/host-manager#171.
+var ErrLookupUnavailable = errors.New("lookup unavailable")
 
 type Lookup interface {
 	FindInternal(subject string, password string) (bool, jwt.MapClaims, error)
@@ -122,6 +137,20 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 	var localIdentity jwt.MapClaims
 	for _, lookup := range rp.lookups {
 		if ok, identity, err := lookup.FindInternal(subject, password); err != nil {
+			// An unreachable backend is OUR failure, and the token endpoint
+			// must answer 500 rather than telling the client its credential
+			// is dead (#171). A rejection is returned unmarked: it is a fact
+			// about the presented grant, and marking it would turn every
+			// wrong password into a 500.
+			if errors.Is(err, ErrLookupUnavailable) {
+				return nil, fmt.Errorf("%w: credential lookup %q unavailable: %w", ErrServerError, lookup.Type(), err)
+			}
+			// Either way the chain STOPS here. A lookup that answered about
+			// this subject is authoritative: one identity may not live in two
+			// lookups, so falling through would let a subject present in two
+			// backends authenticate against whichever one accepts the
+			// password. An outage stops it too — we cannot know whether this
+			// backend would have accepted the credential.
 			return nil, err
 		} else if ok {
 			localIdentity = identity
@@ -145,7 +174,13 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 
 	roles, entitlements, err := rp.FindInternalRolesAndEntitlements(subjectForRoles)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve scopes: %w", err)
+		// Unambiguously ours: the credential already passed, and this is our
+		// own role/entitlement resolution failing. UNREACHABLE today —
+		// FindInternalRolesAndEntitlements returns a nil error unconditionally
+		// — so this marking is carried without a test on purpose: if that ever
+		// starts returning an error, it must not be reported to the caller as
+		// a bad credential. See kdex-tech/host-manager#171.
+		return nil, fmt.Errorf("%w: failed to resolve scopes: %w", ErrServerError, err)
 	}
 	localIdentity["roles"] = roles
 	localIdentity["entitlements"] = entitlements
@@ -353,7 +388,17 @@ func (ll *ldapLookup) FindInternal(subject string, password string) (bool, jwt.M
 	)
 
 	sr, err := l.Search(searchReq)
-	if err != nil || len(sr.Entries) != 1 {
+	if err != nil {
+		// A SEARCH FAILURE is not "user not found". Collapsing the two (as
+		// this did pre-#171) reported a broken service account, a severed
+		// connection or a malformed filter as a nonexistent user — so the
+		// chain fell through to the next lookup and the caller was ultimately
+		// told its credential was invalid during an LDAP outage.
+		return false, nil, fmt.Errorf("%w: ldapLookup: search for subject %q: %w", ErrLookupUnavailable, subject, err)
+	}
+	if len(sr.Entries) != 1 {
+		// Genuinely not present here (or ambiguous): say nothing about the
+		// credential and let the chain try the next lookup.
 		return false, nil, nil
 	}
 
