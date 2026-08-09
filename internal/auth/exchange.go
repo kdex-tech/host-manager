@@ -813,9 +813,12 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		// our own poll was canceled -- OUR infrastructure, not a fact
 		// about the presented token) or a grantFailuref client_id mismatch
 		// (see below) -- so it is safe to return verbatim either way.
+		// `replayed` carries Subject attribution on the mismatch path
+		// (#158) and is the zero value on every other error path, so
+		// returning it alongside graceErr is correct for both.
 		replayed, ok, graceErr := e.replayFromGrace(ctx, tokenID, clientID)
 		if graceErr != nil {
-			return TokenSet{}, graceErr
+			return replayed, graceErr
 		}
 		if ok {
 			return replayed, nil
@@ -1223,12 +1226,24 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 // or outside the window, and continuing to poll would only pay Valkey round
 // trips and pin a goroutine for a redemption that is never coming. This is
 // what makes an ordinary invalid refresh (the common case) cheap again: one
-// cache miss plus at most one retry, not the full 10-attempt/180ms budget.
-// See kdex-tech/host-manager#169 fix round 2 (cost finding).
+// cache miss plus up to two retries, not the full 10-attempt/180ms budget.
+//
+// Set to 3 (~40ms: two sleeps of graceReplayInterval), not 2 (~20ms): the
+// failure mode of too-tight a bailout IS #169 itself -- a legitimate
+// concurrent refresh fast-bailing because the in-flight marker hasn't
+// propagated under a loaded Valkey degrades straight back into the
+// single-winner-fails-the-rest bug this task exists to fix. It fails
+// closed (never a wrong result, only a missed replay), but regressing into
+// the original availability bug under exactly the load #169 targets is a
+// bad trade for 20ms. Three attempts still gives roughly a 4x reduction
+// against the old ~180ms-for-every-miss cost while leaving real headroom
+// over Valkey p99 write-visibility latency. See
+// kdex-tech/host-manager#169 fix round 2 (cost finding) and round 3
+// (bailout-window review).
 const (
 	graceReplayAttempts      = 10
 	graceReplayInterval      = 20 * time.Millisecond
-	graceFastBailoutAttempts = 2
+	graceFastBailoutAttempts = 3
 )
 
 // graceRecord is what the grace cache actually stores, keyed by the
@@ -1347,7 +1362,12 @@ func (e *Exchanger) replayFromGrace(ctx context.Context, tokenID, clientID strin
 				sawInFlight = true
 			} else {
 				if rec.ClientID != clientID {
-					return TokenSet{}, false, grantFailuref("refresh token was not issued to this client")
+					// Subject attribution, consistent with the identical
+					// strict-path rejection (`grantFailed` above, #158):
+					// an operator investigating a rejected redemption
+					// needs to see WHOSE session it belongs to. The
+					// record already carries it on the minted result.
+					return TokenSet{Subject: rec.TokenSet.Subject}, false, grantFailuref("refresh token was not issued to this client")
 				}
 				return rec.TokenSet, true, nil
 			}
