@@ -150,15 +150,18 @@ func TestSpliceMintTokenDescriptor(t *testing.T) {
 	g.Expect(json.Unmarshal(out, &parsed)).To(Succeed())
 	result := parsed.Result.(map[string]any)
 	tools := result["tools"].([]any)
-	g.Expect(tools).To(HaveLen(2))
 
 	byName := map[string]map[string]any{}
 	for _, tool := range tools {
 		m := tool.(map[string]any)
 		byName[m["name"].(string)] = m
 	}
+	// Assert by NAME, not by count: the splice advertises every AS-provided
+	// tool (mint_token, whoami, ...), so a length assertion breaks every time
+	// one is added without telling us anything useful.
 	g.Expect(byName).To(HaveKey("search_atoms"))
 	g.Expect(byName).To(HaveKey("mint_token"))
+	g.Expect(byName).To(HaveKey("whoami"))
 
 	// #133: the discovery endpoint (resolved to the caller-facing address) must
 	// be surfaced inside the mint_token description so an agent can go
@@ -180,8 +183,14 @@ func TestSpliceMintTokenDescriptor_FallsBackWithoutURL(t *testing.T) {
 	var parsed jsonRPCResponse
 	g.Expect(json.Unmarshal(out, &parsed)).To(Succeed())
 	tools := parsed.Result.(map[string]any)["tools"].([]any)
-	g.Expect(tools).To(HaveLen(1))
-	desc := tools[0].(map[string]any)["description"].(string)
+	var desc string
+	for _, tool := range tools {
+		m := tool.(map[string]any)
+		if m["name"] == "mint_token" {
+			desc = m["description"].(string)
+		}
+	}
+	g.Expect(desc).ToNot(BeEmpty(), "mint_token must still be advertised")
 	g.Expect(desc).To(ContainSubstring("attenuated capability token"))
 	g.Expect(desc).ToNot(ContainSubstring("/-/openapi"))
 }
@@ -371,7 +380,8 @@ func TestReverseProxy_ToolsList_SplicesDiscoveryURL(t *testing.T) {
 	var resp jsonRPCResponse
 	g.Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 	tools := resp.Result.(map[string]any)["tools"].([]any)
-	g.Expect(tools).To(HaveLen(2)) // upstream's search_atoms + spliced mint_token
+	// By NAME rather than count: the splice advertises every AS-provided tool
+	// (mint_token, whoami, ...), so counting breaks on each addition.
 
 	var mintDesc string
 	for _, tl := range tools {

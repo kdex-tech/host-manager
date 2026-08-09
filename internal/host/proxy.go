@@ -627,6 +627,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					hh.writeMintTokenRPC(w, r, id, sub, held, args)
 					return
 				}
+				// whoami is a peer of mint_token: answered by the AS and never
+				// forwarded, because only the AS knows who the caller is — the
+				// backend sees a proxied request, not the credential.
+				if id, matched := isWhoamiCall(peek); matched {
+					hh.writeWhoamiRPC(w, r, id)
+					return
+				}
 				if isToolsListCall(peek) {
 					// Resolve the caller-facing /-/openapi discovery URL from the
 					// INBOUND request here, where the ingress/Traefik-provided

@@ -516,6 +516,15 @@ func spliceMintTokenDescriptor(respBody []byte, discoveryURL string) ([]byte, bo
 		return respBody, false
 	}
 	tools = append(tools, descBytes)
+
+	// whoami rides the same splice: it is answered by the AS on the same
+	// interception path, so if it is not advertised here an agent never learns
+	// it exists. See whoami.go.
+	whoamiBytes, err := json.Marshal(whoamiDescriptor())
+	if err != nil {
+		return respBody, false
+	}
+	tools = append(tools, whoamiBytes)
 	newTools, _ := json.Marshal(tools)
 	result["tools"] = newTools
 	newResult, _ := json.Marshal(result)
