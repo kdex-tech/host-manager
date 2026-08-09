@@ -220,8 +220,20 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 
 func (hh *HostHandler) checkHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/-/check"
-	// Apply Authentication Middleware
-	handler := hh.authConfig.AddAuthentication(http.HandlerFunc(hh.CheckHandler), hh.authExchanger)
+	// Apply Authentication Middleware, then OPT IN to API-token identity.
+	//
+	// /-/check is a pure reporting endpoint — it answers "does the caller hold
+	// this grant?" and confers nothing — so an API key should be able to ask
+	// about itself. That is what kdex-tech/host-manager#175 was filed for.
+	//
+	// The opt-in is per route on purpose. Authenticating PATs in the global
+	// middleware instead made a developer key a session-grade identity at
+	// /-/oauth/authorize (redeemable for a JWT + rotating refresh token, which
+	// escapes the key's own revocation) and at /-/apitokens/mint, and it
+	// simultaneously displaced the proxy PAT bridge that aa73843 depends on.
+	// Nothing inherits this by default.
+	handler := hh.authConfig.WithAPITokenIdentity(hh.authExchanger)(
+		hh.authConfig.AddAuthentication(http.HandlerFunc(hh.CheckHandler), hh.authExchanger))
 	mux.Handle("POST "+path, handler)
 
 	hh.registerPath(path, ko.PathInfo{

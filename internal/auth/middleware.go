@@ -37,9 +37,40 @@ func LooksLikePAT(token, tokenPrefix string) bool {
 	return looksLikePAT(token, tokenPrefix)
 }
 
+// WithAPITokenIdentity is OPT-IN: it authenticates a host-audience PASETO PAT
+// into an identity for the single route it wraps. Apply it only to endpoints
+// that should treat an API key as the caller, and never to the mux as a whole —
+// see the PAT block in WithAuthentication for what happens when a PAT identity
+// leaks into the proxy bridge or into /-/oauth/authorize.
+//
+// It composes AFTER WithAuthentication: a request already carrying an identity
+// (JWT or cookie) is left alone, so this only ever fills the gap the PAT
+// passthrough leaves.
+func (c *Config) WithAPITokenIdentity(exchanger *Exchanger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, alreadyLoggedIn := GetAuthContext(r.Context()); alreadyLoggedIn {
+				next.ServeHTTP(w, r)
+				return
+			}
+			authHeader := r.Header.Get("Authorization")
+			parts := strings.Split(authHeader, " ")
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" ||
+				!looksLikePAT(parts[1], c.TokenPrefix()) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if ac, ok := c.hostPATIdentity(r.Context(), parts[1], exchanger); ok {
+				r = r.WithContext(SetAuthContext(r.Context(), ac))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // hostPATIdentity validates a PASETO PAT against the HOST's own audience and,
-// on success, inflates it into an AuthContext so the caller is a real identity
-// at host-level (non-proxied) endpoints. Reports false for every token that is
+// on success, inflates it into an AuthContext. Used only by
+// WithAPITokenIdentity. Reports false for every token that is
 // not usable as a host identity -- wrong audience, malformed, expired, revoked,
 // or an unresolvable subject -- and the caller then leaves the request
 // anonymous. See kdex-tech/host-manager#175.
@@ -150,31 +181,32 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 
 			// A PASETO PAT presented as `Authorization: Bearer <pat>` is NOT a
 			// host-audience JWT and must not be run through jwt.ParseWithClaims
-			// (which would 401 it). This applies only to the header source — a
-			// session cookie always carries the host's own JWT.
+			// (which would 401 it). Pass it through anonymously; this applies
+			// only to the header source — a session cookie always carries the
+			// host's own JWT.
 			//
-			// A PAT carrying the HOST's own audience IS a valid identity here.
-			// Without this, every non-proxied endpoint saw an API-key caller as
-			// anonymous, because the function proxy bridge was the only place a
-			// PAT was ever authenticated -- so /-/check reported that a key
-			// holding real grants held nothing beyond the anonymous floor. See
-			// kdex-tech/host-manager#175.
+			// This middleware wraps the ENTIRE mux, so anything it authenticates
+			// becomes an identity at every host endpoint. A PAT must therefore
+			// NOT be authenticated here, for two independent reasons found by
+			// review of kdex-tech/host-manager#175:
 			//
-			// A PAT bound to a FUNCTION's audience deliberately does NOT
-			// authenticate here. Resource binding is a property of the TOKEN,
-			// not of the endpoint (aa73843), so honoring a function-scoped
-			// token as a general host identity would be a confused-deputy
-			// escalation. It falls through anonymously and the proxy bridge
-			// validates it against the target's own audience (RFC 8707),
-			// exactly as before.
+			//   - Downstream, the function proxy bridge is guarded on
+			//     !alreadyLoggedIn. An identity established here makes it step
+			//     aside, and with it the PATBridgeClaim marker that mirrors the
+			//     caller's entitlements into the "oauth2" scheme bucket. Nothing
+			//     else populates that bucket, so an oauth2-declared operation
+			//     then fails closed — regressing aa73843, which exists to make a
+			//     developer key work on exactly those functions.
 			//
-			// Every failure mode stays anonymous rather than 401: the gate
-			// decides, which is the pre-existing contract.
+			//   - Upstream, /-/oauth/authorize gates purely on the presence of an
+			//     auth context. A PAT identity here is redeemable for an
+			//     authorization code and thus a full JWT + rotating refresh
+			//     token, which escapes the PAT's own jti revocation and ignores
+			//     its scope. /-/apitokens/mint likewise becomes PAT-reachable.
+			//
+			// Endpoints that genuinely want a PAT identity opt in explicitly via
+			// WithAPITokenIdentity, so nothing inherits it by default.
 			if authSource == "header" && looksLikePAT(tokenString, c.TokenPrefix()) {
-				if ac, ok := c.hostPATIdentity(r.Context(), tokenString, exchanger); ok {
-					next.ServeHTTP(w, r.WithContext(SetAuthContext(r.Context(), ac)))
-					return
-				}
 				next.ServeHTTP(w, r)
 				return
 			}
