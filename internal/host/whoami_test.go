@@ -36,14 +36,10 @@ func TestIsWhoamiCall_MatchesOnlyItsOwnTool(t *testing.T) {
 	}
 }
 
-// TestWhoamiFromAuthContext_ReportsTheCredential is the core contract: whoami
-// describes the authority the PRESENTED credential actually carries, not the
-// person behind it.
-//
-// That is what makes it safe to expose. A minted capability token is attenuated
-// on purpose; re-resolving the subject's full entitlements here would disclose
-// the shape of an authority the token was deliberately not granted.
-func TestWhoamiFromAuthContext_ReportsTheCredential(t *testing.T) {
+// TestWhoamiFromAuthContext_ProjectsTheContext covers the identity/profile
+// projection. Entitlements at this stage are what the context CARRIES; the
+// effective set is applied separately by applyEffectiveEntitlements.
+func TestWhoamiFromAuthContext_ProjectsTheContext(t *testing.T) {
 	res, err := whoamiFromAuthContext(auth.AuthContext{
 		"sub":                "rayauge@doublebite.com",
 		"email":              "rayauge@doublebite.com",
@@ -244,73 +240,77 @@ func TestMergeResolvedClaims_NilResolutionIsSafe(t *testing.T) {
 	assert.Equal(t, "alice", res.Identity)
 }
 
-// TestEntitlementsDiagnostic_IdentifiesAWithheldClaim resolves the case that
-// otherwise renders identically to "you hold nothing".
+// TestEffectiveEntitlements_ReportsWhatTheUserCanDo is the core contract.
 //
-// An MCP client that registers via DCR and completes authorization_code gets a
-// JWT, not a PASETO PAT. The proxy PAT bridge is guarded on !alreadyLoggedIn,
-// so for a JWT caller it SKIPS — and confineByScope deletes the entitlements
-// claim at signing time unless the client asked for scope=entitlements. That
-// caller therefore presents a valid credential carrying no entitlements at all,
-// and every gated call fails with nothing to inspect.
-//
-// whoami must tell those two situations apart, because the fix is completely
-// different: one needs a role binding, the other needs a scope.
-func TestEntitlementsDiagnostic_IdentifiesAWithheldClaim(t *testing.T) {
-	res := applyEntitlementsDiagnostic(
-		WhoamiResult{Entitlements: []string{}},
-		auth.AuthContext{"sub": "alice"},
-		[]string{"pages:/:read", "functions:/api/v1/mcp:read"},
+// whoami is a REPORTING tool: it grants nothing, so the answer is about the
+// USER, not about the credential in hand. A caller's token routinely carries
+// less than the user effectively holds — an MCP client's PASETO PAT carries a
+// single narrow scope while the bridge resolves the wide set, and a JWT whose
+// client never requested scope=entitlements carries none at all. Reporting the
+// carried set would answer a question nobody asked.
+func TestEffectiveEntitlements_ReportsWhatTheUserCanDo(t *testing.T) {
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: []string{"functions:/api/v1/mcp:read"}},
+		[]string{"functions:/api/v1/mcp:read", "vector_stores:vs_abc:read", "pages:/:read"},
+	)
+
+	assert.ElementsMatch(t,
+		[]string{"functions:/api/v1/mcp:read", "vector_stores:vs_abc:read", "pages:/:read"},
+		res.Entitlements,
+		"whoami reports the user's effective authority, not what this token happens to carry")
+}
+
+// TestEffectiveEntitlements_AttenuatedTokenStillReportsTheUser: an attenuated
+// capability token is no exception. It cannot EXERCISE the wider set, but
+// whoami answers "what can I do", not "what can this token do" — and it hands
+// out no authority by answering.
+func TestEffectiveEntitlements_AttenuatedTokenStillReportsTheUser(t *testing.T) {
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: []string{"vector_stores:vs_abc:read"}},
+		[]string{"vector_stores:vs_abc:read", "vector_stores:vs_abc:write", "pages:/:read"},
+	)
+
+	assert.Len(t, res.Entitlements, 3,
+		"an attenuated token must not narrow the REPORT of what its user can do")
+}
+
+// TestEffectiveEntitlements_FlagsWhatThisTokenCannotExercise: because the
+// report is now wider than the credential, a caller could reasonably try
+// something the gate will deny. The flag says so, and the hint explains it.
+func TestEffectiveEntitlements_FlagsWhatThisTokenCannotExercise(t *testing.T) {
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: []string{"pages:/:read"}},
+		[]string{"pages:/:read", "vector_stores:vs_abc:write"},
 	)
 
 	assert.True(t, res.EntitlementsWithheld,
-		"the subject holds grants this credential does not carry; that must be visible")
-	assert.Contains(t, res.Hint, "entitlements",
-		"the hint must name the scope to request, or it is not actionable")
-	assert.Empty(t, res.Entitlements,
-		"the withheld grants must NOT be disclosed — the credential was not granted them")
+		"this credential carries less than the user holds; a caller must be able to see that")
+	assert.NotEmpty(t, res.Hint)
 }
 
-// TestEntitlementsDiagnostic_GenuinelyHoldsNothing is the other half of the
-// pair: no flag, no hint. Telling this caller to request a scope would send
-// them chasing a config change that cannot help.
-func TestEntitlementsDiagnostic_GenuinelyHoldsNothing(t *testing.T) {
-	res := applyEntitlementsDiagnostic(
-		WhoamiResult{Entitlements: []string{}},
-		auth.AuthContext{"sub": "nobody"},
+// TestEffectiveEntitlements_NoFlagWhenTheTokenCarriesEverything: the common
+// healthy case — a PAT whose bridge already resolved the full set. Nothing to
+// warn about, so no flag and no hint noise.
+func TestEffectiveEntitlements_NoFlagWhenTheTokenCarriesEverything(t *testing.T) {
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: []string{"pages:/:read", "vector_stores:vs_abc:read"}},
+		[]string{"vector_stores:vs_abc:read", "pages:/:read"},
+	)
+
+	assert.False(t, res.EntitlementsWithheld)
+	assert.Empty(t, res.Hint)
+}
+
+// TestEffectiveEntitlements_UnresolvableFallsBackToCarried: ResolveInternal-
+// RolesAndEntitlements returns nothing for a subject with no bindings, and
+// stub providers return nothing at all. Neither may erase what the credential
+// demonstrably carries.
+func TestEffectiveEntitlements_UnresolvableFallsBackToCarried(t *testing.T) {
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: []string{"pages:/:read"}},
 		nil,
 	)
 
+	assert.Equal(t, []string{"pages:/:read"}, res.Entitlements)
 	assert.False(t, res.EntitlementsWithheld)
-	assert.Empty(t, res.Hint)
-}
-
-// TestEntitlementsDiagnostic_CarriedClaimNeedsNoHint: a credential that carries
-// its grants is working correctly.
-func TestEntitlementsDiagnostic_CarriedClaimNeedsNoHint(t *testing.T) {
-	res := applyEntitlementsDiagnostic(
-		WhoamiResult{Entitlements: []string{"pages:/:read"}},
-		auth.AuthContext{"sub": "alice"},
-		[]string{"pages:/:read"},
-	)
-
-	assert.False(t, res.EntitlementsWithheld)
-	assert.Empty(t, res.Hint)
-}
-
-// TestEntitlementsDiagnostic_CapabilityTokenIsNotDiagnosed is the important
-// exclusion. A minted capability token carries LESS than its subject holds by
-// design — that attenuation is the entire point. Flagging it as withheld would
-// advise the caller to go acquire authority the token was deliberately denied,
-// which is exactly backwards.
-func TestEntitlementsDiagnostic_CapabilityTokenIsNotDiagnosed(t *testing.T) {
-	res := applyEntitlementsDiagnostic(
-		WhoamiResult{Entitlements: []string{}},
-		auth.AuthContext{"sub": "alice", auth.CapUsesClaim: true},
-		[]string{"pages:/:read"},
-	)
-
-	assert.False(t, res.EntitlementsWithheld,
-		"an attenuated capability token holding less than its subject is working as designed")
-	assert.Empty(t, res.Hint)
 }

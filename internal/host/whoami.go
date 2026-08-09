@@ -16,11 +16,10 @@ const toolNameWhoami = "whoami"
 
 // WhoamiResult is the whoami success payload.
 //
-// It describes the authority the PRESENTED CREDENTIAL carries — not the person
-// behind it. That distinction is the whole safety argument for exposing this
-// tool: a minted capability token is attenuated on purpose, and re-resolving
-// the subject's full entitlements here would disclose the shape of an authority
-// the token was deliberately not granted.
+// It describes what the USER can do. whoami is a reporting tool and hands out
+// no authority by answering, so it reports effective entitlements rather than
+// whatever the credential in hand happens to carry — see
+// applyEffectiveEntitlements.
 //
 // Every profile field is omitempty because they are genuinely optional on the
 // wire: name, given_name, family_name and email are scope-controlled claim
@@ -39,12 +38,11 @@ type WhoamiResult struct {
 	PreferredUsername string   `json:"preferred_username,omitempty"`
 	Entitlements      []string `json:"entitlements"`
 
-	// EntitlementsWithheld reports that the SUBJECT holds grants this
-	// credential does not carry. It exists because "you hold nothing" and
-	// "your token was not granted the entitlements scope" otherwise render
-	// identically as an empty list, while needing completely different fixes:
-	// a role binding versus a scope. The withheld grants themselves are never
-	// listed — the credential was not granted them.
+	// EntitlementsWithheld reports that the credential currently presented
+	// carries FEWER entitlements than the user effectively holds, so some of
+	// the entitlements listed here cannot be exercised with it. Set whenever
+	// the two differ — including for a deliberately attenuated capability
+	// token, where it is expected rather than a misconfiguration.
 	EntitlementsWithheld bool `json:"entitlements_withheld,omitempty"`
 
 	// Hint is a short actionable explanation, present only when something is
@@ -91,33 +89,53 @@ func whoamiFromAuthContext(ac auth.AuthContext) (WhoamiResult, error) {
 	}, nil
 }
 
-// applyEntitlementsDiagnostic distinguishes a credential that carries no
-// entitlements because its subject holds none from one that carries none
-// because the claim was stripped at signing time.
+// applyEffectiveEntitlements replaces the CARRIED entitlements with the user's
+// EFFECTIVE ones, and flags the gap when the two differ.
 //
-// The second case is the MCP-client shape: a client that registers via DCR and
-// completes authorization_code receives a JWT, not a PASETO PAT. The proxy PAT
-// bridge — which re-resolves a PAT subject's full entitlements at request time
-// — is guarded on !alreadyLoggedIn and therefore SKIPS for a JWT caller. And
-// confineByScope deletes the entitlements claim unless the client requested
-// scope=entitlements. So the caller presents a perfectly valid credential
-// carrying nothing, and every gated call fails with nothing to inspect.
+// whoami is a REPORTING tool. It grants nothing, so the question it answers is
+// "what can I do", about the USER — not "what can this token do". Those come
+// apart constantly and by design:
 //
-// A minted capability token is deliberately excluded. It carries LESS than its
-// subject holds BY DESIGN; flagging that would advise the caller to acquire
-// authority the token was purposely denied.
-func applyEntitlementsDiagnostic(res WhoamiResult, ac auth.AuthContext, subjectEntitlements []string) WhoamiResult {
-	if len(res.Entitlements) > 0 || len(subjectEntitlements) == 0 {
+//   - A PASETO PAT bakes in no entitlements at all; it carries a single narrow
+//     `scp` and the proxy bridge resolves the wide set at request time.
+//   - A JWT whose client never requested scope=entitlements carries none,
+//     because confineByScope deletes the claim at signing time.
+//   - A minted capability token deliberately carries a subset.
+//
+// The attenuated case is NOT an exception. An attenuated token cannot EXERCISE
+// the wider set, but narrowing the report would answer a question nobody asked
+// and would make whoami useless for the caller most likely to need it.
+//
+// Because the report is therefore wider than the credential, a caller could
+// reasonably attempt something the gate will deny. EntitlementsWithheld says
+// so explicitly rather than leaving them to discover it as a 403.
+//
+// An empty effective set is a resolution failure (no bindings, or a provider
+// without the capability), never an answer: it must not erase what the
+// credential demonstrably carries.
+func applyEffectiveEntitlements(res WhoamiResult, effective []string) WhoamiResult {
+	if len(effective) == 0 {
 		return res
 	}
-	if isCap, _ := ac[auth.CapUsesClaim].(bool); isCap {
-		return res
+
+	carried := make(map[string]struct{}, len(res.Entitlements))
+	for _, e := range res.Entitlements {
+		carried[e] = struct{}{}
 	}
-	res.EntitlementsWithheld = true
-	res.Hint = "This credential carries no entitlements, but your account holds some. " +
-		"The entitlements claim is scope-controlled: request `scope=entitlements` when " +
-		"authorizing (alongside openid/profile as needed) and re-authenticate. Until then " +
-		"every entitlement-gated call will be denied."
+	for _, e := range effective {
+		if _, ok := carried[e]; !ok {
+			res.EntitlementsWithheld = true
+			break
+		}
+	}
+
+	res.Entitlements = effective
+	if res.EntitlementsWithheld {
+		res.Hint = "These are the entitlements YOUR ACCOUNT holds. The credential you are " +
+			"currently presenting carries fewer of them, so calls beyond what it carries will " +
+			"be denied. For an OAuth2 client, request `scope=entitlements` when authorizing; " +
+			"for a minted capability token, this is expected — it was attenuated on purpose."
+	}
 	return res
 }
 
@@ -189,9 +207,9 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 		// call. It is the same resolution the PAT bridge already performs per
 		// request.
 		sub, _ := ac["sub"].(string)
-		_, subjectEnts, rerr := hh.authExchanger.ResolveInternalRolesAndEntitlements(sub)
+		_, effective, rerr := hh.authExchanger.ResolveInternalRolesAndEntitlements(sub)
 		if rerr == nil {
-			res = applyEntitlementsDiagnostic(res, ac, subjectEnts)
+			res = applyEffectiveEntitlements(res, effective)
 		}
 	}
 
@@ -213,15 +231,19 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 func whoamiDescriptor() map[string]any {
 	return map[string]any{
 		"name": toolNameWhoami,
-		"description": "Report who the server thinks you are and what your current credential lets " +
-			"you do. Returns { identity, entitlements } plus whichever of name, given_name, " +
+		"description": "Report who you are and WHAT YOU ARE ENTITLED TO DO. Takes no " +
+			"arguments. Returns { identity, entitlements } plus whichever of name, given_name, " +
 			"family_name and preferred_username are known for you. `identity` is your email, " +
-			"falling back to the token subject. Profile fields are resolved from the identity " +
-			"backend, so they are reported even when your token was not granted the profile/email " +
-			"scopes. `entitlements` is what THIS credential holds, not what you hold generally — an " +
-			"attenuated capability token reports its own reduced set, not the full authority of the " +
-			"user who minted it. Takes no arguments. Use it to answer \"who am I and what may I do?\" " +
-			"before a call fails, or to find out why one did.",
+			"falling back to the token subject.\n\n" +
+			"`entitlements` is what YOUR ACCOUNT holds — not what the credential you happen to be " +
+			"presenting carries. Call this FIRST: without it there is no way to discover what you " +
+			"may do, and the only alternative is to guess an entitlement set, pass it to " +
+			"mint_token, and find out from the failure. Use it to plan a call, to pick the " +
+			"entitlements to request from mint_token (every one must already be held by you), or " +
+			"to explain why a call was denied.\n\n" +
+			"If `entitlements_withheld` is true, the credential you are currently presenting " +
+			"carries fewer entitlements than are listed, so some of these calls will be denied " +
+			"with it; `hint` says what to do about that.",
 		"inputSchema": map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
