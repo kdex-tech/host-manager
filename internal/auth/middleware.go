@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -34,6 +35,70 @@ func looksLikePAT(token, tokenPrefix string) bool {
 // Authorization: Bearer header.
 func LooksLikePAT(token, tokenPrefix string) bool {
 	return looksLikePAT(token, tokenPrefix)
+}
+
+// hostPATIdentity validates a PASETO PAT against the HOST's own audience and,
+// on success, inflates it into an AuthContext so the caller is a real identity
+// at host-level (non-proxied) endpoints. Reports false for every token that is
+// not usable as a host identity -- wrong audience, malformed, expired, revoked,
+// or an unresolvable subject -- and the caller then leaves the request
+// anonymous. See kdex-tech/host-manager#175.
+//
+// ONLY c.Audience is accepted. A PAT minted for a function resource keeps its
+// own audience and is rejected here by design: that binding belongs to the
+// token, and treating a function-scoped credential as a general host identity
+// would be a confused-deputy escalation (aa73843). Widening this to accept
+// other audiences is a deliberate policy change, not a bug fix.
+//
+// The subject's roles/entitlements are resolved through the same resolver the
+// JWT mint path uses, so a PASETO caller and a JWT caller present identical
+// structured entitlements to the authorization checker.
+func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *Exchanger) (AuthContext, bool) {
+	if c == nil || c.TokenManager == nil || exchanger == nil || c.Audience == "" {
+		return nil, false
+	}
+
+	data, err := c.TokenManager.ValidateToken(ctx, token, c.Audience)
+	if err != nil {
+		// Expected for every resource-bound PAT on its way to the proxy
+		// bridge, so this is V(1) rather than an error.
+		logf.FromContext(ctx).V(1).Info(
+			"api token is not valid for the host audience; leaving the request anonymous",
+			"cause", err.Error())
+		return nil, false
+	}
+
+	roles, ents, err := exchanger.ResolveInternalRolesAndEntitlements(data.Subject)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to resolve api token subject", "subject", data.Subject)
+		return nil, false
+	}
+
+	ac := AuthContext{
+		"sub":          data.Subject,
+		"roles":        roles,
+		"entitlements": ents,
+		// The token's static scope rides along under its own key; the
+		// structured entitlements above are the authoritative authz model.
+		"scp": data.Scope,
+	}
+
+	// Deliberately NOT PATBridgeClaim. That marker exists so a PAT can satisfy
+	// a FUNCTION operation declaring only {oauth2: [...]}, by mirroring these
+	// entitlements into the "oauth2" scheme bucket. Host-level endpoints have
+	// no such requirement, and the ruling here is host-audience only -- so this
+	// identity stays in the default (bearer) bucket and grants nothing beyond
+	// what the subject actually holds.
+
+	// Resolve the subject's data-driven backend claims fresh and merge them
+	// non-destructively, matching the proxy bridge (#138).
+	for k, v := range exchanger.ResolveSubjectClaims(data.Subject) {
+		if _, exists := ac[k]; !exists {
+			ac[k] = v
+		}
+	}
+
+	return ac, true
 }
 
 // WithAuthentication creates a middleware that validates JWT tokens from the Authorization header.
@@ -85,11 +150,31 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 
 			// A PASETO PAT presented as `Authorization: Bearer <pat>` is NOT a
 			// host-audience JWT and must not be run through jwt.ParseWithClaims
-			// (which would 401 it). Pass it through anonymously here; the function
-			// proxy bridge authenticates the PAT downstream against the target
-			// resource's audience (RFC 8707). This applies only to the header
-			// source — a session cookie always carries the host's own JWT.
+			// (which would 401 it). This applies only to the header source — a
+			// session cookie always carries the host's own JWT.
+			//
+			// A PAT carrying the HOST's own audience IS a valid identity here.
+			// Without this, every non-proxied endpoint saw an API-key caller as
+			// anonymous, because the function proxy bridge was the only place a
+			// PAT was ever authenticated -- so /-/check reported that a key
+			// holding real grants held nothing beyond the anonymous floor. See
+			// kdex-tech/host-manager#175.
+			//
+			// A PAT bound to a FUNCTION's audience deliberately does NOT
+			// authenticate here. Resource binding is a property of the TOKEN,
+			// not of the endpoint (aa73843), so honoring a function-scoped
+			// token as a general host identity would be a confused-deputy
+			// escalation. It falls through anonymously and the proxy bridge
+			// validates it against the target's own audience (RFC 8707),
+			// exactly as before.
+			//
+			// Every failure mode stays anonymous rather than 401: the gate
+			// decides, which is the pre-existing contract.
 			if authSource == "header" && looksLikePAT(tokenString, c.TokenPrefix()) {
+				if ac, ok := c.hostPATIdentity(r.Context(), tokenString, exchanger); ok {
+					next.ServeHTTP(w, r.WithContext(SetAuthContext(r.Context(), ac)))
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

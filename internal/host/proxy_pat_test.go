@@ -93,6 +93,28 @@ func patProxyFixture(t *testing.T, idp auth.InternalIdentityProvider) (http.Hand
 // can vary the declared security schemes (oauth2-only vs. oauth2+apiKey).
 func patProxyFixtureFor(t *testing.T, idp auth.InternalIdentityProvider, fn kdexv1alpha1.KDexFunction) (http.Handler, *apitoken.TokenManager, *bool) {
 	t.Helper()
+	h, tm, reached, _, _ := patProxyFixtureParts(t, idp, fn)
+	return h, tm, reached
+}
+
+// patProxyFixtureWithMiddleware is patProxyFixtureFor with the real
+// Config.WithAuthentication in front, which is how production serves the
+// request. The bare fixture exercises the proxy bridge in isolation and so
+// cannot see interactions between the two layers -- notably the bridge's
+// `!alreadyLoggedIn` guard stepping aside for an identity the middleware
+// established. See TestProxyPAT_HostAudiencePATThroughMiddleware.
+func patProxyFixtureWithMiddleware(t *testing.T, idp auth.InternalIdentityProvider, fn kdexv1alpha1.KDexFunction) (http.Handler, *apitoken.TokenManager, *bool) {
+	t.Helper()
+	h, tm, reached, cfg, ex := patProxyFixtureParts(t, idp, fn)
+	return cfg.WithAuthentication(ex)(h), tm, reached
+}
+
+// patProxyFixtureParts is the shared body; it additionally surfaces the
+// auth.Config and *auth.Exchanger so a caller can compose the middleware.
+func patProxyFixtureParts(t *testing.T, idp auth.InternalIdentityProvider, fn kdexv1alpha1.KDexFunction) (
+	http.Handler, *apitoken.TokenManager, *bool, *auth.Config, *auth.Exchanger,
+) {
+	t.Helper()
 	logf.SetLogger(logr.Discard())
 
 	backendReached := new(bool)
@@ -119,6 +141,12 @@ func patProxyFixtureFor(t *testing.T, idp auth.InternalIdentityProvider, fn kdex
 
 	fn.Status.URL = upstream.URL
 
+	authConfig := &auth.Config{
+		ActivePair:   &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
+		Audience:     patProxyHostAud,
+		TokenManager: tm,
+	}
+
 	hh := &HostHandler{
 		log:          logr.Discard(),
 		scheme:       "https",
@@ -129,16 +157,12 @@ func patProxyFixtureFor(t *testing.T, idp auth.InternalIdentityProvider, fn kdex
 		},
 		// oauth2ProtectedResources() enumerates over hh.functions; this function
 		// must be present for the handler to detect itself as oauth2-protected.
-		functions: []kdexv1alpha1.KDexFunction{fn},
-		authConfig: &auth.Config{
-			ActivePair:   &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
-			Audience:     patProxyHostAud,
-			TokenManager: tm,
-		},
+		functions:     []kdexv1alpha1.KDexFunction{fn},
+		authConfig:    authConfig,
 		authExchanger: ex,
 	}
 
-	return hh.reverseProxyHandler(&fn, patProxyIssuer), tm, backendReached
+	return hh.reverseProxyHandler(&fn, patProxyIssuer), tm, backendReached, authConfig, ex
 }
 
 // TestProxyPAT_BearerResourceBound covers Plan B Task 9: a PASETO PAT minted for
