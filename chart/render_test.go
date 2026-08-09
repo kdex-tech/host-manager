@@ -149,6 +149,7 @@ func TestServerTimeoutArgs(t *testing.T) {
 		"server.readTimeout=30s",
 		"server.writeTimeout=0",
 		"server.idleTimeout=45s",
+		"server.streamStallTimeout=0",
 	)
 
 	for _, want := range []string{
@@ -156,6 +157,11 @@ func TestServerTimeoutArgs(t *testing.T) {
 		"--server-read-timeout=30s",
 		"--server-write-timeout=0",
 		"--server-idle-timeout=45s",
+		// Quad-findings item 1: streamStallTimeout follows the same
+		// no-per-field-`with`-guard pattern as its four siblings, so an
+		// operator disabling the SSE stall window gets an explicit 0
+		// rather than a dropped flag silently restoring the 5m default.
+		"--server-stream-stall-timeout=0",
 	} {
 		if !strings.Contains(manifests, want) {
 			t.Errorf("rendered manifests missing %q:\n%s", want, manifests)
@@ -172,6 +178,7 @@ func TestServerTimeoutArgs_Defaults(t *testing.T) {
 		"--server-read-timeout=60s",
 		"--server-write-timeout=60s",
 		"--server-idle-timeout=120s",
+		"--server-stream-stall-timeout=5m",
 	} {
 		if !strings.Contains(manifests, want) {
 			t.Errorf("rendered manifests missing default %q:\n%s", want, manifests)

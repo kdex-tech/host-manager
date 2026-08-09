@@ -19,13 +19,36 @@ import (
 //
 // A writeTimeout of zero or less means the server has no write deadline, so
 // there is nothing to adjust and this is a pass-through.
-func WithStreamDeadline(writeTimeout time.Duration) func(http.Handler) http.Handler {
+//
+// streamStallTimeout is the SEPARATE, much larger window an SSE response
+// slides on. SSE is not exempt from bounding — it is bounded on its own
+// terms. Clearing the deadline outright (the first #167 implementation)
+// left a consumer that stops reading parked in Flush->conn.Write under TCP
+// backpressure with nothing to cut it: the request context cancels on
+// close, not on a stalled reader, so Linux TCP keepalive reaped it at
+// ~2h11m where pre-#167 it died at writeTimeout. Nothing else in the repo
+// covers that — ReadTimeout/ReadHeaderTimeout bound the request only,
+// IdleTimeout bounds inter-request idle only, and there is no
+// ConnState/LimitListener/TimeoutHandler — and each held connection pins a
+// goroutine, an FD, the upstream connection and ReverseProxy's 32KB
+// buffer. The design's rationale ("the cadence belongs to the backend")
+// argues against a CADENCE-SIZED cap, not against any cap: at the 5m
+// default a healthy stream runs unbounded at 20x the 15s keep-alive
+// cadence of the affected backends, while a stalled one dies in minutes.
+// Zero or less restores the cleared-deadline behavior for SSE, which is
+// the documented escape hatch for a backend whose legitimate silence can
+// exceed any window.
+func WithStreamDeadline(writeTimeout, streamStallTimeout time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if writeTimeout <= 0 {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(&streamWriter{ResponseWriter: w, writeTimeout: writeTimeout}, r)
+			next.ServeHTTP(&streamWriter{
+				ResponseWriter: w,
+				writeTimeout:   writeTimeout,
+				stallTimeout:   streamStallTimeout,
+			}, r)
 		})
 	}
 }
@@ -38,8 +61,13 @@ type streamWriter struct {
 	http.ResponseWriter
 
 	writeTimeout time.Duration
-	sliding      bool
-	wroteHeader  bool
+	stallTimeout time.Duration
+	// slideWindow is zero when this response is not in sliding mode, and
+	// otherwise the window Flush re-arms: writeTimeout for the chunked
+	// case, stallTimeout for the SSE case. Storing the window rather than
+	// a bool is what keeps the two paths on their own budgets.
+	slideWindow time.Duration
+	wroteHeader bool
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer's
@@ -48,6 +76,27 @@ type streamWriter struct {
 func (s *streamWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 func (s *streamWriter) WriteHeader(code int) {
+	// A 1xx informational response is NOT the final response head, so the
+	// headers accompanying it must not decide this response's policy.
+	// httputil.ReverseProxy forwards a backend's `103 Early Hints` by
+	// copying the 1xx headers in, calling rw.WriteHeader(103), then
+	// CLEARING the header map before the real 200 arrives (its
+	// httptrace.Got1xxResponse hook). Without this guard a backend that
+	// emits 103 before `200 text/event-stream` had its policy decided
+	// against the 1xx headers — no Content-Type, no Content-Length — and
+	// landed in the CHUNKED window (writeTimeout) rather than the SSE one
+	// (stallTimeout), silently re-severing exactly the streams #167
+	// exists to keep alive. See #167 and
+	// TestWithStreamDeadline_EarlyHintsBeforeSSEStillGetsSSEWindow, which
+	// discriminates on WHICH window was chosen, not merely on survival.
+	//
+	// 101 Switching Protocols takes this path too: an upgraded connection
+	// is governed by Hijack (below), not by any deadline policy we would
+	// pick from its headers.
+	if code < 200 {
+		s.ResponseWriter.WriteHeader(code)
+		return
+	}
 	s.applyDeadlinePolicyOnce()
 	s.ResponseWriter.WriteHeader(code)
 }
@@ -67,9 +116,10 @@ func (s *streamWriter) Write(p []byte) (int, error) {
 }
 
 // applyDeadlinePolicyOnce runs exactly once, when the response headers are
-// final. The three cases are ordered and first-match-wins: an SSE response
-// ALSO has no Content-Length, so the event-stream check must be evaluated
-// first or SSE would land in sliding mode and still die on a backend whose
+// final (see WriteHeader's 1xx guard for what "final" excludes). The three
+// cases are ordered and first-match-wins: an SSE response ALSO has no
+// Content-Length, so the event-stream check must be evaluated first or SSE
+// would land on the CHUNKED window and still die on a backend whose
 // keep-alive interval exceeds writeTimeout.
 func (s *streamWriter) applyDeadlinePolicyOnce() {
 	if s.wroteHeader {
@@ -79,10 +129,28 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 
 	h := s.Header()
 
-	// 1. Server-Sent Events: clear the deadline outright. The keep-alive
-	//    cadence belongs to the backend and may exceed anything we pick.
+	// 1. Server-Sent Events: slide on the SEPARATE, much larger
+	//    stallTimeout window. The keep-alive cadence belongs to the
+	//    backend and may exceed writeTimeout, so the cadence-sized window
+	//    is wrong for SSE — but a window still bounds a stalled stream
+	//    (see WithStreamDeadline's doc comment for why "no window at all"
+	//    was worse than the bug it fixed).
+	//
+	//    The deadline is armed HERE, not left until the first Flush the
+	//    way the chunked case is: until something re-arms it, the
+	//    connection-level WriteTimeout is still in force, and an SSE
+	//    backend whose FIRST event arrives later than writeTimeout would
+	//    be severed before ever reaching Flush.
 	if strings.HasPrefix(h.Get("Content-Type"), "text/event-stream") {
-		_ = http.NewResponseController(s.ResponseWriter).SetWriteDeadline(time.Time{})
+		rc := http.NewResponseController(s.ResponseWriter)
+		if s.stallTimeout <= 0 {
+			// Documented escape hatch: no stall window configured means
+			// the pre-existing "clear it outright" behavior.
+			_ = rc.SetWriteDeadline(time.Time{})
+			return
+		}
+		s.slideWindow = s.stallTimeout
+		_ = rc.SetWriteDeadline(time.Now().Add(s.stallTimeout))
 		return
 	}
 
@@ -90,7 +158,7 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 	//
 	//    "Progress" here means an explicit Flush call, not bytes handed to
 	//    Write. A handler that Writes a large body and never calls Flush
-	//    still sets sliding = true but the deadline is never extended: the
+	//    still sets slideWindow but the deadline is never extended: the
 	//    wrapper only observes Flush (see Flush below), while
 	//    http.response's internal bufio buffer auto-flushes to the socket
 	//    on its own once it fills, doing real I/O the wrapper never sees.
@@ -105,7 +173,7 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 	//    See TestWithStreamDeadline_ChunkedWithoutFlushStaysBounded, which
 	//    pins this boundary rather than leaving it assumed.
 	if h.Get("Content-Length") == "" {
-		s.sliding = true
+		s.slideWindow = s.writeTimeout
 		return
 	}
 
@@ -132,22 +200,27 @@ func (s *streamWriter) applyDeadlinePolicyOnce() {
 // One deadline, two jobs — a known, accepted trade-off: the same window
 // bounds both "how long can the handler stay silent between flushes" AND
 // "how long may this flush's own socket write take once TCP backpressure
-// makes it block." A flush at T sets the deadline to T+writeTimeout; a
-// flush that then lands at T+Δ has only writeTimeout-Δ left for its own
-// write to complete. A cadence that runs right up against writeTimeout
+// makes it block." A flush at T sets the deadline to T+slideWindow; a
+// flush that then lands at T+Δ has only slideWindow-Δ left for its own
+// write to complete. A cadence that runs right up against the window
 // therefore leaves near-zero budget for the write itself, and a slow
 // client's ordinary backpressure — not just a genuine stall — can cut the
-// response. This is benign at the ~60s default (production cadences are
-// far below that), but it means writeTimeout is implicitly a ceiling on
-// how close together flushes may usefully be, not just a stall cap.
+// response. This is benign at the ~60s chunked / 5m SSE defaults
+// (production cadences are far below both), but it means the window is
+// implicitly a ceiling on how close together flushes may usefully be, not
+// just a stall cap.
+//
+// slideWindow, not writeTimeout: an SSE response re-arms its own, much
+// larger stallTimeout window here (see applyDeadlinePolicyOnce case 1), so
+// the two streaming paths never share a budget.
 func (s *streamWriter) Flush() {
 	s.applyDeadlinePolicyOnce()
 
 	rc := http.NewResponseController(s.ResponseWriter)
 	_ = rc.Flush()
 
-	if s.sliding {
-		_ = rc.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+	if s.slideWindow > 0 {
+		_ = rc.SetWriteDeadline(time.Now().Add(s.slideWindow))
 	}
 }
 

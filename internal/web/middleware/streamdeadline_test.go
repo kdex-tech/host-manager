@@ -13,13 +13,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testWriteTimeout = 200 * time.Millisecond
+const (
+	testWriteTimeout = 200 * time.Millisecond
+	// testStallTimeout is the SSE window. Deliberately a large multiple of
+	// testWriteTimeout so a test can tell the two windows apart: a cadence
+	// between them survives on the SSE window and is severed on the
+	// chunked one.
+	testStallTimeout = 10 * testWriteTimeout // 2s
+)
 
 // serve starts an httptest server whose connection-level WriteTimeout is
-// testWriteTimeout and whose handler is wrapped by WithStreamDeadline.
+// testWriteTimeout and whose handler is wrapped by WithStreamDeadline with
+// the standard testStallTimeout SSE window.
 func serve(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(WithStreamDeadline(testWriteTimeout)(h))
+	return serveWithStall(t, testStallTimeout, h)
+}
+
+// serveWithStall is serve with an explicit SSE stall window, for the tests
+// that are ABOUT that window.
+func serveWithStall(t *testing.T, stall time.Duration, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(WithStreamDeadline(testWriteTimeout, stall)(h))
 	srv.Config.WriteTimeout = testWriteTimeout
 	srv.Start()
 	t.Cleanup(srv.Close)
@@ -47,9 +62,130 @@ func TestWithStreamDeadline_SSEOutlivesWriteTimeout(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err,
-		"SSE stream was severed mid-body — the per-request write deadline was not cleared (#167)")
+		"SSE stream was severed mid-body — the per-request write deadline did not move to the SSE window (#167)")
 	assert.Equal(t, 5, strings.Count(string(body), ": keepalive"),
 		"every keep-alive must arrive; got:\n%s", body)
+}
+
+// TestWithStreamDeadline_SSEStallIsCutAtStreamStallTimeout pins quad-findings
+// item 1: SSE is bounded on its OWN window, not exempt from bounding.
+//
+// The handler proves both halves in one run against a 200ms WriteTimeout and
+// a 400ms stall window:
+//
+//   - "mid-stream" arrives after a 300ms silence. 300ms exceeds
+//     writeTimeout, so the response is demonstrably NOT on the chunked
+//     window — the SSE window is genuinely separate and larger.
+//   - "after-stall" does NOT arrive after a silence far beyond the stall
+//     window. Against the previous implementation, which called
+//     SetWriteDeadline(time.Time{}) for SSE, this write succeeds and the
+//     assertion fails: that code had no bound at all, so a consumer that
+//     stopped reading parked the proxy in conn.Write until TCP keepalive
+//     (~2h11m), pinning a goroutine, an FD, the upstream connection and
+//     ReverseProxy's 32KB buffer.
+func TestWithStreamDeadline_SSEStallIsCutAtStreamStallTimeout(t *testing.T) {
+	const stall = 2 * testWriteTimeout // 400ms
+	srv := serveWithStall(t, stall, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		_, _ = fmt.Fprint(w, ": opened\n\n")
+		_ = http.NewResponseController(w).Flush()
+
+		// Longer than writeTimeout, shorter than the stall window.
+		time.Sleep(3 * testWriteTimeout / 2)
+		_, _ = fmt.Fprint(w, ": mid-stream\n\n")
+		_ = http.NewResponseController(w).Flush()
+
+		// Far beyond the stall window.
+		time.Sleep(4 * stall)
+		_, _ = fmt.Fprint(w, ": after-stall\n\n")
+		_ = http.NewResponseController(w).Flush()
+	})
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), ": mid-stream",
+		"a silence longer than writeTimeout but shorter than streamStallTimeout must survive — "+
+			"SSE runs on its own, larger window")
+	assert.NotContains(t, string(body), ": after-stall",
+		"an SSE stream that stalls past streamStallTimeout must still be cut (quad-findings item 1); "+
+			"clearing the deadline outright left a stalled consumer holding the connection for hours")
+}
+
+// TestWithStreamDeadline_SSEStallTimeoutZeroClearsDeadline pins the
+// documented escape hatch: streamStallTimeout <= 0 restores the earlier
+// "clear the deadline for SSE" behavior, for a backend whose legitimate
+// silence can exceed any window an operator would pick.
+func TestWithStreamDeadline_SSEStallTimeoutZeroClearsDeadline(t *testing.T) {
+	srv := serveWithStall(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, ": opened\n\n")
+		_ = http.NewResponseController(w).Flush()
+		time.Sleep(4 * testWriteTimeout)
+		_, _ = fmt.Fprint(w, ": after-stall\n\n")
+		_ = http.NewResponseController(w).Flush()
+	})
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), ": after-stall",
+		"streamStallTimeout=0 must clear the SSE deadline outright, matching the documented escape hatch")
+}
+
+// TestWithStreamDeadline_EarlyHintsBeforeSSEGetsSSEWindow pins quad-findings
+// item 3 (#167 verbatim). httputil.ReverseProxy forwards a backend's 103
+// Early Hints by copying the 1xx headers into rw.Header(), calling
+// rw.WriteHeader(103), and then CLEARING the header map — the handler below
+// reproduces that sequence exactly. Before the 1xx guard,
+// applyDeadlinePolicyOnce ran on that first WriteHeader and classified the
+// response against headers that carry neither Content-Type nor
+// Content-Length, so it landed in CHUNKED mode on the writeTimeout window.
+//
+// The keep-alive cadence here (300ms) sits deliberately BETWEEN the two
+// windows: above writeTimeout (200ms) and far below the stall window (2s).
+// So this test discriminates on WHICH window was chosen, not merely on the
+// response surviving — on the unfixed code the stream is severed after the
+// first event and the count assertion fails.
+func TestWithStreamDeadline_EarlyHintsBeforeSSEGetsSSEWindow(t *testing.T) {
+	const events = 4
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Link", "</style.css>; rel=preload; as=style")
+		w.WriteHeader(http.StatusEarlyHints)
+		// ReverseProxy's Got1xxResponse hook does exactly this: the
+		// ResponseWriter does not clear the map for informational
+		// responses (RFC 8297), so the proxy must.
+		clear(h)
+
+		h.Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < events; i++ {
+			_, _ = fmt.Fprintf(w, ": keepalive %d\n\n", i)
+			_ = http.NewResponseController(w).Flush()
+			time.Sleep(3 * testWriteTimeout / 2)
+		}
+	})
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err,
+		"SSE stream preceded by 103 Early Hints was severed — the policy was decided against the "+
+			"1xx headers and the response got the chunked window (quad-findings item 3)")
+	assert.Equal(t, events, strings.Count(string(body), ": keepalive"),
+		"a cadence between writeTimeout and streamStallTimeout must survive, proving the SSE window "+
+			"was chosen despite the preceding 103; got:\n%s", body)
 }
 
 // TestWithStreamDeadline_ChunkedProgressOutlivesWriteTimeout covers the
@@ -82,6 +218,11 @@ func TestWithStreamDeadline_ChunkedProgressOutlivesWriteTimeout(t *testing.T) {
 // making progress for longer than writeTimeout is still cut. If this test
 // starts passing trivially, the implementation has become "clear the
 // deadline for anything chunked", which drops the stall cap.
+//
+// It also discriminates the two windows in the other direction: the stall
+// here (4x writeTimeout = 800ms) is well inside testStallTimeout (2s), so a
+// chunked response that wrongly picked up the SSE window would survive and
+// this test would fail.
 func TestWithStreamDeadline_ChunkedStallIsStillCut(t *testing.T) {
 	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -164,7 +305,7 @@ func TestWithStreamDeadline_FixedLengthStillBounded(t *testing.T) {
 // write deadline to adjust, the middleware must not wrap at all.
 func TestWithStreamDeadline_Disabled(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	wrapped := WithStreamDeadline(0)(inner)
+	wrapped := WithStreamDeadline(0, testStallTimeout)(inner)
 
 	rec := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -205,7 +346,7 @@ func TestStreamWriter_InterfaceObligations(t *testing.T) {
 // `server.writeTimeout: 0` as required for h2 SSE deployments. Report that
 // before changing anything else.
 func TestWithStreamDeadline_SSEOverHTTP2(t *testing.T) {
-	srv := httptest.NewUnstartedServer(WithStreamDeadline(testWriteTimeout)(
+	srv := httptest.NewUnstartedServer(WithStreamDeadline(testWriteTimeout, testStallTimeout)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)

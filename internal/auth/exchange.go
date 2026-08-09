@@ -20,6 +20,7 @@ import (
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"golang.org/x/oauth2"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ErrServerError marks a failure of OUR infrastructure — a cache read, a
@@ -121,6 +122,21 @@ type Exchanger struct {
 // a membership change reflects quickly (unlike a login-time snapshot).
 const subjectResolveCacheTTL = 60 * time.Second
 
+// MaxRefreshGraceWindow is the hard ceiling on Config.RefreshGraceWindow.
+// The window exists to absorb the few hundred milliseconds a real client's
+// parallel refreshes span (RFC 9700 4.14); anything on that order is
+// covered well inside a minute. Past it the knob stops being a race
+// absorber and becomes a replay window: a consumed refresh token keeps
+// returning a live access/ID/refresh set for its whole duration, and the
+// minted set sits at rest in the cache for just as long. A misconfigured
+// `--refresh-grace-window=24h` would silently convert single-use rotation
+// into 24h replay, so NewExchanger clamps to this and says so.
+const MaxRefreshGraceWindow = 60 * time.Second
+
+// refreshGraceMaxItems bounds the in-memory grace cache. See the comment at
+// its GetCache call in NewExchanger for the arithmetic.
+const refreshGraceMaxItems = 10000
+
 // authCodeTTL is the upper bound on how long an unredeemed authorization
 // code remains valid. Slightly longer than the 10-minute default Exp on
 // AuthorizationCodeClaims so the cache TTL doesn't expire the JTI ahead
@@ -134,8 +150,17 @@ type RefreshTokenClaims struct {
 	ExpiresAt        int64      `json:"exp"`
 	IssuedAt         int64      `json:"iat"`
 	OriginalIssuedAt int64      `json:"oiat"`
-	Scope            string     `json:"scp"`
-	Subject          string     `json:"sub"`
+	// PredecessorID is the id of the refresh token this one ROTATED FROM,
+	// set only by RedeemRefreshToken. It is the key the #169 grace record
+	// for that rotation lives under, and exists so RevokeRefreshToken can
+	// tear the record down at logout -- the grace record is keyed by the
+	// CONSUMED token, which is not the value the cookie holds afterwards,
+	// so revocation has no other way to find it. Empty on a freshly minted
+	// (non-rotated) token and on records written before this field
+	// existed; omitempty keeps those round-tripping unchanged.
+	PredecessorID string `json:"pid,omitempty"`
+	Scope         string `json:"scp"`
+	Subject       string `json:"sub"`
 }
 
 // TokenSet is the result of a token minting operation.
@@ -192,8 +217,34 @@ func NewExchanger(
 		// losers replay it rather than minting a second lineage.
 		if cfg.RefreshGraceWindow > 0 {
 			gw := cfg.RefreshGraceWindow
+			if gw > MaxRefreshGraceWindow {
+				// Clamped, not rejected: this process is the site's
+				// serving path, and refusing to start over one flag takes
+				// the whole host down, which is a worse outcome than
+				// running with a safe window. Clamped LOUDLY rather than
+				// silently, because the running config no longer matches
+				// what the operator asked for.
+				logf.FromContext(ctx).Info(
+					"refresh grace window exceeds the maximum and has been clamped; "+
+						"the window is a replay window, and a long one turns single-use rotation "+
+						"into ordinary replay while keeping a live minted token set at rest for its duration",
+					"requested", cfg.RefreshGraceWindow.String(),
+					"applied", MaxRefreshGraceWindow.String())
+				gw = MaxRefreshGraceWindow
+			}
 			ex.refreshGraceWindow = gw
+			// MaxItems is set explicitly: the cache defaults to 1000 with
+			// LRU eviction, which at the 10s default window is only ~100
+			// refreshes/s before records are evicted INSIDE their own
+			// window and concurrent losers fall silently to not-found --
+			// fail-closed, but a silent regression back into #169 on
+			// exactly the load it targets. 10000 gives ~1000/s at the
+			// default and ~166/s at the 60s ceiling. Only the in-memory
+			// backend enforces this; ValkeyCache stores the value and
+			// leaves eviction to the server.
+			graceMaxItems := refreshGraceMaxItems
 			ex.refreshGraceCache = cacheManager.GetCache("refresh-grace", cache.CacheOptions{
+				MaxItems: &graceMaxItems,
 				TTL:      &gw,
 				Uncycled: true,
 			})
@@ -432,11 +483,43 @@ func (e *Exchanger) IsRefreshTokenEnabled() bool {
 // tokenID from the cache. Idempotent — returns nil if no entry exists.
 // Called from logout flows so a stolen `_refresh` cookie value cannot
 // be replayed after the user logs out. See kdex-tech/host-manager#84.
+//
+// It also tears down the #169 grace records that can still replay this
+// session, which deleting the refresh token alone does not cover. A grace
+// record is keyed by the CONSUMED token id, so after a T1->T2 rotation the
+// live record sits under T1 while the cookie holds T2: revoking T2 left
+// anyone presenting T1 with the winner's access and ID tokens for the rest
+// of the window. T2 is dead so no lineage continues, but logout had gained
+// a replay window it did not have before the grace window existed. Both
+// keys are therefore removed:
+//
+//   - tokenID itself, for a logout that presents an already-consumed token
+//     (a stale cookie, or a client that raced its own rotation), and
+//   - claims.PredecessorID, the key under which THIS token was published --
+//     the T1 above.
+//
+// Grace deletion is best-effort: a failure there must not stop the actual
+// revocation, which is what bounds the exposure to the grace window rather
+// than the refresh-token TTL.
 func (e *Exchanger) RevokeRefreshToken(ctx context.Context, tokenID string) error {
 	if !e.IsRefreshTokenEnabled() {
 		return nil
 	}
-	return e.refreshTokenCache.Delete(ctx, tokenID)
+	// GetAndDelete rather than Delete: the record has to be read to learn
+	// its predecessor, and reading it in the same atomic step keeps the
+	// revocation single-shot under concurrent logouts.
+	raw, found, _, err := e.refreshTokenCache.GetAndDelete(ctx, tokenID)
+	if e.refreshGraceCache == nil {
+		return err
+	}
+	_ = e.refreshGraceCache.Delete(ctx, tokenID)
+	if found {
+		var claims RefreshTokenClaims
+		if json.Unmarshal([]byte(raw), &claims) == nil && claims.PredecessorID != "" {
+			_ = e.refreshGraceCache.Delete(ctx, claims.PredecessorID)
+		}
+	}
+	return err
 }
 
 // createRefreshToken is the internal helper that stores a refresh token in the cache.
@@ -673,8 +756,17 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	object, err := jose.ParseEncrypted(code, []jose.KeyAlgorithm{jose.DIRECT}, []jose.ContentEncryption{jose.A256GCM})
 	if err != nil {
 		// The presented code itself is malformed -- that is ABOUT the
-		// grant, not our infrastructure, so it is safe to describe.
-		return TokenSet{}, grantFailuref("failed to parse auth code: %v", err)
+		// grant, not our infrastructure, so it is safe to SAY SO. The
+		// library's own error text is NOT: the ErrGrantFailure allowlist
+		// echoes an error's message verbatim to an unauthenticated
+		// caller, and its stated invariant is that every such message is
+		// an authored constant. go-jose's messages carry no input and no
+		// key material today, but a library upgrade that starts quoting
+		// the offending input would leak silently with no test failing.
+		// The cause goes to the operator log instead, which is where the
+		// #168 design puts richer causes. See kdex-tech/host-manager#168.
+		logf.FromContext(ctx).V(1).Info("authorization code failed to parse", "cause", err.Error())
+		return TokenSet{}, grantFailuref("failed to parse auth code")
 	}
 
 	// 2. Derive Key
@@ -683,9 +775,11 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 	// 3. Decrypt
 	decrypted, err := object.Decrypt(key[:])
 	if err != nil {
-		// Same reasoning: a caller-presented ciphertext that does not
-		// decrypt against our current key is an invalid grant.
-		return TokenSet{}, grantFailuref("failed to decrypt auth code: %v", err)
+		// Same reasoning, same treatment: a caller-presented ciphertext
+		// that does not decrypt against our current key is an invalid
+		// grant, but only the fixed description goes on the wire.
+		logf.FromContext(ctx).V(1).Info("authorization code failed to decrypt", "cause", err.Error())
+		return TokenSet{}, grantFailuref("failed to decrypt auth code")
 	}
 
 	var claims AuthorizationCodeClaims
@@ -861,7 +955,13 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// never survives long enough to be a second "publish" of anything a
 	// rejected redemption produced (that property -- a rejected redemption
 	// publishes no RESULT -- is unchanged; see publishToGrace below).
-	e.markGraceInFlight(ctx, tokenID, claims.ClientID)
+	if err := e.markGraceInFlight(ctx, tokenID, claims.ClientID); err != nil {
+		// Optimization only: without the marker a concurrent loser fast-
+		// bails to not-found instead of polling out the full budget. Never
+		// a wrong answer, so this does not fail the redemption.
+		logf.FromContext(ctx).V(1).Info("refresh-grace in-flight marker not written",
+			"subject", claims.Subject, "cause", err.Error())
+	}
 	published := false
 	defer func() {
 		if !published {
@@ -889,16 +989,24 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	}
 
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.
+	//
+	// No ErrServerError re-wrap here: mintTokensFromSubject marks its own
+	// infrastructure failures, exactly as mintTokensFromCode does, so the
+	// classification is a property of the function that knows what failed
+	// rather than of this one caller. %w keeps the mark in the chain.
 	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod)
 	if err != nil {
-		return failed("%w: failed to mint tokens from refresh: %v", ErrServerError, err)
+		return failed("failed to mint tokens from refresh: %w", err)
 	}
 
-	// Rotate: issue a new refresh token.
+	// Rotate: issue a new refresh token. PredecessorID records the token
+	// this one replaced -- the key its grace record lives under -- so
+	// RevokeRefreshToken can tear that record down too (see there).
 	ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
 		AuthMethod:       claims.AuthMethod,
 		ClientID:         claims.ClientID,
 		OriginalIssuedAt: claims.OriginalIssuedAt,
+		PredecessorID:    tokenID,
 		Scope:            claims.Scope,
 		Subject:          claims.Subject,
 	})
@@ -919,8 +1027,21 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// the strict `claims.ClientID != clientID` check above would reject
 	// it, instead of the grace window handing a live rotating credential
 	// to a caller that never owned the session.
-	e.publishToGrace(ctx, tokenID, claims.ClientID, ts)
-	published = true
+	//
+	// `published` is gated on the write actually landing. If it did not,
+	// the deferred cleanup clears the in-flight marker instead of leaving
+	// a Pending record with no result behind it: a stranded marker makes
+	// every concurrent loser commit to the full poll budget and still
+	// return not-found, for the whole window, and disables the very
+	// cleanup written for this case. The winner's own rotation succeeded,
+	// so the redemption still returns success -- losing the replay is a
+	// degraded #169, not a failed refresh.
+	if perr := e.publishToGrace(ctx, tokenID, claims.ClientID, ts); perr != nil {
+		logf.FromContext(ctx).V(1).Info("refresh-grace result not published; concurrent refreshes will not replay",
+			"subject", claims.Subject, "cause", perr.Error())
+	} else {
+		published = true
+	}
 
 	return ts, nil
 }
@@ -1162,6 +1283,15 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 
 // mintTokensFromSubject re-mints tokens for a known-authenticated subject (used by the refresh flow).
 // It re-resolves roles/entitlements to ensure freshness.
+//
+// Every failure below is OUR infrastructure — a role resolver that is down,
+// a signer that is misconfigured — reached only after the caller has already
+// validated the grant, so all three are marked ErrServerError exactly as the
+// structurally identical sites in mintTokensFromCode are. This function owns
+// that classification rather than leaning on its single caller re-wrapping
+// it: the caller's re-wrap was correct but invisible from here, and a second
+// caller would have silently reported an outage as invalid_grant. See
+// kdex-tech/host-manager#168.
 func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod) (TokenSet, error) {
 	// As in mintTokensFromCode: subject is an input, so every failure below
 	// can be attributed. See kdex-tech/host-manager#158.
@@ -1171,7 +1301,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 
 	roles, entitlements, backend, err := e.subjectSigningContext(subject)
 	if err != nil {
-		return failed("failed to resolve roles: %w", err)
+		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
 	}
 
 	signingContext := jwt.MapClaims{
@@ -1187,7 +1317,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
-		return failed("failed to sign access token: %w", err)
+		return failed("%w: failed to sign access token: %v", ErrServerError, err)
 	}
 
 	var idToken string
@@ -1198,7 +1328,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		delete(idCtx, "scope")
 		idToken, err = e.config.Signer.SignScoped(idCtx, grantedScopes)
 		if err != nil {
-			return failed("failed to sign id token: %w", err)
+			return failed("%w: failed to sign id token: %v", ErrServerError, err)
 		}
 	}
 
@@ -1265,25 +1395,36 @@ type graceRecord struct {
 	TokenSet TokenSet `json:"ts"`
 }
 
-// graceCacheSet is the shared best-effort write path for both the in-flight
-// marker and the final result: it always uses a context detached from the
-// caller's own (context.WithoutCancel), because both writes matter to OTHER
-// concurrent callers, not to whether THIS caller's own request is still
-// live. Without this, a winner whose client disconnects or whose deadline
-// fires between mint and publish would cancel `ctx`, the Set would fail,
-// nothing would be published, and every loser would fall through to
-// not-found -- precisely the #169 scenario a request that times out and
-// triggers a retry burst is the canonical trigger for. See
-// kdex-tech/host-manager#169 fix round 2 (IMPORTANT finding).
-func (e *Exchanger) graceCacheSet(ctx context.Context, tokenID string, rec graceRecord) {
+// graceCacheSet is the shared write path for both the in-flight marker and
+// the final result: it always uses a context detached from the caller's own
+// (context.WithoutCancel), because both writes matter to OTHER concurrent
+// callers, not to whether THIS caller's own request is still live. Without
+// this, a winner whose client disconnects or whose deadline fires between
+// mint and publish would cancel `ctx`, the Set would fail, nothing would be
+// published, and every loser would fall through to not-found -- precisely
+// the #169 scenario a request that times out and triggers a retry burst is
+// the canonical trigger for. See kdex-tech/host-manager#169 fix round 2
+// (IMPORTANT finding).
+//
+// It RETURNS the write's error rather than swallowing it. The caller that
+// publishes the winner's result gates its `published` flag on this, so a
+// dropped publish still runs the deferred clearGraceInFlight: an earlier
+// revision set `published = true` unconditionally, which meant a single
+// failed Set (Valkey blip, OOM, rejected PX) stranded the Pending marker
+// with no result behind it for the whole window -- every concurrent loser
+// then committed to the full poll budget and returned not-found, and the
+// cleanup written for exactly that case was switched off by it. Returning
+// nil when no grace cache is configured is correct: nothing to publish is
+// not a failure to publish.
+func (e *Exchanger) graceCacheSet(ctx context.Context, tokenID string, rec graceRecord) error {
 	if e.refreshGraceCache == nil {
-		return
+		return nil
 	}
 	payload, err := json.Marshal(rec)
 	if err != nil {
-		return
+		return err
 	}
-	_ = e.refreshGraceCache.Set(context.WithoutCancel(ctx), tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
+	return e.refreshGraceCache.Set(context.WithoutCancel(ctx), tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
 }
 
 // markGraceInFlight publishes the lightweight in-flight marker described on
@@ -1292,8 +1433,12 @@ func (e *Exchanger) graceCacheSet(ctx context.Context, tokenID string, rec grace
 // RedeemRefreshToken -- so a concurrent loser's poll can distinguish "a
 // rotation for this token is happening right now" from "nothing is
 // happening" almost as fast as the winner's own GetAndDelete completed.
-func (e *Exchanger) markGraceInFlight(ctx context.Context, tokenID, clientID string) {
-	e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, Pending: true})
+//
+// Its error is returned for observability only; the marker is a pure
+// optimization for concurrent losers (a lost marker costs them a fast
+// bailout, never a wrong answer), so no caller gates behavior on it.
+func (e *Exchanger) markGraceInFlight(ctx context.Context, tokenID, clientID string) error {
+	return e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, Pending: true})
 }
 
 // clearGraceInFlight removes the in-flight marker after a redemption that
@@ -1317,8 +1462,12 @@ func (e *Exchanger) clearGraceInFlight(ctx context.Context, tokenID string) {
 // (its deferred cleanup in RedeemRefreshToken clears the marker instead), so
 // its concurrent losers fall through to not-found rather than replaying a
 // failure. See kdex-tech/host-manager#169.
-func (e *Exchanger) publishToGrace(ctx context.Context, tokenID, clientID string, ts TokenSet) {
-	e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, TokenSet: ts})
+//
+// The error MUST be checked by the caller: a publish that did not land is
+// indistinguishable from a rejection as far as losers are concerned, so the
+// in-flight marker has to be cleared rather than left stranded.
+func (e *Exchanger) publishToGrace(ctx context.Context, tokenID, clientID string, ts TokenSet) error {
+	return e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, TokenSet: ts})
 }
 
 // replayFromGrace returns the winner's result for a token that was already

@@ -55,6 +55,7 @@ spec:
             - --server-read-timeout={{ .readTimeout }}
             - --server-write-timeout={{ .writeTimeout }}
             - --server-idle-timeout={{ .idleTimeout }}
+            - --server-stream-stall-timeout={{ .streamStallTimeout }}
             {{- end }}
             {{- with .Values.auth }}
             - --refresh-grace-window={{ .refreshGraceWindow }}

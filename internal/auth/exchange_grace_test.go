@@ -39,6 +39,8 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +66,24 @@ func (c ctxRespectingCache) Set(ctx context.Context, key string, value string, o
 		return err
 	}
 	return c.Cache.Set(ctx, key, value, opts...)
+}
+
+// publishFailingCache lets the lightweight in-flight MARKER through but
+// fails the winner's final RESULT publish, standing in for the Valkey blip
+// / OOM / rejected-PX case: the one write that matters lands nowhere while
+// everything around it succeeds. The in-memory backend cannot produce this
+// on its own -- InMemoryCache.Set never returns an error.
+type publishFailingCache struct {
+	cache.Cache
+}
+
+var errPublishUnavailable = errors.New("grace cache unavailable")
+
+func (c publishFailingCache) Set(ctx context.Context, key string, value string, opts ...cache.SetOption) error {
+	if strings.Contains(value, `"pending":true`) {
+		return c.Cache.Set(ctx, key, value, opts...)
+	}
+	return errPublishUnavailable
 }
 
 // TestRefreshGrace_ExpiresAfterWindow confirms the grace window is a
@@ -352,4 +372,171 @@ func TestRefreshGrace_PollCancellationIsServerError(t *testing.T) {
 		"our own deadline firing mid-poll is OUR infrastructure, not a fact about the presented token")
 	assert.False(t, errors.Is(err, ErrGrantFailure),
 		"must not classify as a grant failure -- that would tell the caller its token is dead when it might still be good")
+}
+
+// TestRefreshGrace_FailedPublishDoesNotStrandTheMarker pins quad-findings
+// item 2. graceCacheSet swallowed its Set error and RedeemRefreshToken set
+// `published = true` unconditionally, which SUPPRESSED the deferred
+// clearGraceInFlight. A single dropped write therefore left a Pending
+// marker with no result behind it for the whole window: every concurrent
+// loser saw "a rotation is in progress", committed to the full 10x20ms
+// budget, and still returned not-found -- and the cleanup written for
+// exactly this case was switched off by it.
+//
+// Against the unfixed code the marker survives, so the follow-up below
+// polls out the full ~180ms budget and the grace cache still holds an
+// entry: both assertions fail.
+func TestRefreshGrace_FailedPublishDoesNotStrandTheMarker(t *testing.T) {
+	ex := newRotationTestExchanger(t)
+	ex.refreshGraceCache = publishFailingCache{Cache: ex.refreshGraceCache}
+	ctx := context.Background()
+
+	tokenID, err := ex.createRefreshToken(ctx, RefreshTokenClaims{
+		AuthMethod: AuthMethodLocal,
+		ClientID:   "app",
+		Subject:    "alice",
+		Scope:      "openid",
+	})
+	require.NoError(t, err)
+
+	// The winner's own rotation succeeds; only the publish is lost. Losing
+	// the replay is a degraded #169, not a failed refresh, so the caller
+	// that actually did the work must still get its tokens.
+	winner, err := ex.RedeemRefreshToken(ctx, tokenID, "app")
+	require.NoError(t, err,
+		"a failed grace publish must not fail the rotation that already succeeded")
+	require.NotEmpty(t, winner.RefreshToken)
+
+	_, found, _, err := ex.refreshGraceCache.Get(ctx, tokenID)
+	require.NoError(t, err)
+	assert.False(t, found,
+		"a failed publish must leave NO grace entry (quad-findings item 2): "+
+			"the Pending marker with no result behind it strands for the whole window "+
+			"and disables the cleanup written for this case")
+
+	start := time.Now()
+	_, err = ex.RedeemRefreshToken(ctx, tokenID, "app")
+	elapsed := time.Since(start)
+	assert.Error(t, err, "nothing was published, so a follow-up must be rejected")
+	assert.Less(t, elapsed, 100*time.Millisecond,
+		"the cleared marker must let a follow-up fail fast; a stranded Pending marker makes every "+
+			"concurrent loser pay the full ~180ms budget for a result that will never come")
+}
+
+// TestNewExchanger_RefreshGraceWindowIsClamped pins quad-findings item 4.
+// `auth.refreshGraceWindow: 24h` silently converted single-use rotation
+// into 24h replay and kept live minted token sets at rest for a day. The
+// window is clamped at construction rather than rejected: this process is
+// the site's serving path, so refusing to start over one flag is a worse
+// outcome than running with a safe window -- but the clamp is logged, not
+// silent, because the running config no longer matches what was asked for.
+func TestNewExchanger_RefreshGraceWindowIsClamped(t *testing.T) {
+	t.Run("an over-long window is clamped", func(t *testing.T) {
+		ex := newRotationTestExchangerWithGrace(t, 24*time.Hour)
+		require.NotNil(t, ex.refreshGraceCache, "the window is still enabled, just bounded")
+		assert.Equal(t, MaxRefreshGraceWindow, ex.refreshGraceWindow,
+			"a 24h grace window must be clamped (quad-findings item 4): unclamped it is a 24h "+
+				"replay window on a token whose whole point is single use")
+	})
+
+	t.Run("a sane window is honored verbatim", func(t *testing.T) {
+		ex := newRotationTestExchangerWithGrace(t, 5*time.Second)
+		assert.Equal(t, 5*time.Second, ex.refreshGraceWindow,
+			"the clamp must be a ceiling, not a floor or a fixed value")
+	})
+}
+
+// TestRefreshGrace_CacheOutlivesTheDefaultLRUBound pins quad-findings item
+// 9. The grace cache passed no MaxItems, so it inherited the backend's
+// default of 1000 with LRU eviction. At the 10s default window that is
+// ~100 refreshes/s before records are evicted INSIDE their own window and
+// concurrent losers fall silently to not-found -- fail-closed, but a silent
+// slide back into #169 under exactly the load #169 targets.
+//
+// Against the unfixed code the first record is evicted long before the
+// last is written and the lookup below reports not-found.
+func TestRefreshGrace_CacheOutlivesTheDefaultLRUBound(t *testing.T) {
+	ex := newRotationTestExchanger(t)
+	ctx := context.Background()
+
+	const written = 1500 // > the backend's 1000 default, < refreshGraceMaxItems
+	for i := range written {
+		require.NoError(t, ex.publishToGrace(ctx, fmt.Sprintf("tok-%d", i), "app", TokenSet{
+			AccessToken:  "at",
+			RefreshToken: "rt",
+			Subject:      "alice",
+		}))
+	}
+
+	_, found, _, err := ex.refreshGraceCache.Get(ctx, "tok-0")
+	require.NoError(t, err)
+	assert.True(t, found,
+		"the first grace record must survive %d later writes (quad-findings item 9): with the "+
+			"inherited 1000-item LRU bound it is evicted inside its own window and its loser "+
+			"silently gets not-found", written)
+}
+
+// TestRefreshGrace_FastBailoutBoundaryUnderMarkerLatency closes quad-
+// findings item 11. Every other grace test runs on the in-memory backend,
+// where the winner's marker is visible in microseconds, so the fast-bailout
+// sub-window (graceFastBailoutAttempts x graceReplayInterval ~= 40ms) was
+// never exercised against the marker-visibility latency it is actually
+// budgeted against. Both sides of the boundary are pinned here by delaying
+// when the marker becomes visible -- a descheduled winner, or a Valkey p99
+// above the sub-window, look identical to the poller.
+//
+// The behavior on the far side is deliberate and fail-closed (a missed
+// replay, never a wrong result); this test exists so that trade-off is
+// asserted rather than only reasoned about in a comment, and so a change to
+// graceFastBailoutAttempts cannot pass silently.
+func TestRefreshGrace_FastBailoutBoundaryUnderMarkerLatency(t *testing.T) {
+	t.Run("marker latency inside the sub-window still replays", func(t *testing.T) {
+		ex := newRotationTestExchanger(t)
+		ctx := context.Background()
+
+		// Visible at ~15ms, comfortably before the bailout decision at
+		// attempt index graceFastBailoutAttempts-1 (~40ms).
+		go func() {
+			time.Sleep(15 * time.Millisecond)
+			_ = ex.markGraceInFlight(ctx, "latent-token", "app")
+			time.Sleep(20 * time.Millisecond)
+			_ = ex.publishToGrace(ctx, "latent-token", "app", TokenSet{
+				AccessToken:  "at",
+				RefreshToken: "rt",
+				Subject:      "alice",
+			})
+		}()
+
+		ts, ok, err := ex.replayFromGrace(ctx, "latent-token", "app")
+		require.NoError(t, err)
+		require.True(t, ok,
+			"a winner whose marker takes 15ms to become visible is still inside the fast-bailout "+
+				"sub-window and must be waited for (quad-findings item 11)")
+		assert.Equal(t, "rt", ts.RefreshToken)
+	})
+
+	t.Run("marker latency past the sub-window fails closed and fast", func(t *testing.T) {
+		ex := newRotationTestExchanger(t)
+		ctx := context.Background()
+
+		// Visible only long after the bailout decision: the legitimate
+		// concurrent refresh is missed.
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_ = ex.markGraceInFlight(ctx, "very-latent-token", "app")
+		}()
+
+		start := time.Now()
+		ts, ok, err := ex.replayFromGrace(ctx, "very-latent-token", "app")
+		elapsed := time.Since(start)
+
+		require.NoError(t, err,
+			"a missed replay is not-found, not an error: the caller re-authenticates rather than "+
+				"seeing a 500")
+		assert.False(t, ok, "fail closed -- never a replay the poller could not confirm")
+		assert.Empty(t, ts.AccessToken)
+		assert.Less(t, elapsed, 120*time.Millisecond,
+			"and it must bail out at the sub-window (~40ms), not pay the full ~180ms budget for a "+
+				"marker it never saw")
+	})
 }

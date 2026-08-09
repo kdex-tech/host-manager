@@ -100,6 +100,7 @@ func main() {
 	var serverReadTimeout time.Duration
 	var serverWriteTimeout time.Duration
 	var serverIdleTimeout time.Duration
+	var serverStreamStallTimeout time.Duration
 	var secureMetrics bool
 	var tlsOpts []func(*tls.Config)
 	var webhookCertKey, webhookCertName, webhookCertPath string
@@ -132,16 +133,25 @@ func main() {
 	flag.DurationVar(&serverReadTimeout, "server-read-timeout", srvDefaults.ReadTimeout,
 		"How long the inbound webserver allows for reading a whole request. 0 disables the deadline.")
 	flag.DurationVar(&serverWriteTimeout, "server-write-timeout", srvDefaults.WriteTimeout,
-		"Connection-level write deadline for the inbound webserver. Streaming responses "+
-			"(text/event-stream, and chunked responses that keep making progress) are exempted "+
-			"per-request; see kdex-tech/host-manager#167. 0 disables the deadline entirely.")
+		"Connection-level write deadline for the inbound webserver. A chunked response that "+
+			"keeps making progress has its per-request deadline pushed forward on every explicit "+
+			"Flush; a handler that writes without flushing stays bounded. text/event-stream runs "+
+			"on --server-stream-stall-timeout instead. See kdex-tech/host-manager#167. "+
+			"0 disables the deadline entirely (and with it all per-request adjustment).")
 	flag.DurationVar(&serverIdleTimeout, "server-idle-timeout", srvDefaults.IdleTimeout,
 		"How long an idle keep-alive connection to the inbound webserver lingers. 0 disables the deadline.")
+	flag.DurationVar(&serverStreamStallTimeout, "server-stream-stall-timeout", srvDefaults.StreamStallTimeout,
+		"Sliding write deadline for a text/event-stream response, pushed forward on every "+
+			"explicit Flush. Its own, much larger window than --server-write-timeout because an "+
+			"SSE keep-alive cadence belongs to the backend — but a window still reclaims a stream "+
+			"whose consumer stopped reading. 0 clears the deadline for SSE outright (unbounded "+
+			"until TCP keepalive; see kdex-tech/host-manager#167).")
 
 	flag.DurationVar(&refreshGraceWindow, "refresh-grace-window", 10*time.Second,
 		"How long a rotated refresh token's result stays replayable, so concurrent refreshes "+
 			"from one client do not race (RFC 9700 4.14). Exactly one rotation still occurs; "+
-			"losers replay the winner's pair. 0 restores strict single-winner rotation.")
+			"losers replay the winner's pair. 0 restores strict single-winner rotation. "+
+			"Clamped to at most 1m: a longer window turns single-use rotation into replay.")
 
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
@@ -431,10 +441,11 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 
 	srv := server.New(webserverAddr, hostHandler, server.Timeouts{
-		ReadHeaderTimeout: serverReadHeaderTimeout,
-		ReadTimeout:       serverReadTimeout,
-		WriteTimeout:      serverWriteTimeout,
-		IdleTimeout:       serverIdleTimeout,
+		ReadHeaderTimeout:  serverReadHeaderTimeout,
+		ReadTimeout:        serverReadTimeout,
+		WriteTimeout:       serverWriteTimeout,
+		IdleTimeout:        serverIdleTimeout,
+		StreamStallTimeout: serverStreamStallTimeout,
 	})
 
 	go func() {

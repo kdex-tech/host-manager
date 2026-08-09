@@ -127,6 +127,39 @@ func TestRedeemRefreshToken_StorageNotConfiguredIsServerError(t *testing.T) {
 		"refresh tokens never having been configured is our deployment fact, not the client's grant")
 }
 
+// TestMintTokensFromSubject_MarksItsOwnInfrastructureFailures closes
+// quad-findings item 8. The branch marked the three structurally identical
+// infrastructure sites in mintTokensFromCode and left the three in
+// mintTokensFromSubject bare, safe only because its single caller re-wrapped
+// with ErrServerError -- two near-twin functions with opposite conventions,
+// in the branch that introduces the convention. The classification now
+// belongs to the function that knows what failed, so a second caller cannot
+// silently report an outage as invalid_grant.
+//
+// This calls mintTokensFromSubject DIRECTLY, standing in for that future
+// second caller: against the unfixed code the error carries no sentinel and
+// this fails.
+func TestMintTokensFromSubject_MarksItsOwnInfrastructureFailures(t *testing.T) {
+	ex := newRotationTestExchanger(t)
+
+	// Same idiom as TestRedeemAuthorizationCode_SignFailureIsServerError:
+	// a real signer of a key type SignScoped does not handle.
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	badCS := crypto.Signer(edPriv)
+	badSigner, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &badCS, "bad-kid", nil)
+	require.NoError(t, err)
+	ex.config.Signer = *badSigner
+
+	ts, err := ex.mintTokensFromSubject("alice", "app", "openid", AuthMethodLocal)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrServerError),
+		"mintTokensFromSubject must mark its own infrastructure failures (quad-findings item 8), "+
+			"not rely on one caller re-wrapping them")
+	assert.Equal(t, "alice", ts.Subject,
+		"#158 subject attribution on the failure path is unchanged")
+}
+
 // httpLookupIdentityAdapter adapts the internal Lookup interface (the same
 // one lookup_http_test.go exercises directly) to the InternalIdentityProvider
 // shape Exchanger.sp expects, reproducing exactly what

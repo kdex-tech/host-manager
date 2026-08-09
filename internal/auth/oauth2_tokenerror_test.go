@@ -80,6 +80,71 @@ func TestTokenHandler_DeadRefreshTokenIsInvalidGrant(t *testing.T) {
 		"the description must be exactly the grant message, with no sentinel wording prepended (#168 round 2)")
 }
 
+// TestTokenHandler_AuthCodeFailureDescriptionsAreAuthoredConstants pins
+// quad-findings item 6. The ErrGrantFailure allowlist echoes an error's
+// message VERBATIM to an unauthenticated caller, and its stated invariant
+// is that every allowlisted description is an authored constant. Two sites
+// broke it at exactly the two places it was written for, formatting
+// go-jose's error text into the description with %v. Nothing leaks today —
+// those messages carry no input and no key material — but a library upgrade
+// that starts quoting the offending input would leak silently, with no test
+// failing. This is that test.
+//
+// Against the unfixed code the descriptions read "failed to parse auth
+// code: go-jose/go-jose: compact JWE format must have five parts" and both
+// equality assertions fail.
+func TestTokenHandler_AuthCodeFailureDescriptionsAreAuthoredConstants(t *testing.T) {
+	o := newTokenErrorTestHandler(t)
+
+	t.Run("unparseable code", func(t *testing.T) {
+		rec := postToken(t, o, url.Values{
+			"grant_type":   {"authorization_code"},
+			"code":         {"this-is-not-a-jwe"},
+			"redirect_uri": {"https://app.example.com/cb"},
+			"client_id":    {"app"},
+		})
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		body := decodeOAuthError(t, rec)
+		assert.Equal(t, "invalid_grant", body["error"])
+		assert.Equal(t, "failed to parse auth code", body["error_description"],
+			"the description must be the authored constant alone (quad-findings item 6); "+
+				"the library's message belongs in the log, not on the wire")
+		assert.NotContains(t, body["error_description"], "jose",
+			"no third-party error text may reach an unauthenticated caller")
+	})
+
+	t.Run("well-formed code that does not decrypt", func(t *testing.T) {
+		// Minted under a different block key, so it parses as a JWE and
+		// then fails A256GCM authentication — the second site.
+		other := newRotationTestExchanger(t)
+		other.config.OIDC.BlockKey = "a-different-block-key"
+		code, err := other.CreateAuthorizationCode(context.Background(), AuthorizationCodeClaims{
+			ClientID:    "app",
+			RedirectURI: "https://app.example.com/cb",
+			Subject:     "alice",
+			Scope:       "openid",
+			Exp:         time.Now().Add(time.Minute).Unix(),
+		})
+		require.NoError(t, err)
+
+		rec := postToken(t, o, url.Values{
+			"grant_type":   {"authorization_code"},
+			"code":         {code},
+			"redirect_uri": {"https://app.example.com/cb"},
+			"client_id":    {"app"},
+		})
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		body := decodeOAuthError(t, rec)
+		assert.Equal(t, "invalid_grant", body["error"])
+		assert.Equal(t, "failed to decrypt auth code", body["error_description"],
+			"the description must be the authored constant alone (quad-findings item 6)")
+		assert.NotContains(t, body["error_description"], "jose",
+			"no third-party error text may reach an unauthenticated caller")
+	})
+}
+
 // TestTokenHandler_ErrorMapping walks the rest of the 5.2 table.
 func TestTokenHandler_ErrorMapping(t *testing.T) {
 	tests := []struct {

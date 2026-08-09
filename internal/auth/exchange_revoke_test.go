@@ -102,3 +102,67 @@ func TestRevokeRefreshToken_InvalidatesRedemption(t *testing.T) {
 			"RevokeRefreshToken on an unknown tokenID must not error")
 	})
 }
+
+// TestRevokeRefreshToken_ClearsGraceRecords pins quad-findings item 7.
+// Deleting the refresh token is no longer enough once the #169 grace window
+// exists: a grace record is keyed by the CONSUMED token id, so it outlives
+// the token whose revocation is supposed to end the session. Logout gained
+// a replay window it did not have before, on the credentials of a session
+// the user has explicitly ended.
+func TestRevokeRefreshToken_ClearsGraceRecords(t *testing.T) {
+	// The grace window must actually be on for this to mean anything, so
+	// this uses the rotation fixture rather than newRevokeTestExchanger.
+	t.Run("revoking the rotated successor kills its predecessor's replay", func(t *testing.T) {
+		ex := newRotationTestExchanger(t)
+		ctx := context.Background()
+
+		t1, err := ex.createRefreshToken(ctx, RefreshTokenClaims{
+			AuthMethod: AuthMethodLocal,
+			ClientID:   "app",
+			Subject:    "alice",
+			Scope:      "openid",
+		})
+		require.NoError(t, err)
+
+		// T1 -> T2. The grace record now lives under T1; the cookie holds T2.
+		winner, err := ex.RedeemRefreshToken(ctx, t1, "app")
+		require.NoError(t, err)
+		t2 := winner.RefreshToken
+		require.NotEmpty(t, t2)
+
+		// The user logs out. The cookie value is T2.
+		require.NoError(t, ex.RevokeRefreshToken(ctx, t2))
+
+		_, err = ex.RedeemRefreshToken(ctx, t2, "app")
+		require.Error(t, err, "the revoked token itself must be dead")
+
+		_, err = ex.RedeemRefreshToken(ctx, t1, "app")
+		assert.Error(t, err,
+			"presenting the PREDECESSOR after logout must not replay the winner's access and ID "+
+				"tokens (quad-findings item 7): the grace record is keyed by the consumed token, "+
+				"which revoking the successor alone never reaches")
+	})
+
+	t.Run("revoking a token that is itself already graced kills its replay", func(t *testing.T) {
+		ex := newRotationTestExchanger(t)
+		ctx := context.Background()
+
+		t1, err := ex.createRefreshToken(ctx, RefreshTokenClaims{
+			AuthMethod: AuthMethodLocal,
+			ClientID:   "app",
+			Subject:    "alice",
+			Scope:      "openid",
+		})
+		require.NoError(t, err)
+
+		_, err = ex.RedeemRefreshToken(ctx, t1, "app")
+		require.NoError(t, err)
+
+		// A logout that races its own rotation still presents T1.
+		require.NoError(t, ex.RevokeRefreshToken(ctx, t1))
+
+		_, err = ex.RedeemRefreshToken(ctx, t1, "app")
+		assert.Error(t, err,
+			"revoking an already-consumed token must also drop its own grace record")
+	})
+}

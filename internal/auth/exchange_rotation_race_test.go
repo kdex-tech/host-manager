@@ -38,7 +38,20 @@ func (rotationStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]
 	return nil, nil, nil
 }
 
+// newRotationTestExchanger builds the package's shared rotation fixture with
+// the #169 grace window ON, so the concurrency tests exercise the replay
+// path without wiring it up individually.
 func newRotationTestExchanger(t *testing.T) *Exchanger {
+	t.Helper()
+	return newRotationTestExchangerWithGrace(t, 10*time.Second)
+}
+
+// newRotationTestExchangerWithGrace builds the same fixture with an explicit
+// Config.RefreshGraceWindow, so a test can exercise the window THROUGH THE
+// CONFIG PATH rather than by reaching into the built Exchanger's fields.
+// That is what makes the `cfg.RefreshGraceWindow > 0` gate in NewExchanger
+// (and its clamp) observable at all — see quad-findings items 4 and 10.
+func newRotationTestExchangerWithGrace(t *testing.T, window time.Duration) *Exchanger {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -48,16 +61,12 @@ func newRotationTestExchanger(t *testing.T) *Exchanger {
 	require.NoError(t, err)
 
 	cfg := Config{
-		Issuer:          "test-iss",
-		Audience:        "test-aud",
-		Signer:          *signer,
-		ActivePair:      &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
-		RefreshTokenTTL: time.Hour,
-		// Grace window (#169) is on by default here so the concurrency
-		// tests below exercise the replay path without every test having
-		// to wire it up individually. TestRedeemRefreshToken_StrictModeHasSingleWinner
-		// explicitly disables it to pin the pre-#169 behavior.
-		RefreshGraceWindow: 10 * time.Second,
+		Issuer:             "test-iss",
+		Audience:           "test-aud",
+		Signer:             *signer,
+		ActivePair:         &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		RefreshTokenTTL:    time.Hour,
+		RefreshGraceWindow: window,
 		Clients: map[string]AuthClient{
 			"app": {ClientID: "app"},
 		},
@@ -80,10 +89,22 @@ func newRotationTestExchanger(t *testing.T) *Exchanger {
 // With the #169 grace window DISABLED (0), this is still the observable
 // behavior, which is why the grace window is configurable rather than
 // unconditional.
+//
+// The window is disabled THROUGH THE CONFIG, not by assigning
+// ex.refreshGraceCache = nil after construction. Quad-findings item 10: the
+// hand-assignment left the design's claim that `RefreshGraceWindow: 0`
+// restores single-winner rotation entirely unconstrained — the
+// `cfg.RefreshGraceWindow > 0` gate in NewExchanger could have been
+// inverted and every test still passed.
 func TestRedeemRefreshToken_StrictModeHasSingleWinner(t *testing.T) {
-	ex := newRotationTestExchanger(t)
-	ex.refreshGraceCache = nil // grace window off
+	ex := newRotationTestExchangerWithGrace(t, 0)
 	ctx := context.Background()
+
+	require.Nil(t, ex.refreshGraceCache,
+		"RefreshGraceWindow: 0 must leave the grace cache unwired (quad-findings item 10): "+
+			"the strict-mode guarantee is a property of the config gate, not of a test fixture")
+	require.Zero(t, ex.refreshGraceWindow,
+		"RefreshGraceWindow: 0 must leave the window at zero")
 
 	tokenID, err := ex.createRefreshToken(ctx, RefreshTokenClaims{
 		AuthMethod: AuthMethodLocal,

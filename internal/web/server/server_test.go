@@ -31,6 +31,17 @@ func TestDefaultTimeouts(t *testing.T) {
 
 	assert.LessOrEqual(t, d.ReadHeaderTimeout, 30*time.Second,
 		"ReadHeaderTimeout should be aggressive (<=30s)")
+
+	// Quad-findings item 1: SSE must be bounded on its own window rather
+	// than exempt from bounding. A zero default here means the SSE
+	// deadline is cleared outright, which is what left a stalled consumer
+	// holding a goroutine, an FD and the upstream connection until TCP
+	// keepalive (~2h11m).
+	assert.Greater(t, d.StreamStallTimeout, time.Duration(0),
+		"StreamStallTimeout must bound a stalled SSE stream (#167 / quad-findings item 1)")
+	assert.Greater(t, d.StreamStallTimeout, d.WriteTimeout,
+		"the SSE stall window must be larger than the chunked window, or SSE is back on a "+
+			"cadence-sized deadline and #167 regresses")
 }
 
 // TestNew_AppliesDefaultTimeouts checks the defaults reach the http.Server.

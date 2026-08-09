@@ -58,24 +58,36 @@ proxy:
   idleConnTimeout: 90s
 
 # Inbound webserver timeouts. These bound exposure on every accepted
-# connection (kdex-tech/host-manager#49). Streaming responses are exempted
-# from writeTimeout per-request — text/event-stream has its deadline cleared
-# outright, and a chunked response that keeps making progress has its
-# deadline pushed forward on every write — so SSE and MCP streams are no
-# longer severed at writeTimeout (#167). Set any value to "0" to disable that
-# deadline entirely.
+# connection (kdex-tech/host-manager#49). Streaming responses are not
+# severed at writeTimeout any more (#167); they are bounded per-request
+# instead:
+#   - a chunked response that keeps making progress has its deadline pushed
+#     forward on every explicit Flush; a handler that writes without
+#     flushing stays bounded by the last-armed deadline.
+#   - a text/event-stream response slides the same way but on its own, much
+#     larger streamStallTimeout window, because an SSE keep-alive cadence is
+#     chosen by the backend and may legitimately exceed writeTimeout. It is
+#     still a window: a consumer that stops reading is reclaimed rather than
+#     holding a goroutine, an FD and the upstream connection until TCP
+#     keepalive (~2h11m).
+# Set any value to "0" to disable that deadline entirely — for
+# streamStallTimeout that means SSE runs with no write deadline at all.
 server:
   readHeaderTimeout: 10s
   readTimeout: 60s
   writeTimeout: 60s
   idleTimeout: 120s
+  streamStallTimeout: 5m
 
 # Refresh-token rotation grace window (RFC 9700 4.14,
 # kdex-tech/host-manager#169). Real clients fire several refresh requests in
 # parallel; with strict rotation only one could win. Within this window a
 # concurrent caller replays the winner's pair instead of failing. Exactly one
 # rotation still happens, so rotation-based theft detection is unchanged.
-# Set to "0" for strict single-winner rotation.
+# Set to "0" for strict single-winner rotation. Values above 1m are clamped
+# to 1m at startup with a warning: the window is a replay window, and a long
+# one turns single-use rotation into ordinary replay while keeping a live
+# minted token set at rest for its duration.
 auth:
   refreshGraceWindow: 10s
 
