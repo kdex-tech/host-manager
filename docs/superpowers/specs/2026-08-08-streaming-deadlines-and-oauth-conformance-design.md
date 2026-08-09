@@ -47,9 +47,28 @@ three cases are evaluated **in order, first match wins** — an SSE response als
 has no `Content-Length`, so the ordering is what keeps it on the cleared path
 rather than the sliding one:
 
-1. **`Content-Type: text/event-stream`** → `SetWriteDeadline(time.Time{})`. The
-   deadline is cleared outright. The keep-alive cadence is chosen by the backend
-   and may legitimately exceed any deadline we would pick.
+1. **`Content-Type: text/event-stream`** → **sliding on its own, much larger
+   window** (`server.streamStallTimeout`, default 5m), re-armed after each
+   successful `Flush` exactly as case 2 does. The keep-alive cadence is chosen by
+   the backend and may legitimately exceed `writeTimeout`, so the *cadence-sized*
+   window is wrong — but a window still bounds a stalled stream.
+
+   *(Corrected 2026-08-08 by the final whole-branch review. This originally said
+   `SetWriteDeadline(time.Time{})` — cleared outright. The performance and
+   security lenses independently found the same consequence: a consumer that
+   stops reading, whether it vanished without an RST or is doing it on purpose,
+   parks the proxy's `Flush`→`conn.Write` under TCP backpressure with nothing to
+   cut it. The request context cancels on close, not on a stalled reader, and
+   nothing else covers it — `ReadTimeout`/`ReadHeaderTimeout` bound the request
+   only, `IdleTimeout` bounds inter-request idle only, and there is no
+   `ConnState`/`LimitListener`/`TimeoutHandler` in the repo. Linux TCP keepalive
+   reaps such a connection at ~2h11m, where before this branch it died at 60s;
+   each one pins a goroutine, an FD, the upstream connection and a 32KB buffer.
+   That is precisely the exposure #49's `WriteTimeout` existed to bound. Sliding
+   on a generous window keeps a healthy stream unbounded — 5m is 20× the 15s
+   keep-alive cadence of the affected backends — while killing a stalled one in
+   minutes. Note the chunked path never had this problem: a blocked flush
+   inherits the deadline armed by the previous flush.)*
 2. **No `Content-Length` header** (chunked / unknown length) → **sliding mode**:
    after each successful `Flush`, re-arm the deadline to `now + writeTimeout`.
 3. **Everything else** → untouched; the connection-level `WriteTimeout` applies
