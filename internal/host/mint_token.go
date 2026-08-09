@@ -18,6 +18,11 @@ import (
 	"github.com/kdex-tech/host-manager/internal/sign"
 )
 
+// toolNameMintToken is the MCP tool name the AS answers locally on the
+// interception path. Named once so the matcher and the advertised descriptor
+// cannot drift apart.
+const toolNameMintToken = "mint_token"
+
 // ctxKey namespaces context values set by the mint_token interception so
 // they can't collide with other packages' context keys.
 type ctxKey int
@@ -332,7 +337,7 @@ func isMintTokenCall(body []byte) (json.RawMessage, MintTokenRequest, bool) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, MintTokenRequest{}, false
 	}
-	if req.Method != "tools/call" || req.Params.Name != "mint_token" {
+	if req.Method != "tools/call" || req.Params.Name != toolNameMintToken {
 		return nil, MintTokenRequest{}, false
 	}
 	var args MintTokenRequest
@@ -394,7 +399,7 @@ func mintTokenDescriptor(discoveryURL string) map[string]any {
 		)
 	}
 	return map[string]any{
-		"name":        "mint_token",
+		"name":        toolNameMintToken,
 		"description": description,
 		"inputSchema": map[string]any{
 			"type":     "object",

@@ -10,6 +10,10 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 )
 
+// toolNameWhoami is the MCP tool name the AS answers locally, kept in one
+// place so the matcher and the advertised descriptor cannot drift apart.
+const toolNameWhoami = "whoami"
+
 // WhoamiResult is the whoami success payload.
 //
 // It describes the authority the PRESENTED CREDENTIAL carries — not the person
@@ -34,6 +38,18 @@ type WhoamiResult struct {
 	FamilyName        string   `json:"family_name,omitempty"`
 	PreferredUsername string   `json:"preferred_username,omitempty"`
 	Entitlements      []string `json:"entitlements"`
+
+	// EntitlementsWithheld reports that the SUBJECT holds grants this
+	// credential does not carry. It exists because "you hold nothing" and
+	// "your token was not granted the entitlements scope" otherwise render
+	// identically as an empty list, while needing completely different fixes:
+	// a role binding versus a scope. The withheld grants themselves are never
+	// listed — the credential was not granted them.
+	EntitlementsWithheld bool `json:"entitlements_withheld,omitempty"`
+
+	// Hint is a short actionable explanation, present only when something is
+	// actionable.
+	Hint string `json:"hint,omitempty"`
 }
 
 // whoamiFromAuthContext projects an auth context into the tool's result.
@@ -75,6 +91,36 @@ func whoamiFromAuthContext(ac auth.AuthContext) (WhoamiResult, error) {
 	}, nil
 }
 
+// applyEntitlementsDiagnostic distinguishes a credential that carries no
+// entitlements because its subject holds none from one that carries none
+// because the claim was stripped at signing time.
+//
+// The second case is the MCP-client shape: a client that registers via DCR and
+// completes authorization_code receives a JWT, not a PASETO PAT. The proxy PAT
+// bridge — which re-resolves a PAT subject's full entitlements at request time
+// — is guarded on !alreadyLoggedIn and therefore SKIPS for a JWT caller. And
+// confineByScope deletes the entitlements claim unless the client requested
+// scope=entitlements. So the caller presents a perfectly valid credential
+// carrying nothing, and every gated call fails with nothing to inspect.
+//
+// A minted capability token is deliberately excluded. It carries LESS than its
+// subject holds BY DESIGN; flagging that would advise the caller to acquire
+// authority the token was purposely denied.
+func applyEntitlementsDiagnostic(res WhoamiResult, ac auth.AuthContext, subjectEntitlements []string) WhoamiResult {
+	if len(res.Entitlements) > 0 || len(subjectEntitlements) == 0 {
+		return res
+	}
+	if isCap, _ := ac[auth.CapUsesClaim].(bool); isCap {
+		return res
+	}
+	res.EntitlementsWithheld = true
+	res.Hint = "This credential carries no entitlements, but your account holds some. " +
+		"The entitlements claim is scope-controlled: request `scope=entitlements` when " +
+		"authorizing (alongside openid/profile as needed) and re-authenticate. Until then " +
+		"every entitlement-gated call will be denied."
+	return res
+}
+
 // isWhoamiCall returns the request id and true when body is a single JSON-RPC
 // tools/call for whoami. Batch (array) bodies and any other method/tool return
 // matched=false (passthrough), matching isMintTokenCall — MCP revision
@@ -88,7 +134,7 @@ func isWhoamiCall(body []byte) (json.RawMessage, bool) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, false
 	}
-	if req.Method != "tools/call" || req.Params.Name != "whoami" {
+	if req.Method != "tools/call" || req.Params.Name != toolNameWhoami {
 		return nil, false
 	}
 	return req.ID, true
@@ -137,6 +183,17 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 		ac = mergeResolvedClaims(ac, hh.authExchanger.ResolveSubjectClaims(sub))
 	}
 	res, err := whoamiFromAuthContext(ac)
+	if err == nil && hh.authExchanger != nil {
+		// In-memory only: role bindings and the roles->entitlements table are
+		// preloaded, so this is a map lookup plus a regex scan, not a backend
+		// call. It is the same resolution the PAT bridge already performs per
+		// request.
+		sub, _ := ac["sub"].(string)
+		_, subjectEnts, rerr := hh.authExchanger.ResolveInternalRolesAndEntitlements(sub)
+		if rerr == nil {
+			res = applyEntitlementsDiagnostic(res, ac, subjectEnts)
+		}
+	}
 
 	var payload jsonRPCResponse
 	if err != nil {
@@ -155,7 +212,7 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 // so there is nothing for a caller to pass.
 func whoamiDescriptor() map[string]any {
 	return map[string]any{
-		"name": "whoami",
+		"name": toolNameWhoami,
 		"description": "Report who the server thinks you are and what your current credential lets " +
 			"you do. Returns { identity, entitlements } plus whichever of name, given_name, " +
 			"family_name and preferred_username are known for you. `identity` is your email, " +

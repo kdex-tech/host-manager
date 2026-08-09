@@ -243,3 +243,74 @@ func TestMergeResolvedClaims_NilResolutionIsSafe(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "alice", res.Identity)
 }
+
+// TestEntitlementsDiagnostic_IdentifiesAWithheldClaim resolves the case that
+// otherwise renders identically to "you hold nothing".
+//
+// An MCP client that registers via DCR and completes authorization_code gets a
+// JWT, not a PASETO PAT. The proxy PAT bridge is guarded on !alreadyLoggedIn,
+// so for a JWT caller it SKIPS — and confineByScope deletes the entitlements
+// claim at signing time unless the client asked for scope=entitlements. That
+// caller therefore presents a valid credential carrying no entitlements at all,
+// and every gated call fails with nothing to inspect.
+//
+// whoami must tell those two situations apart, because the fix is completely
+// different: one needs a role binding, the other needs a scope.
+func TestEntitlementsDiagnostic_IdentifiesAWithheldClaim(t *testing.T) {
+	res := applyEntitlementsDiagnostic(
+		WhoamiResult{Entitlements: []string{}},
+		auth.AuthContext{"sub": "alice"},
+		[]string{"pages:/:read", "functions:/api/v1/mcp:read"},
+	)
+
+	assert.True(t, res.EntitlementsWithheld,
+		"the subject holds grants this credential does not carry; that must be visible")
+	assert.Contains(t, res.Hint, "entitlements",
+		"the hint must name the scope to request, or it is not actionable")
+	assert.Empty(t, res.Entitlements,
+		"the withheld grants must NOT be disclosed — the credential was not granted them")
+}
+
+// TestEntitlementsDiagnostic_GenuinelyHoldsNothing is the other half of the
+// pair: no flag, no hint. Telling this caller to request a scope would send
+// them chasing a config change that cannot help.
+func TestEntitlementsDiagnostic_GenuinelyHoldsNothing(t *testing.T) {
+	res := applyEntitlementsDiagnostic(
+		WhoamiResult{Entitlements: []string{}},
+		auth.AuthContext{"sub": "nobody"},
+		nil,
+	)
+
+	assert.False(t, res.EntitlementsWithheld)
+	assert.Empty(t, res.Hint)
+}
+
+// TestEntitlementsDiagnostic_CarriedClaimNeedsNoHint: a credential that carries
+// its grants is working correctly.
+func TestEntitlementsDiagnostic_CarriedClaimNeedsNoHint(t *testing.T) {
+	res := applyEntitlementsDiagnostic(
+		WhoamiResult{Entitlements: []string{"pages:/:read"}},
+		auth.AuthContext{"sub": "alice"},
+		[]string{"pages:/:read"},
+	)
+
+	assert.False(t, res.EntitlementsWithheld)
+	assert.Empty(t, res.Hint)
+}
+
+// TestEntitlementsDiagnostic_CapabilityTokenIsNotDiagnosed is the important
+// exclusion. A minted capability token carries LESS than its subject holds by
+// design — that attenuation is the entire point. Flagging it as withheld would
+// advise the caller to go acquire authority the token was deliberately denied,
+// which is exactly backwards.
+func TestEntitlementsDiagnostic_CapabilityTokenIsNotDiagnosed(t *testing.T) {
+	res := applyEntitlementsDiagnostic(
+		WhoamiResult{Entitlements: []string{}},
+		auth.AuthContext{"sub": "alice", auth.CapUsesClaim: true},
+		[]string{"pages:/:read"},
+	)
+
+	assert.False(t, res.EntitlementsWithheld,
+		"an attenuated capability token holding less than its subject is working as designed")
+	assert.Empty(t, res.Hint)
+}
