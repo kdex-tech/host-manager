@@ -62,6 +62,18 @@ func (ew *errorResponseWriter) WriteHeader(code int) {
 	if ew.wroteHeader {
 		return
 	}
+	// An informational 1xx does NOT complete the response: more headers,
+	// and the real final status, are still to come. Delegate it and return
+	// without latching wroteHeader or recording statusCode -- doing either
+	// swallowed the final WriteHeader, so a backend emitting 103 Early
+	// Hints before a 500 never set statusCode >= 400, bypassed the
+	// error-page path, and reached the client as an implicit 200. It also
+	// left statusCode at 103 for feedback.go's unwrap path, which writes it
+	// as the final status. See kdex-tech/host-manager#170.
+	if code < 200 {
+		ew.ResponseWriter.WriteHeader(code)
+		return
+	}
 	ew.statusCode = code
 	if code >= 400 {
 		return
