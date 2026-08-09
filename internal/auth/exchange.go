@@ -882,7 +882,9 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 
 // RedeemRefreshToken validates and consumes a refresh token (one-time use / rotation),
 // then returns a fresh TokenSet including a rotated refresh token.
-func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID string) (TokenSet, error) {
+// The results are NAMED so the #172 compensating restore can inspect the
+// error this call is actually returning. Nothing else depends on the names.
+func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID string) (_ TokenSet, err error) {
 	if !e.IsRefreshTokenEnabled() {
 		// This is a server misconfiguration (refresh tokens were never set
 		// up), not a fact about the presented token — the client did
@@ -928,6 +930,40 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("%w: failed to parse refresh token: %v", ErrServerError, err)
 	}
 
+	// The record parsed, so it is genuinely ours and genuinely restorable.
+	// GetAndDelete already consumed it -- that ordering is what makes
+	// rotation single-use (#71) and is deliberately NOT reordered -- so an
+	// infrastructure failure from here on would destroy a live session: the
+	// caller gets a 500 (retryable), retries with the same token, and is
+	// told 400 invalid_grant (re-authorize). One transient blip logs the
+	// user out. Put the record back on exactly the ErrServerError paths.
+	//
+	// Armed only AFTER a successful unmarshal, which is what excludes the
+	// unparseable-record case: restoring bytes that just failed to parse
+	// guarantees the same failure on every future redemption for the rest
+	// of the term, where dropping them costs one re-authorization and
+	// self-heals. The three grant failures below are excluded by the
+	// ErrServerError gate itself -- they are legitimate consumptions.
+	//
+	// Safe against #71 because no ErrServerError return exists downstream
+	// of a successful createRefreshToken (publishToGrace failing is logged,
+	// not returned), so a restored predecessor can never coexist with a
+	// live successor. TestRedeemRefreshToken_SuccessfulRotationDoesNotRestore
+	// fails if that ever stops being true.
+	//
+	// The restore runs BEFORE the marker is cleared so a concurrent loser
+	// is never told "nothing is happening" about a token that is already
+	// live again. See kdex-tech/host-manager#172.
+	published := false
+	defer func() {
+		if errors.Is(err, ErrServerError) {
+			e.restoreConsumedRefreshToken(ctx, tokenID, raw, claims)
+		}
+		if !published {
+			e.clearGraceInFlight(ctx, tokenID)
+		}
+	}()
+
 	// The stored record is ours, so from here the subject is known and
 	// server-vouched. Carry it on every rejection below -- these are the
 	// cases an operator most needs attributed (a client stuck refreshing
@@ -962,12 +998,6 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		logf.FromContext(ctx).V(1).Info("refresh-grace in-flight marker not written",
 			"subject", claims.Subject, "cause", err.Error())
 	}
-	published := false
-	defer func() {
-		if !published {
-			e.clearGraceInFlight(ctx, tokenID)
-		}
-	}()
 
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
 	// The token is already consumed by GetAndDelete above, so we just
@@ -1425,6 +1455,46 @@ func (e *Exchanger) graceCacheSet(ctx context.Context, tokenID string, rec grace
 		return err
 	}
 	return e.refreshGraceCache.Set(context.WithoutCancel(ctx), tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
+}
+
+// restoreConsumedRefreshToken puts a consumed refresh record back after the
+// redemption failed for an infrastructure reason, so the caller's retry has
+// something to succeed against instead of being told its credential is dead.
+// See kdex-tech/host-manager#172.
+//
+// The TTL is the record's REMAINING lifetime, never the default. The
+// refresh-token cache is created with TTL: refreshTokenTTL and
+// createRefreshToken writes with no explicit option, so a plain Set here
+// would silently renew the record for a fresh full term and carry it past
+// its original expiry. (The embedded ExpiresAt check on redemption bounds
+// the damage to a lingering cache entry rather than a usable token, but the
+// entry should not linger either.)
+//
+// Written on a context detached from the caller's, for the same reason
+// graceCacheSet is: the whole point is to compensate for a failed
+// redemption, and a client that has already disconnected or timed out is
+// precisely the case where the session most needs to survive.
+//
+// A failed restore degrades to the pre-#172 behaviour -- the session is lost
+// -- and is logged rather than returned, so the failure that actually
+// happened is what reaches the caller.
+func (e *Exchanger) restoreConsumedRefreshToken(ctx context.Context, tokenID, raw string, claims RefreshTokenClaims) {
+	if e.refreshTokenCache == nil {
+		return
+	}
+	remaining := time.Until(time.Unix(claims.ExpiresAt, 0))
+	if remaining <= 0 {
+		// Already expired: restoring it would only produce a record whose
+		// next redemption rejects it anyway.
+		return
+	}
+	if err := e.refreshTokenCache.Set(
+		context.WithoutCancel(ctx), tokenID, raw, cache.WithTTL(remaining),
+	); err != nil {
+		logf.FromContext(ctx).V(1).Info(
+			"refresh token not restored after an infrastructure failure; this session is lost and the client must re-authorize",
+			"subject", claims.Subject, "cause", err.Error())
+	}
 }
 
 // markGraceInFlight publishes the lightweight in-flight marker described on
