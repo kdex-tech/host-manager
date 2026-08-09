@@ -97,6 +97,11 @@ type Exchanger struct {
 	oidcVerifier      *oidc.IDTokenVerifier
 	refreshTokenCache cache.Cache
 	refreshTokenTTL   time.Duration
+	// refreshGraceCache and refreshGraceWindow implement the #169 rotation
+	// grace window: refreshGraceCache is nil (and replayFromGrace/
+	// publishToGrace are no-ops) unless Config.RefreshGraceWindow > 0.
+	refreshGraceCache  cache.Cache
+	refreshGraceWindow time.Duration
 	// authCodeCache tracks the JTI of every unredeemed authorization code.
 	// On RedeemAuthorizationCode the JTI is Get-then-Delete'd; an absent
 	// JTI signals replay (or expiry) and the redemption is rejected. See
@@ -182,6 +187,17 @@ func NewExchanger(
 			TTL:      &srTTL,
 			Uncycled: true,
 		})
+		// Grace window for concurrent refresh presentations (#169). Holds
+		// the winner's MINTED RESULT keyed by the CONSUMED token id, so
+		// losers replay it rather than minting a second lineage.
+		if cfg.RefreshGraceWindow > 0 {
+			gw := cfg.RefreshGraceWindow
+			ex.refreshGraceWindow = gw
+			ex.refreshGraceCache = cacheManager.GetCache("refresh-grace", cache.CacheOptions{
+				TTL:      &gw,
+				Uncycled: true,
+			})
+		}
 	}
 
 	if cfg.IsOIDCEnabled() {
@@ -790,6 +806,18 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return TokenSet{}, fmt.Errorf("%w: failed to read refresh token: %v", ErrServerError, err)
 	}
 	if !found {
+		// A concurrent caller may have won the rotation microseconds ago.
+		// Replay its result rather than failing this one (#169). A non-nil
+		// graceErr means the grace cache itself is unreadable/corrupt --
+		// OUR infrastructure, not a fact about the presented token -- and
+		// is already wrapped in ErrServerError by replayFromGrace.
+		replayed, ok, graceErr := e.replayFromGrace(ctx, tokenID)
+		if graceErr != nil {
+			return TokenSet{}, graceErr
+		}
+		if ok {
+			return replayed, nil
+		}
 		// This is the literal kdex-tech/host-manager#168 reproduction: a
 		// dead/unknown refresh token is squarely ABOUT the presented grant,
 		// so it is marked safe to describe.
@@ -851,6 +879,13 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	if err != nil {
 		return failed("%w: failed to rotate refresh token: %v", ErrServerError, err)
 	}
+
+	// Publish the winner's result so any concurrent loser presenting the
+	// SAME (now-consumed) tokenID within the grace window replays it
+	// instead of minting a second lineage. Only a successful rotation
+	// reaches here — a rejected redemption above returns before this
+	// point, so it publishes nothing. See kdex-tech/host-manager#169.
+	e.publishToGrace(ctx, tokenID, ts)
 
 	return ts, nil
 }
@@ -1138,4 +1173,76 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		Scope:       grantedScope,
 		Subject:     subject,
 	}, nil
+}
+
+// graceReplayAttempts and graceReplayInterval bound the poll a losing caller
+// does while the winner is still publishing its result. A loser can arrive
+// after the winner's GetAndDelete but before its Set, an interval that is
+// sub-millisecond in memory but a network round trip under Valkey. Bounded
+// at 200ms; the winner either publishes within it or has failed, in which
+// case not-found is the correct answer.
+const (
+	graceReplayAttempts = 10
+	graceReplayInterval = 20 * time.Millisecond
+)
+
+// publishToGrace makes the winner's result replayable for the window. Called
+// only on a SUCCESSFUL rotation: a rejected redemption publishes nothing, so
+// its concurrent losers fall through to not-found rather than replaying a
+// failure. See kdex-tech/host-manager#169.
+//
+// The cache write is best-effort: this runs after the winner's redemption
+// has already succeeded, so a Set failure here must not turn that success
+// into an error. Its only effect is that concurrent losers fall back to
+// not-found instead of replaying -- the same outcome the grace window did
+// not exist to prevent -- rather than the winner's own response failing.
+func (e *Exchanger) publishToGrace(ctx context.Context, tokenID string, ts TokenSet) {
+	if e.refreshGraceCache == nil {
+		return
+	}
+	payload, err := json.Marshal(ts)
+	if err != nil {
+		return
+	}
+	_ = e.refreshGraceCache.Set(ctx, tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
+}
+
+// replayFromGrace returns the winner's result for a token that was already
+// rotated inside the grace window. Exactly one rotation still occurred, so
+// #71's single-lineage theft-detection guarantee is preserved: losers mint
+// nothing, they receive a copy.
+//
+// A non-nil error means the grace cache itself is unreadable or its stored
+// record is corrupt — OUR infrastructure, not a fact about the presented
+// token — and is wrapped in ErrServerError so the token endpoint maps it to
+// 500 server_error rather than telling a caller its refresh token doesn't
+// exist during what may be a transient cache outage. See
+// kdex-tech/host-manager#169 and #168. A clean "never published" (or
+// not-yet-published) result is NOT an error: (TokenSet{}, false, nil).
+func (e *Exchanger) replayFromGrace(ctx context.Context, tokenID string) (TokenSet, bool, error) {
+	if e.refreshGraceCache == nil {
+		return TokenSet{}, false, nil
+	}
+	for attempt := range graceReplayAttempts {
+		raw, found, _, err := e.refreshGraceCache.Get(ctx, tokenID)
+		if err != nil {
+			return TokenSet{}, false, fmt.Errorf("%w: failed to read refresh-grace entry: %v", ErrServerError, err)
+		}
+		if found {
+			var ts TokenSet
+			if json.Unmarshal([]byte(raw), &ts) != nil {
+				return TokenSet{}, false, fmt.Errorf("%w: failed to parse refresh-grace entry", ErrServerError)
+			}
+			return ts, true, nil
+		}
+		if attempt == graceReplayAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return TokenSet{}, false, nil
+		case <-time.After(graceReplayInterval):
+		}
+	}
+	return TokenSet{}, false, nil
 }

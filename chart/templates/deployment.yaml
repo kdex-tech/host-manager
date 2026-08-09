@@ -56,6 +56,9 @@ spec:
             - --server-write-timeout={{ .writeTimeout }}
             - --server-idle-timeout={{ .idleTimeout }}
             {{- end }}
+            {{- with .Values.auth }}
+            - --refresh-grace-window={{ .refreshGraceWindow }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

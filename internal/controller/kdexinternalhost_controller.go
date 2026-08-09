@@ -69,6 +69,7 @@ type KDexInternalHostReconciler struct {
 	FocalHost           string
 	HostHandler         *host.HostHandler
 	Port                int32
+	RefreshGraceWindow  time.Duration
 	RequeueDelay        time.Duration
 	Scheme              *runtime.Scheme
 	ServiceName         string
@@ -530,6 +531,8 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		internalHost.Spec.DevMode,
 	).WithCacheManager(
 		r.HostHandler.GetCacheManager(),
+	).WithRefreshGraceWindow(
+		r.RefreshGraceWindow,
 	)
 
 	authConfig, err := authConfigBuilder.Build(internalHost.Spec.Auth)

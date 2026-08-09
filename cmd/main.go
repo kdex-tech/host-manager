@@ -95,6 +95,7 @@ func main() {
 	var proxyDialTimeout time.Duration
 	var proxyResponseHeaderTimeout time.Duration
 	var proxyIdleConnTimeout time.Duration
+	var refreshGraceWindow time.Duration
 	var serverReadHeaderTimeout time.Duration
 	var serverReadTimeout time.Duration
 	var serverWriteTimeout time.Duration
@@ -136,6 +137,11 @@ func main() {
 			"per-request; see kdex-tech/host-manager#167. 0 disables the deadline entirely.")
 	flag.DurationVar(&serverIdleTimeout, "server-idle-timeout", srvDefaults.IdleTimeout,
 		"How long an idle keep-alive connection to the inbound webserver lingers. 0 disables the deadline.")
+
+	flag.DurationVar(&refreshGraceWindow, "refresh-grace-window", 10*time.Second,
+		"How long a rotated refresh token's result stays replayable, so concurrent refreshes "+
+			"from one client do not race (RFC 9700 4.14). Exactly one rotation still occurs; "+
+			"losers replay the winner's pair. 0 restores strict single-winner rotation.")
 
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
@@ -329,6 +335,7 @@ func main() {
 		FocalHost:           focalHost,
 		HostHandler:         hostHandler,
 		Port:                webserverPort(webserverAddr),
+		RefreshGraceWindow:  refreshGraceWindow,
 		RequeueDelay:        requeueDelay,
 		Scheme:              mgr.GetScheme(),
 		ServiceName:         serviceName,

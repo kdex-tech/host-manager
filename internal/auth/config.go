@@ -69,7 +69,16 @@ type Config struct {
 	MintTokenDestructiveVerbs []string
 	MintTokenURLDelivery      bool
 	RefreshTokenTTL           time.Duration
-	Signer                    sign.Signer
+	// RefreshGraceWindow keeps a rotated refresh token's RESULT replayable
+	// for a short period so concurrent refreshes from one client do not
+	// race (RFC 9700 4.14; kdex-tech/host-manager#169). Zero disables it,
+	// restoring strict single-winner rotation.
+	//
+	// Deliberately NOT a KDexHost.spec.auth field: a CRD change would force
+	// a paired nexus-manager release. Per-host override goes through
+	// KDexHost.spec.helm.hostManager.values instead.
+	RefreshGraceWindow time.Duration
+	Signer             sign.Signer
 	// ClaimMappings are the host's spec.auth.claimMappings rules. They shape
 	// EVERY token the host issues: the session Signer above bakes them in, and
 	// the per-function FAT signer (proxy.go) prepends them to its own
@@ -114,6 +123,7 @@ type ConfigBuilder struct {
 	Issuer                 string
 	KeyLoader              func() (*keys.KeyPairs, error)
 	OIDCClientConfigLoader func() (*OIDCClientConfig, error)
+	RefreshGraceWindow     time.Duration
 }
 
 func NewConfigBuilder() *ConfigBuilder {
@@ -157,6 +167,11 @@ func (cb *ConfigBuilder) WithIssuer(issuer string) *ConfigBuilder {
 
 func (cb *ConfigBuilder) WithDevMode(devMode bool) *ConfigBuilder {
 	cb.DevMode = devMode
+	return cb
+}
+
+func (cb *ConfigBuilder) WithRefreshGraceWindow(d time.Duration) *ConfigBuilder {
+	cb.RefreshGraceWindow = d
 	return cb
 }
 
@@ -215,6 +230,7 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 			return nil, err
 		}
 		cfg.RefreshTokenTTL = refreshTokenTTL
+		cfg.RefreshGraceWindow = cb.RefreshGraceWindow
 
 		tokenTTLString := utils.IfElse(auth.JWT.TokenTTL == "", "1h", auth.JWT.TokenTTL)
 		tokenTTL, err := time.ParseDuration(tokenTTLString)

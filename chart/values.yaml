@@ -70,6 +70,15 @@ server:
   writeTimeout: 60s
   idleTimeout: 120s
 
+# Refresh-token rotation grace window (RFC 9700 4.14,
+# kdex-tech/host-manager#169). Real clients fire several refresh requests in
+# parallel; with strict rotation only one could win. Within this window a
+# concurrent caller replays the winner's pair instead of failing. Exactly one
+# rotation still happens, so rotation-based theft detection is unchanged.
+# Set to "0" for strict single-winner rotation.
+auth:
+  refreshGraceWindow: 10s
+
 fullnameOverride: ""
 
 image:

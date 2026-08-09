@@ -178,3 +178,14 @@ func TestServerTimeoutArgs_Defaults(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshGraceWindowArg pins that the chart value reaches the flag,
+// including 0 (kdex-tech/host-manager#169).
+func TestRefreshGraceWindowArg(t *testing.T) {
+	if got := renderChart(t); !strings.Contains(got, "--refresh-grace-window=10s") {
+		t.Errorf("default refresh grace window not rendered:\n%s", got)
+	}
+	if got := renderChart(t, "auth.refreshGraceWindow=0"); !strings.Contains(got, "--refresh-grace-window=0") {
+		t.Errorf("refreshGraceWindow=0 must render explicitly, not be dropped:\n%s", got)
+	}
+}
