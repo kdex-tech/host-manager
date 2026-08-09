@@ -454,6 +454,23 @@ func (e *Exchanger) RevokeRefreshToken(ctx context.Context, tokenID string) erro
 	// its predecessor, and reading it in the same atomic step keeps the
 	// revocation single-shot under concurrent logouts.
 	raw, found, _, err := e.refreshTokenCache.GetAndDelete(ctx, tokenID)
+
+	// Mark the id revoked regardless of whether a record was present. When it
+	// was NOT, the likely reason is that a concurrent redemption consumed it
+	// microseconds ago -- and that redemption may still fail and try to restore
+	// it (#172). Deleting alone cannot express "stay dead"; this can.
+	// See restoreConsumedRefreshToken.
+	if serr := e.refreshTokenCache.Set(
+		context.WithoutCancel(ctx), refreshRevokeTombstoneKey(tokenID), "1",
+		cache.WithTTL(refreshRevokeTombstoneTTL),
+	); serr != nil {
+		// Best effort: a missing tombstone degrades to the pre-tombstone
+		// behaviour (a racing restore could resurrect the token), never to a
+		// failed logout.
+		logf.FromContext(ctx).V(1).Info("refresh revocation tombstone not written",
+			"cause", serr.Error())
+	}
+
 	if e.refreshGraceCache == nil {
 		return err
 	}
@@ -465,6 +482,23 @@ func (e *Exchanger) RevokeRefreshToken(ctx context.Context, tokenID string) erro
 		}
 	}
 	return err
+}
+
+// refreshRevokeTombstoneTTL bounds how long a revocation tombstone is kept.
+//
+// A tombstone only has to outlive an IN-FLIGHT redemption: the #172 restore
+// runs in that redemption's own deferred cleanup, so the window between
+// consuming a record and restoring it is one request. Five minutes is far
+// beyond any such request (the inbound write deadline is 60s by default) while
+// keeping the entries short-lived — they exist only for tokens that were
+// explicitly revoked.
+const refreshRevokeTombstoneTTL = 5 * time.Minute
+
+// refreshRevokeTombstoneKey namespaces a tombstone away from live refresh
+// records in the same cache class. The prefix contains a character rand.Text()
+// never emits, so a tombstone can never collide with a real token id.
+func refreshRevokeTombstoneKey(tokenID string) string {
+	return "revoked:" + tokenID
 }
 
 // createRefreshToken is the internal helper that stores a refresh token in the cache.
@@ -1340,6 +1374,20 @@ func (e *Exchanger) restoreConsumedRefreshToken(ctx context.Context, tokenID, ra
 	if e.refreshTokenCache == nil {
 		return
 	}
+	// A revocation that landed while this redemption held the consumed record
+	// must win. RevokeRefreshToken revokes by DELETING, so once we have taken
+	// the record there is nothing left for it to delete -- without this check
+	// the restore below would silently undo an explicit logout and the session
+	// would survive for the rest of its term.
+	if _, revoked, _, rerr := e.refreshTokenCache.Get(
+		context.WithoutCancel(ctx), refreshRevokeTombstoneKey(tokenID),
+	); rerr == nil && revoked {
+		logf.FromContext(ctx).V(1).Info(
+			"refresh token not restored: it was revoked while the redemption was in flight",
+			"subject", claims.Subject)
+		return
+	}
+
 	remaining := time.Until(time.Unix(claims.ExpiresAt, 0))
 	if remaining <= 0 {
 		// Already expired: restoring it would only produce a record whose

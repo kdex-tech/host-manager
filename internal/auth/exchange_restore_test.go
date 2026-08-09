@@ -237,3 +237,53 @@ func TestRedeemRefreshToken_SuccessfulRotationDoesNotRestore(t *testing.T) {
 		"a successfully rotated predecessor must stay consumed — restoring it alongside its live successor would create the second lineage #71 exists to prevent")
 	assert.Empty(t, raw)
 }
+
+// TestRedeemRefreshToken_RestoreDoesNotResurrectARevokedToken closes the hole
+// the quad review found in #172.
+//
+// RevokeRefreshToken revokes BY DELETING. The #172 restore is a blind Set with
+// no way to tell "consumed by me" from "revoked while I held it", so a logout
+// racing a failing redemption is silently undone:
+//
+//  1. RedeemRefreshToken consumes T via GetAndDelete.
+//  2. The user logs out. RevokeRefreshToken(T) finds nothing — already
+//     consumed — clears the grace records and returns success.
+//  3. The redemption then fails with ErrServerError.
+//  4. The deferred restore writes T back with its remaining TTL.
+//
+// T is live again for the rest of its term (72h on the knowdrive dev host), so
+// the session survives an explicit logout. That is the replay window #84 exists
+// to close, reopened by the compensation for #172.
+func TestRedeemRefreshToken_RestoreDoesNotResurrectARevokedToken(t *testing.T) {
+	ex, c, tokenID := newRestoreFixture(t)
+	ctx := context.Background()
+
+	// The user logs out WHILE the redemption below is in flight. At this point
+	// the token is not yet consumed, so this is the ordinary revoke path.
+	require.NoError(t, ex.RevokeRefreshToken(ctx, tokenID))
+
+	// Re-seed as though the redemption had consumed it first: this is the race
+	// window — consumed, then revoked, then the redemption fails.
+	payload, err := json.Marshal(RefreshTokenClaims{
+		AuthMethod: AuthMethodLocal, ClientID: "app", Scope: "openid", Subject: "alice",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, ex.refreshTokenCache.Set(ctx, tokenID, string(payload)))
+	require.NoError(t, ex.RevokeRefreshToken(ctx, tokenID))
+	require.NoError(t, ex.refreshTokenCache.Set(ctx, tokenID, string(payload)))
+
+	c.armed.Store(true)
+	_, err = ex.RedeemRefreshToken(ctx, tokenID, "app")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrServerError), "precondition: the rotation write must fail")
+
+	// The restore must NOT have resurrected a revoked token.
+	c.armed.Store(false)
+	_, err = ex.RedeemRefreshToken(ctx, tokenID, "app")
+
+	require.Error(t, err,
+		"a revoked refresh token must stay dead; the #172 restore must not undo a logout")
+	assert.True(t, errors.Is(err, ErrGrantFailure),
+		"the resurrected-token redemption must be rejected as a grant failure, not succeed")
+}
