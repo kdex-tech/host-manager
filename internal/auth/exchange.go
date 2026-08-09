@@ -808,10 +808,12 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	if !found {
 		// A concurrent caller may have won the rotation microseconds ago.
 		// Replay its result rather than failing this one (#169). A non-nil
-		// graceErr means the grace cache itself is unreadable/corrupt --
-		// OUR infrastructure, not a fact about the presented token -- and
-		// is already wrapped in ErrServerError by replayFromGrace.
-		replayed, ok, graceErr := e.replayFromGrace(ctx, tokenID)
+		// graceErr is already fully classified by replayFromGrace: either
+		// ErrServerError (the grace cache itself is unreadable/corrupt, or
+		// our own poll was canceled -- OUR infrastructure, not a fact
+		// about the presented token) or a grantFailuref client_id mismatch
+		// (see below) -- so it is safe to return verbatim either way.
+		replayed, ok, graceErr := e.replayFromGrace(ctx, tokenID, clientID)
 		if graceErr != nil {
 			return TokenSet{}, graceErr
 		}
@@ -842,6 +844,27 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	grantFailed := func(format string, args ...any) (TokenSet, error) {
 		return TokenSet{Subject: claims.Subject}, grantFailuref(format, args...)
 	}
+
+	// The token is consumed and its record is known-good: mark it
+	// in-flight for the grace window BEFORE the (comparatively slow)
+	// validation/minting work below, so a concurrent loser's poll can tell
+	// "a rotation for this exact token is under way" from "nothing is
+	// happening, don't bother polling" -- the common case of a bogus or
+	// already-expired token presented with no concurrent redemption at all
+	// (kdex-tech/host-manager#169 fix round 2, cost finding). Cleared again
+	// on any rejection below via the deferred cleanup so a loser's poll
+	// sees the marker vanish and stops immediately rather than waiting out
+	// the full budget for a result that will never come -- the marker
+	// never survives long enough to be a second "publish" of anything a
+	// rejected redemption produced (that property -- a rejected redemption
+	// publishes no RESULT -- is unchanged; see publishToGrace below).
+	e.markGraceInFlight(ctx, tokenID, claims.ClientID)
+	published := false
+	defer func() {
+		if !published {
+			e.clearGraceInFlight(ctx, tokenID)
+		}
+	}()
 
 	// Validate expiry (belt-and-suspenders; cache TTL should cover this).
 	// The token is already consumed by GetAndDelete above, so we just
@@ -884,8 +907,17 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// SAME (now-consumed) tokenID within the grace window replays it
 	// instead of minting a second lineage. Only a successful rotation
 	// reaches here — a rejected redemption above returns before this
-	// point, so it publishes nothing. See kdex-tech/host-manager#169.
-	e.publishToGrace(ctx, tokenID, ts)
+	// point (and its deferred cleanup removes the in-flight marker instead
+	// of leaving anything published). See kdex-tech/host-manager#169.
+	//
+	// The record carries claims.ClientID -- the client the token was
+	// ORIGINALLY issued to -- so a loser presenting a different client_id
+	// against the same tokenID is rejected by replayFromGrace exactly as
+	// the strict `claims.ClientID != clientID` check above would reject
+	// it, instead of the grace window handing a live rotating credential
+	// to a caller that never owned the session.
+	e.publishToGrace(ctx, tokenID, claims.ClientID, ts)
+	published = true
 
 	return ts, nil
 }
@@ -1181,66 +1213,163 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 // sub-millisecond in memory but a network round trip under Valkey. Bounded
 // at 200ms; the winner either publishes within it or has failed, in which
 // case not-found is the correct answer.
+//
+// graceFastBailoutAttempts bounds a SHORTER leading sub-window used to
+// decide whether to poll at all. markGraceInFlight writes a lightweight
+// pending marker as a single fast cache op immediately after GetAndDelete
+// succeeds -- well before the (comparatively slow) validation/minting work
+// -- so if nothing at all (not even that marker) is visible within this
+// short sub-window, no winner exists for this token: it is bogus, expired,
+// or outside the window, and continuing to poll would only pay Valkey round
+// trips and pin a goroutine for a redemption that is never coming. This is
+// what makes an ordinary invalid refresh (the common case) cheap again: one
+// cache miss plus at most one retry, not the full 10-attempt/180ms budget.
+// See kdex-tech/host-manager#169 fix round 2 (cost finding).
 const (
-	graceReplayAttempts = 10
-	graceReplayInterval = 20 * time.Millisecond
+	graceReplayAttempts      = 10
+	graceReplayInterval      = 20 * time.Millisecond
+	graceFastBailoutAttempts = 2
 )
 
-// publishToGrace makes the winner's result replayable for the window. Called
-// only on a SUCCESSFUL rotation: a rejected redemption publishes nothing, so
-// its concurrent losers fall through to not-found rather than replaying a
-// failure. See kdex-tech/host-manager#169.
+// graceRecord is what the grace cache actually stores, keyed by the
+// CONSUMED token id. ClientID is the client the token was ORIGINALLY issued
+// to (claims.ClientID from the record RedeemRefreshToken just consumed),
+// carried so replayFromGrace can reject a caller presenting a different
+// client_id exactly as the strict `claims.ClientID != clientID` check does
+// on the non-grace path -- without it, the grace window would hand a live
+// rotating credential to any caller that merely knew the consumed token id.
+// See kdex-tech/host-manager#169 (CRITICAL review finding).
 //
-// The cache write is best-effort: this runs after the winner's redemption
-// has already succeeded, so a Set failure here must not turn that success
-// into an error. Its only effect is that concurrent losers fall back to
-// not-found instead of replaying -- the same outcome the grace window did
-// not exist to prevent -- rather than the winner's own response failing.
-func (e *Exchanger) publishToGrace(ctx context.Context, tokenID string, ts TokenSet) {
+// Pending marks an in-flight marker written by markGraceInFlight before the
+// winner has minted anything: TokenSet is the zero value until
+// publishToGrace overwrites the same key with the real result. See
+// markGraceInFlight / clearGraceInFlight.
+type graceRecord struct {
+	ClientID string   `json:"cid"`
+	Pending  bool     `json:"pending,omitempty"`
+	TokenSet TokenSet `json:"ts"`
+}
+
+// graceCacheSet is the shared best-effort write path for both the in-flight
+// marker and the final result: it always uses a context detached from the
+// caller's own (context.WithoutCancel), because both writes matter to OTHER
+// concurrent callers, not to whether THIS caller's own request is still
+// live. Without this, a winner whose client disconnects or whose deadline
+// fires between mint and publish would cancel `ctx`, the Set would fail,
+// nothing would be published, and every loser would fall through to
+// not-found -- precisely the #169 scenario a request that times out and
+// triggers a retry burst is the canonical trigger for. See
+// kdex-tech/host-manager#169 fix round 2 (IMPORTANT finding).
+func (e *Exchanger) graceCacheSet(ctx context.Context, tokenID string, rec graceRecord) {
 	if e.refreshGraceCache == nil {
 		return
 	}
-	payload, err := json.Marshal(ts)
+	payload, err := json.Marshal(rec)
 	if err != nil {
 		return
 	}
-	_ = e.refreshGraceCache.Set(ctx, tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
+	_ = e.refreshGraceCache.Set(context.WithoutCancel(ctx), tokenID, string(payload), cache.WithTTL(e.refreshGraceWindow))
+}
+
+// markGraceInFlight publishes the lightweight in-flight marker described on
+// graceRecord. Called immediately after the token is consumed and its
+// record parses cleanly -- before the validation checks and minting in
+// RedeemRefreshToken -- so a concurrent loser's poll can distinguish "a
+// rotation for this token is happening right now" from "nothing is
+// happening" almost as fast as the winner's own GetAndDelete completed.
+func (e *Exchanger) markGraceInFlight(ctx context.Context, tokenID, clientID string) {
+	e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, Pending: true})
+}
+
+// clearGraceInFlight removes the in-flight marker after a redemption that
+// consumed the token but was then rejected (expired, session cap, client_id
+// mismatch, or a minting/rotation failure), so a concurrent loser's poll
+// sees the marker vanish and stops immediately instead of waiting out the
+// full budget for a result that is never coming. It does NOT weaken "a
+// rejected redemption publishes nothing": the marker it removes never
+// carried a result, only the fact that a (now-rejected) redemption was
+// attempted.
+func (e *Exchanger) clearGraceInFlight(ctx context.Context, tokenID string) {
+	if e.refreshGraceCache == nil {
+		return
+	}
+	_ = e.refreshGraceCache.Delete(context.WithoutCancel(ctx), tokenID)
+}
+
+// publishToGrace makes the winner's result replayable for the window,
+// overwriting whatever in-flight marker markGraceInFlight left. Called only
+// on a SUCCESSFUL rotation: a rejected redemption never reaches this call
+// (its deferred cleanup in RedeemRefreshToken clears the marker instead), so
+// its concurrent losers fall through to not-found rather than replaying a
+// failure. See kdex-tech/host-manager#169.
+func (e *Exchanger) publishToGrace(ctx context.Context, tokenID, clientID string, ts TokenSet) {
+	e.graceCacheSet(ctx, tokenID, graceRecord{ClientID: clientID, TokenSet: ts})
 }
 
 // replayFromGrace returns the winner's result for a token that was already
-// rotated inside the grace window. Exactly one rotation still occurred, so
-// #71's single-lineage theft-detection guarantee is preserved: losers mint
-// nothing, they receive a copy.
+// rotated inside the grace window, for a caller presenting the SAME
+// client_id the token was originally issued to. Exactly one rotation still
+// occurred, so #71's single-lineage theft-detection guarantee is preserved:
+// losers mint nothing, they receive a copy.
 //
-// A non-nil error means the grace cache itself is unreadable or its stored
-// record is corrupt — OUR infrastructure, not a fact about the presented
-// token — and is wrapped in ErrServerError so the token endpoint maps it to
-// 500 server_error rather than telling a caller its refresh token doesn't
-// exist during what may be a transient cache outage. See
-// kdex-tech/host-manager#169 and #168. A clean "never published" (or
-// not-yet-published) result is NOT an error: (TokenSet{}, false, nil).
-func (e *Exchanger) replayFromGrace(ctx context.Context, tokenID string) (TokenSet, bool, error) {
+// A non-nil error is already fully classified:
+//   - a client_id mismatch on a live grace record is a grantFailuref, the
+//     exact rejection and message the strict (non-grace) path uses for the
+//     same case, so a caller cannot use the grace window to bypass client
+//     binding (kdex-tech/host-manager#169 CRITICAL review finding).
+//   - an unreadable/corrupt grace cache entry, or this poll's own context
+//     being canceled (OUR deadline, not a fact about the presented token),
+//     is ErrServerError so the token endpoint maps it to 500 server_error
+//     rather than telling a caller its refresh token doesn't exist. See
+//     kdex-tech/host-manager#168 and #169 fix round 2.
+//
+// A clean "nothing published" (or "published and rejected", once the
+// in-flight marker has been cleared) result is NOT an error:
+// (TokenSet{}, false, nil).
+func (e *Exchanger) replayFromGrace(ctx context.Context, tokenID, clientID string) (TokenSet, bool, error) {
 	if e.refreshGraceCache == nil {
 		return TokenSet{}, false, nil
 	}
+	sawInFlight := false
 	for attempt := range graceReplayAttempts {
 		raw, found, _, err := e.refreshGraceCache.Get(ctx, tokenID)
 		if err != nil {
 			return TokenSet{}, false, fmt.Errorf("%w: failed to read refresh-grace entry: %v", ErrServerError, err)
 		}
 		if found {
-			var ts TokenSet
-			if json.Unmarshal([]byte(raw), &ts) != nil {
+			var rec graceRecord
+			if json.Unmarshal([]byte(raw), &rec) != nil {
 				return TokenSet{}, false, fmt.Errorf("%w: failed to parse refresh-grace entry", ErrServerError)
 			}
-			return ts, true, nil
+			if rec.Pending {
+				// A rotation is confirmed in progress; keep polling below
+				// for the real result within the full budget.
+				sawInFlight = true
+			} else {
+				if rec.ClientID != clientID {
+					return TokenSet{}, false, grantFailuref("refresh token was not issued to this client")
+				}
+				return rec.TokenSet, true, nil
+			}
+		} else if sawInFlight {
+			// The in-flight marker we previously observed is gone: the
+			// winner consumed the token, marked it in-flight, then
+			// rejected the redemption and cleared the marker. Stop now
+			// rather than burning the remaining poll budget on a result
+			// that will never arrive.
+			return TokenSet{}, false, nil
+		} else if attempt == graceFastBailoutAttempts-1 {
+			// Nothing published at all within the fast-bailout window --
+			// not even the in-flight marker, which a winner writes
+			// immediately. No rotation is happening for this token.
+			return TokenSet{}, false, nil
 		}
 		if attempt == graceReplayAttempts-1 {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return TokenSet{}, false, nil
+			return TokenSet{}, false, fmt.Errorf("%w: refresh-grace replay canceled: %v", ErrServerError, ctx.Err())
 		case <-time.After(graceReplayInterval):
 		}
 	}
