@@ -214,10 +214,17 @@ type KDexFunctionHandler struct {
 	oauth2Resource string
 	// issuer is the host's issuer address, captured at handler-build time.
 	issuer string
-	// mintTokenEnabled opts this (oauth2-protected) MCP function into the AS
-	// mint_token augmentation: tools/call name=mint_token is handled locally
-	// and tools/list responses gain the mint_token descriptor. See #280.
-	mintTokenEnabled bool
+	// asToolsEnabled opts this (oauth2-protected) MCP function into the AS tool
+	// augmentation: a tools/call for an AS-provided tool is answered locally and
+	// never forwarded, and tools/list responses gain that tool's descriptor.
+	//
+	// It currently covers BOTH mint_token and whoami (see whoami.go), and is
+	// still driven by spec.auth.mintToken.enabled -- so disabling mint_token
+	// also removes whoami. That coupling is deliberate for now (they are peers
+	// on one interception path and share one splice) but it is NOT obvious from
+	// the CR field name, so an operator turning mint_token off should expect
+	// whoami to disappear with it.
+	asToolsEnabled bool
 }
 
 func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

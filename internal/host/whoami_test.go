@@ -171,7 +171,7 @@ func TestReverseProxy_InterceptsWhoamiCall(t *testing.T) {
 func TestSpliceIncludesWhoamiDescriptor(t *testing.T) {
 	in := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"existing"}]}}`)
 
-	out, ok := spliceMintTokenDescriptor(in, "https://dev.example/-/openapi")
+	out, ok := spliceASToolDescriptors(in, "https://dev.example/-/openapi")
 	require.True(t, ok)
 
 	var env struct {

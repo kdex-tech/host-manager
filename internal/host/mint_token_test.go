@@ -143,7 +143,7 @@ func TestIsMintTokenCall(t *testing.T) {
 func TestSpliceMintTokenDescriptor(t *testing.T) {
 	g := NewWithT(t)
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search_atoms"}]}}`)
-	out, ok := spliceMintTokenDescriptor(resp, "https://dev.knowdrive.ai/-/openapi")
+	out, ok := spliceASToolDescriptors(resp, "https://dev.knowdrive.ai/-/openapi")
 	g.Expect(ok).To(BeTrue())
 
 	var parsed jsonRPCResponse
@@ -177,7 +177,7 @@ func TestSpliceMintTokenDescriptor(t *testing.T) {
 func TestSpliceMintTokenDescriptor_FallsBackWithoutURL(t *testing.T) {
 	g := NewWithT(t)
 	resp := []byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)
-	out, ok := spliceMintTokenDescriptor(resp, "")
+	out, ok := spliceASToolDescriptors(resp, "")
 	g.Expect(ok).To(BeTrue())
 
 	var parsed jsonRPCResponse

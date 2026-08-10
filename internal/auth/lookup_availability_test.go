@@ -158,3 +158,31 @@ func TestScopeProvider_NotPresentContinuesToNextLookup(t *testing.T) {
 		"a subject absent from lookup #1 must still be looked for in lookup #2")
 	assert.Equal(t, "alice", claims["sub"])
 }
+
+// TestLDAPLookup_InfrastructureFailuresAreUnavailable completes #171 for the
+// ldapLookup paths the original change missed.
+//
+// Only the SEARCH failure was marked. A dial failure and a service-account bind
+// failure -- between them the most common LDAP outages -- still returned an
+// unmarked error, so scopeProvider passed them through as a rejection and the
+// token endpoint answered 400 invalid_grant. That is precisely the behaviour
+// #171 exists to fix: a client told its credential is dead during OUR outage
+// discards a working refresh token and forces the user to re-authenticate.
+//
+// A dial failure is provoked with an address nothing is listening on; both
+// paths are reached before any credential is evaluated, so no LDAP server is
+// needed to distinguish them.
+func TestLDAPLookup_InfrastructureFailuresAreUnavailable(t *testing.T) {
+	ll := &ldapLookup{
+		addr:     "ldap://127.0.0.1:1", // nothing listens here
+		bindUser: "cn=svc,dc=example,dc=test",
+		bindPass: "irrelevant",
+		baseDN:   "dc=example,dc=test",
+	}
+
+	_, _, err := ll.FindInternal("alice", "hunter2")
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrLookupUnavailable),
+		"an unreachable LDAP server is OUR outage, not a verdict on the caller's password")
+}

@@ -192,21 +192,28 @@ func isWhoamiCall(body []byte) (json.RawMessage, bool) {
 // arrives populated by the time this runs. Only a scope-limited OAuth2
 // delegation is narrowed, which is the point.
 //
+// The exchanger is passed IN rather than read off the handler: hh.authExchanger
+// is written under hh.mu by SetHost and read under RLock everywhere else, and
+// this runs on the request goroutine. proxy.go already snapshots it under RLock
+// in the closure that calls this, so taking it as a parameter removes an
+// unguarded read that raced every host reconcile -- the torn-interface hazard
+// #88 documents.
+//
 // Entitlements are DELIBERATELY exempt from that rule: they are the caller's own
 // authority rather than personal data, and reporting them fully is the whole
 // point of the tool. See applyEffectiveEntitlements.
-func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage) {
+func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage, exchanger *auth.Exchanger) {
 	w.Header().Set("Content-Type", "application/json")
 
 	ac, _ := auth.GetAuthContext(r.Context())
 	res, err := whoamiFromAuthContext(ac)
-	if err == nil && hh.authExchanger != nil {
+	if err == nil && exchanger != nil {
 		// In-memory only: role bindings and the roles->entitlements table are
 		// preloaded, so this is a map lookup plus a regex scan, not a backend
 		// call. It is the same resolution the PAT bridge already performs per
 		// request.
 		sub, _ := ac["sub"].(string)
-		_, effective, rerr := hh.authExchanger.ResolveInternalRolesAndEntitlements(sub)
+		_, effective, rerr := exchanger.ResolveInternalRolesAndEntitlements(sub)
 		if rerr == nil {
 			res = applyEffectiveEntitlements(res, effective)
 		}

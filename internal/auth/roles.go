@@ -365,7 +365,10 @@ func (ll *ldapLookup) FindInternal(subject string, password string) (bool, jwt.M
 	// 1. Dial on every auth request (or use a pool)
 	l, err := ldap.DialURL(ll.addr)
 	if err != nil {
-		return false, nil, fmt.Errorf("connection error: %w", err)
+		// The server is unreachable: we learned nothing about the credential.
+		// Unmarked, this reached the token endpoint as 400 invalid_grant and
+		// told the client its credential was dead during OUR outage (#171).
+		return false, nil, fmt.Errorf("%w: ldapLookup: connection error: %w", ErrLookupUnavailable, err)
 	}
 	defer func() {
 		if err := l.Close(); err != nil {
@@ -375,7 +378,9 @@ func (ll *ldapLookup) FindInternal(subject string, password string) (bool, jwt.M
 
 	// 2. Bind with the pre-configured Service Account
 	if err := l.Bind(ll.bindUser, ll.bindPass); err != nil {
-		return false, nil, fmt.Errorf("service bind failed: %w", err)
+		// OUR service account, not the caller's credential -- the caller's
+		// password has not been evaluated at this point.
+		return false, nil, fmt.Errorf("%w: ldapLookup: service bind failed: %w", ErrLookupUnavailable, err)
 	}
 
 	// 3. Search for the user

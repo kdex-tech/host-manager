@@ -490,12 +490,15 @@ func openapiDiscoveryURL(r *http.Request) string {
 	return (&url.URL{Scheme: fwdScheme(r), Host: host, Path: "/-/openapi"}).String()
 }
 
-// spliceMintTokenDescriptor appends the mint_token descriptor to result.tools of
+// spliceASToolDescriptors appends the mint_token descriptor to result.tools of
 // a tools/list JSON-RPC response, embedding discoveryURL (the caller-facing
 // /-/openapi endpoint, or "" for the static fallback) in its description.
 // Returns (original, false) if the shape isn't a tools array (e.g. an SSE frame
 // or an error response), so callers pass through.
-func spliceMintTokenDescriptor(respBody []byte, discoveryURL string) ([]byte, bool) {
+// spliceASToolDescriptors appends every AS-provided tool descriptor to a
+// forwarded tools/list result. Named for the set rather than for mint_token
+// alone, which it outgrew when whoami joined it.
+func spliceASToolDescriptors(respBody []byte, discoveryURL string) ([]byte, bool) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return respBody, false

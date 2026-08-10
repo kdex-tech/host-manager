@@ -898,6 +898,23 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		if ok {
 			return replayed, nil
 		}
+		// Before declaring the grant dead, check whether the record came BACK
+		// while we were polling. #169 documents concurrent bursts of 4-5 as
+		// routine; when the winner of such a burst fails with ErrServerError,
+		// #172 restores the record -- but the losers are already past their own
+		// GetAndDelete and see only a cleared marker. Telling them
+		// invalid_grant makes standard OAuth clients discard a credential that
+		// is demonstrably live, defeating that compensation for every caller
+		// but one.
+		//
+		// A restored record means the failure was OURS and is retryable, so it
+		// is classified as such rather than as a fact about the grant.
+		if _, restored, _, gerr := e.refreshTokenCache.Get(ctx, tokenID); gerr == nil && restored {
+			return TokenSet{}, fmt.Errorf(
+				"%w: a concurrent redemption of this refresh token failed and was rolled back; retry",
+				ErrServerError)
+		}
+
 		// This is the literal kdex-tech/host-manager#168 reproduction: a
 		// dead/unknown refresh token is squarely ABOUT the presented grant,
 		// so it is marked safe to describe.

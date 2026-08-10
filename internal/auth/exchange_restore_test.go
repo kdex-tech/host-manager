@@ -287,3 +287,64 @@ func TestRedeemRefreshToken_RestoreDoesNotResurrectARevokedToken(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrGrantFailure),
 		"the resurrected-token redemption must be rejected as a grant failure, not succeed")
 }
+
+// lateRestoreCache models the loser's exact position in a concurrent burst:
+// its GetAndDelete MISSES (the winner consumed the record first), and by the
+// time the grace poll gives up the winner's #172 restore has landed, so a
+// direct Get now finds the record.
+type lateRestoreCache struct {
+	cache.Cache
+	tokenID string
+	raw     string
+}
+
+func (c lateRestoreCache) GetAndDelete(ctx context.Context, key string) (string, bool, bool, error) {
+	if key == c.tokenID {
+		return "", false, false, nil // the winner got there first
+	}
+	return c.Cache.GetAndDelete(ctx, key)
+}
+
+func (c lateRestoreCache) Get(ctx context.Context, key string) (string, bool, bool, error) {
+	if key == c.tokenID {
+		return c.raw, true, true, nil // the restore has since landed
+	}
+	return c.Cache.Get(ctx, key)
+}
+
+// TestRedeemRefreshToken_LoserGetsRetryableErrorWhenTokenWasRestored closes the
+// gap the quad review found between #169 and #172.
+//
+// #169 documents concurrent refresh bursts of 4-5 as ROUTINE. When the winner
+// of such a burst fails with ErrServerError, #172 restores the record — but the
+// losers are already past their own GetAndDelete and are polling the grace
+// cache. They see the marker cleared, fall through to not-found, and are told
+// 400 invalid_grant: "your credential is dead, re-authorize". Standard OAuth
+// clients discard a refresh token on invalid_grant.
+//
+// So #172's compensation was defeated for every caller but one, in exactly the
+// scenario #169 calls normal. A loser must instead be told the failure is
+// RETRYABLE, because the token it presented is live again.
+func TestRedeemRefreshToken_LoserGetsRetryableErrorWhenTokenWasRestored(t *testing.T) {
+	ex := newRotationTestExchanger(t)
+	ctx := context.Background()
+
+	raw, err := json.Marshal(RefreshTokenClaims{
+		AuthMethod: AuthMethodLocal, ClientID: "app", Scope: "openid", Subject: "alice",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+
+	ex.refreshTokenCache = lateRestoreCache{
+		Cache: ex.refreshTokenCache, tokenID: "consumed-by-winner", raw: string(raw),
+	}
+
+	_, err = ex.RedeemRefreshToken(ctx, "consumed-by-winner", "app")
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrServerError),
+		"the presented token is demonstrably live again, so the loser must get a RETRYABLE "+
+			"error; invalid_grant makes standard OAuth clients discard a working credential")
+	assert.False(t, errors.Is(err, ErrGrantFailure),
+		"it must not be classified as a fact about the grant")
+}

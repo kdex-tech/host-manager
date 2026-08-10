@@ -275,7 +275,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				raw, rerr := io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 				if rerr == nil {
-					if spliced, ok := spliceMintTokenDescriptor(raw, discoveryURL); ok {
+					if spliced, ok := spliceASToolDescriptors(raw, discoveryURL); ok {
 						raw = spliced
 					}
 					resp.Body = io.NopCloser(bytes.NewReader(raw))
@@ -386,7 +386,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	}
 
 	if fh.oauth2Protected && hh.authConfig != nil && hh.authConfig.MintTokenEnabled {
-		fh.mintTokenEnabled = true
+		fh.asToolsEnabled = true
 	}
 
 	// Capture the start time and log the completion
@@ -611,7 +611,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// oauth2-protected MCP function. A tools/call for mint_token is handled
 		// locally (never forwarded); a tools/list is marked so ModifyResponse
 		// can splice the descriptor. All other bodies pass through untouched.
-		if fh.mintTokenEnabled && r.Method == http.MethodPost && r.Body != nil {
+		if fh.asToolsEnabled && r.Method == http.MethodPost && r.Body != nil {
 			// Peek up to maxMintPeekBytes+1 to classify the JSON-RPC body without
 			// buffering an arbitrarily large request.
 			peek, rerr := io.ReadAll(io.LimitReader(r.Body, maxMintPeekBytes+1))
@@ -631,7 +631,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// forwarded, because only the AS knows who the caller is — the
 				// backend sees a proxied request, not the credential.
 				if id, matched := isWhoamiCall(peek); matched {
-					hh.writeWhoamiRPC(w, r, id)
+					// authExchanger was snapshotted under hh.mu.RLock above.
+					hh.writeWhoamiRPC(w, r, id, authExchanger)
 					return
 				}
 				if isToolsListCall(peek) {
