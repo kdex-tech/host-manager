@@ -24,7 +24,13 @@ else on that route (every knowdb tool, the SSE `GET` stream, `initialize`,
 
 | On the wire | host-manager does |
 |---|---|
-| `tools/list` response | **splices** the `mint_token` descriptor into `result.tools` (via `ModifyResponse`) so connectors discover it. knowdb's own tools are untouched. |
+| `tools/list` response | **splices** the AS tool descriptors — `mint_token` **and `whoami`** — into `result.tools` (via `ModifyResponse`) so connectors discover them. knowdb's own tools are untouched. |
+
+> **`whoami` rides this same path.** It is answered locally like `mint_token`,
+> advertised by the same splice, and gated by the same
+> `spec.auth.mintToken.enabled` flag — so **disabling `mint_token` also removes
+> `whoami`**. If an operator reports that `whoami` is missing, check that flag
+> first.
 | `tools/call` with `name == "mint_token"` | **handled locally, never forwarded** to knowdb. Mints the token and returns the JSON-RPC result. |
 
 Minting (`internal/host/mint_token.go` → `mintCapabilityToken`):
@@ -178,7 +184,7 @@ the ttl expires) the token stops working.
 ## 5. Verify (smoke test)
 
 1. **Descriptor present:** call `tools/list` on the MCP function; assert
-   `mint_token` is in `result.tools` and knowdb's tools are still there.
+   `mint_token` and `whoami` are in `result.tools` and knowdb's tools are still there.
 2. **Mint within held set:** `tools/call mint_token` with an entitlement you
    hold → non-empty `token`, `uses_remaining` = clamped `uses`.
 3. **Attenuation rejects:** request an entitlement you do **not** hold → tool
