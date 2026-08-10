@@ -324,19 +324,37 @@ type jsonRPCResponse struct {
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
 
-// isMintTokenCall returns the request id, parsed arguments, and true when body
-// is a single JSON-RPC tools/call for the mint_token tool. Batch (array) bodies
-// and any other method/tool return matched=false (passthrough). MCP revision
-// 2025-06-18 removed batching, so only the single-object shape is intercepted.
-func isMintTokenCall(body []byte) (json.RawMessage, MintTokenRequest, bool) {
-	trimmed := strings.TrimLeft(string(body), " \t\r\n")
-	if !strings.HasPrefix(trimmed, "{") {
-		return nil, MintTokenRequest{}, false
+// parseSingleJSONRPC decodes a request body as ONE JSON-RPC object.
+//
+// Batch (array) bodies and anything unparseable return ok=false so the proxy
+// forwards them untouched; MCP revision 2025-06-18 removed batching, so only
+// the single-object shape is ever intercepted. Every interception predicate
+// below shares this, so that rule lives in one place -- and, more practically,
+// the body is copied and parsed ONCE per request rather than once per
+// predicate. With three predicates and a 256 KiB tools/call payload that was
+// ~+43% CPU and ~+541 KiB of transient allocation for nothing.
+func parseSingleJSONRPC(body []byte) (jsonRPCRequest, bool) {
+	if len(body) == 0 || body[0] != '{' {
+		// Fast path on the raw bytes: skip only leading whitespace, and only
+		// if the first non-space byte is not '{'.
+		i := 0
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' || body[i] == '\n') {
+			i++
+		}
+		if i >= len(body) || body[i] != '{' {
+			return jsonRPCRequest{}, false
+		}
 	}
 	var req jsonRPCRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, MintTokenRequest{}, false
+		return jsonRPCRequest{}, false
 	}
+	return req, true
+}
+
+// isMintTokenCall returns the request id, parsed arguments, and true when the
+// already-parsed request is a tools/call for the mint_token tool.
+func isMintTokenCall(req jsonRPCRequest) (json.RawMessage, MintTokenRequest, bool) {
 	if req.Method != "tools/call" || req.Params.Name != toolNameMintToken {
 		return nil, MintTokenRequest{}, false
 	}
@@ -431,16 +449,8 @@ func mintTokenDescriptor(discoveryURL string) map[string]any {
 	}
 }
 
-// isToolsListCall reports whether body is a single JSON-RPC tools/list request.
-func isToolsListCall(body []byte) bool {
-	trimmed := strings.TrimLeft(string(body), " \t\r\n")
-	if !strings.HasPrefix(trimmed, "{") {
-		return false
-	}
-	var req jsonRPCRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return false
-	}
+// isToolsListCall reports whether the already-parsed request is a tools/list.
+func isToolsListCall(req jsonRPCRequest) bool {
 	return req.Method == "tools/list"
 }
 

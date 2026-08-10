@@ -620,7 +620,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// original body is drained, so close it and forward the buffer.
 				_ = r.Body.Close()
 				r.Body = io.NopCloser(bytes.NewReader(peek))
-				if id, args, matched := isMintTokenCall(peek); matched {
+				parsed, isJSONRPC := parseSingleJSONRPC(peek)
+				if id, args, matched := isMintTokenCall(parsed); isJSONRPC && matched {
 					ac, _ := auth.GetAuthContext(r.Context())
 					sub, _ := ac["sub"].(string)
 					held := stringSliceFromClaim(ac["entitlements"])
@@ -630,12 +631,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// whoami is a peer of mint_token: answered by the AS and never
 				// forwarded, because only the AS knows who the caller is — the
 				// backend sees a proxied request, not the credential.
-				if id, matched := isWhoamiCall(peek); matched {
+				if id, matched := isWhoamiCall(parsed); isJSONRPC && matched {
 					// authExchanger was snapshotted under hh.mu.RLock above.
 					hh.writeWhoamiRPC(w, r, id, authExchanger)
 					return
 				}
-				if isToolsListCall(peek) {
+				if isJSONRPC && isToolsListCall(parsed) {
 					// Resolve the caller-facing /-/openapi discovery URL from the
 					// INBOUND request here, where the ingress/Traefik-provided
 					// X-Forwarded-* headers are intact — the outbound request's

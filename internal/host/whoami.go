@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
 )
@@ -156,19 +155,10 @@ func applyEffectiveEntitlements(res WhoamiResult, resolved []string) WhoamiResul
 	return res
 }
 
-// isWhoamiCall returns the request id and true when body is a single JSON-RPC
-// tools/call for whoami. Batch (array) bodies and any other method/tool return
-// matched=false (passthrough), matching isMintTokenCall — MCP revision
-// 2025-06-18 removed batching, so only the single-object shape is intercepted.
-func isWhoamiCall(body []byte) (json.RawMessage, bool) {
-	trimmed := strings.TrimLeft(string(body), " \t\r\n")
-	if !strings.HasPrefix(trimmed, "{") {
-		return nil, false
-	}
-	var req jsonRPCRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, false
-	}
+// isWhoamiCall returns the request id and true when the already-parsed request
+// is a tools/call for whoami. The single-object/batch rule lives in
+// parseSingleJSONRPC, which every predicate shares.
+func isWhoamiCall(req jsonRPCRequest) (json.RawMessage, bool) {
 	if req.Method != "tools/call" || req.Params.Name != toolNameWhoami {
 		return nil, false
 	}

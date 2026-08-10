@@ -33,7 +33,11 @@ func TestIsWhoamiCall_MatchesOnlyItsOwnTool(t *testing.T) {
 		{"not json", `whoami please`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, matched := isWhoamiCall([]byte(tc.body))
+			req, ok := parseSingleJSONRPC([]byte(tc.body))
+			matched := false
+			if ok {
+				_, matched = isWhoamiCall(req)
+			}
 			assert.Equal(t, tc.want, matched)
 		})
 	}

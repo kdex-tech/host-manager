@@ -151,7 +151,7 @@ func (hh *HostHandler) oauthRegisterHandler(w http.ResponseWriter, r *http.Reque
 			// Nothing survived. Registering it anyway would hand back a working
 			// client for a grant the caller never asked for, so say no instead.
 			writeRegisterError(w, http.StatusBadRequest, "invalid_client_metadata",
-				"grant_types must include at least one of: authorization_code, refresh_token")
+				"grant_types must include at least one of: "+strings.Join(dcrSupportedGrantTypes, ", "))
 			return
 		}
 	}

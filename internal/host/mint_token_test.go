@@ -127,17 +127,23 @@ func TestMintCapabilityToken_ProvisionsCounter(t *testing.T) {
 func TestIsMintTokenCall(t *testing.T) {
 	g := NewWithT(t)
 	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mint_token","arguments":{"entitlements":["pages:/:read"],"ttl_seconds":30}}}`)
-	id, args, matched := isMintTokenCall(body)
+	parsed, isRPC := parseSingleJSONRPC(body)
+	g.Expect(isRPC).To(BeTrue())
+	id, args, matched := isMintTokenCall(parsed)
 	g.Expect(matched).To(BeTrue())
 	g.Expect(string(id)).To(Equal("7"))
 	g.Expect(args.Entitlements).To(Equal([]string{"pages:/:read"}))
 	g.Expect(args.TTLSeconds).To(Equal(30))
 
-	_, _, m2 := isMintTokenCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_atoms"}}`))
+	other, isRPC2 := parseSingleJSONRPC([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_atoms"}}`))
+	g.Expect(isRPC2).To(BeTrue())
+	_, _, m2 := isMintTokenCall(other)
 	g.Expect(m2).To(BeFalse())
 
-	_, _, m3 := isMintTokenCall([]byte(`[{"jsonrpc":"2.0"}]`)) // batch passthrough
-	g.Expect(m3).To(BeFalse())
+	// Batch arrays are rejected by the shared parser, so no predicate ever sees
+	// them -- the single-object rule now lives in exactly one place.
+	_, batchIsRPC := parseSingleJSONRPC([]byte(`[{"jsonrpc":"2.0"}]`))
+	g.Expect(batchIsRPC).To(BeFalse())
 }
 
 func TestSpliceMintTokenDescriptor(t *testing.T) {
@@ -235,8 +241,10 @@ func TestOpenapiDiscoveryURL(t *testing.T) {
 
 func TestIsToolsListCall(t *testing.T) {
 	g := NewWithT(t)
-	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))).To(BeTrue())
-	g.Expect(isToolsListCall([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))).To(BeFalse())
+	listReq, _ := parseSingleJSONRPC([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	g.Expect(isToolsListCall(listReq)).To(BeTrue())
+	callReq, _ := parseSingleJSONRPC([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`))
+	g.Expect(isToolsListCall(callReq)).To(BeFalse())
 }
 
 // mintProxyDomain / mintProxyBasePath mirror the oauth2 e2e fixtures' naming
