@@ -123,9 +123,31 @@ func TestWaitOnValkeyImage_DefaultIsMultiArch(t *testing.T) {
 	if strings.Contains(img, "cli-tools:0.3.9") {
 		t.Fatalf("default wait-on-valkey image is the arm64-broken cli-tools:0.3.9 (#107); got %q", img)
 	}
-	if want := "ghcr.io/kdex-tech/cli-tools:0.3.18"; img != want {
-		t.Fatalf("default wait-on-valkey image = %q, want %q", img, want)
+	// Assert the rendered default against values.yaml rather than a fourth
+	// hardcoded copy. The version already lives in values.yaml AND as the
+	// template's `default` fallback; a literal here made three places to bump
+	// in lockstep, and this test would have been the one to notice last.
+	want := waitImageFromValues(t)
+	if img != want {
+		t.Fatalf("default wait-on-valkey image = %q, want %q (from chart/values.yaml)", img, want)
 	}
+}
+
+// waitImageFromValues reads valkey.waitImage straight out of chart/values.yaml,
+// so the test tracks the chart instead of duplicating it.
+func waitImageFromValues(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("values.yaml")
+	if err != nil {
+		t.Fatalf("read values.yaml: %v", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "waitImage:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "waitImage:"))
+		}
+	}
+	t.Fatal("valkey.waitImage not found in chart/values.yaml")
+	return ""
 }
 
 // TestWaitOnValkeyImage_Overridable pins #108: operators must be able to point

@@ -180,7 +180,11 @@ valkey:
   # service before the server starts). Overridable so operators can point it
   # at a known-good / multi-arch tag without forking the chart. Must provide
   # bash + /dev/tcp + timeout. See kdex-tech/host-manager#107, #108.
-  waitImage: ghcr.io/kdex-tech/cli-tools:0.3.18
+  #
+  # NOTE: templates/deployment.yaml repeats this as its `default` fallback, so
+  # the two must be bumped together — a stale fallback surfaces whenever an
+  # operator sets valkey without waitImage.
+  waitImage: ghcr.io/kdex-tech/cli-tools:0.3.19
 
   # Valkey chart values
   dataStorage:

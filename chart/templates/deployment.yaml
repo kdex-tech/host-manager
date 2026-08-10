@@ -114,7 +114,7 @@ spec:
 
                   sleep 2
               done
-          image: {{ .Values.valkey.waitImage | default "ghcr.io/kdex-tech/cli-tools:0.3.18" }}
+          image: {{ .Values.valkey.waitImage | default "ghcr.io/kdex-tech/cli-tools:0.3.19" }}
           imagePullPolicy: IfNotPresent
           name: wait-on-valkey
           securityContext:
