@@ -89,8 +89,8 @@ func whoamiFromAuthContext(ac auth.AuthContext) (WhoamiResult, error) {
 	}, nil
 }
 
-// applyEffectiveEntitlements replaces the CARRIED entitlements with the user's
-// EFFECTIVE ones, and flags the gap when the two differ.
+// applyEffectiveEntitlements reports the UNION of what the credential carries
+// and what the user's role bindings resolve to, and flags the gap between them.
 //
 // whoami is a REPORTING tool. It grants nothing, so the question it answers is
 // "what can I do", about the USER — not "what can this token do". Those come
@@ -106,15 +106,28 @@ func whoamiFromAuthContext(ac auth.AuthContext) (WhoamiResult, error) {
 // the wider set, but narrowing the report would answer a question nobody asked
 // and would make whoami useless for the caller most likely to need it.
 //
-// Because the report is therefore wider than the credential, a caller could
-// reasonably attempt something the gate will deny. EntitlementsWithheld says
-// so explicitly rather than leaving them to discover it as a 403.
+// UNION, not replacement. The two inputs are different sets and NEITHER is a
+// superset of the other:
 //
-// An empty effective set is a resolution failure (no bindings, or a provider
-// without the capability), never an answer: it must not erase what the
-// credential demonstrably carries.
-func applyEffectiveEntitlements(res WhoamiResult, effective []string) WhoamiResult {
-	if len(effective) == 0 {
+//   - carried is the auth context, already through EnrichAuthContext on the
+//     proxy path (proxy.go:547, ahead of this interception), so it includes
+//     anything the host's claimMappings folded in — on the knowdrive dev host
+//     that is `self.vs_entitlements`, the per-vector-store grants. mint_token
+//     reads exactly this set as `held`.
+//   - resolved is ResolveInternalRolesAndEntitlements: KDexRoleBinding grants
+//     only, which never include those.
+//
+// Replacing carried with resolved dropped precisely the per-vector-store
+// entitlements an agent needs and reported LESS than mint_token would accept.
+//
+// EntitlementsWithheld flags only resolved-minus-carried. A grant the
+// credential carries but the role set does not is exercisable right now, so
+// nothing is being withheld and warning about it would be noise.
+//
+// An empty resolved set is a resolution failure (no bindings, or a provider
+// without the capability), never an answer: it leaves the carried set alone.
+func applyEffectiveEntitlements(res WhoamiResult, resolved []string) WhoamiResult {
+	if len(resolved) == 0 {
 		return res
 	}
 
@@ -122,10 +135,14 @@ func applyEffectiveEntitlements(res WhoamiResult, effective []string) WhoamiResu
 	for _, e := range res.Entitlements {
 		carried[e] = struct{}{}
 	}
-	for _, e := range effective {
+
+	// Carried first so the report leads with what is exercisable right now.
+	effective := make([]string, 0, len(res.Entitlements)+len(resolved))
+	effective = append(effective, res.Entitlements...)
+	for _, e := range resolved {
 		if _, ok := carried[e]; !ok {
 			res.EntitlementsWithheld = true
-			break
+			effective = append(effective, e)
 		}
 	}
 
@@ -190,9 +207,10 @@ func mergeResolvedClaims(ac auth.AuthContext, resolved jwt.MapClaims) auth.AuthC
 // password-less resolution path for exactly this, and it sits behind the 60s
 // subject-resolve cache, so repeated calls do not hit the backend.
 //
-// Entitlements are NOT re-resolved. They stay whatever the presented credential
-// carries, which is what keeps an attenuated capability token reporting its
-// reduced authority rather than the full authority of the user who minted it.
+// Entitlements ARE resolved and unioned with what the credential carries — see
+// applyEffectiveEntitlements for why the report is about the USER rather than
+// about the token in hand, and why an attenuated capability token is not an
+// exception to that.
 func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage) {
 	w.Header().Set("Content-Type", "application/json")
 

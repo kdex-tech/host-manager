@@ -7,11 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // TestIsWhoamiCall_MatchesOnlyItsOwnTool mirrors isMintTokenCall's contract:
@@ -240,24 +243,56 @@ func TestMergeResolvedClaims_NilResolutionIsSafe(t *testing.T) {
 	assert.Equal(t, "alice", res.Identity)
 }
 
-// TestEffectiveEntitlements_ReportsWhatTheUserCanDo is the core contract.
+// TestEffectiveEntitlements_UnionsCarriedWithResolved is the core contract, and
+// the fix for a defect the quad review caught.
 //
-// whoami is a REPORTING tool: it grants nothing, so the answer is about the
-// USER, not about the credential in hand. A caller's token routinely carries
-// less than the user effectively holds — an MCP client's PASETO PAT carries a
-// single narrow scope while the bridge resolves the wide set, and a JWT whose
-// client never requested scope=entitlements carries none at all. Reporting the
-// carried set would answer a question nobody asked.
-func TestEffectiveEntitlements_ReportsWhatTheUserCanDo(t *testing.T) {
+// The two inputs are DIFFERENT SETS, neither a superset of the other:
+//
+//   - CARRIED is the request's auth context, which on the proxy path has already
+//     been through EnrichAuthContext (proxy.go:547, before this interception at
+//     :633). The knowdrive dev host's claimMappings union `self.vs_entitlements`
+//     — the per-vector-store grants resolved by the credential-check Lookup —
+//     into it. mint_token reads exactly this set as `held`.
+//   - RESOLVED is ResolveInternalRolesAndEntitlements, i.e. KDexRoleBinding
+//     grants only. It never contains the vs_entitlements.
+//
+// Replacing carried with resolved therefore DROPPED precisely the
+// per-vector-store entitlements an agent needs, and reported a set SMALLER than
+// mint_token would accept — sending the agent back into the guess-and-retry
+// loop whoami exists to end.
+func TestEffectiveEntitlements_UnionsCarriedWithResolved(t *testing.T) {
 	res := applyEffectiveEntitlements(
-		WhoamiResult{Entitlements: []string{"functions:/api/v1/mcp:read"}},
-		[]string{"functions:/api/v1/mcp:read", "vector_stores:vs_abc:read", "pages:/:read"},
+		// Carried: enriched, includes a vs_entitlements grant.
+		WhoamiResult{Entitlements: []string{
+			"functions:/api/v1/mcp:read",
+			"vector_stores:vs_abc:write",
+		}},
+		// Resolved: role bindings only — no vs_entitlements.
+		[]string{"functions:/api/v1/mcp:read", "pages:/:read"},
 	)
 
-	assert.ElementsMatch(t,
-		[]string{"functions:/api/v1/mcp:read", "vector_stores:vs_abc:read", "pages:/:read"},
-		res.Entitlements,
-		"whoami reports the user's effective authority, not what this token happens to carry")
+	assert.ElementsMatch(t, []string{
+		"functions:/api/v1/mcp:read",
+		"vector_stores:vs_abc:write",
+		"pages:/:read",
+	}, res.Entitlements,
+		"neither input is a superset: the claimMappings-enriched grants and the role-derived "+
+			"grants must BOTH be reported")
+}
+
+// TestEffectiveEntitlements_NeverDropsACarriedGrant is the regression guard for
+// the specific failure above, stated as an invariant: whatever the credential
+// carries is exercisable right now, so it can never be absent from the report.
+func TestEffectiveEntitlements_NeverDropsACarriedGrant(t *testing.T) {
+	carried := []string{"vector_stores:vs_only_in_context:read"}
+
+	res := applyEffectiveEntitlements(
+		WhoamiResult{Entitlements: carried},
+		[]string{"pages:/:read"},
+	)
+
+	assert.Contains(t, res.Entitlements, "vector_stores:vs_only_in_context:read",
+		"a grant the credential demonstrably carries must never be dropped from the report")
 }
 
 // TestEffectiveEntitlements_AttenuatedTokenStillReportsTheUser: an attenuated
@@ -290,14 +325,19 @@ func TestEffectiveEntitlements_FlagsWhatThisTokenCannotExercise(t *testing.T) {
 
 // TestEffectiveEntitlements_NoFlagWhenTheTokenCarriesEverything: the common
 // healthy case — a PAT whose bridge already resolved the full set. Nothing to
-// warn about, so no flag and no hint noise.
+// warn about, so no flag and no hint noise. Carried-but-not-resolved grants
+// (the vs_entitlements case) must NOT trip the flag either: they are
+// exercisable, so nothing is being withheld.
 func TestEffectiveEntitlements_NoFlagWhenTheTokenCarriesEverything(t *testing.T) {
 	res := applyEffectiveEntitlements(
-		WhoamiResult{Entitlements: []string{"pages:/:read", "vector_stores:vs_abc:read"}},
+		WhoamiResult{Entitlements: []string{
+			"pages:/:read", "vector_stores:vs_abc:read", "vector_stores:vs_extra:write",
+		}},
 		[]string{"vector_stores:vs_abc:read", "pages:/:read"},
 	)
 
-	assert.False(t, res.EntitlementsWithheld)
+	assert.False(t, res.EntitlementsWithheld,
+		"a grant present in the credential but absent from the role set is exercisable, not withheld")
 	assert.Empty(t, res.Hint)
 }
 
@@ -313,4 +353,77 @@ func TestEffectiveEntitlements_UnresolvableFallsBackToCarried(t *testing.T) {
 
 	assert.Equal(t, []string{"pages:/:read"}, res.Entitlements)
 	assert.False(t, res.EntitlementsWithheld)
+}
+
+// TestReverseProxy_WhoamiWiresEffectiveEntitlements is the WIRING guard.
+//
+// applyEffectiveEntitlements has unit tests; its call site had none.
+// TestReverseProxy_InterceptsWhoamiCall cannot serve as one — it builds the
+// handler with a zero-value stubInternalIdentityProvider, so `resolved` comes
+// back empty and applyEffectiveEntitlements short-circuits before doing
+// anything. Nothing proved entitlements_withheld or hint ever reach the wire.
+//
+// That is the same "correct but never called" shape TestNew_AppliesTheClamp
+// rejects for Timeouts.Normalized, and it was found by the quad review.
+func TestReverseProxy_WhoamiWiresEffectiveEntitlements(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cm, err := cache.NewCacheManager("", "whoami-wiring-test", nil)
+	require.NoError(t, err)
+
+	// A provider that actually resolves grants, so `resolved` is non-empty.
+	idp := stubInternalIdentityProvider{
+		roles: []string{"reader"},
+		ents:  []string{"pages:/:read", "vector_stores:vs_role:read"},
+	}
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, idp)
+	require.NoError(t, err)
+
+	cfg := testAuthConfigForMint(t)
+	fn := newServiceBackedMCPFunction(t, upstream.URL)
+	hh := &HostHandler{
+		log:           logr.Discard(),
+		scheme:        "https",
+		cacheManager:  cm,
+		authChecker:   &entitlementGateChecker{},
+		host:          &kdexv1alpha1.KDexHostSpec{Routing: kdexv1alpha1.Routing{Domains: []string{mintProxyDomain}}},
+		functions:     []kdexv1alpha1.KDexFunction{*fn},
+		authConfig:    cfg,
+		authExchanger: ex,
+	}
+	handler := hh.reverseProxyHandler(fn, mintProxyIssuer)
+
+	body := `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"whoami"}}`
+	req := httptest.NewRequest(http.MethodPost, mintProxyBasePath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Carries ONLY a vector-store grant, as a claimMappings-enriched context
+	// would; the role set carries different ones.
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice", "email": "alice@example.test",
+		"entitlements": []any{"vector_stores:vs_from_context:write"},
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Result struct {
+			StructuredContent WhoamiResult `json:"structuredContent"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	got := resp.Result.StructuredContent
+
+	assert.Contains(t, got.Entitlements, "vector_stores:vs_from_context:write",
+		"the carried (claimMappings-enriched) grant must survive to the wire")
+	assert.Contains(t, got.Entitlements, "pages:/:read",
+		"the role-resolved grants must reach the wire — proving the call site runs at all")
+	assert.True(t, got.EntitlementsWithheld,
+		"the role set holds grants this credential does not carry; the flag must reach the wire")
+	assert.NotEmpty(t, got.Hint, "the hint must reach the wire alongside the flag")
 }
