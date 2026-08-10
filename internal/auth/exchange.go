@@ -1201,15 +1201,23 @@ func applyScopeFilter(signingContext jwt.MapClaims, requestedScope string, defau
 	if len(requested) == 0 && len(defaultScopes) > 0 {
 		requested = defaultScopes
 	}
+	// RFC 6749 3.3: "The value of the scope parameter is expressed as a list of
+	// space-delimited, case-sensitive strings. The strings are defined by the
+	// AUTHORIZATION SERVER." A client SELECTS from the vocabulary the AS defines
+	// and publishes as scopes_supported (RFC 8414 2); it cannot invent values.
+	//
+	// An earlier revision appended every unrecognised requested string to the
+	// granted set. Because GetParsedEntitlements files the signed `scope` claim
+	// into the "oauth2" scheme bucket, that let a client author its own
+	// entitlement-shaped string -- e.g. "vector_stores:vs_victim:write" -- and
+	// satisfy an oauth2-declared operation requirement its role bindings never
+	// granted. Narrowing here is explicitly permitted by 3.3 ("MAY fully or
+	// partially ignore the scope requested"); the granted set is returned to the
+	// caller so the 3.3 MUST on reporting the actual scope is satisfiable.
 	granted := []string{}
-	for _, known := range []string{"openid", "email", "profile", "entitlements", "roles"} {
+	for _, known := range SupportedScopes {
 		if slices.Contains(requested, known) {
 			granted = append(granted, known)
-		}
-	}
-	for _, s := range requested {
-		if s != "" && !slices.Contains(granted, s) {
-			granted = append(granted, s)
 		}
 	}
 	if len(granted) > 0 {

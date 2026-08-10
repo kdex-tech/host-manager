@@ -60,10 +60,19 @@ func TestGetParsedEntitlements_ScopesDoNotClobberThePATBridgeMirror(t *testing.T
 //
 // Note the shape. VerifyResourceParsedEntitlements gates on IDENTITY first,
 // reading only the default (bearer) bucket for the same resource+verb, and only
-// then evaluates the declared requirements. So a scope can never GRANT access to
-// something bearer does not already cover — it can only satisfy an additional
-// oauth2-declared constraint on top. This test is built accordingly: bearer
-// supplies the identity, and the oauth2 bucket must supply the requirement.
+// then evaluates the declared requirements. This test is built accordingly:
+// bearer supplies the identity, and the oauth2 bucket must supply the
+// requirement.
+//
+// An earlier version of this comment claimed "a scope can never GRANT access to
+// something bearer does not already cover". That is TRUE of the identity gate
+// and FALSE of the requirements, which is where the real authorization lives:
+// an oauth2-declared requirement IS satisfiable from the oauth2 bucket, so a
+// scope the caller chose could satisfy a constraint their role bindings never
+// granted. The quad review demonstrated the escalation. It is closed upstream
+// now — applyScopeFilter grants nothing outside SupportedScopes, so a client
+// can no longer author an entitlement-shaped scope — but the invariant as
+// originally written was wrong and should not be relied on.
 func TestGetParsedEntitlements_ScopesStillSatisfyAnOAuth2Requirement(t *testing.T) {
 	ac := NewAuthorizationChecker(nil, logr.Discard())
 

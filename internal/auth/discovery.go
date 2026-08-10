@@ -22,6 +22,20 @@ type OpenIDConfiguration struct {
 }
 
 // DiscoveryHandler creates an HTTP handler that serves the OpenID discovery document.
+// SupportedScopes is the authorization server's scope vocabulary: the complete
+// set of `scope` values a client may be granted.
+//
+// RFC 6749 3.3 makes the vocabulary the AS's to define, and RFC 8414 2 makes
+// scopes_supported the way it is published. This variable is therefore the
+// single source for BOTH -- the discovery document advertises it and
+// applyScopeFilter grants nothing outside it. They were previously two
+// hardcoded lists that could drift, so a scope could be advertised but
+// ungrantable, or grantable but unadvertised.
+//
+// Order is the grant order applyScopeFilter emits; discovery order is not
+// significant.
+var SupportedScopes = []string{"openid", "email", "profile", "entitlements", "roles"}
+
 func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFunc {
 	config := OpenIDConfiguration{
 		AuthorizationEndpoint: issuer + "/-/oauth/authorize",
@@ -60,15 +74,9 @@ func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFu
 		Issuer:                           issuer,
 		JwksURI:                          issuer + "/.well-known/jwks.json",
 		ResponseTypesSupported:           []string{"code", "id_token"},
-		ScopesSupported: []string{
-			"email",
-			"entitlements",
-			"openid",
-			"profile",
-			"roles",
-		},
-		SubjectTypesSupported: []string{"public"},
-		TokenEndpoint:         issuer + "/-/token",
+		ScopesSupported:                  SupportedScopes,
+		SubjectTypesSupported:            []string{"public"},
+		TokenEndpoint:                    issuer + "/-/token",
 	}
 	config.CodeChallengeMethodsSupported = []string{PKCE_METHOD_S256}
 	if registrationEndpoint != "" {
