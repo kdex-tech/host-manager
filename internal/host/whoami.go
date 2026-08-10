@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
 )
 
@@ -21,17 +20,18 @@ const toolNameWhoami = "whoami"
 // whatever the credential in hand happens to carry — see
 // applyEffectiveEntitlements.
 //
-// Every profile field is omitempty because they are genuinely optional on the
-// wire: name, given_name, family_name and email are scope-controlled claim
-// families (see Signer.confineByScope), so an OAuth2 caller whose token lacks
-// `profile`/`email` does not carry them at all. Absent means "this credential
-// does not carry it", which is information; an empty string would not be.
+// Identity and Entitlements are MANDATORY: whatever the scope, a caller must
+// always learn who the server thinks they are and what they may do — that is
+// the entire purpose of the tool. Identity falls back to the subject, which
+// every credential carries, and an empty entitlement set serializes as `[]`
+// rather than being dropped so a client can iterate without a nil check.
 //
-// Entitlements is NOT omitempty: an authenticated caller holding nothing must
-// serialize as `[]` rather than being dropped, so a client can iterate without
-// a nil check.
+// The profile fields ARE omitempty, and that is the privacy contract: they are
+// scope-controlled claim families (see Signer.confineByScope), so absent means
+// "this credential was not granted it" — which is information an empty string
+// would not convey.
 type WhoamiResult struct {
-	Identity          string   `json:"identity,omitempty"`
+	Identity          string   `json:"identity"`
 	Name              string   `json:"name,omitempty"`
 	GivenName         string   `json:"given_name,omitempty"`
 	FamilyName        string   `json:"family_name,omitempty"`
@@ -175,49 +175,30 @@ func isWhoamiCall(body []byte) (json.RawMessage, bool) {
 	return req.ID, true
 }
 
-// mergeResolvedClaims folds a subject's resolved backend claims onto the
-// caller's auth context WITHOUT overwriting anything already there.
-//
-// The direction matters: a claim the presented credential actually carries is
-// authoritative and must win, so the lookup only ever fills gaps. This mirrors
-// the PAT bridge's own merge (#138).
-func mergeResolvedClaims(ac auth.AuthContext, resolved jwt.MapClaims) auth.AuthContext {
-	if len(resolved) == 0 {
-		return ac
-	}
-	if ac == nil {
-		ac = auth.AuthContext{}
-	}
-	for k, v := range resolved {
-		if _, exists := ac[k]; !exists {
-			ac[k] = v
-		}
-	}
-	return ac
-}
-
 // writeWhoamiRPC answers the call locally and never forwards it upstream. An
 // unauthenticated caller surfaces as an MCP tool error (isError=true) with HTTP
 // 200, matching how writeMintTokenRPC surfaces domain errors.
 //
-// Profile fields are fleshed out from the NON-LOGIN Lookup before projecting:
-// name/given_name/family_name/email are scope-controlled claim families, so a
-// caller whose token lacks profile/email carries none of them and whoami would
-// otherwise report a bare subject. Exchanger.ResolveSubjectClaims is the
-// password-less resolution path for exactly this, and it sits behind the 60s
-// subject-resolve cache, so repeated calls do not hit the backend.
+// Profile fields are reported ONLY as the presented credential carries them.
+// name/given_name/family_name/email are scope-controlled claim families that
+// confineByScope deletes at signing time when the client was not granted
+// profile/email, so resolving them back from the identity backend would hand a
+// third-party client personal data the user deliberately withheld when
+// authorizing it — routing around the consent mechanism instead of honouring
+// it.
 //
-// Entitlements ARE resolved and unioned with what the credential carries — see
-// applyEffectiveEntitlements for why the report is about the USER rather than
-// about the token in hand, and why an attenuated capability token is not an
-// exception to that.
+// This costs PAT callers nothing: the proxy PAT bridge already merges
+// ResolveSubjectClaims into the context it builds (proxy.go), so their profile
+// arrives populated by the time this runs. Only a scope-limited OAuth2
+// delegation is narrowed, which is the point.
+//
+// Entitlements are DELIBERATELY exempt from that rule: they are the caller's own
+// authority rather than personal data, and reporting them fully is the whole
+// point of the tool. See applyEffectiveEntitlements.
 func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage) {
 	w.Header().Set("Content-Type", "application/json")
 
 	ac, _ := auth.GetAuthContext(r.Context())
-	if sub, _ := ac["sub"].(string); sub != "" && hh.authExchanger != nil {
-		ac = mergeResolvedClaims(ac, hh.authExchanger.ResolveSubjectClaims(sub))
-	}
 	res, err := whoamiFromAuthContext(ac)
 	if err == nil && hh.authExchanger != nil {
 		// In-memory only: role bindings and the roles->entitlements table are
@@ -250,9 +231,11 @@ func whoamiDescriptor() map[string]any {
 	return map[string]any{
 		"name": toolNameWhoami,
 		"description": "Report who you are and WHAT YOU ARE ENTITLED TO DO. Takes no " +
-			"arguments. Returns { identity, entitlements } plus whichever of name, given_name, " +
-			"family_name and preferred_username are known for you. `identity` is your email, " +
-			"falling back to the token subject.\n\n" +
+			"arguments. Always returns { identity, entitlements }, plus whichever of name, " +
+			"given_name, family_name and preferred_username the credential you are presenting " +
+			"actually carries — a client authorized without the profile/email scopes will not " +
+			"see those, by design. `identity` is your email, falling back to the token " +
+			"subject.\n\n" +
 			"`entitlements` is what YOUR ACCOUNT holds — not what the credential you happen to be " +
 			"presenting carries. Call this FIRST: without it there is no way to discover what you " +
 			"may do, and the only alternative is to guess an entitlement set, pass it to " +

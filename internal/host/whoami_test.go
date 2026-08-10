@@ -192,55 +192,83 @@ func TestSpliceIncludesWhoamiDescriptor(t *testing.T) {
 	assert.Contains(t, names, "whoami")
 }
 
-// TestMergeResolvedClaims_FleshesOutTheContext pins how whoami fills profile
-// fields. They are scope-gated (confineByScope strips name/given_name/
-// family_name/email when the token lacks profile/email), so reading only what
-// the credential carries would leave whoami blank for perfectly valid callers.
+// TestWhoamiFromAuthContext_HonoursScopeForProfileFields pins the privacy
+// contract: profile fields are reported ONLY when the presented credential
+// actually carries them.
 //
-// Instead the subject's backend claims are resolved through the NON-LOGIN
-// Lookup path — Exchanger.ResolveSubjectClaims, which sits behind the 60s
-// subject-resolve cache, the same password-less resolution the PAT bridge uses
-// (#138).
-func TestMergeResolvedClaims_FleshesOutTheContext(t *testing.T) {
-	ac := mergeResolvedClaims(
-		auth.AuthContext{"sub": "alice", "entitlements": []string{"pages:/:read"}},
-		jwt.MapClaims{"email": "alice@example.test", "name": "Alice A", "given_name": "Alice"},
-	)
-
-	res, err := whoamiFromAuthContext(ac)
+// confineByScope deletes name/given_name/family_name/email at signing time when
+// the client was not granted profile/email. Re-resolving them from the identity
+// backend would hand a third-party client personal data the user deliberately
+// withheld when authorizing it — routing around the consent mechanism rather
+// than honouring it.
+//
+// Entitlements are exempt and stay wide: they are the caller's own authority,
+// not personal data, and reporting them is what the tool exists for.
+func TestWhoamiFromAuthContext_HonoursScopeForProfileFields(t *testing.T) {
+	// A client authorized with "openid entitlements" only: no profile, no email.
+	res, err := whoamiFromAuthContext(auth.AuthContext{
+		"sub":          "alice@example.test",
+		"scope":        "openid entitlements",
+		"entitlements": []string{"pages:/:read"},
+	})
 	require.NoError(t, err)
 
-	assert.Equal(t, "alice@example.test", res.Identity)
-	assert.Equal(t, "Alice A", res.Name)
+	encoded, err := json.Marshal(res)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &got))
+
+	for _, withheld := range []string{"name", "given_name", "family_name", "preferred_username"} {
+		assert.NotContains(t, got, withheld,
+			"a profile field the credential does not carry must not be resolved behind the scope")
+	}
+	assert.Equal(t, []any{"pages:/:read"}, got["entitlements"],
+		"entitlements are exempt from the scope rule and must still be reported")
+}
+
+// TestWhoamiFromAuthContext_ReportsProfileTheCredentialCarries is the other
+// half: when the claims ARE present — a scope that granted them, or a PAT whose
+// proxy bridge already enriched the context — they must be reported.
+func TestWhoamiFromAuthContext_ReportsProfileTheCredentialCarries(t *testing.T) {
+	res, err := whoamiFromAuthContext(auth.AuthContext{
+		"sub":                "alice@example.test",
+		"email":              "alice@example.test",
+		"name":               "Alice Alpha",
+		"given_name":         "Alice",
+		"family_name":        "Alpha",
+		"preferred_username": "alice",
+		"scope":              "openid profile email",
+		"entitlements":       []string{"pages:/:read"},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Alice Alpha", res.Name)
 	assert.Equal(t, "Alice", res.GivenName)
-	assert.Equal(t, []string{"pages:/:read"}, res.Entitlements,
-		"entitlements stay CREDENTIAL-scoped; only profile is resolved")
+	assert.Equal(t, "Alpha", res.FamilyName)
+	assert.Equal(t, "alice", res.PreferredUsername)
 }
 
-// TestMergeResolvedClaims_TokenClaimsWin: the merge is non-destructive, exactly
-// as the PAT bridge does it. A claim the credential actually carries is the
-// authoritative one — a resolved value must never overwrite it.
-func TestMergeResolvedClaims_TokenClaimsWin(t *testing.T) {
-	ac := mergeResolvedClaims(
-		auth.AuthContext{"sub": "alice", "email": "from-token@example.test"},
-		jwt.MapClaims{"email": "from-lookup@example.test"},
-	)
-
-	res, err := whoamiFromAuthContext(ac)
+// TestWhoamiResult_IdentityAndEntitlementsAreMandatory: whatever the scope, the
+// caller must always learn WHO the server thinks they are and WHAT they may do.
+// Those two fields are the tool's entire purpose, so neither may be omitted —
+// identity falls back to the subject, which every credential carries.
+func TestWhoamiResult_IdentityAndEntitlementsAreMandatory(t *testing.T) {
+	res, err := whoamiFromAuthContext(auth.AuthContext{
+		"sub":   "svc-account",
+		"scope": "openid",
+	})
 	require.NoError(t, err)
-	assert.Equal(t, "from-token@example.test", res.Identity,
-		"a claim the credential carries must not be overwritten by the lookup")
-}
 
-// TestMergeResolvedClaims_NilResolutionIsSafe: ResolveSubjectClaims returns nil
-// when no lookup supplies backend claims (test stubs, providers without the
-// optional capability). That must degrade to the credential's own view.
-func TestMergeResolvedClaims_NilResolutionIsSafe(t *testing.T) {
-	ac := mergeResolvedClaims(auth.AuthContext{"sub": "alice"}, nil)
-
-	res, err := whoamiFromAuthContext(ac)
+	encoded, err := json.Marshal(res)
 	require.NoError(t, err)
-	assert.Equal(t, "alice", res.Identity)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &got))
+
+	require.Contains(t, got, "identity", "identity must always be present")
+	assert.Equal(t, "svc-account", got["identity"],
+		"with no email claim the subject is the identity; the credential already carries it")
+	require.Contains(t, got, "entitlements", "entitlements must always be present")
+	assert.Equal(t, []any{}, got["entitlements"], "an empty set serializes as [], never null or absent")
 }
 
 // TestEffectiveEntitlements_UnionsCarriedWithResolved is the core contract, and
@@ -426,4 +454,79 @@ func TestReverseProxy_WhoamiWiresEffectiveEntitlements(t *testing.T) {
 	assert.True(t, got.EntitlementsWithheld,
 		"the role set holds grants this credential does not carry; the flag must reach the wire")
 	assert.NotEmpty(t, got.Hint, "the hint must reach the wire alongside the flag")
+}
+
+// resolvingIdentityProvider resolves backend profile claims password-lessly,
+// which is what ResolveSubjectClaims reaches when the host has a resolve
+// endpoint wired. The stub used elsewhere does not implement ResolveClaims at
+// all, so it can never exercise this path.
+type resolvingIdentityProvider struct{ stubInternalIdentityProvider }
+
+func (resolvingIdentityProvider) ResolveClaims(string) jwt.MapClaims {
+	return jwt.MapClaims{
+		"email":       "alice@example.test",
+		"name":        "Alice Alpha",
+		"given_name":  "Alice",
+		"family_name": "Alpha",
+	}
+}
+
+// TestReverseProxy_WhoamiDoesNotResolvePIIBehindTheScope is the handler-level
+// privacy guard, and the one that matters: whoamiFromAuthContext is pure over
+// the context and was never the leak — writeWhoamiRPC's own resolution was.
+//
+// A client authorized with "openid entitlements" has had its profile/email
+// claims deleted by confineByScope. Resolving them back from the identity
+// backend hands that client personal data the user withheld when authorizing
+// it, defeating the consent mechanism rather than honouring it.
+func TestReverseProxy_WhoamiDoesNotResolvePIIBehindTheScope(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cm, err := cache.NewCacheManager("", "whoami-pii-test", nil)
+	require.NoError(t, err)
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, resolvingIdentityProvider{
+		stubInternalIdentityProvider{roles: []string{"reader"}, ents: []string{"pages:/:read"}},
+	})
+	require.NoError(t, err)
+
+	fn := newServiceBackedMCPFunction(t, upstream.URL)
+	hh := &HostHandler{
+		log: logr.Discard(), scheme: "https", cacheManager: cm,
+		authChecker:   &entitlementGateChecker{},
+		host:          &kdexv1alpha1.KDexHostSpec{Routing: kdexv1alpha1.Routing{Domains: []string{mintProxyDomain}}},
+		functions:     []kdexv1alpha1.KDexFunction{*fn},
+		authConfig:    testAuthConfigForMint(t),
+		authExchanger: ex,
+	}
+
+	body := `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"whoami"}}`
+	req := httptest.NewRequest(http.MethodPost, mintProxyBasePath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Scope-limited: no profile, no email. The backend COULD resolve them.
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice@example.test", "scope": "openid entitlements",
+		"entitlements": []any{"pages:/:read"},
+	}))
+	rec := httptest.NewRecorder()
+	hh.reverseProxyHandler(fn, mintProxyIssuer).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Result struct {
+			StructuredContent WhoamiResult `json:"structuredContent"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	got := resp.Result.StructuredContent
+
+	assert.Empty(t, got.Name, "a withheld profile claim must not be resolved from the backend")
+	assert.Empty(t, got.GivenName)
+	assert.Empty(t, got.FamilyName)
+	assert.NotEmpty(t, got.Entitlements, "entitlements are exempt and must still be reported")
+	assert.Equal(t, "alice@example.test", got.Identity, "identity is mandatory")
 }
