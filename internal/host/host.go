@@ -683,6 +683,21 @@ func (hh *HostHandler) SetHost(
 		hh.authConfig = authConfig
 		hh.authChecker = auth.NewAuthorizationChecker(authConfig.AnonymousEntitlements, hh.log.WithName("authChecker"))
 		hh.authExchanger = authExchanger
+
+		// Hand the middleware the map it needs to name a resource in the 401
+		// bearer challenge (#180). It must be computed here: hh.functions was
+		// set above, and the middleware wraps the whole mux with no way to
+		// resolve a path to a function on its own.
+		//
+		// INSIDE this block deliberately. authConfig is freshly built per
+		// reconcile (ConfigBuilder.Build always returns a new *Config, and the
+		// exchanger takes a copy rather than the pointer), so nothing can be
+		// reading it yet, and both the publication above and this write happen
+		// under hh.mu while ServeHTTP takes the pointer under RLock. Hoisting
+		// this out to also cover a nil authConfig would mean writing a field of
+		// a Config that in-flight requests are already reading — an unsynchronized
+		// write for a caller that does not exist today.
+		hh.authConfig.OAuth2ResourceMetadata = hh.oauth2ResourceMetadataLocked()
 	}
 
 	openapiBuilder := ko.Builder{

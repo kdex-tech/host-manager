@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -130,6 +131,50 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 	}
 
 	return ac, true
+}
+
+// bearerChallenge builds the RFC 6750 §3 WWW-Authenticate value for a rejected
+// bearer credential, adding RFC 9728's resource_metadata pointer when path
+// belongs to one of this host's oauth2-protected resources.
+//
+// error_description is drawn from a fixed pair rather than rendered from err.
+// The value lands inside an HTTP quoted-string, so nothing derived from a
+// caller-supplied token may reach it — a parse error can carry attacker-chosen
+// bytes, and a stray quote would let it break out of the header.
+func (c *Config) bearerChallenge(path string, err error) string {
+	desc := "the access token is invalid"
+	if errors.Is(err, jwt.ErrTokenExpired) {
+		desc = "the access token expired"
+	}
+	challenge := `Bearer error="invalid_token", error_description="` + desc + `"`
+	if md := c.resourceMetadataURL(path); md != "" {
+		challenge += `, resource_metadata="` + md + `"`
+	}
+	return challenge
+}
+
+// resourceMetadataURL returns the RFC 9728 metadata URL of the oauth2-protected
+// resource owning path, or "" when path belongs to none.
+//
+// Matching is segment-wise, so /api/v1/mcp owns itself and everything beneath
+// it but never /api/v1/mcp-other. The longest matching basePath wins: map
+// iteration order is randomized, so nested resources would otherwise resolve
+// non-deterministically.
+func (c *Config) resourceMetadataURL(path string) string {
+	if c == nil {
+		return ""
+	}
+	var best string
+	var bestLen int
+	for basePath, metadataURL := range c.OAuth2ResourceMetadata {
+		if path != basePath && !strings.HasPrefix(path, basePath+"/") {
+			continue
+		}
+		if len(basePath) > bestLen {
+			best, bestLen = metadataURL, len(basePath)
+		}
+	}
+	return best
 }
 
 // WithAuthentication creates a middleware that validates JWT tokens from the Authorization header.
@@ -288,7 +333,20 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			}
 
 			if err != nil || !token.Valid {
-				log.Error(err, "Failed to parse JWT")
+				// NOT an error. With jwt.tokenTTL at an hour, every session
+				// crosses expiry hourly by design, and both branches below
+				// treat the rejection as an expected outcome. Logged at V(1)
+				// for the same reason hostPATIdentity logs its rejected
+				// credential there. Left at ERROR, one client stuck replaying
+				// a dead token kept every error-severity alert on the
+				// deployment permanently lit (~5,700 lines/day, measured).
+				// See kdex-tech/host-manager#181.
+				cause := "the token is not valid"
+				if err != nil {
+					cause = err.Error()
+				}
+				log.V(1).Info("token is not valid; rejecting the credential",
+					"source", authSource, "cause", cause)
 
 				if authSource == COOKIE {
 					// Clear the cookie
@@ -325,6 +383,14 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 					return
 				}
 
+				// RFC 6750 §3 requires a challenge on every 401 issued over the
+				// Bearer scheme, and RFC 9728's resource_metadata is what tells
+				// an OAuth2/MCP client to re-authorize rather than retry. The
+				// proxy's oauth2 gate emits exactly this for an ANONYMOUS
+				// caller (internal/host/proxy.go), but it is never reached from
+				// here — so without this the expired-token caller got a bare
+				// 401 and no way back. See kdex-tech/host-manager#180.
+				w.Header().Set("WWW-Authenticate", c.bearerChallenge(r.URL.Path, err))
 				http.Error(w, "Invalid token", http.StatusUnauthorized)
 				return
 			}

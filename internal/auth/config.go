@@ -60,8 +60,20 @@ type Config struct {
 		RedirectURL  string
 		Scopes       []string
 	}
-	DCR                       DCRConfig
-	DCRStore                  *dcr.Store
+	DCR      DCRConfig
+	DCRStore *dcr.Store
+	// OAuth2ResourceMetadata maps an oauth2-protected resource's basePath to
+	// that resource's RFC 9728 metadata URL. It exists so the 401 this
+	// middleware returns for an invalid bearer can carry the same
+	// resource_metadata challenge the proxy's oauth2 gate emits for an
+	// anonymous caller (#180) — the middleware wraps the whole mux and has no
+	// other way to know which function a path belongs to.
+	//
+	// A read-only snapshot of internal/host.oauth2ProtectedResources(),
+	// installed by SetHost whenever the host's functions change. Nil is fine:
+	// the challenge then omits resource_metadata and is still RFC 6750
+	// conformant.
+	OAuth2ResourceMetadata    map[string]string
 	MintCapCache              cache.Cache
 	MintTokenEnabled          bool
 	MintTokenTTLCap           time.Duration

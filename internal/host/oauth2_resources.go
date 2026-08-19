@@ -70,6 +70,31 @@ func (hh *HostHandler) oauth2ProtectedResources() map[string]OAuth2Resource {
 	return out
 }
 
+// oauth2ResourceMetadataLocked maps each oauth2-protected basePath to that
+// resource's RFC 9728 metadata URL — the same document oauthProtectedResourceHandler
+// serves, so the two can never describe different locations.
+//
+// Handed to auth.Config as a snapshot (#180). The authentication middleware
+// wraps the whole mux and cannot resolve a request path to a function, so it
+// needs this mapping to name the resource in the 401 challenge it returns for
+// an invalid bearer. A snapshot rather than a callback because the middleware
+// reads it on every rejected request and must not reach back into HostHandler
+// for a lock.
+//
+// Caller must hold hh.mu: oauth2ProtectedResources reads hh.functions.
+func (hh *HostHandler) oauth2ResourceMetadataLocked() map[string]string {
+	resources := hh.oauth2ProtectedResources()
+	if len(resources) == 0 {
+		return nil
+	}
+	issuer := hh.issuerAddress()
+	out := make(map[string]string, len(resources))
+	for basePath := range resources {
+		out[basePath] = issuer + protectedResourcePath + basePath
+	}
+	return out
+}
+
 // oauth2ResourceAudiences returns the set of acceptable RFC 8707 `resource`
 // values for this host's oauth2-protected resources. Both the full resource
 // URI (issuer + basePath, what clients send as `resource`) and the basePath
