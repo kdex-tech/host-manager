@@ -173,11 +173,15 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{}, err
 	}
 
-	if internalHost.Spec.Registries.NpmRegistry == "" {
-		internalHost.Spec.Registries.NpmRegistry = r.Configuration.DefaultNpmRegistry
+	// registries is optional, so read it through the accessor and keep the
+	// resolved default local — mutating the fetched CR only ever confused the
+	// next reader, and nothing writes it back.
+	npmRegistry := internalHost.Spec.GetRegistries().NpmRegistry
+	if npmRegistry == "" {
+		npmRegistry = r.Configuration.DefaultNpmRegistry
 	}
 
-	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, internalHost.Spec.Registries.NpmRegistry, secrets)
+	secretOp, secret, err := r.createOrUpdateJobSecret(ctx, &ipr, npmRegistry, secrets)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -205,7 +209,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		Client:           r.Client,
 		ConfigMap:        configMap,
 		InternalHost:     internalHost,
-		ImageRegistry:    internalHost.Spec.Registries.ImageRegistry,
+		ImageRegistry:    internalHost.Spec.GetRegistries().ImageRegistry,
 		ImagePushSecret:  imagePushSecret,
 		ImagePullSecrets: imagePullSecretRefs,
 		Log:              log,
@@ -339,7 +343,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		}
 
 		builtImage := fmt.Sprintf(
-			"%s/%s/packages:%d@%s", internalHost.Spec.Registries.ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
+			"%s/%s/packages:%d@%s", internalHost.Spec.GetRegistries().ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
 		)
 
 		// The Job reported success, but "success" has been observed to mean

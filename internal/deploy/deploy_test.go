@@ -464,7 +464,7 @@ func TestDeploy_ScalingFieldFormatting(t *testing.T) {
 func TestDeploy_SourceOrigin_ScalingFromSpec(t *testing.T) {
 	d, fn := scalingTestSetup(t)
 	one := int32(1)
-	fn.Spec.Origin = kdexv1alpha1.FunctionOrigin{
+	fn.Spec.Origin = &kdexv1alpha1.FunctionOrigin{
 		Source: &kdexv1alpha1.Source{
 			Repository: "https://example.com/repo.git",
 			Revision:   "main",

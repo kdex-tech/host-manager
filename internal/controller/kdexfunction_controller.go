@@ -262,7 +262,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Pick up asynchronous builder updates (e.g. from KPack git polling)
-	if function.Spec.Origin.Executable == nil && function.Status.Source != nil {
+	if function.Spec.GetOrigin().Executable == nil && function.Status.Source != nil {
 		kImageName := fmt.Sprintf("%s-%s", hc.host.Name, function.Name)
 		image := &unstructured.Unstructured{}
 		image.SetGroupVersionKind(internal.KPackImageGVK)
@@ -294,7 +294,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// already-Ready function silently keeps serving the old image.
 	// Mirrors the kpack-SHA regression above. See kdex-tech/host-manager#41.
 	if function.Status.State == kdexv1alpha1.KDexFunctionStateReady &&
-		function.Spec.Origin.Source != nil &&
+		function.Spec.GetOrigin().Source != nil &&
 		!shouldSkipCodegen(&function) {
 		log.Info("Codegen inputs changed on Ready function, re-reconciling from build valid")
 		function.Status.State = kdexv1alpha1.KDexFunctionStateBuildValid
@@ -917,10 +917,10 @@ func codegenInputsChanged(fn *kdexv1alpha1.KDexFunction) (edgeMode, changed bool
 // force-regen AND (we've never recorded inputs OR recorded inputs
 // match current). See kdex-tech/host-manager#40.
 func shouldSkipCodegen(fn *kdexv1alpha1.KDexFunction) bool {
-	if fn.Spec.Origin.Source == nil {
+	if fn.Spec.GetOrigin().Source == nil {
 		return false
 	}
-	if sourceRegenerate(fn.Spec.Origin.Source) {
+	if sourceRegenerate(fn.Spec.GetOrigin().Source) {
 		return false
 	}
 	edgeMode, inputsChanged := codegenInputsChanged(fn)
@@ -1005,15 +1005,15 @@ func (r *KDexFunctionReconciler) handlePending(hc handlerContext) ctrl.Result {
 func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
-	if hc.function.Spec.Origin.Executable != nil {
+	if hc.function.Spec.GetOrigin().Executable != nil {
 		// Populate Status.Executable at the same point we transition
 		// state, so the invariant "state=ExecutableAvailable ⇒
 		// status.executable != nil" holds for downstream handlers.
 		// Deploy() depends on this in handleExecutableAvailable.
-		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
+		hc.function.Status.Executable = hc.function.Spec.GetOrigin().Executable
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateExecutableAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-	} else if hc.function.Spec.Origin.Source != nil && !sourceRegenerate(hc.function.Spec.Origin.Source) {
+	} else if hc.function.Spec.GetOrigin().Source != nil && !sourceRegenerate(hc.function.Spec.GetOrigin().Source) {
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateSourceAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
@@ -1022,8 +1022,8 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 	// + BuildValid so the codegen Job runs. The Job ends with
 	// patch_source_status writing the result into function.Status.Source.
 
-	if hc.function.Spec.Origin.Generator != nil {
-		hc.function.Status.Generator = hc.function.Spec.Origin.Generator
+	if hc.function.Spec.GetOrigin().Generator != nil {
+		hc.function.Status.Generator = hc.function.Spec.GetOrigin().Generator
 	} else {
 		var g *kdexv1alpha1.Generator
 
@@ -1094,10 +1094,10 @@ func (r *KDexFunctionReconciler) handleOpenAPIValid(hc handlerContext) (ctrl.Res
 func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
-	if hc.function.Spec.Origin.Executable != nil {
+	if hc.function.Spec.GetOrigin().Executable != nil {
 		// Pair Status.Executable with the state transition — see
 		// handleOpenAPIValid for the rationale.
-		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
+		hc.function.Status.Executable = hc.function.Spec.GetOrigin().Executable
 		hc.function.Status.State = kdexv1alpha1.KDexFunctionStateExecutableAvailable
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
@@ -1112,7 +1112,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 		// it back to spec's branch ref would re-arm kpack's branch-polling
 		// loop. See kdex-tech/host-manager#38.
 		if hc.function.Status.Source == nil || hc.function.Status.Source.Revision == "" {
-			hc.function.Status.Source = hc.function.Spec.Origin.Source
+			hc.function.Status.Source = hc.function.Spec.GetOrigin().Source
 		}
 	} else {
 		if hc.gitSecret == nil {
@@ -1319,8 +1319,8 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
-	if hc.function.Spec.Origin.Executable != nil {
-		hc.function.Status.Executable = hc.function.Spec.Origin.Executable
+	if hc.function.Spec.GetOrigin().Executable != nil {
+		hc.function.Status.Executable = hc.function.Spec.GetOrigin().Executable
 	} else {
 		// spec.origin.source carries intent (which branch to scaffold from,
 		// which builder/SA/tolerations to use). status.source carries the
@@ -1329,9 +1329,9 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 		// stops polling the branch HEAD and rebuilding on every unrelated
 		// monorepo push. See kdex-tech/host-manager#38.
 		var sourceCopy kdexv1alpha1.Source
-		hasSpec := hc.function.Spec.Origin.Source != nil
+		hasSpec := hc.function.Spec.GetOrigin().Source != nil
 		if hasSpec {
-			sourceCopy = *hc.function.Spec.Origin.Source
+			sourceCopy = *hc.function.Spec.GetOrigin().Source
 		}
 		if hc.function.Status.Source != nil && hc.function.Status.Source.Revision != "" {
 			sourceCopy.Repository = hc.function.Status.Source.Repository
@@ -1422,7 +1422,7 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 
 		builder := build.Builder{
 			Client:         r.Client,
-			ImageRegistry:  hc.host.Spec.Registries.ImageRegistry,
+			ImageRegistry:  hc.host.Spec.GetRegistries().ImageRegistry,
 			ImagePrefix:    imagePrefix,
 			Scheme:         r.Scheme,
 			ServiceAccount: buildSA,
@@ -1545,9 +1545,9 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 	// the state without pairing the populate. Mirrors handleReady's
 	// self-heal at line 1409. See kdex-tech/host-manager#77.
 	if hc.function.Status.Executable == nil {
-		if hc.function.Spec.Origin.Executable != nil {
+		if hc.function.Spec.GetOrigin().Executable != nil {
 			log.V(2).Info("Status.Executable is nil, re-deriving from Spec.Origin.Executable")
-			hc.function.Status.Executable = hc.function.Spec.Origin.Executable
+			hc.function.Status.Executable = hc.function.Spec.GetOrigin().Executable
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 		log.V(2).Info("Status.Executable is nil and Spec has no executable, stepping back to OpenAPIValid")
@@ -1757,9 +1757,9 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	// derived field here, mirroring the #77 Executable self-heal above, and
 	// requeue so the next loop's drift check promotes the already-built image with
 	// no rebuild. Only when nil: never overwrite a codegen-resolved revision (#38).
-	if hc.function.Spec.Origin.Source != nil && hc.function.Status.Source == nil {
+	if hc.function.Spec.GetOrigin().Source != nil && hc.function.Status.Source == nil {
 		log.V(2).Info("Source is nil on a source-authoritative Ready function, re-deriving from Spec.Origin.Source")
-		hc.function.Status.Source = hc.function.Spec.Origin.Source
+		hc.function.Status.Source = hc.function.Spec.GetOrigin().Source
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 

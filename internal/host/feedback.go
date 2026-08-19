@@ -348,8 +348,8 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 // spec.origin.source which implies it is relying on code generation and we can
 // influence the spec through the sniffer.
 func isMutable(matchedFunction *kdexv1alpha1.KDexFunction) bool {
-	return matchedFunction.Spec.Origin.Executable == nil ||
-		matchedFunction.Spec.Origin.Source == nil
+	return matchedFunction.Spec.GetOrigin().Executable == nil ||
+		matchedFunction.Spec.GetOrigin().Source == nil
 }
 
 // canGenerateSniffer reports whether the caller is permitted to auto-generate

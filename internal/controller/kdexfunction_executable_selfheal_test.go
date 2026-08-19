@@ -47,7 +47,7 @@ func TestHandleExecutableAvailable_SelfHealsNilStatusExecutable(t *testing.T) {
 		fn := &kdexv1alpha1.KDexFunction{
 			ObjectMeta: metav1.ObjectMeta{Name: "fn", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
-				Origin: kdexv1alpha1.FunctionOrigin{
+				Origin: &kdexv1alpha1.FunctionOrigin{
 					Executable: &kdexv1alpha1.Executable{
 						Image: "ghcr.io/example/fn:v1",
 					},
@@ -73,7 +73,7 @@ func TestHandleExecutableAvailable_SelfHealsNilStatusExecutable(t *testing.T) {
 		fn := &kdexv1alpha1.KDexFunction{
 			ObjectMeta: metav1.ObjectMeta{Name: "fn", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
-				Origin: kdexv1alpha1.FunctionOrigin{},
+				Origin: &kdexv1alpha1.FunctionOrigin{},
 			},
 			Status: kdexv1alpha1.KDexFunctionStatus{
 				State:      kdexv1alpha1.KDexFunctionStateExecutableAvailable,

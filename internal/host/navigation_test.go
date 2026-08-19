@@ -12,6 +12,7 @@ import (
 	"golang.org/x/text/message/catalog"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/render"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -83,7 +84,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 					Page: &kdexv1alpha1.KDexPageSpec{
 						Label: "Contact Us",
 						NavigationHints: &kdexv1alpha1.NavigationHints{
-							Weight: resource.MustParse("100"),
+							Weight: ptr.To(resource.MustParse("100")),
 						},
 						Paths: kdexv1alpha1.Paths{
 							BasePath: "/contact",

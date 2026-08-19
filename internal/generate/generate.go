@@ -157,10 +157,10 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 	// convention. Preserves hand-authored cmd/custom.go + custom go.mod
 	// when source has been declared by the developer; the canonical
 	// convention is still used in pure codegen mode (origin.source nil).
-	if function.Spec.Origin.Source != nil && function.Spec.Origin.Source.Path != "" {
+	if function.Spec.GetOrigin().Source != nil && function.Spec.GetOrigin().Source.Path != "" {
 		env = append(env, corev1.EnvVar{
 			Name:  "SOURCE_PATH",
-			Value: function.Spec.Origin.Source.Path,
+			Value: function.Spec.GetOrigin().Source.Path,
 		})
 	}
 
@@ -282,6 +282,14 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 func marshall(function *kdexv1alpha1.KDexFunction) (string, error) {
 	copy := function.DeepCopy()
 
+	// Origin is optional, so it has to exist before status can be folded into
+	// it — but only allocate when there is something to fold, or an origin-less
+	// function regains the empty `origin: {}` this marshalling just stopped
+	// emitting (kdex-crds#19).
+	if copy.Spec.Origin == nil &&
+		(copy.Status.Generator != nil || copy.Status.Source != nil || copy.Status.Executable != nil) {
+		copy.Spec.Origin = &kdexv1alpha1.FunctionOrigin{}
+	}
 	if copy.Status.Generator != nil && copy.Spec.Origin.Generator == nil {
 		copy.Spec.Origin.Generator = copy.Status.Generator
 	}

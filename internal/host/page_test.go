@@ -14,6 +14,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/page"
 	G "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -65,7 +66,7 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 			Label: "Page 1",
 			Paths: kdexv1alpha1.Paths{BasePath: "/page1"},
 			NavigationHints: &kdexv1alpha1.NavigationHints{
-				Weight: resource.MustParse("10"),
+				Weight: ptr.To(resource.MustParse("10")),
 			},
 		},
 		ParsedRequirements: &entitlements.ParsedRequirements{},
@@ -76,7 +77,7 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 			Label: "Page 2",
 			Paths: kdexv1alpha1.Paths{BasePath: "/page2"},
 			NavigationHints: &kdexv1alpha1.NavigationHints{
-				Weight: resource.MustParse("20"),
+				Weight: ptr.To(resource.MustParse("20")),
 			},
 		},
 		ParsedRequirements: &entitlements.ParsedRequirements{},

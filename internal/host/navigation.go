@@ -112,7 +112,11 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 
 			if ph.NavigationHints != nil {
 				pageEntry.Icon = ph.NavigationHints.Icon
-				pageEntry.Weight = ph.NavigationHints.Weight
+				// An unset weight keeps the "0" default above, which is what the
+				// zero Quantity resolved to before the field became optional.
+				if ph.NavigationHints.Weight != nil {
+					pageEntry.Weight = *ph.NavigationHints.Weight
+				}
 			}
 
 			hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)

@@ -212,7 +212,8 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		cfg.AnonymousEntitlements = auth.AnonymousEntitlements
 		cfg.Audience = cb.Audience
 		cfg.AutoExtendSession = auth.AutoExtendSession
-		cfg.CookieName = utils.IfElse(auth.JWT.CookieName == "", "auth_token", auth.JWT.CookieName)
+		jwt := auth.GetJWT()
+		cfg.CookieName = utils.IfElse(jwt.CookieName == "", "auth_token", jwt.CookieName)
 
 		applyMintTokenPolicy(cfg, auth.MintToken)
 		cb.buildMintCapCache(cfg)
@@ -244,7 +245,8 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		cfg.RefreshTokenTTL = refreshTokenTTL
 		cfg.RefreshGraceWindow = cb.RefreshGraceWindow
 
-		tokenTTLString := utils.IfElse(auth.JWT.TokenTTL == "", "1h", auth.JWT.TokenTTL)
+		jwtTTL := auth.GetJWT()
+		tokenTTLString := utils.IfElse(jwtTTL.TokenTTL == "", "1h", jwtTTL.TokenTTL)
 		tokenTTL, err := time.ParseDuration(tokenTTLString)
 		if err != nil {
 			return nil, err

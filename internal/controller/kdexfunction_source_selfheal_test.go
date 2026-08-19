@@ -45,7 +45,7 @@ func TestHandleReady_SelfHealsNilStatusSource(t *testing.T) {
 		fn := &kdexv1alpha1.KDexFunction{
 			ObjectMeta: metav1.ObjectMeta{Name: "fn", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
-				Origin: kdexv1alpha1.FunctionOrigin{
+				Origin: &kdexv1alpha1.FunctionOrigin{
 					Source: &kdexv1alpha1.Source{
 						Repository: "https://gitlab.com/example/repo.git",
 						Revision:   "main",
@@ -79,7 +79,7 @@ func TestHandleReady_SelfHealsNilStatusSource(t *testing.T) {
 		fn := &kdexv1alpha1.KDexFunction{
 			ObjectMeta: metav1.ObjectMeta{Name: "fn", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
-				Origin: kdexv1alpha1.FunctionOrigin{
+				Origin: &kdexv1alpha1.FunctionOrigin{
 					Source: &kdexv1alpha1.Source{
 						Repository: "https://gitlab.com/example/repo.git",
 						Revision:   "main",

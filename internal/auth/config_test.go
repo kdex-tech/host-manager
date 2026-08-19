@@ -80,7 +80,7 @@ func TestNewConfig(t *testing.T) {
 			name: "constructor, devMode enabled, invalid TTL",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{
+					JWT: &kdexv1alpha1.JWT{
 						TokenTTL: "?",
 					},
 				},
@@ -126,7 +126,7 @@ func TestNewConfig(t *testing.T) {
 			name: "constructor, devMode enabled, with JWTKeysSecrets, secret not found",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   false,
@@ -142,7 +142,7 @@ func TestNewConfig(t *testing.T) {
 			name: "constructor, devMode enabled, with JWTKeysSecrets, secret no matching key",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -201,7 +201,7 @@ func TestNewConfig(t *testing.T) {
 			name: "constructor, devMode enabled, with JWTKeysSecrets, secret with invalid key",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -233,7 +233,7 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgXufwXet+BRiqMQDn
 			name: "constructor, devMode enabled, with JWTKeysSecrets, secret with matching key (ECDSA P-256)",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -268,7 +268,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 			name: "constructor, devMode enabled, with JWTKeysSecrets, secret with matching key (RSA)",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -323,7 +323,7 @@ ZMtAm8mrV+h0ef/lr6zdJffz/EmM5MZrRAu2/dcK6S6qSEkwCTZ4
 			name: "constructor, with JWTKeysSecrets, multiple keys, none selected as active, newest selected",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -398,7 +398,7 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 			name: "constructor, with JWTKeysSecrets, multiple keys, one selected as active",
 			args: testargs{
 				auth: &kdexv1alpha1.Auth{
-					JWT: kdexv1alpha1.JWT{},
+					JWT: &kdexv1alpha1.JWT{},
 				},
 				namespace: "foo",
 				devMode:   true,
@@ -1170,7 +1170,7 @@ func TestBuild_MintTokenPolicy(t *testing.T) {
 	g := NewWithT(t)
 	cb := newTestConfigBuilder(t) // helper that wires KeyLoader + Audience + Issuer (mirror existing config tests)
 	auth := &kdexv1alpha1.Auth{
-		JWT: kdexv1alpha1.JWT{},
+		JWT: &kdexv1alpha1.JWT{},
 		MintToken: &kdexv1alpha1.MintToken{
 			Enabled: true, TTLCapSeconds: 45, UsesCap: 8,
 			DestructiveVerbs: []string{"delete"},
