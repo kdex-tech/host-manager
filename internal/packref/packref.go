@@ -74,6 +74,22 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 		return nil, nil
 	}
 
+	// Announce the degraded state rather than letting it be inferred from a Job
+	// spec. Without a claim there is no persistent volume to hold the
+	// package-manager caches OR node-tools' verification ledger, so every
+	// dependency re-fetches, gunzips and tar-parses its tarball on every run —
+	// measured at 88% of a prod packager's wall time, sustained for 33
+	// generations because nothing ever said so (kdex-tech/host-manager#182,
+	// kdex-tech/node-tools#8).
+	if p.Packages.CacheClaim == "" {
+		p.Log.Info(
+			"no packages cacheClaim configured: installs are cold and the verification ledger is DISABLED, "+
+				"so every dependency is re-fetched and re-hashed on every build; "+
+				"set packages.cacheClaim to a PersistentVolumeClaim to make both persist",
+			"job", jobName,
+		)
+	}
+
 	volumes := []corev1.Volume{
 		{
 			Name: internal.SHARED_VOLUME,
