@@ -46,6 +46,28 @@ func (hh *HostHandler) pageHandlerFunc(
 			if !authorized {
 				log.V(2).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
 
+				// An anonymous caller gets the login page with a return
+				// trip -- not a consolation page they happen to be allowed
+				// to see. This branch used to sit *after* the
+				// firstAuthorizedPage discovery below, which made it
+				// unreachable on any host with a non-empty
+				// anonymousEntitlements list: every caller has some
+				// authorized page, so discovery always matched first and
+				// the gate sent logged-out users somewhere arbitrary
+				// instead of letting them log in. See #184.
+				_, authenticated := auth.GetAuthContext(r.Context())
+				if !authenticated {
+					_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
+					if hasLoginPage {
+						log.V(2).Info("unauthenticated, redirecting to login")
+						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+						return
+					}
+				}
+
+				// Reached when the caller is already authenticated (logging
+				// in again would not help them) or when the host configures
+				// no login page at all.
 				log.V(2).Info("attempt discovery of first accessible page", "l10n", l.String())
 				first := hh.firstAuthorizedPage(r.Context(), &l, l.String() == hh.defaultLanguage)
 				if first != "" {
@@ -55,16 +77,6 @@ func (hh *HostHandler) pageHandlerFunc(
 					log.V(2).Info("first accessible page", "page", first, "l10n", l.String())
 					http.Redirect(w, r, first, http.StatusSeeOther)
 					return
-				}
-
-				_, authenticated := auth.GetAuthContext(r.Context())
-				if !authenticated {
-					_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
-					if hasLoginPage {
-						log.V(2).Info("no accessible pages, redirecting to login")
-						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
-						return
-					}
 				}
 
 				log.V(2).Info("no accessible pages, send 404")

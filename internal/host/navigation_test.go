@@ -162,3 +162,34 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 		})
 	}
 }
+
+// firstAuthorizedPage picks values[0] after sorting on Weight alone. Its input
+// comes from maps.Values (randomized order) and slices.SortFunc is unstable, so
+// with every page defaulting to weight 0 the "first" page is whichever one the
+// map happened to yield. That is what makes a gated page redirect somewhere
+// different on every request. See kdex-tech/host-manager#184.
+func TestFirstAuthorizedPage_IsDeterministicWhenWeightsTie(t *testing.T) {
+	ctx := context.Background()
+	cacheManager, _ := cache.NewCacheManager("", "", nil)
+	hh := NewHostHandler(fake.NewClientBuilder().Build(), "foo", "foo", logr.Discard(), cacheManager)
+
+	for _, basePath := range []string{"/terms", "/pricing", "/signup", "/tools/bridge-mac", "/reset-password"} {
+		hh.Pages.Set(page.PageHandler{
+			Name: basePath,
+			Page: &kdexv1alpha1.KDexPageSpec{
+				Label: basePath,
+				Paths: kdexv1alpha1.Paths{BasePath: basePath},
+			},
+		})
+	}
+
+	tag := language.English
+	first := hh.firstAuthorizedPage(ctx, &tag, true)
+
+	for i := 0; i < 200; i++ {
+		assert.Equal(t, first, hh.firstAuthorizedPage(ctx, &tag, true),
+			"identical requests must resolve to the same page")
+	}
+
+	assert.Equal(t, "/pricing", first, "a weight tie must break on BasePath")
+}

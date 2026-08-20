@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
@@ -47,13 +48,22 @@ func (hh *HostHandler) firstAuthorizedPage(
 	if rootEntry.Children != nil {
 		se := maps.Values(*rootEntry.Children)
 		values := slices.Collect(se)
+		// values comes from maps.Values, whose order is randomized, and
+		// slices.SortFunc is not stable -- so Weight alone is not a total
+		// order. Every page without a navigationHints.weight defaults to 0,
+		// making ties the normal case rather than the edge case, and the
+		// winner then varied per request. BasePath is unique per page, so
+		// breaking ties on it makes the pick reproducible. See #184.
 		slices.SortFunc(values, func(a, b any) int {
 			aPE, aOk := a.(render.PageEntry)
 			bPE, bOk := b.(render.PageEntry)
 			if !aOk || !bOk {
 				return 0
 			}
-			return aPE.Weight.Cmp(bPE.Weight)
+			if c := aPE.Weight.Cmp(bPE.Weight); c != 0 {
+				return c
+			}
+			return strings.Compare(aPE.BasePath, bPE.BasePath)
 		})
 		pe, ok := values[0].(render.PageEntry)
 		if !ok {

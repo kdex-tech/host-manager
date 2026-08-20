@@ -48,6 +48,57 @@ func (m *pageMockAuthChecker) VerifyResourceParsedEntitlements(kind string, name
 	return true, nil
 }
 
+// An anonymous caller who fails a page's gate must be sent to the login page,
+// not to whatever else they happen to be allowed to see. Any host with a
+// non-empty anonymousEntitlements list has authorized pages for every caller,
+// so a cascade that tries "first authorized page" first can never reach the
+// login branch in production. See kdex-tech/host-manager#184.
+func TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage(t *testing.T) {
+	g := G.NewGomegaWithT(t)
+
+	cacheManager, _ := cache.NewCacheManager("", "", nil)
+	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+	hh.host = &kdexv1alpha1.KDexHostSpec{}
+	hh.authConfig = &auth.Config{
+		AnonymousEntitlements: []string{"public"},
+		ActivePair:            &keys.KeyPair{},
+	}
+
+	gated := page.PageHandler{
+		Name: "developer-keys",
+		Page: &kdexv1alpha1.KDexPageSpec{
+			Label: "Developer Keys",
+			Paths: kdexv1alpha1.Paths{BasePath: "/developer-keys"},
+		},
+		ParsedRequirements: &entitlements.ParsedRequirements{},
+	}
+	publicPage := page.PageHandler{
+		Name: "pricing",
+		Page: &kdexv1alpha1.KDexPageSpec{
+			Label: "Pricing",
+			Paths: kdexv1alpha1.Paths{BasePath: "/pricing"},
+		},
+		ParsedRequirements: &entitlements.ParsedRequirements{},
+	}
+	hh.Pages.Set(gated)
+	hh.Pages.Set(publicPage)
+	hh.utilityPages[kdexv1alpha1.LoginUtilityPageType] = page.PageHandler{Name: "login"}
+
+	hh.authChecker = &pageMockAuthChecker{
+		verifyFn: func(_ string, name string, _ entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements, _ ...string) (bool, error) {
+			return name != "/developer-keys", nil
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/developer-keys", nil)
+	w := httptest.NewRecorder()
+
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, req)
+
+	g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
+	g.Expect(w.Header().Get("Location")).To(G.Equal("/-/login?return=%2Fdeveloper-keys"))
+}
+
 func TestPageHandlerFunc_Redirection(t *testing.T) {
 	cacheManager, _ := cache.NewCacheManager("", "", nil)
 	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
@@ -98,6 +149,10 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 
 	handler := hh.pageHandlerFunc(page1, &hh.Translations)
 
+	// No login utility page is registered until the third subtest below, so
+	// an unauthenticated caller legitimately falls through to discovery here.
+	// Where a login page IS configured the login redirect wins instead --
+	// see TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage.
 	t.Run("Redirect to first authorized page when unauthenticated", func(t *testing.T) {
 		g := G.NewGomegaWithT(t)
 		req := httptest.NewRequest("GET", "/page1", nil)
