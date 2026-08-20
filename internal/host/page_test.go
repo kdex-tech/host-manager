@@ -48,6 +48,44 @@ func (m *pageMockAuthChecker) VerifyResourceParsedEntitlements(kind string, name
 	return true, nil
 }
 
+// newPage is a page whose gate the mock checker can decide on by basePath.
+func newPage(name, label, basePath string) page.PageHandler {
+	return page.PageHandler{
+		Name: name,
+		Page: &kdexv1alpha1.KDexPageSpec{
+			Label: label,
+			Paths: kdexv1alpha1.Paths{BasePath: basePath},
+		},
+		ParsedRequirements: &entitlements.ParsedRequirements{},
+	}
+}
+
+// gatedHostFixture builds a host with auth enabled and a login utility page
+// registered, serving the given pages. Callers set hh.authChecker to decide
+// which of them the gate lets through.
+func gatedHostFixture(pages ...page.PageHandler) *HostHandler {
+	cacheManager, _ := cache.NewCacheManager("", "", nil)
+	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+	hh.host = &kdexv1alpha1.KDexHostSpec{}
+	hh.authConfig = &auth.Config{
+		AnonymousEntitlements: []string{"public"},
+		ActivePair:            &keys.KeyPair{},
+	}
+	for _, p := range pages {
+		hh.Pages.Set(p)
+	}
+	hh.utilityPages[kdexv1alpha1.LoginUtilityPageType] = page.PageHandler{Name: "login"}
+	return hh
+}
+
+func denyPath(basePath string) *pageMockAuthChecker {
+	return &pageMockAuthChecker{
+		verifyFn: func(_ string, name string, _ entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements, _ ...string) (bool, error) {
+			return name != basePath, nil
+		},
+	}
+}
+
 // An anonymous caller who fails a page's gate must be sent to the login page,
 // not to whatever else they happen to be allowed to see. Any host with a
 // non-empty anonymousEntitlements list has authorized pages for every caller,
@@ -56,39 +94,9 @@ func (m *pageMockAuthChecker) VerifyResourceParsedEntitlements(kind string, name
 func TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage(t *testing.T) {
 	g := G.NewGomegaWithT(t)
 
-	cacheManager, _ := cache.NewCacheManager("", "", nil)
-	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
-	hh.host = &kdexv1alpha1.KDexHostSpec{}
-	hh.authConfig = &auth.Config{
-		AnonymousEntitlements: []string{"public"},
-		ActivePair:            &keys.KeyPair{},
-	}
-
-	gated := page.PageHandler{
-		Name: "developer-keys",
-		Page: &kdexv1alpha1.KDexPageSpec{
-			Label: "Developer Keys",
-			Paths: kdexv1alpha1.Paths{BasePath: "/developer-keys"},
-		},
-		ParsedRequirements: &entitlements.ParsedRequirements{},
-	}
-	publicPage := page.PageHandler{
-		Name: "pricing",
-		Page: &kdexv1alpha1.KDexPageSpec{
-			Label: "Pricing",
-			Paths: kdexv1alpha1.Paths{BasePath: "/pricing"},
-		},
-		ParsedRequirements: &entitlements.ParsedRequirements{},
-	}
-	hh.Pages.Set(gated)
-	hh.Pages.Set(publicPage)
-	hh.utilityPages[kdexv1alpha1.LoginUtilityPageType] = page.PageHandler{Name: "login"}
-
-	hh.authChecker = &pageMockAuthChecker{
-		verifyFn: func(_ string, name string, _ entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements, _ ...string) (bool, error) {
-			return name != "/developer-keys", nil
-		},
-	}
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
 
 	req := httptest.NewRequest("GET", "/developer-keys", nil)
 	w := httptest.NewRecorder()
@@ -97,6 +105,27 @@ func TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage(t *testin
 
 	g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
 	g.Expect(w.Header().Get("Location")).To(G.Equal("/-/login?return=%2Fdeveloper-keys"))
+}
+
+// The return trip must carry the whole request target, not just its path.
+// Returning a user to /search after they asked for /search?q=foo silently
+// drops what they came for. SafeReturnPath already round-trips a query
+// string (see TestSafeReturnPath), so the value is safe to hand back.
+func TestPageHandlerFunc_LoginReturnPreservesQueryString(t *testing.T) {
+	g := G.NewGomegaWithT(t)
+
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated)
+	hh.authChecker = denyPath("/developer-keys")
+
+	req := httptest.NewRequest("GET", "/developer-keys?tab=tokens&page=2", nil)
+	w := httptest.NewRecorder()
+
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, req)
+
+	g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
+	g.Expect(w.Header().Get("Location")).To(
+		G.Equal("/-/login?return=%2Fdeveloper-keys%3Ftab%3Dtokens%26page%3D2"))
 }
 
 func TestPageHandlerFunc_Redirection(t *testing.T) {

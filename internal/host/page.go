@@ -60,7 +60,12 @@ func (hh *HostHandler) pageHandlerFunc(
 					_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
 					if hasLoginPage {
 						log.V(2).Info("unauthenticated, redirecting to login")
-						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
+						// RequestURI, not Path: the return trip has to carry
+						// the query string too, or a gated /search?q=foo sends
+						// the user back to a bare /search. SafeReturnPath
+						// round-trips a query and still collapses anything
+						// cross-origin, so the value stays safe to redirect to.
+						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
 						return
 					}
 				}
