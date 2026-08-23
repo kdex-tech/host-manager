@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
@@ -98,11 +99,68 @@ const transferPath = "/-/transfer/{handle}"
 
 // transferHandler registers the redemption route, but only when URL delivery is
 // enabled — a disabled host has no /-/transfer surface at all.
-func (hh *HostHandler) transferHandler(mux *http.ServeMux, _ map[string]ko.PathInfo) {
+//
+// The PathInfo is published under the same guard, so the catalog advertises the
+// route exactly when the route exists. Documenting it leaks nothing: the
+// credential is the 256-bit handle, not the route template — and without an
+// entry, an agent reading /-/openapi (which the mint_token descriptor tells it
+// to do) never learns the mechanism exists. See kdex-tech/host-manager#185.
+func (hh *HostHandler) transferHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	if hh.authConfig == nil || !hh.authConfig.MintTokenURLDelivery {
 		return
 	}
 	mux.HandleFunc("GET "+transferPath, hh.TransferGet)
+
+	hh.registerPath(transferPath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: transferPath,
+			Paths: map[string]ko.PathItem{
+				transferPath: {
+					Description: "Redeems a single-use capability URL minted with delivery \"url\".",
+					Get: &openapi.Operation{
+						Description: "GET to redeem the capability and receive the bound target's response. " +
+							"Send NO credentials: the handle is the credential, and an Authorization header is " +
+							"rejected by the authentication middleware before redemption is reached. The bound " +
+							"method and path are fixed at mint time; any query string is discarded, and all " +
+							"headers except Accept, Accept-Encoding, Range, If-Range, If-Modified-Since and " +
+							"If-None-Match are dropped before the request is re-dispatched.",
+						OperationID: "transfer-redeem-get",
+						Parameters: openapi.Parameters{
+							&openapi.ParameterRef{
+								Value: &openapi.Parameter{
+									Name:        "handle",
+									In:          "path",
+									Required:    true,
+									Description: "The unguessable 256-bit handle returned by the mint. This value IS the credential.",
+									Schema:      &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+								},
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("200", &openapi.Response{
+								Description: new("The bound target's response, passed through unchanged. " +
+									"Content type is whatever the target produced."),
+							}),
+							openapi.WithStatus(401, &openapi.ResponseRef{
+								Ref: "#/components/responses/Unauthorized",
+							}),
+							openapi.WithStatus(410, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Description: new("The link is no longer redeemable. Deliberately indistinguishable " +
+										"across every cause — already spent, expired, unknown handle, method mismatch, " +
+										"or no cache backing the record — so a caller cannot enumerate handles."),
+								},
+							}),
+						),
+						Summary: "Redeem a capability URL",
+						Tags:    []string{"system", "transfer", "auth"},
+					},
+					Summary: "Redeem a capability URL",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
 }
 
 // TransferGet redeems a /-/transfer/<handle> capability: resolve the handle,

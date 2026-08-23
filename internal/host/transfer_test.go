@@ -12,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -120,12 +121,45 @@ func TestTransferGet_UnknownHandle410(t *testing.T) {
 func TestTransferHandler_GatedOnPolicy(t *testing.T) {
 	g := NewWithT(t)
 	onMux := http.NewServeMux()
-	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: true}}).transferHandler(onMux, nil)
+	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: true}}).transferHandler(onMux, map[string]ko.PathInfo{})
 	g.Expect(patternRegistered(onMux, "GET "+transferPath)).To(BeTrue())
 
 	offMux := http.NewServeMux()
-	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: false}}).transferHandler(offMux, nil)
+	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: false}}).transferHandler(offMux, map[string]ko.PathInfo{})
 	g.Expect(patternRegistered(offMux, "GET "+transferPath)).To(BeFalse())
+}
+
+// The redemption route is the one /-/ route that published no PathInfo, so an
+// agent reading /-/openapi never learned the mechanism exists (#185).
+func TestTransferHandler_PublishesOpenAPIPath(t *testing.T) {
+	g := NewWithT(t)
+
+	on := map[string]ko.PathInfo{}
+	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: true}}).
+		transferHandler(http.NewServeMux(), on)
+
+	info, ok := on[transferPath]
+	g.Expect(ok).To(BeTrue(), "url delivery on -> the redemption route must be documented")
+	g.Expect(info.Type).To(Equal(ko.SystemPathType))
+
+	item, ok := info.API.Paths[transferPath]
+	g.Expect(ok).To(BeTrue())
+	g.Expect(item.Get).ToNot(BeNil())
+	g.Expect(item.Get.OperationID).To(Equal("transfer-redeem-get"))
+
+	// The 410 is the anti-enumeration catch-all: a recipient cannot tell spent
+	// from expired from unknown, and the contract should say so.
+	g.Expect(item.Get.Responses.Status(http.StatusGone)).ToNot(BeNil())
+	// Sending an Authorization header gets the request rejected by the outer
+	// middleware before redemption -- counter-intuitive enough to document.
+	g.Expect(item.Get.Responses.Status(http.StatusUnauthorized)).ToNot(BeNil())
+	// The handle IS the credential; the route carries no security requirement.
+	g.Expect(item.Get.Security).To(BeNil())
+
+	off := map[string]ko.PathInfo{}
+	(&HostHandler{authConfig: &auth.Config{MintTokenURLDelivery: false}}).
+		transferHandler(http.NewServeMux(), off)
+	g.Expect(off).To(BeEmpty(), "url delivery off -> no route exists, so nothing to document")
 }
 
 func TestURLDelivery_EndToEnd(t *testing.T) {
@@ -141,7 +175,7 @@ func TestURLDelivery_EndToEnd(t *testing.T) {
 	})
 
 	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr, Mux: mux}
-	hh.transferHandler(mux, nil) // register /-/transfer on the same mux
+	hh.transferHandler(mux, map[string]ko.PathInfo{}) // register /-/transfer on the same mux
 
 	// Mint a URL capability.
 	res, err := hh.mintCapabilityToken(context.Background(), "alice",
@@ -284,7 +318,7 @@ func TestURLDelivery_ThroughRealProxy(t *testing.T) {
 	mux.Handle("/api/v1/files", handler)
 	mux.Handle("/api/v1/files/", handler)
 	hh.Mux = mux
-	hh.transferHandler(mux, nil)
+	hh.transferHandler(mux, map[string]ko.PathInfo{})
 
 	held := []string{"functions:/api/v1/files:read"}
 	res, err := hh.mintCapabilityToken(context.Background(), "alice", held,
