@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -91,8 +90,9 @@ func transferBaseURL(r *http.Request) string {
 }
 
 // errNoCache is returned when URL delivery is requested but no cache manager is
-// available to hold the handle record / budget counter.
-var errNoCache = fmt.Errorf("mint_token url delivery requires a configured cache")
+// available to hold the handle record / budget counter. Classified
+// mintUnavailable: the caller's request is fine, the server cannot honour it.
+var errNoCache = mintErrf(mintUnavailable, "mint_token url delivery requires a configured cache")
 
 // transferPath is the redemption route for URL-delivered capabilities.
 const transferPath = "/-/transfer/{handle}"

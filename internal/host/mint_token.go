@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,6 +40,58 @@ const mintTokenListDiscoveryURLKey ctxKey = iota
 // delivery. Any other value (including "" / "bearer") selects the default
 // bearer-token delivery.
 const deliveryURL = "url"
+
+// mintFailureKind classifies WHY a mint was refused, so the REST surface can
+// answer with a real HTTP status instead of collapsing every cause into one.
+//
+// The MCP surface reports all of them as isError:true over HTTP 200, which is
+// how MCP conveys domain errors — so this classification is purely additive and
+// leaves tools/call byte-identical. See kdex-tech/host-manager#186.
+type mintFailureKind int
+
+const (
+	// mintInvalidRequest: malformed input the caller can correct.
+	mintInvalidRequest mintFailureKind = iota
+	// mintRefused: well-formed, but policy says no (attenuation, feature off).
+	mintRefused
+	// mintUnavailable: a server-side prerequisite is missing (no cache).
+	mintUnavailable
+)
+
+// mintFailure pairs a kind with the underlying error. Error() delegates, so
+// every existing message reaches MCP callers verbatim.
+type mintFailure struct {
+	kind mintFailureKind
+	err  error
+}
+
+func (e *mintFailure) Error() string { return e.err.Error() }
+func (e *mintFailure) Unwrap() error { return e.err }
+
+// mintErrf builds a classified mint failure.
+func mintErrf(kind mintFailureKind, format string, a ...any) error {
+	return &mintFailure{kind: kind, err: fmt.Errorf(format, a...)}
+}
+
+// mintStatus maps a mint error onto an HTTP status. An UNCLASSIFIED error is
+// deliberately a 500: the classified set covers every caller-visible refusal,
+// so anything else is a signing/marshalling fault the caller cannot act on —
+// and a new failure path added without a kind shows up as a server error rather
+// than silently masquerading as a client mistake.
+func mintStatus(err error) int {
+	var mf *mintFailure
+	if errors.As(err, &mf) {
+		switch mf.kind {
+		case mintInvalidRequest:
+			return http.StatusBadRequest
+		case mintRefused:
+			return http.StatusForbidden
+		case mintUnavailable:
+			return http.StatusServiceUnavailable
+		}
+	}
+	return http.StatusInternalServerError
+}
 
 // TransferTarget is the single concrete operation a delivery:"url" capability
 // authorizes. Download-only in this release: Method must be GET.
@@ -143,22 +196,22 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
-		return MintTokenResult{}, fmt.Errorf("mint_token is not enabled on this host")
+		return MintTokenResult{}, mintErrf(mintRefused, "mint_token is not enabled on this host")
 	}
 	if sub == "" {
-		return MintTokenResult{}, fmt.Errorf("mint_token requires an authenticated caller")
+		return MintTokenResult{}, mintErrf(mintRefused, "mint_token requires an authenticated caller")
 	}
 	if len(req.Entitlements) == 0 {
-		return MintTokenResult{}, fmt.Errorf("mint_token requires at least one entitlement")
+		return MintTokenResult{}, mintErrf(mintInvalidRequest, "mint_token requires at least one entitlement")
 	}
 
 	isURL := req.Delivery == deliveryURL
 	if isURL {
 		if !cfg.MintTokenURLDelivery {
-			return MintTokenResult{}, fmt.Errorf("url delivery is not enabled on this host")
+			return MintTokenResult{}, mintErrf(mintRefused, "url delivery is not enabled on this host")
 		}
 		if err := validateTransferTarget(req.Target); err != nil {
-			return MintTokenResult{}, err
+			return MintTokenResult{}, &mintFailure{kind: mintInvalidRequest, err: err}
 		}
 		if hh.capCache() == nil {
 			return MintTokenResult{}, errNoCache
@@ -167,7 +220,7 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 
 	// Attenuation: every requested entitlement must be dominated by the held set.
 	if offender, ok := entitlements.VerifyAttenuation(held, req.Entitlements); !ok {
-		return MintTokenResult{}, fmt.Errorf("entitlement not held by caller: %s", offender)
+		return MintTokenResult{}, mintErrf(mintRefused, "entitlement not held by caller: %s", offender)
 	}
 
 	// Clamp ttl.
@@ -241,7 +294,7 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 			Entitlements: req.Entitlements,
 			Target:       *req.Target,
 		}, ttl); serr != nil {
-			return MintTokenResult{}, serr
+			return MintTokenResult{}, &mintFailure{kind: mintUnavailable, err: serr}
 		}
 		result.URL = baseURL + "/-/transfer/" + handle
 		return result, nil
