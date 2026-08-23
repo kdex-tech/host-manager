@@ -37,8 +37,22 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 		return
 	}
 
-	mux.Handle("POST "+capabilitiesMintPath, hh.authConfig.AddAuthentication(
-		http.HandlerFunc(hh.capabilityMintHandler), hh.authExchanger))
+	// Opt in to PASETO developer keys. WithAuthentication alone leaves a PAT
+	// anonymous by design, so without this the REST surface would accept only a
+	// session cookie or an OAuth2 access token — useless to the CI jobs and ops
+	// scripts it exists to serve, and strictly weaker than the MCP path, whose
+	// proxy bridge already authenticates all three PAT deliveries.
+	//
+	// Safe here in a way it is NOT at /-/apitokens/mint or /-/oauth/authorize,
+	// which refuse a PAT so a key cannot mint a longer-lived credential than
+	// itself: a capability is bounded BELOW the key by construction — its
+	// entitlements are attenuated from the caller's own, its lifetime is clamped
+	// to MintTokenTTLCap, and url delivery is single-use. Only a HOST-audience
+	// key is accepted; a function-bound key stays anonymous.
+	mux.Handle("POST "+capabilitiesMintPath,
+		hh.authConfig.WithAPITokenIdentity(hh.authExchanger)(
+			hh.authConfig.AddAuthentication(
+				http.HandlerFunc(hh.capabilityMintHandler), hh.authExchanger)))
 
 	hh.registerPath(capabilitiesMintPath, ko.PathInfo{
 		API: ko.OpenAPI{

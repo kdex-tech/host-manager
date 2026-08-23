@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
@@ -133,6 +134,62 @@ func TestCapabilityAndTransferPathsCompileIntoOpenAPI(t *testing.T) {
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(string(raw)).To(ContainSubstring(capabilitiesMintPath))
 	g.Expect(string(raw)).To(ContainSubstring(transferPath))
+}
+
+// A developer key must be able to mint a capability over REST, or the REST
+// surface is not a usable alternative to the MCP path for the scripts and CI
+// jobs it exists to serve. System routes do NOT authenticate a PAT by default
+// -- WithAuthentication deliberately leaves one anonymous -- so the route has
+// to opt in via WithAPITokenIdentity, the same composition /-/check uses.
+//
+// Only a HOST-audience PAT counts: a function-bound key stays anonymous, which
+// is what keeps a key scoped to one function from minting against the host.
+func TestCapabilitiesRoute_AcceptsHostAudienceDeveloperKey(t *testing.T) {
+	g := NewWithT(t)
+
+	const issuer = "https://caps.example"
+	cacheManager, _ := cache.NewCacheManager("", "caps-pat-test", nil)
+
+	tm, err := apitoken.NewTokenManager(issuer, apitoken.GenerateDevmodeKeyPair(), nil)
+	g.Expect(err).ToNot(HaveOccurred())
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager,
+		stubInternalIdentityProvider{})
+	g.Expect(err).ToNot(HaveOccurred())
+
+	cfg := testURLAuthConfig(t)
+	cfg.Audience = issuer
+	cfg.TokenManager = tm
+
+	hh := &HostHandler{
+		log:           logr.Discard(),
+		authConfig:    cfg,
+		authExchanger: ex,
+		cacheManager:  cacheManager,
+		Mux:           http.NewServeMux(),
+	}
+
+	mux := http.NewServeMux()
+	hh.capabilitiesHandler(mux, map[string]ko.PathInfo{})
+
+	body := `{"entitlements":["functions:/api/v1/files:read"]}`
+	post := func(pat string) int {
+		r := httptest.NewRequest(http.MethodPost, capabilitiesMintPath, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+pat)
+		rw := httptest.NewRecorder()
+		mux.ServeHTTP(rw, r)
+		return rw.Code
+	}
+
+	hostPAT, err := tm.MintStatelessKey(issuer, "alice", "act", "scope:x", time.Hour)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(post(hostPAT)).ToNot(Equal(http.StatusUnauthorized),
+		"a host-audience developer key must authenticate on the REST mint route")
+
+	fnPAT, err := tm.MintStatelessKey(issuer+"/api/v1/files", "eve", "act", "scope:x", time.Hour)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(post(fnPAT)).To(Equal(http.StatusUnauthorized),
+		"a function-bound key must NOT become a host identity here")
 }
 
 func TestCapabilityMintHandler_URLDelivery(t *testing.T) {
