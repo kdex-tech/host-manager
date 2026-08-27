@@ -756,7 +756,10 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
-	const path = "/-/oauth/callback"
+	// Shared with the redirect_uri derivation in internal/auth: the provider
+	// compares the registered URI exactly, so the path we serve and the path we
+	// send must be the same string by construction.
+	const path = auth.OAuthCallbackPath
 	mux.HandleFunc("GET "+path, oauth2.OAuthGet)
 
 	hh.registerPath(path, ko.PathInfo{

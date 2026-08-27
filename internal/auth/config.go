@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kdex-tech/dmapper"
@@ -18,6 +19,16 @@ import (
 	"github.com/kdex-tech/host-manager/internal/utils"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
+
+// OAuthCallbackPath is the path this host serves the OIDC authorization-code
+// callback on, and the path component of the redirect_uri sent to the provider.
+//
+// It is one constant rather than two literals deliberately: the value is
+// registered by hand with the identity provider, which compares it exactly, so
+// a drift between the path we advertise and the path we serve would present as
+// an authorization failure with no local symptom to trace it by. The handler
+// registration in internal/host reads this same constant.
+const OAuthCallbackPath = "/-/oauth/callback"
 
 // DCRConfig is the resolved per-host Dynamic Client Registration config.
 type DCRConfig struct {
@@ -293,28 +304,8 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 			cfg.Clients = clients
 		}
 
-		if cb.OIDCClientConfigLoader != nil && auth.OIDCProvider != nil && auth.OIDCProvider.OIDCProviderURL != "" {
-			oidcClientConfig, err := cb.OIDCClientConfigLoader()
-			if err != nil {
-				return nil, err
-			}
-
-			cfg.OIDC.BlockKey = getOrGenerate(oidcClientConfig.BlockKey)
-			cfg.OIDC.ClientID = oidcClientConfig.ClientID
-			cfg.OIDC.ClientSecret = oidcClientConfig.ClientSecret
-			cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cb.CacheManager, cfg.TokenTTL)
-			cfg.OIDC.Name = oidcClientConfig.Name
-			cfg.OIDC.ProviderURL = auth.OIDCProvider.OIDCProviderURL
-			cfg.OIDC.RedirectURL = "/-/oauth/callback"
-			cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
-
-			if cfg.OIDC.Name == "" {
-				providerURL, err := url.Parse(cfg.OIDC.ProviderURL)
-				if err != nil {
-					return nil, err
-				}
-				cfg.OIDC.Name = providerURL.Host
-			}
+		if err := cb.applyOIDC(cfg, auth); err != nil {
+			return nil, err
 		}
 	}
 
@@ -436,6 +427,65 @@ func (c *Config) IsM2MEnabled() bool {
 		return false
 	}
 	return true
+}
+
+// applyOIDC resolves the host's OIDC client configuration onto cfg. It is a
+// no-op unless the host actually declares a provider.
+//
+// Extracted from Build rather than inlined: Build is already at the gocyclo
+// ceiling, and this block is self-contained — it reads only the builder's
+// loaders and the host's OIDCProvider, and writes only cfg.OIDC.
+func (cb *ConfigBuilder) applyOIDC(cfg *Config, auth *kdexv1alpha1.Auth) error {
+	if cb.OIDCClientConfigLoader == nil || auth.OIDCProvider == nil || auth.OIDCProvider.OIDCProviderURL == "" {
+		return nil
+	}
+
+	oidcClientConfig, err := cb.OIDCClientConfigLoader()
+	if err != nil {
+		return err
+	}
+
+	// The redirect_uri must be ABSOLUTE. RFC 6749 §3.1.2 requires it, and OIDC
+	// Core §3.1.2.1 requires it to match a pre-registered value exactly — which
+	// a bare path can never do. golang.org/x/oauth2 emits whatever is in
+	// RedirectURL verbatim, on both the authorize hop and the token exchange
+	// (§4.1.3 requires the two to agree), so a relative value is rejected by the
+	// provider at the very first step of the login flow, before the user ever
+	// reaches a consent screen. See kdex-tech/host-manager#188.
+	//
+	// cb.Issuer is "<scheme>://<primary domain>", the same value the JWT `iss`
+	// claim carries, so the redirect_uri and the issuer can never disagree about
+	// which origin this host answers on.
+	//
+	// NOTE for multi-domain hosts: routing.domains is a list but redirect_uri is
+	// a single registered value, so the callback always lands on domains[0]. A
+	// user who arrives on a secondary domain is returned to the primary one.
+	if cb.Issuer == "" {
+		return fmt.Errorf(
+			"an issuer is required to derive the OIDC redirect_uri; it must be absolute and there is nothing to build it from")
+	}
+
+	cfg.OIDC.BlockKey = getOrGenerate(oidcClientConfig.BlockKey)
+	cfg.OIDC.ClientID = oidcClientConfig.ClientID
+	cfg.OIDC.ClientSecret = oidcClientConfig.ClientSecret
+	cfg.OIDC.IDTokenStore = idtoken.NewCacheIDTokenStore(cb.CacheManager, cfg.TokenTTL)
+	cfg.OIDC.Name = oidcClientConfig.Name
+	cfg.OIDC.ProviderURL = auth.OIDCProvider.OIDCProviderURL
+	// Trim a trailing slash so the join can never double the separator: the
+	// provider compares the URI byte-for-byte against what was registered, and
+	// "https://host//-/oauth/callback" is a different URI that fails the match.
+	cfg.OIDC.RedirectURL = strings.TrimSuffix(cb.Issuer, "/") + OAuthCallbackPath
+	cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
+
+	if cfg.OIDC.Name == "" {
+		providerURL, err := url.Parse(cfg.OIDC.ProviderURL)
+		if err != nil {
+			return err
+		}
+		cfg.OIDC.Name = providerURL.Host
+	}
+
+	return nil
 }
 
 func getOrGenerate(blockKey string) string {
