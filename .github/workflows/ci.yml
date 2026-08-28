@@ -38,7 +38,8 @@ jobs:
     - name: Run Linter
       uses: golangci/golangci-lint-action@v9
       with:
-        version: v2.10.1
+        # Keep in lockstep with GOLANGCI_LINT_VERSION in the Makefile.
+        version: v2.13.2
 
     - name: Run Unit Tests
       run: |
