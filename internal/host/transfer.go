@@ -142,7 +142,7 @@ func (hh *HostHandler) transferHandler(mux *http.ServeMux, registeredPaths map[s
 									"Content type is whatever the target produced."),
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(410, &openapi.ResponseRef{
 								Value: &openapi.Response{

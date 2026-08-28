@@ -218,7 +218,7 @@ func stormDefaultClusterArchetype() *kdexv1alpha1.KDexClusterPageArchetype {
 	return &kdexv1alpha1.KDexClusterPageArchetype{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "storm-default-archetype",
-			Labels: map[string]string{"kdex.dev/default": "true"},
+			Labels: map[string]string{internal.LABEL_DEFAULT: "true"},
 		},
 		Spec: kdexv1alpha1.KDexPageArchetypeSpec{
 			Content: "<h1>Hello, World!</h1>",

@@ -176,12 +176,12 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 			Name:      jobName,
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				"app":                 "codegen",
-				"function":            function.Name,
-				"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+				"app":                          "codegen",
+				"function":                     function.Name,
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 			Annotations: map[string]string{
-				"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -197,7 +197,7 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+						internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 					},
 				},
 				Spec: corev1.PodSpec{

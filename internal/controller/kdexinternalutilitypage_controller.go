@@ -110,7 +110,12 @@ func (r *KDexInternalUtilityPageReconciler) Reconcile(ctx context.Context, req c
 			if err := r.Update(ctx, &internalUtilityPage); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{Requeue: true}, nil
+			// Re-reconcile now that the finalizer is present. Result.Requeue
+			// is deprecated; an explicit short RequeueAfter is used rather
+			// than relying on the Update's own watch event, because this
+			// controller runs behind an event filter that may not admit a
+			// metadata-only change.
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	} else {
 		if controllerutil.ContainsFinalizer(&internalUtilityPage, UTILITY_PAGE_FINALIZER) {

@@ -7,6 +7,8 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/kdex-tech/host-manager/internal"
 )
 
 func GetPodForJob(ctx context.Context, c client.Client, job *batchv1.Job) (*corev1.Pod, error) {
@@ -17,7 +19,7 @@ func GetPodForJob(ctx context.Context, c client.Client, job *batchv1.Job) (*core
 
 	// find pod with matching generation
 	for _, pod := range podList.Items {
-		if pod.Annotations["kdex.dev/generation"] == job.Annotations["kdex.dev/generation"] {
+		if pod.Annotations[internal.ANNOTATION_GENERATION] == job.Annotations[internal.ANNOTATION_GENERATION] {
 			return &pod, nil
 		}
 	}

@@ -590,7 +590,7 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		isDefault := false
 		if _, ok := obj.(*kdexv1alpha1.KDexClusterFaaSAdaptor); ok {
 			defaults := &kdexv1alpha1.KDexClusterFaaSAdaptorList{}
-			if err := r.List(ctx, defaults, client.MatchingLabels{"kdex.dev/default": "true"}); err == nil &&
+			if err := r.List(ctx, defaults, client.MatchingLabels{internal.LABEL_DEFAULT: "true"}); err == nil &&
 				len(defaults.Items) != 0 {
 				slices.SortFunc(defaults.Items, func(a, b kdexv1alpha1.KDexClusterFaaSAdaptor) int {
 					return a.CreationTimestamp.Compare(b.CreationTimestamp.Time)
@@ -1827,8 +1827,8 @@ func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdex
 
 	currentGen := fmt.Sprintf("%d", function.Generation)
 	for _, job := range jobList.Items {
-		if job.Labels["kdex.dev/generation"] != currentGen && (job.Status.Succeeded > 0 || job.Status.Failed > 0) {
-			log.V(2).Info("Cleaning up obsolete job from previous generation", "job", job.Name, "jobGen", job.Labels["kdex.dev/generation"], "app", appLabel)
+		if job.Labels[internal.ANNOTATION_GENERATION] != currentGen && (job.Status.Succeeded > 0 || job.Status.Failed > 0) {
+			log.V(2).Info("Cleaning up obsolete job from previous generation", "job", job.Name, "jobGen", job.Labels[internal.ANNOTATION_GENERATION], "app", appLabel)
 			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
 				return err
 			}

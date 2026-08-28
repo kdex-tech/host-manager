@@ -389,7 +389,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("PASETO Public Keys"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "PASETO Public Keys Discovery",
@@ -447,7 +447,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("Minted PASETO Token"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(403, &openapi.ResponseRef{
 								Value: &openapi.Response{
@@ -455,7 +455,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								},
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Security: &openapi.SecurityRequirements{
@@ -523,13 +523,13 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("Verified Token Claims"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Verify PASETO API Token",
@@ -586,7 +586,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("Revocation Confirmation"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(403, &openapi.ResponseRef{
 								Value: &openapi.Response{
@@ -594,7 +594,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								},
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Security: &openapi.SecurityRequirements{

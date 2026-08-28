@@ -144,10 +144,10 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 								Description: new("The minted capability"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(403, &openapi.ResponseRef{
 								Value: &openapi.Response{
@@ -156,7 +156,7 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 								},
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 							openapi.WithStatus(503, &openapi.ResponseRef{
 								Value: &openapi.Response{

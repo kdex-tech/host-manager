@@ -119,7 +119,12 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 			if err := r.Update(ctx, &page); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{Requeue: true}, nil
+			// Re-reconcile now that the finalizer is present. Result.Requeue
+			// is deprecated; an explicit short RequeueAfter is used rather
+			// than relying on the Update's own watch event, because this
+			// controller runs behind an event filter that may not admit a
+			// metadata-only change.
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	} else {
 		if controllerutil.ContainsFinalizer(&page, internal.PAGE_FINALIZER) {
@@ -489,7 +494,7 @@ func normalizeReferencedResource(obj client.Object) client.Object {
 	c.SetManagedFields(nil)
 
 	v := reflect.ValueOf(c)
-	if v.Kind() != reflect.Ptr || v.IsNil() {
+	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return c
 	}
 	statusField := v.Elem().FieldByName("Status")

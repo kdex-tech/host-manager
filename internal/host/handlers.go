@@ -88,16 +88,16 @@ func (hh *HostHandler) addHandlerAndRegister(
 					},
 				}),
 				openapi.WithStatus(303, &openapi.ResponseRef{
-					Ref: "#/components/responses/SeeOther",
+					Ref: ko.RespRefSeeOther,
 				}),
 				openapi.WithStatus(400, &openapi.ResponseRef{
-					Ref: "#/components/responses/BadRequest",
+					Ref: ko.RespRefBadRequest,
 				}),
 				openapi.WithStatus(404, &openapi.ResponseRef{
-					Ref: "#/components/responses/NotFound",
+					Ref: ko.RespRefNotFound,
 				}),
 				openapi.WithStatus(500, &openapi.ResponseRef{
-					Ref: "#/components/responses/InternalServerError",
+					Ref: ko.RespRefInternalServerError,
 				}),
 			),
 			Security: reqs,
@@ -198,13 +198,13 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 						},
 						Responses: openapi.NewResponses(
 							openapi.WithStatus(302, &openapi.ResponseRef{
-								Ref: "#/components/responses/Found",
+								Ref: ko.RespRefFound,
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OAuth2 Authorization",
@@ -295,13 +295,13 @@ func (hh *HostHandler) checkHandler(mux *http.ServeMux, registeredPaths map[stri
 								Description: new("Subset of resource identifiers that passed the check"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Check Entitlements",
@@ -353,7 +353,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("OpenID Configuration"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OAuth 2.0 Authorization Server configuration",
@@ -399,7 +399,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("OpenID Configuration"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OpenID Discovery",
@@ -442,7 +442,7 @@ func (hh *HostHandler) faviconHandler(mux *http.ServeMux, registeredPaths map[st
 								Description: new("SVG Favicon"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Favicon SVG",
@@ -489,7 +489,7 @@ func (hh *HostHandler) jwksHandler(mux *http.ServeMux, registeredPaths map[strin
 								Description: new("JWKS"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "The JWKS",
@@ -536,16 +536,16 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 								Description: new("HTML login page"),
 							}),
 							openapi.WithStatus(303, &openapi.ResponseRef{
-								Ref: "#/components/responses/SeeOther",
+								Ref: ko.RespRefSeeOther,
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(404, &openapi.ResponseRef{
-								Ref: "#/components/responses/NotFound",
+								Ref: ko.RespRefNotFound,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Get login experience",
@@ -556,10 +556,10 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 						OperationID: "login-post",
 						Responses: openapi.NewResponses(
 							openapi.WithStatus(303, &openapi.ResponseRef{
-								Ref: "#/components/responses/SeeOther",
+								Ref: ko.RespRefSeeOther,
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 						),
 						Summary: "Login action",
@@ -600,16 +600,16 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 								Description: new("HTML login page shell"),
 							}),
 							openapi.WithStatus(303, &openapi.ResponseRef{
-								Ref: "#/components/responses/SeeOther",
+								Ref: ko.RespRefSeeOther,
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(404, &openapi.ResponseRef{
-								Ref: "#/components/responses/NotFound",
+								Ref: ko.RespRefNotFound,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Get login experience (client-side route)",
@@ -636,10 +636,10 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 						OperationID: "logout-post",
 						Responses: openapi.NewResponses(
 							openapi.WithStatus(302, &openapi.ResponseRef{
-								Ref: "#/components/responses/Found",
+								Ref: ko.RespRefFound,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Logout action",
@@ -683,13 +683,13 @@ func (hh *HostHandler) navigationHandler(mux *http.ServeMux, registeredPaths map
 								Description: new("HTML navigation fragment"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(404, &openapi.ResponseRef{
-								Ref: "#/components/responses/NotFound",
+								Ref: ko.RespRefNotFound,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Dynamic HTML navigation",
@@ -777,16 +777,16 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 						},
 						Responses: openapi.NewResponses(
 							openapi.WithStatus(303, &openapi.ResponseRef{
-								Ref: "#/components/responses/SeeOther",
+								Ref: ko.RespRefSeeOther,
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OAuth2 Callback",
@@ -834,7 +834,7 @@ func (hh *HostHandler) openapiHandler(mux *http.ServeMux, registeredPaths map[st
 								Description: new("OpenAPI documentation"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OpenAPI 3.0 Spec",
@@ -901,7 +901,7 @@ func (hh *HostHandler) schemaHandler(mux *http.ServeMux, registeredPaths map[str
 								Description: new("Schema list"),
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Schema List",
@@ -938,10 +938,10 @@ func (hh *HostHandler) schemaHandler(mux *http.ServeMux, registeredPaths map[str
 								Description: new("JSONschema fragment"),
 							}),
 							openapi.WithStatus(404, &openapi.ResponseRef{
-								Ref: "#/components/responses/NotFound",
+								Ref: ko.RespRefNotFound,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "JSONschema",
@@ -995,10 +995,10 @@ func (hh *HostHandler) snifferHandler(mux *http.ServeMux, registeredPaths map[st
 									),
 								}),
 								openapi.WithStatus(404, &openapi.ResponseRef{
-									Ref: "#/components/responses/NotFound",
+									Ref: ko.RespRefNotFound,
 								}),
 								openapi.WithStatus(500, &openapi.ResponseRef{
-									Ref: "#/components/responses/InternalServerError",
+									Ref: ko.RespRefInternalServerError,
 								}),
 							),
 							Summary: "Sniffer Dashboard",
@@ -1036,7 +1036,7 @@ func (hh *HostHandler) snifferHandler(mux *http.ServeMux, registeredPaths map[st
 									),
 								}),
 								openapi.WithStatus(500, &openapi.ResponseRef{
-									Ref: "#/components/responses/InternalServerError",
+									Ref: ko.RespRefInternalServerError,
 								}),
 							),
 							Summary: "Sniffer Docs",
@@ -1090,10 +1090,10 @@ func (hh *HostHandler) stateHandler(mux *http.ServeMux, registeredPaths map[stri
 								Description: new("Current session claims"),
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Authenticated session state",
@@ -1198,13 +1198,13 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 								Description: new("Token Response"),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(401, &openapi.ResponseRef{
-								Ref: "#/components/responses/Unauthorized",
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "OAuth2 Token",
@@ -1249,10 +1249,10 @@ func (hh *HostHandler) translationHandler(mux *http.ServeMux, registeredPaths ma
 								),
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
-								Ref: "#/components/responses/BadRequest",
+								Ref: ko.RespRefBadRequest,
 							}),
 							openapi.WithStatus(500, &openapi.ResponseRef{
-								Ref: "#/components/responses/InternalServerError",
+								Ref: ko.RespRefInternalServerError,
 							}),
 						),
 						Summary: "Localization keys and their translated values",

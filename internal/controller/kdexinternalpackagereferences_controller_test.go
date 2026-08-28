@@ -28,6 +28,8 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/kdex-tech/host-manager/internal"
 )
 
 // newJob builds a packager Job carrying the labels cleanupJobs filters on.
@@ -39,9 +41,9 @@ func newJob(iprName, name, genLabel string, succeeded, failed int32) *batchv1.Jo
 			Name:      name,
 			Namespace: "default",
 			Labels: map[string]string{
-				"app":                 "packages",
-				"packages":            iprName,
-				"kdex.dev/generation": genLabel,
+				"app":                          "packages",
+				"packages":                     iprName,
+				internal.ANNOTATION_GENERATION: genLabel,
 			},
 		},
 		Status: batchv1.JobStatus{
@@ -145,7 +147,7 @@ var _ = Describe("KDexInternalPackageReferencesReconciler.cleanupJobs", func() {
 		// unexpected deletes. The Job is left for an operator to inspect.
 		jBad := newJob(iprName, "rsi-dev-packages-x", "not-a-number", 0, 0)
 		jBlank := newJob(iprName, "rsi-dev-packages-blank", "", 0, 0)
-		delete(jBlank.Labels, "kdex.dev/generation")
+		delete(jBlank.Labels, internal.ANNOTATION_GENERATION)
 		jCurrent := newJob(iprName, "rsi-dev-packages-6", "6", 0, 0)
 
 		r, c := buildRcnl(jBad, jBlank, jCurrent)

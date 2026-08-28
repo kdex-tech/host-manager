@@ -43,6 +43,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/kdex-tech/host-manager/internal"
 )
 
 // KDexInternalPackageReferencesReconciler reconciles a KDexInternalPackageReferences object
@@ -474,7 +476,7 @@ func (r *KDexInternalPackageReferencesReconciler) cleanupJobs(ctx context.Contex
 	}
 
 	for _, job := range jobList.Items {
-		genLabel := job.Labels["kdex.dev/generation"]
+		genLabel := job.Labels[internal.ANNOTATION_GENERATION]
 		jobGen, parseErr := strconv.ParseInt(genLabel, 10, 64)
 		if parseErr != nil {
 			log.V(2).Info("Skipping job with missing or unparseable generation label", "job", job.Name, "label", genLabel)

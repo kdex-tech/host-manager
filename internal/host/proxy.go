@@ -134,6 +134,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		}
 	}
 
+	// NewSigner refuses an empty audience, a zero duration, an empty issuer, a
+	// nil key or an empty key id. The error was assigned and never read, so a
+	// nil signer was wired into the Rewrite closure below: an anonymous request
+	// proxied through with NO Function Access Token, and an authenticated one
+	// dereferenced nil in Project. Fail closed here, exactly as the bad-URL and
+	// bad-mapper paths above already do.
 	signer, err := sign.NewSigner(
 		fatAudienceFor(fn),
 		signerDuration,
@@ -142,6 +148,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		hh.authConfig.ActivePair.KeyId,
 		mapper,
 	)
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hh.log.Error(err, "failed to create FAT signer", "function", fn.Name)
+			http.Error(w, "invalid function signer", http.StatusInternalServerError)
+		})
+	}
 
 	// Downscoped Function Access Token (FAT) Cache. TTL is slightly less
 	// than the signer duration so a cache hit always yields a token with

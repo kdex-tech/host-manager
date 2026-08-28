@@ -379,12 +379,12 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			Name:      jobName,
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				"app":                 "deployer",
-				"function":            function.Name,
-				"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+				"app":                          "deployer",
+				"function":                     function.Name,
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 			Annotations: map[string]string{
-				"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -402,7 +402,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"kdex.dev/generation": fmt.Sprintf("%d", function.Generation),
+						internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 					},
 				},
 				Spec: corev1.PodSpec{

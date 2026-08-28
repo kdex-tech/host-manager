@@ -518,7 +518,7 @@ func (s *RequestSniffer) parseRequestIntoAPI(
 			if found {
 				op.Security = &security
 				op.Responses.Set("401", &openapi.ResponseRef{
-					Ref: "#/components/responses/Unauthorized",
+					Ref: ko.RespRefUnauthorized,
 				})
 			}
 		}

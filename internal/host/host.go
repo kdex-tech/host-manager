@@ -414,7 +414,18 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 				continue
 			}
 			h := hh.reverseProxyHandler(&f, hh.issuerAddress())
-			fh := h.(*KDexFunctionHandler)
+			// reverseProxyHandler returns a plain error handler when it cannot
+			// build the proxy -- an unparseable function URL, an invalid
+			// ClaimMappings mapper, or a FAT signer it was refused. Assert
+			// rather than panic: leaving the route unregistered 404s it, which
+			// is the fail-closed outcome, where the unchecked assertion took
+			// the whole reconcile down.
+			fh, ok := h.(*KDexFunctionHandler)
+			if !ok {
+				hh.log.Error(nil, "function handler could not be built; route not registered",
+					"function", f.Name, "basePath", f.Spec.API.BasePath)
+				continue
+			}
 			actualHandlers[f.Spec.API.BasePath] = fh
 			functionHandlers = append(functionHandlers, functionHandler{
 				basePath: f.Spec.API.BasePath,
@@ -486,6 +497,17 @@ func (hh *HostHandler) RemoveUtilityPage(name string) {
 	}
 }
 
+// oauthFlowScopes is the scope map advertised for every OAuth flow in the
+// generated document. The three flows advertise the same set, so it is built
+// once -- three verbatim copies could drift a description without anything
+// noticing.
+func oauthFlowScopes() map[string]string {
+	return map[string]string{
+		"openid":  "standard oidc scope",
+		"profile": "user profile info",
+	}
+}
+
 func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 	req := &openapi.SecuritySchemes{}
 
@@ -535,24 +557,15 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 			Flows: &openapi.OAuthFlows{
 				AuthorizationCode: &openapi.OAuthFlow{
 					AuthorizationURL: "/-/oauth/authorize",
-					Scopes: map[string]string{
-						"openid":  "standard oidc scope",
-						"profile": "user profile info",
-					},
-					TokenURL: "/-/token",
+					Scopes:           oauthFlowScopes(),
+					TokenURL:         "/-/token",
 				},
 				ClientCredentials: &openapi.OAuthFlow{
-					Scopes: map[string]string{
-						"openid":  "standard oidc scope",
-						"profile": "user profile info",
-					},
+					Scopes:   oauthFlowScopes(),
 					TokenURL: "/-/token",
 				},
 				Password: &openapi.OAuthFlow{
-					Scopes: map[string]string{
-						"openid":  "standard oidc scope",
-						"profile": "user profile info",
-					},
+					Scopes:   oauthFlowScopes(),
 					TokenURL: "/-/token",
 				},
 			},

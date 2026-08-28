@@ -22,6 +22,95 @@ linters:
     - unparam
     - unused
   settings:
+    goconst:
+      # Table-driven tests repeat literals by construction -- the same status
+      # string across twenty cases is the point of the table, not a missing
+      # constant.
+      ignore-tests: true
+      # Protocol vocabulary, exempted deliberately. Each of these is an
+      # identifier defined by a wire format -- a JWT claim, an OAuth grant
+      # type or scope, an HTTP method or media type, a JSON-RPC/MCP payload
+      # key, an OpenAPI document key. Several appear under MORE THAN ONE of
+      # those namespaces at once: `email` is both an OAuth scope and a JWT
+      # claim here, `sub`/`name`/`password` are also Kubernetes Secret data
+      # keys, and `sub`/`auth_method` also appear in struct tags. Collapsing
+      # each spelling into one shared constant would erase a real
+      # distinction, and giving each namespace its own constant of the same
+      # value would not reduce the count -- so there is no extraction that
+      # both satisfies the linter and improves the code.
+      #
+      # Genuine duplication is still reported: this list is what goconst
+      # started flagging when golangci-lint v2.10.1 -> v2.13.2 brought
+      # goconst 1.8.2 -> 1.11.0, and the findings that WERE worth acting on
+      # from that same upgrade have been extracted instead -- the OpenAPI
+      # $ref components (internal/openapi.RespRef*) and the kdex.dev
+      # annotation/label keys (internal.ANNOTATION_GENERATION, LABEL_DEFAULT).
+      # Protocol vocabulary, exempted deliberately. Every entry below is an
+      # identifier defined by a wire format -- a JWT claim, an OAuth grant type
+      # or scope, an HTTP method or media type, a JSON-RPC/MCP payload key, an
+      # OpenAPI document key. Several are more than one AT ONCE: `email` is both
+      # an OAuth scope and a JWT claim here; `sub`, `name` and `password` are
+      # also Kubernetes Secret data keys; `sub` and `auth_method` also appear in
+      # struct tags, which cannot hold a constant at all. Collapsing a spelling
+      # into one shared constant would erase a real distinction, and giving each
+      # namespace its own constant of the same value would not lower the count --
+      # so no extraction both satisfies the linter and improves the code.
+      #
+      # This list is what goconst BEGAN reporting when golangci-lint v2.10.1 ->
+      # v2.13.2 brought goconst 1.8.2 -> 1.11.0 (the upgrade was needed because
+      # v2.10.1 panics on go1.27 export data). The findings from that same
+      # upgrade that WERE worth acting on were extracted instead, not listed
+      # here: the OpenAPI $ref components (internal/openapi.RespRef*) and the
+      # kdex.dev annotation/label keys (internal.ANNOTATION_GENERATION,
+      # internal.LABEL_DEFAULT). Genuine duplication is still reported.
+      ignore-string-values:
+        - "2.0"
+        - "GET"
+        - "act"
+        - "apiKey"
+        - "apitoken"
+        - "application/json"
+        - "aud"
+        - "auth"
+        - "auth_method"
+        - "bearer"
+        - "binary"
+        - "client_credentials"
+        - "content"
+        - "description"
+        - "email"
+        - "email_verified"
+        - "entitlements"
+        - "given_name"
+        - "html"
+        - "isError"
+        - "json"
+        - "kid"
+        - "login"
+        - "method"
+        - "name"
+        - "packages"
+        - "password"
+        - "path"
+        - "preferred_username"
+        - "query"
+        - "roles"
+        - "server"
+        - "sub"
+        - "true"
+        - "/-/token"
+        - "object"
+        - "openapi"
+        - "openid"
+        - "profile"
+        - "properties"
+        - "scp"
+        - "string"
+        - "system"
+        - "text"
+        - "token"
+        - "url"
+        - "type"
     revive:
       rules:
         - name: comment-spacings

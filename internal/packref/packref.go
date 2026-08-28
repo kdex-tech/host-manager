@@ -287,12 +287,12 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Name:      jobName,
 			Namespace: ipr.Namespace,
 			Labels: map[string]string{
-				"app":                 "packages",
-				"packages":            ipr.Name,
-				"kdex.dev/generation": fmt.Sprintf("%d", ipr.Generation),
+				"app":                          "packages",
+				"packages":                     ipr.Name,
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", ipr.Generation),
 			},
 			Annotations: map[string]string{
-				"kdex.dev/generation": fmt.Sprintf("%d", ipr.Generation),
+				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", ipr.Generation),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -309,7 +309,7 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"kdex.dev/generation": fmt.Sprintf("%d", ipr.Generation),
+						internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", ipr.Generation),
 					},
 				},
 				Spec: corev1.PodSpec{

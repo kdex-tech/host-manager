@@ -18,6 +18,8 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/kdex-tech/host-manager/internal"
 )
 
 func ResolveContents(
@@ -282,7 +284,7 @@ func ResolveOrDefaultFaaSAdaptor(ctx context.Context, c client.Client, referrer 
 
 	if faasAdaptorObj == nil {
 		var clusterFaaSAdaptorList kdexv1alpha1.KDexClusterFaaSAdaptorList
-		if err = c.List(ctx, &clusterFaaSAdaptorList, client.MatchingLabels{"kdex.dev/default": "true"}); err != nil {
+		if err = c.List(ctx, &clusterFaaSAdaptorList, client.MatchingLabels{internal.LABEL_DEFAULT: "true"}); err != nil {
 			kdexv1alpha1.SetConditions(
 				referrerConditions,
 				kdexv1alpha1.ConditionStatuses{
@@ -316,7 +318,7 @@ func ResolveOrDefaultPageArchetype(ctx context.Context, c client.Client, referre
 
 	if pageArchetypeObj == nil {
 		var clusterPageArchetypeList kdexv1alpha1.KDexClusterPageArchetypeList
-		if err = c.List(ctx, &clusterPageArchetypeList, client.MatchingLabels{"kdex.dev/default": "true"}); err != nil {
+		if err = c.List(ctx, &clusterPageArchetypeList, client.MatchingLabels{internal.LABEL_DEFAULT: "true"}); err != nil {
 			kdexv1alpha1.SetConditions(
 				referrerConditions,
 				kdexv1alpha1.ConditionStatuses{
