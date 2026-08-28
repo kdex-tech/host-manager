@@ -108,8 +108,18 @@ type Config struct {
 	// fn.Spec.ClaimMappings — so a rule authored once on the host applies
 	// uniformly. See #138.
 	ClaimMappings []dmapper.MappingRule
-	TokenManager  *apitoken.TokenManager
-	TokenTTL      time.Duration
+
+	// ClaimMapper is ClaimMappings compiled once, retained so any reader of an
+	// auth context can apply the SAME enrichment the session-token signer does.
+	// Without it the only compiled host mapper lived inside Build's local scope
+	// and was handed to the Signer alone, so a context assembled OUTSIDE the
+	// mint path -- a host-audience PAT identity (#175) -- carried its
+	// data-driven source claims unfolded, and every non-proxied reader
+	// evaluated a smaller entitlement set than the proxy gate enforced.
+	// See kdex-tech/host-manager#192.
+	ClaimMapper  *dmapper.Mapper
+	TokenManager *apitoken.TokenManager
+	TokenTTL     time.Duration
 }
 
 // EnrichAuthContext applies mapper (compiled ClaimMappings) to the auth context
@@ -275,6 +285,9 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 				return nil, err
 			}
 		}
+		// Retain it: readers outside the mint path need the same enrichment the
+		// signer applies. See kdex-tech/host-manager#192.
+		cfg.ClaimMapper = mapper
 		signer, err := sign.NewSigner(
 			cb.Audience,
 			tokenTTL,

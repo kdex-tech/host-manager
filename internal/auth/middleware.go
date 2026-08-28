@@ -130,6 +130,23 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 		}
 	}
 
+	// Fold those source claims into `entitlements` with the host's
+	// ClaimMappings -- the same mapper the session-token signer applies, per
+	// EnrichAuthContext's contract. The merge above lands each claim under its
+	// OWN key, so without this the data-driven per-store grants stay invisible
+	// to everything that reads `entitlements`. The function proxy repaired that
+	// on its own path; nothing else did, so /-/check, the page security gate
+	// and the navigation filter each evaluated a smaller set than the proxy
+	// gate enforced -- the same credential answered "denied" by /-/check and
+	// "allowed" by the gate, for the same resource, in the same minutes.
+	//
+	// Placed here rather than at each reader so the invariant holds for every
+	// reader, including ones added later. Idempotent and attenuation-safe, so
+	// the proxy's own enrichment (which additionally applies the FUNCTION's
+	// ClaimMappings) still runs and still refines this.
+	// See kdex-tech/host-manager#192.
+	EnrichAuthContext(ac, c.ClaimMapper)
+
 	return ac, true
 }
 
