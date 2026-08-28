@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,7 +151,7 @@ func TestNewExchanger(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, got *Exchanger, goterr error) {
 				assert.NotNil(t, got)
-				_, err := got.ExchangeToken(context.Background(), "foo")
+				_, err := got.ExchangeToken(context.Background(), OIDCExchange{RawIDToken: "foo"})
 				assert.NotNil(t, err)
 				assert.Contains(t, err.Error(), "OIDC is not configured")
 			},
@@ -628,10 +629,10 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				innerHandler.Handler = MockOIDCProvider(*cfg)
 				ex, gotErr := NewExchanger(ctx, *cfg, cacheManager, scopeProvider)
 				assert.Nil(t, gotErr)
-				rawIDToken, err := ex.ExchangeCode(ctx, "foo")
+				oidcTokens, err := ex.ExchangeCode(ctx, "foo")
 				claims := jwt.MapClaims{}
 				parser := new(jwt.Parser)
-				jwtToken, _, err := parser.ParseUnverified(rawIDToken, claims)
+				jwtToken, _, err := parser.ParseUnverified(oidcTokens.RawIDToken, claims)
 				assert.Nil(t, err)
 				assert.NotNil(t, jwtToken)
 				assert.Contains(t, jwtToken.Header["kid"], "kdex-dev-")
@@ -785,9 +786,9 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				innerHandler.Handler = MockOIDCProvider(*cfg)
 				ex, gotErr := NewExchanger(ctx, *cfg, cacheManager, scopeProvider)
 				assert.Nil(t, gotErr)
-				rawIDToken, err := ex.ExchangeCode(ctx, "foo")
+				oidcTokens, err := ex.ExchangeCode(ctx, "foo")
 				assert.Nil(t, err)
-				oidcToken, err := ex.verifyIDToken(ctx, rawIDToken)
+				oidcToken, err := ex.verifyIDToken(ctx, oidcTokens.RawIDToken)
 				assert.Nil(t, err)
 				assert.NotNil(t, oidcToken)
 				assert.Equal(t, cfg.OIDC.ClientID, oidcToken.Audience[0])
@@ -838,9 +839,9 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				innerHandler.Handler = MockOIDCProvider(*cfg)
 				ex, gotErr := NewExchanger(ctx, *cfg, cacheManager, scopeProvider)
 				assert.Nil(t, gotErr)
-				rawIDToken, err := ex.ExchangeCode(ctx, "foo")
+				oidcTokens, err := ex.ExchangeCode(ctx, "foo")
 				assert.Nil(t, err)
-				ts, err := ex.ExchangeToken(ctx, rawIDToken)
+				ts, err := ex.ExchangeToken(ctx, oidcTokens)
 				assert.Nil(t, err)
 				claims := jwt.MapClaims{}
 				parser := new(jwt.Parser)
@@ -900,7 +901,51 @@ func TokenHandler(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		// 2. Validate the Grant Type
+		// 2a. Upstream refresh grant (kdex-tech/host-manager#190). The mock
+		// answers with a FRESH id_token whose email differs from the one the
+		// authorization-code exchange issued, so a test can tell a re-fetched
+		// claim set from a replayed one. Two reserved values stand in for the
+		// failure modes that must be told apart: a provider that is down and
+		// a grant the user revoked.
+		if grantType == GRANT_TYPE_REFRESH_TOKEN {
+			presented := r.FormValue("refresh_token")
+			sub := strings.TrimPrefix(presented, "upstream-rt-")
+
+			switch {
+			case strings.HasSuffix(sub, "-down"):
+				http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+				return
+			case strings.HasSuffix(sub, "-revoked"):
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"invalid_grant","error_description":"Token has been revoked."}`))
+				return
+			case strings.HasSuffix(sub, "-imposter"):
+				sub = "mallory"
+			}
+
+			refreshed, err := cfg.Signer.Sign(jwt.MapClaims{
+				"sub":   sub,
+				"email": "live@foo.bar",
+				"aud":   clientID,
+			})
+			if err != nil {
+				http.Error(w, "failed to sign token", http.StatusInternalServerError)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "mock-access-token-" + rand.Text(),
+				"expires_in":    3600,
+				"id_token":      refreshed,
+				"refresh_token": presented + "-rotated",
+				"token_type":    "Bearer",
+			})
+			return
+		}
+
+		// 2b. Validate the Grant Type
 		if grantType != "authorization_code" {
 			http.Error(w, `{"error":"unsupported_grant_type"}`, http.StatusBadRequest)
 			return
@@ -931,6 +976,15 @@ func TokenHandler(cfg Config) http.HandlerFunc {
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 			"scope":        "openid email",
+		}
+
+		// A real provider issues a refresh token only when the authorization
+		// request asked for offline access. The token endpoint cannot see
+		// that request, so the mock keys off the code: an `offline`-prefixed
+		// one stands in for a consent that granted offline access.
+		// See kdex-tech/host-manager#190.
+		if strings.HasPrefix(code, "offline") {
+			resp["refresh_token"] = "upstream-rt-" + code
 		}
 
 		if code != "no_id_token" {

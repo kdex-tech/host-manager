@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -84,10 +85,10 @@ func scopeProviderForOIDC() InternalIdentityProvider {
 func TestExchangeToken_MintsARefreshToken(t *testing.T) {
 	f := newOIDCFixture(t)
 
-	rawIDToken, err := f.ex.ExchangeCode(f.ctx, "alice")
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "alice")
 	require.NoError(t, err)
 
-	ts, err := f.ex.ExchangeToken(f.ctx, rawIDToken)
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, ts.AccessToken, "the OIDC callback must mint an access token")
@@ -120,10 +121,10 @@ func claimsOf(t *testing.T, signed string) jwt.MapClaims {
 func TestRedeemRefreshToken_PreservesOIDCClaims(t *testing.T) {
 	f := newOIDCFixture(t)
 
-	rawIDToken, err := f.ex.ExchangeCode(f.ctx, "alice")
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "alice")
 	require.NoError(t, err)
 
-	ts, err := f.ex.ExchangeToken(f.ctx, rawIDToken)
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
 	require.NoError(t, err)
 	require.Equal(t, "email@foo.bar", claimsOf(t, ts.AccessToken)["email"],
 		"precondition: the login token carries the IdP's email claim")
@@ -147,10 +148,10 @@ func TestRedeemRefreshToken_PreservesOIDCClaims(t *testing.T) {
 func TestRedeemRefreshToken_RotatedOIDCSessionMatchesLogin(t *testing.T) {
 	f := newOIDCFixture(t)
 
-	rawIDToken, err := f.ex.ExchangeCode(f.ctx, "alice")
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "alice")
 	require.NoError(t, err)
 
-	ts, err := f.ex.ExchangeToken(f.ctx, rawIDToken)
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
 	require.NoError(t, err)
 
 	rotated, err := f.ex.RedeemRefreshToken(f.ctx, ts.RefreshToken, "")
@@ -205,4 +206,148 @@ func TestOAuthGet_SetsBothSessionCookies(t *testing.T) {
 	assert.NotEmpty(t, cookies[f.cfg.CookieName+"_refresh"],
 		"the callback must set the refresh cookie, or AutoExtendSession can never "+
 			"find the session it is meant to extend (#189)")
+}
+
+// TestAuthCodeURL_RequestsOfflineAccessWhenScoped pins the first half of
+// kdex-tech/host-manager#190.
+//
+// AuthCodeURL passed no AuthCodeOption at all, so the provider was never
+// asked for a refresh token. `offline_access` (OIDC Core 11) is the scope
+// that requests one; Google's spelling is the access_type auth-URL param,
+// which reading the scope alone never produces. prompt=consent rides along
+// because without it Google returns a refresh token only on a user's very
+// first consent for the client -- some sessions would have one and some
+// would not, which is worse than none having one.
+func TestAuthCodeURL_RequestsOfflineAccessWhenScoped(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	got := f.ex.AuthCodeURL("/home")
+
+	assert.Contains(t, got, "access_type=offline",
+		"offline_access in the configured scopes must reach the provider as access_type=offline (#190)")
+	assert.Contains(t, got, "prompt=consent",
+		"offline_access must force consent, or the refresh token is issued only once ever (#190)")
+	assert.Contains(t, got, "offline_access",
+		"the standard scope must still be sent for providers that honour it")
+}
+
+// TestAuthCodeURL_NoOfflineAccessByDefault is the other side of the opt-in:
+// forcing a consent screen on every login is a real cost, so a host that did
+// not ask for offline access must not pay it.
+func TestAuthCodeURL_NoOfflineAccessByDefault(t *testing.T) {
+	f := newOIDCFixture(t)
+
+	got := f.ex.AuthCodeURL("/home")
+
+	assert.NotContains(t, got, "access_type=offline")
+	assert.NotContains(t, got, "prompt=consent")
+}
+
+// TestExchangeCode_ReturnsUpstreamRefreshToken pins the second half of
+// kdex-tech/host-manager#190: ExchangeCode pulled id_token out of the
+// exchanged token and dropped the *oauth2.Token, so a provider that DID
+// return a refresh token had it silently discarded.
+func TestExchangeCode_ReturnsUpstreamRefreshToken(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	got, err := f.ex.ExchangeCode(f.ctx, "offline-alice")
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, got.RawIDToken, "the ID token is still the primary result")
+	assert.Equal(t, "upstream-rt-offline-alice", got.UpstreamRefreshToken,
+		"a refresh token returned by the provider must not be discarded (#190)")
+}
+
+// TestRedeemRefreshToken_RefetchesLiveClaimsFromIdP is what
+// kdex-tech/host-manager#190 exists for. #189 made the login-time IdP claims
+// survive rotation by replaying them; replaying them is still a snapshot, so
+// a session kept its login-time view of the user for the whole of
+// maxSessionAge (720h on public). With an upstream refresh token the session
+// can be re-derived from the IdP instead of replayed.
+//
+// The mock answers the refresh grant with email=live@foo.bar, distinct from
+// the email@foo.bar the authorization-code exchange issued, so a replayed
+// snapshot and a re-fetch are told apart by the value itself.
+func TestRedeemRefreshToken_RefetchesLiveClaimsFromIdP(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "offline-alice")
+	require.NoError(t, err)
+	require.NotEmpty(t, oidcTokens.UpstreamRefreshToken)
+
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
+	require.NoError(t, err)
+	require.Equal(t, "email@foo.bar", claimsOf(t, ts.AccessToken)["email"])
+
+	rotated, err := f.ex.RedeemRefreshToken(f.ctx, ts.RefreshToken, "")
+	require.NoError(t, err)
+
+	assert.Equal(t, "live@foo.bar", claimsOf(t, rotated.AccessToken)["email"],
+		"rotation must re-derive the claims from the IdP when an upstream "+
+			"refresh token is held, not replay the login-time snapshot (#190)")
+}
+
+// TestRedeemRefreshToken_SurvivesUnreachableIdP pins the degrade half of the
+// kdex-tech/host-manager#190 trade-off. Re-deriving the session from the IdP
+// is worth having only if the IdP being DOWN does not log every user of the
+// tenant out at their next hourly rotation. A transport failure must fall
+// back to the stored claim set -- the #189 behaviour -- not end the session.
+func TestRedeemRefreshToken_SurvivesUnreachableIdP(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "offline-down")
+	require.NoError(t, err)
+	require.NotEmpty(t, oidcTokens.UpstreamRefreshToken)
+
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
+	require.NoError(t, err)
+
+	rotated, err := f.ex.RedeemRefreshToken(f.ctx, ts.RefreshToken, "")
+	require.NoError(t, err,
+		"an IdP outage must not end the session (#190)")
+	assert.Equal(t, "email@foo.bar", claimsOf(t, rotated.AccessToken)["email"],
+		"an unreachable IdP degrades to the stored claim set, not to no claims")
+}
+
+// TestRedeemRefreshToken_EndsSessionWhenIdPRevokesTheGrant is the security
+// win kdex-tech/host-manager#190 is for, and the one outcome that must NOT
+// take the degrade path above. `invalid_grant` is the IdP saying this grant
+// is dead -- consent withdrawn, account disabled, token revoked -- and
+// replaying the stored claims there would keep a revoked user signed in for
+// the whole of maxSessionAge.
+func TestRedeemRefreshToken_EndsSessionWhenIdPRevokesTheGrant(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "offline-revoked")
+	require.NoError(t, err)
+
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
+	require.NoError(t, err)
+
+	_, err = f.ex.RedeemRefreshToken(f.ctx, ts.RefreshToken, "")
+	require.Error(t, err,
+		"a grant the IdP has revoked must end the session, not degrade (#190)")
+	assert.False(t, errors.Is(err, ErrServerError),
+		"a revoked upstream grant is a fact about the grant, not our outage -- "+
+			"marking it ErrServerError would tell the client to retry a dead session")
+}
+
+// TestRedeemRefreshToken_RejectsARefreshedTokenForAnotherSubject guards the
+// case where the IdP answers successfully but names someone else. Every
+// downstream check -- roles, entitlements, audit -- keys on `sub`, so
+// accepting it would rebind a live session to another identity. Degrading is
+// not an option either: that would mint the session under the OLD subject
+// carrying claims the IdP asserted about a DIFFERENT one.
+func TestRedeemRefreshToken_RejectsARefreshedTokenForAnotherSubject(t *testing.T) {
+	f := newOIDCFixture(t, "offline_access")
+
+	oidcTokens, err := f.ex.ExchangeCode(f.ctx, "offline-imposter")
+	require.NoError(t, err)
+
+	ts, err := f.ex.ExchangeToken(f.ctx, oidcTokens)
+	require.NoError(t, err)
+
+	_, err = f.ex.RedeemRefreshToken(f.ctx, ts.RefreshToken, "")
+	assert.Error(t, err,
+		"a refreshed id_token naming a different subject must end the session (#190)")
 }

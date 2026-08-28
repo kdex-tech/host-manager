@@ -37,12 +37,16 @@ type CompiledMappingRule struct {
 }
 
 type Exchanger struct {
-	config            Config
-	oauth2Config      *oauth2.Config
-	oidcProvider      *oidc.Provider
-	oidcVerifier      *oidc.IDTokenVerifier
-	refreshTokenCache cache.Cache
-	refreshTokenTTL   time.Duration
+	config       Config
+	oauth2Config *oauth2.Config
+	// oidcAuthCodeOptions are the extra authorization-URL parameters this
+	// host sends the IdP -- non-empty only when offline access was requested.
+	// See kdex-tech/host-manager#190.
+	oidcAuthCodeOptions []oauth2.AuthCodeOption
+	oidcProvider        *oidc.Provider
+	oidcVerifier        *oidc.IDTokenVerifier
+	refreshTokenCache   cache.Cache
+	refreshTokenTTL     time.Duration
 	// refreshGraceCache and refreshGraceWindow implement the #169 rotation
 	// grace window: refreshGraceCache is nil (and replayFromGrace/
 	// publishToGrace are no-ops) unless Config.RefreshGraceWindow > 0.
@@ -81,6 +85,12 @@ const MaxRefreshGraceWindow = 60 * time.Second
 // refreshGraceMaxItems bounds the in-memory grace cache. See the comment at
 // its GetCache call in NewExchanger for the arithmetic.
 const refreshGraceMaxItems = 10000
+
+// scopeOfflineAccess is the OIDC Core 11 scope that asks the provider for a
+// refresh token. It is NOT one of SupportedScopes: that vocabulary is what
+// THIS host grants its own clients, whereas this value is only ever sent
+// upstream. See kdex-tech/host-manager#190.
+const scopeOfflineAccess = "offline_access"
 
 // defaultSessionScopes is what a browser session is granted when no client
 // asked for a scope: the full identity set. Shared by the two flows that
@@ -130,6 +140,15 @@ type RefreshTokenClaims struct {
 	// already there -- same store, same trust boundary, more PII at rest.
 	// See kdex-tech/host-manager#189.
 	IDPClaims jwt.MapClaims `json:"idpc,omitempty"`
+	// UpstreamRefreshToken is the refresh token the IdP issued for this
+	// session, held so a rotation can re-derive the user from the IdP instead
+	// of replaying IDPClaims. Empty unless offline access was requested and
+	// the provider issued one.
+	//
+	// This is a long-lived THIRD-PARTY credential living in the same cache as
+	// this host's own refresh tokens -- the trust boundary is unchanged, but
+	// the value of the store is not. See kdex-tech/host-manager#190.
+	UpstreamRefreshToken string `json:"urt,omitempty"`
 }
 
 // TokenSet is the result of a token minting operation.
@@ -242,6 +261,24 @@ func NewExchanger(
 			RedirectURL:  cfg.OIDC.RedirectURL,
 			Scopes:       scopes,
 		}
+
+		// `offline_access` (OIDC Core 11) is the standard way to ask for a
+		// refresh token, and is what an operator writes in the CR. Google
+		// ignores it and wants access_type=offline instead, so the scope is
+		// carried AND translated. See kdex-tech/host-manager#190.
+		if slices.Contains(scopes, scopeOfflineAccess) {
+			ex.oidcAuthCodeOptions = []oauth2.AuthCodeOption{
+				oauth2.AccessTypeOffline,
+				// Without this Google returns a refresh token only on a
+				// user's FIRST consent for the client, so a re-login after
+				// the token is lost silently yields a session with no
+				// upstream grant -- some sessions re-validated against the
+				// IdP and some not, with nothing to distinguish them. The
+				// cost is a consent screen on every login, which is why the
+				// whole thing is opt-in.
+				oauth2.SetAuthURLParam("prompt", "consent"),
+			}
+		}
 	}
 
 	return ex, nil
@@ -313,7 +350,7 @@ func (e *Exchanger) AuthCodeURL(state string) string {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return ""
 	}
-	return e.oauth2Config.AuthCodeURL(state)
+	return e.oauth2Config.AuthCodeURL(state, e.oidcAuthCodeOptions...)
 }
 
 func (e *Exchanger) EndSessionURL() (string, error) {
@@ -327,32 +364,44 @@ func (e *Exchanger) EndSessionURL() (string, error) {
 	return claims.EndSessionURL, nil
 }
 
-func (e *Exchanger) ExchangeCode(ctx context.Context, code string) (string, error) {
+// OIDCExchange is what an authorization-code exchange with the upstream IdP
+// yielded. UpstreamRefreshToken is empty unless offline access was requested
+// AND the provider issued one -- it was previously discarded outright, which
+// is the second half of kdex-tech/host-manager#190.
+type OIDCExchange struct {
+	RawIDToken           string
+	UpstreamRefreshToken string
+}
+
+func (e *Exchanger) ExchangeCode(ctx context.Context, code string) (OIDCExchange, error) {
 	if e == nil || !e.config.IsOIDCEnabled() {
-		return "", fmt.Errorf("OIDC is not configured")
+		return OIDCExchange{}, fmt.Errorf("OIDC is not configured")
 	}
 
 	oauthToken, err := e.oauth2Config.Exchange(ctx, code)
 	if err != nil {
-		return "", fmt.Errorf("failed to exchange oauth code %w", err)
+		return OIDCExchange{}, fmt.Errorf("failed to exchange oauth code %w", err)
 	}
 
 	// Extract ID Token from oauthToken
 	rawIDToken, ok := oauthToken.Extra("id_token").(string)
 	if !ok {
-		return "", fmt.Errorf("no id_token in response")
+		return OIDCExchange{}, fmt.Errorf("no id_token in response")
 	}
 
-	return rawIDToken, nil
+	return OIDCExchange{
+		RawIDToken:           rawIDToken,
+		UpstreamRefreshToken: oauthToken.RefreshToken,
+	}, nil
 }
 
-func (e *Exchanger) ExchangeToken(ctx context.Context, rawIDToken string) (TokenSet, error) {
+func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) (TokenSet, error) {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return TokenSet{}, fmt.Errorf("OIDC is not configured")
 	}
 
 	// 1. Verify OIDC Token
-	idToken, err := e.verifyIDToken(ctx, rawIDToken)
+	idToken, err := e.verifyIDToken(ctx, oidcTokens.RawIDToken)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("failed to verify ID token: %w", err)
 	}
@@ -410,10 +459,11 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, rawIDToken string) (Token
 	// See kdex-tech/host-manager#189.
 	if e.IsRefreshTokenEnabled() {
 		ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
-			AuthMethod: AuthMethodOIDC,
-			IDPClaims:  idpClaims,
-			Scope:      grantedScope,
-			Subject:    sub,
+			AuthMethod:           AuthMethodOIDC,
+			IDPClaims:            idpClaims,
+			Scope:                grantedScope,
+			Subject:              sub,
+			UpstreamRefreshToken: oidcTokens.UpstreamRefreshToken,
 		})
 		if err != nil {
 			return TokenSet{Subject: sub}, fmt.Errorf("failed to create refresh token: %w", err)
@@ -1060,13 +1110,44 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return grantFailed("refresh token was not issued to this client")
 	}
 
+	// Re-derive the IdP's view of this user rather than replaying the
+	// login-time snapshot, when the session holds an upstream refresh token
+	// to do it with. This is the only point at which an account disabled,
+	// suspended, or stripped of its groups upstream can reach a session that
+	// is already established. See kdex-tech/host-manager#190.
+	idpClaims := claims.IDPClaims
+	upstreamRefreshToken := claims.UpstreamRefreshToken
+	if upstreamRefreshToken != "" {
+		refreshed, rotatedUpstream, uerr := e.refreshUpstreamClaims(ctx, upstreamRefreshToken, claims.Subject)
+		if errors.Is(uerr, errUpstreamGrantRevoked) {
+			// The IdP says this grant is dead. Ending the session here is the
+			// entire point of holding the upstream token, so this is
+			// deliberately NOT the degrade path below: replaying the stored
+			// claims would keep a revoked user signed in for the whole of
+			// maxSessionAge, which is the exposure #190 set out to close.
+			return grantFailed("the identity provider rejected this session: %v", uerr)
+		} else if uerr != nil {
+			// The IdP is unreachable, or answered something we cannot read.
+			// Re-deriving the session is worth having only if a provider
+			// outage does not log the whole tenant out at the next hourly
+			// rotation, so fall back to the stored claim set -- exactly the
+			// #189 behaviour.
+			logf.FromContext(ctx).V(1).Info(
+				"upstream claim refresh failed; replaying the stored claim set",
+				"subject", claims.Subject, "cause", uerr.Error())
+		} else {
+			idpClaims = refreshed
+			upstreamRefreshToken = rotatedUpstream
+		}
+	}
+
 	// Mint fresh tokens — re-resolves roles/entitlements for freshness.
 	//
 	// No ErrServerError re-wrap here: mintTokensFromSubject marks its own
 	// infrastructure failures, exactly as mintTokensFromCode does, so the
 	// classification is a property of the function that knows what failed
 	// rather than of this one caller. %w keeps the mark in the chain.
-	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod, claims.IDPClaims)
+	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod, idpClaims)
 	if err != nil {
 		return failed("failed to mint tokens from refresh: %w", err)
 	}
@@ -1075,13 +1156,14 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// this one replaced -- the key its grace record lives under -- so
 	// RevokeRefreshToken can tear that record down too (see there).
 	ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
-		AuthMethod:       claims.AuthMethod,
-		ClientID:         claims.ClientID,
-		IDPClaims:        claims.IDPClaims,
-		OriginalIssuedAt: claims.OriginalIssuedAt,
-		PredecessorID:    tokenID,
-		Scope:            claims.Scope,
-		Subject:          claims.Subject,
+		AuthMethod:           claims.AuthMethod,
+		ClientID:             claims.ClientID,
+		IDPClaims:            idpClaims,
+		OriginalIssuedAt:     claims.OriginalIssuedAt,
+		PredecessorID:        tokenID,
+		Scope:                claims.Scope,
+		Subject:              claims.Subject,
+		UpstreamRefreshToken: upstreamRefreshToken,
 	})
 	if err != nil {
 		return failed("%w: failed to rotate refresh token: %v", ErrServerError, err)
@@ -1536,4 +1618,69 @@ func mergeIDPList(idpValue any, internal []string) any {
 	default:
 		return internal
 	}
+}
+
+// errUpstreamGrantRevoked marks the one upstream-refresh outcome that must
+// END the session rather than degrade it: the IdP answering invalid_grant
+// (consent withdrawn, account disabled, token revoked), or handing back an
+// id_token for a different subject. Every other failure is the provider being
+// unreachable, which must not log the whole tenant out.
+// See kdex-tech/host-manager#190.
+var errUpstreamGrantRevoked = errors.New("the upstream refresh grant is no longer valid")
+
+// refreshUpstreamClaims spends the session's upstream refresh token to obtain
+// a fresh id_token from the IdP, and returns the claim set it asserts NOW
+// alongside the refresh token to carry forward. golang.org/x/oauth2 keeps the
+// presented token when a provider does not rotate, so the returned value is
+// always usable.
+func (e *Exchanger) refreshUpstreamClaims(
+	ctx context.Context, upstreamRefreshToken, expectSubject string,
+) (jwt.MapClaims, string, error) {
+	if e.oauth2Config == nil {
+		return nil, "", fmt.Errorf("OIDC is not configured")
+	}
+
+	token, err := e.oauth2Config.TokenSource(
+		ctx, &oauth2.Token{RefreshToken: upstreamRefreshToken},
+	).Token()
+	if err != nil {
+		// RFC 6749 5.2: invalid_grant is the provider stating that THIS grant
+		// is no longer usable. Every other failure (transport, 5xx, a
+		// malformed body) is an outage and must degrade instead.
+		var retrieve *oauth2.RetrieveError
+		if errors.As(err, &retrieve) && retrieve.ErrorCode == "invalid_grant" {
+			return nil, "", fmt.Errorf("%w: %v", errUpstreamGrantRevoked, retrieve.ErrorCode)
+		}
+		return nil, "", fmt.Errorf("upstream refresh failed: %w", err)
+	}
+
+	// Not every provider returns an id_token on the refresh grant. That is a
+	// capability gap, not a revocation, so it degrades to the stored claims.
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok {
+		return nil, "", fmt.Errorf("upstream refresh returned no id_token")
+	}
+
+	idToken, err := e.verifyIDToken(ctx, rawIDToken)
+	if err != nil {
+		return nil, "", fmt.Errorf("upstream refresh returned an unverifiable id_token: %w", err)
+	}
+
+	var refreshed jwt.MapClaims
+	if err := idToken.Claims(&refreshed); err != nil {
+		return nil, "", fmt.Errorf("upstream refresh id_token claims are unreadable: %w", err)
+	}
+
+	// A refreshed id_token naming a different subject would silently rebind
+	// this session to another identity -- every downstream check (roles,
+	// entitlements, audit) keys on `sub`. Treated as a revocation rather than
+	// an outage because degrading is not a safe fallback here: it would mint
+	// the session under the OLD subject while the IdP has just told us the
+	// grant now belongs to someone else.
+	if sub, _ := refreshed.GetSubject(); sub != expectSubject {
+		return nil, "", fmt.Errorf(
+			"%w: the refreshed id_token names a different subject", errUpstreamGrantRevoked)
+	}
+
+	return idpClaimSnapshot(refreshed), token.RefreshToken, nil
 }

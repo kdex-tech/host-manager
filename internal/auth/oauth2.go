@@ -191,7 +191,7 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange code for ID Token
-	rawIDToken, err := o.AuthExchanger.ExchangeCode(r.Context(), code)
+	oidcTokens, err := o.AuthExchanger.ExchangeCode(r.Context(), code)
 	if err != nil {
 		log.Error(err, "failed to exchange oauth code")
 		http.Error(w, "Failed to exchange token", http.StatusUnauthorized)
@@ -199,7 +199,7 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange ID Token for Local Token
-	ts, err := o.AuthExchanger.ExchangeToken(r.Context(), rawIDToken)
+	ts, err := o.AuthExchanger.ExchangeToken(r.Context(), oidcTokens)
 	if err != nil {
 		log.Error(err, "failed to exchange for local token")
 		http.Error(w, "Failed to exchange for local token", http.StatusUnauthorized)
@@ -208,7 +208,7 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 
 	store := o.AuthConfig.OIDC.IDTokenStore
 
-	if err := store.Set(w, r, rawIDToken); err != nil {
+	if err := store.Set(w, r, oidcTokens.RawIDToken); err != nil {
 		log.Error(err, "failed to store session hint")
 		http.Error(w, "Failed to store session hint", http.StatusInternalServerError)
 		return
