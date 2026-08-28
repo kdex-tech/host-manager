@@ -199,7 +199,7 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Exchange ID Token for Local Token
-	localToken, err := o.AuthExchanger.ExchangeToken(r.Context(), rawIDToken)
+	ts, err := o.AuthExchanger.ExchangeToken(r.Context(), rawIDToken)
 	if err != nil {
 		log.Error(err, "failed to exchange for local token")
 		http.Error(w, "Failed to exchange for local token", http.StatusUnauthorized)
@@ -217,12 +217,28 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	// Set Cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     o.AuthConfig.CookieName,
-		Value:    localToken,
+		Value:    ts.AccessToken,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   kdexhttp.IsSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	// Both AutoExtendSession branches (internal/auth/middleware.go) find the
+	// session by THIS cookie, so without it an OIDC session hard-expires at
+	// jwt.tokenTTL however long refreshTokenTTL / maxSessionAge are -- the
+	// local-login path (internal/host/login.go) has always written it.
+	// See kdex-tech/host-manager#189.
+	if ts.RefreshToken != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     o.AuthConfig.CookieName + "_refresh",
+			Value:    ts.RefreshToken,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   kdexhttp.IsSecure(r),
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 
 	// Validate state/redirect. state is attacker-controlled (it's the
 	// upstream IdP echo of whatever we passed in as our state param), so

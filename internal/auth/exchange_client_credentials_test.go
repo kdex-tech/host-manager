@@ -169,7 +169,7 @@ func TestAllGrantTypes_CarryEntitlements(t *testing.T) {
 	})
 
 	t.Run("refresh_token", func(t *testing.T) {
-		ts, err := ex.mintTokensFromSubject("alice", "sim-launcher", "entitlements", AuthMethodOAuth2)
+		ts, err := ex.mintTokensFromSubject("alice", "sim-launcher", "entitlements", AuthMethodOAuth2, nil)
 		require.NoError(t, err)
 		assertEntitlements(t, "refresh_token", ts.AccessToken)
 	})

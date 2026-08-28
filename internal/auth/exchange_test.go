@@ -840,11 +840,11 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				assert.Nil(t, gotErr)
 				rawIDToken, err := ex.ExchangeCode(ctx, "foo")
 				assert.Nil(t, err)
-				strinToken, err := ex.ExchangeToken(ctx, rawIDToken)
+				ts, err := ex.ExchangeToken(ctx, rawIDToken)
 				assert.Nil(t, err)
 				claims := jwt.MapClaims{}
 				parser := new(jwt.Parser)
-				jwtToken, _, err := parser.ParseUnverified(strinToken, claims)
+				jwtToken, _, err := parser.ParseUnverified(ts.AccessToken, claims)
 				assert.Nil(t, err)
 				assert.NotNil(t, jwtToken)
 				assert.Contains(t, jwtToken.Header["kid"], "kdex-dev-")
@@ -1060,7 +1060,7 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 
 	t.Run("refresh mint carries backend grant", func(t *testing.T) {
 		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
-		ts, err := e.mintTokensFromSubject("alice", "c", "entitlements", AuthMethodOAuth2)
+		ts, err := e.mintTokensFromSubject("alice", "c", "entitlements", AuthMethodOAuth2, nil)
 		require.NoError(t, err)
 		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "resource:rx:all")
 	})

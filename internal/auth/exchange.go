@@ -82,6 +82,13 @@ const MaxRefreshGraceWindow = 60 * time.Second
 // its GetCache call in NewExchanger for the arithmetic.
 const refreshGraceMaxItems = 10000
 
+// defaultSessionScopes is what a browser session is granted when no client
+// asked for a scope: the full identity set. Shared by the two flows that
+// establish a browser session -- LoginLocal and the OIDC callback -- so a
+// session's granted scope does not depend on which one minted it, and so a
+// rotation of either reproduces the same set. See kdex-tech/host-manager#189.
+var defaultSessionScopes = []string{"email", "entitlements", "openid", "profile", "roles"}
+
 // authCodeTTL is the upper bound on how long an unredeemed authorization
 // code remains valid. Slightly longer than the 10-minute default Exp on
 // AuthorizationCodeClaims so the cache TTL doesn't expire the JTI ahead
@@ -106,6 +113,23 @@ type RefreshTokenClaims struct {
 	PredecessorID string `json:"pid,omitempty"`
 	Scope         string `json:"scp"`
 	Subject       string `json:"sub"`
+	// IDPClaims is the claim set the upstream IdP asserted at login, minus
+	// reservedMintClaims. Rotation re-mints through mintTokensFromSubject,
+	// which knows only what FindInternalRolesAndEntitlements returns -- so
+	// without this every IdP-supplied claim (email, profile, and any custom
+	// claim a host's ClaimMappings reads as an INPUT) would vanish at the
+	// first rotation, an hour into the session. Empty for non-OIDC grants
+	// and for records written before this field existed; omitempty keeps
+	// those round-tripping unchanged.
+	//
+	// Deliberately NOT allowlisted down to the claims the signer projects: a
+	// host's ClaimMappings is CEL over the WHOLE signing context, so any claim
+	// can be a mapper INPUT, and a fixed allowlist is exactly what would drop
+	// the custom one some tenant depends on. The cost is that identity claims
+	// (email, name, ...) now sit in the refresh-token cache beside the `sub`
+	// already there -- same store, same trust boundary, more PII at rest.
+	// See kdex-tech/host-manager#189.
+	IDPClaims jwt.MapClaims `json:"idpc,omitempty"`
 }
 
 // TokenSet is the result of a token minting operation.
@@ -322,58 +346,81 @@ func (e *Exchanger) ExchangeCode(ctx context.Context, code string) (string, erro
 	return rawIDToken, nil
 }
 
-func (e *Exchanger) ExchangeToken(ctx context.Context, rawIDToken string) (string, error) {
+func (e *Exchanger) ExchangeToken(ctx context.Context, rawIDToken string) (TokenSet, error) {
 	if e == nil || !e.config.IsOIDCEnabled() {
-		return "", fmt.Errorf("OIDC is not configured")
+		return TokenSet{}, fmt.Errorf("OIDC is not configured")
 	}
 
 	// 1. Verify OIDC Token
 	idToken, err := e.verifyIDToken(ctx, rawIDToken)
 	if err != nil {
-		return "", fmt.Errorf("failed to verify ID token: %w", err)
+		return TokenSet{}, fmt.Errorf("failed to verify ID token: %w", err)
 	}
 
 	var signingContext jwt.MapClaims
 	if err := idToken.Claims(&signingContext); err != nil {
-		return "", fmt.Errorf("failed to parse claims: %w", err)
+		return TokenSet{}, fmt.Errorf("failed to parse claims: %w", err)
 	}
 
 	signingContext["idp"] = "oidc"
 
 	sub, err := signingContext.GetSubject()
 	if err != nil {
-		return "", fmt.Errorf("no sub in id_token")
+		return TokenSet{}, fmt.Errorf("no sub in id_token")
 	}
+
+	// Snapshot what the IdP asserted BEFORE the merges below fold our own
+	// roles/entitlements in, so a rotation re-runs the same merge against
+	// freshly-resolved internal grants instead of compounding the union it
+	// already produced. See kdex-tech/host-manager#189.
+	idpClaims := idpClaimSnapshot(signingContext)
 
 	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(sub)
 	if err != nil {
-		return "", err
+		return TokenSet{}, err
 	}
 
-	oidcRoles := signingContext["roles"]
-	switch v := oidcRoles.(type) {
-	case []string:
-		oidcRoles = append(v, roles...)
-	case string:
-		oidcRoles = append([]string{v}, roles...)
-	default:
-		oidcRoles = roles
-	}
-	signingContext["roles"] = oidcRoles
+	signingContext["roles"] = mergeIDPList(signingContext["roles"], roles)
+	signingContext["entitlements"] = mergeIDPList(signingContext["entitlements"], entitlements)
 
-	oidcEntitlements := signingContext["entitlements"]
-	switch v := oidcEntitlements.(type) {
-	case []string:
-		oidcEntitlements = append(v, entitlements...)
-	case string:
-		oidcEntitlements = append([]string{v}, entitlements...)
-	default:
-		oidcEntitlements = entitlements
-	}
-	signingContext["entitlements"] = oidcEntitlements
+	// 3. Mint the session access token the same way LoginLocal does -- scope
+	// filter with the browser-session default, then SignScoped. This path used
+	// a bare Sign, which left the token with no `scope` claim at all while a
+	// rotation of the SAME session (mintTokensFromSubject -> SignScoped) minted
+	// one. GetParsedEntitlements files the signed `scope` claim into the oauth2
+	// scheme bucket, so that asymmetry let an OIDC session satisfy oauth2-scheme
+	// requirements after its first rotation that it could not satisfy at login.
+	// See kdex-tech/host-manager#189.
+	grantedScopes := applyScopeFilter(signingContext, "", defaultSessionScopes)
+	grantedScope := strings.Join(grantedScopes, " ")
 
-	// 3. Mint Primary Access Token
-	return e.config.Signer.Sign(signingContext)
+	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
+	if err != nil {
+		return TokenSet{}, err
+	}
+
+	ts := TokenSet{AccessToken: accessToken, Scope: grantedScope, Subject: sub}
+
+	// 4. Mint the session's refresh token. Without this the OIDC callback
+	// produced an access token and nothing else, so the `<cookie>_refresh`
+	// cookie both AutoExtendSession branches key on was never written and an
+	// OIDC session died at jwt.tokenTTL regardless of refreshTokenTTL /
+	// maxSessionAge. ClientID is empty because this is a browser cookie
+	// session, which is what the middleware presents on redemption.
+	// See kdex-tech/host-manager#189.
+	if e.IsRefreshTokenEnabled() {
+		ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
+			AuthMethod: AuthMethodOIDC,
+			IDPClaims:  idpClaims,
+			Scope:      grantedScope,
+			Subject:    sub,
+		})
+		if err != nil {
+			return TokenSet{Subject: sub}, fmt.Errorf("failed to create refresh token: %w", err)
+		}
+	}
+
+	return ts, nil
 }
 
 func (e *Exchanger) GetClient(clientID string) (AuthClient, bool) {
@@ -682,8 +729,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// SignScoped, so it holds regardless of what ClaimMappings injected — this
 	// also closes the latent leak the old pre-mapper strip had. Default to the
 	// full identity set when the client requested no scope (local-login default).
-	grantedScopes := applyScopeFilter(signingContext, scope,
-		[]string{"email", "entitlements", "openid", "profile", "roles"})
+	grantedScopes := applyScopeFilter(signingContext, scope, defaultSessionScopes)
 	grantedScopeStr := strings.Join(grantedScopes, " ")
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
@@ -1020,7 +1066,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// infrastructure failures, exactly as mintTokensFromCode does, so the
 	// classification is a property of the function that knows what failed
 	// rather than of this one caller. %w keeps the mark in the chain.
-	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod)
+	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod, claims.IDPClaims)
 	if err != nil {
 		return failed("failed to mint tokens from refresh: %w", err)
 	}
@@ -1031,6 +1077,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	ts.RefreshToken, err = e.createRefreshToken(ctx, RefreshTokenClaims{
 		AuthMethod:       claims.AuthMethod,
 		ClientID:         claims.ClientID,
+		IDPClaims:        claims.IDPClaims,
 		OriginalIssuedAt: claims.OriginalIssuedAt,
 		PredecessorID:    tokenID,
 		Scope:            claims.Scope,
@@ -1326,7 +1373,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 // it: the caller's re-wrap was correct but invisible from here, and a second
 // caller would have silently reported an outage as invalid_grant. See
 // kdex-tech/host-manager#168.
-func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod) (TokenSet, error) {
+func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod, idpClaims jwt.MapClaims) (TokenSet, error) {
 	// As in mintTokensFromCode: subject is an input, so every failure below
 	// can be attributed. See kdex-tech/host-manager#158.
 	failed := func(format string, args ...any) (TokenSet, error) {
@@ -1339,11 +1386,31 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	}
 
 	signingContext := jwt.MapClaims{
-		"auth_method":  string(authMethod),
-		"entitlements": entitlements,
-		"roles":        roles,
-		"sub":          subject,
+		"auth_method": string(authMethod),
+		"sub":         subject,
 	}
+
+	// Replay what the IdP asserted at login, then union its roles/entitlements
+	// with the FRESHLY-resolved internal ones -- the same merge ExchangeToken
+	// runs, so a rotated session is claim-identical to the one login minted
+	// while internal grants stay live. Empty for every non-OIDC grant, which
+	// leaves those paths exactly as they were.
+	// See kdex-tech/host-manager#189.
+	for k, v := range idpClaims {
+		if _, reserved := reservedMintClaims[k]; reserved {
+			continue
+		}
+		signingContext[k] = v
+	}
+	if authMethod == AuthMethodOIDC {
+		// Derived, never carried: `idp` is in reservedMintClaims precisely so
+		// a stored value cannot rebind the identity provider.
+		signingContext["idp"] = "oidc"
+	}
+
+	signingContext["roles"] = mergeIDPList(signingContext["roles"], roles)
+	signingContext["entitlements"] = mergeIDPList(signingContext["entitlements"], entitlements)
+
 	mergeBackendClaims(signingContext, backend)
 
 	grantedScopes := applyScopeFilter(signingContext, scope, nil)
@@ -1425,5 +1492,48 @@ func (e *Exchanger) restoreConsumedRefreshToken(ctx context.Context, tokenID, ra
 		logf.FromContext(ctx).V(1).Info(
 			"refresh token not restored after an infrastructure failure; this session is lost and the client must re-authorize",
 			"subject", claims.Subject, "cause", err.Error())
+	}
+}
+
+// idpClaimSnapshot copies the claims an upstream IdP asserted, dropping the
+// ones the mint owns authoritatively (reservedMintClaims: the JWT envelope,
+// `sub`, and the auth-flow claims a forged value could hijack). What remains
+// is stored on the session's refresh-token record so a rotation can reproduce
+// the login-time claim set -- including custom claims a host's ClaimMappings
+// reads as an INPUT, which nothing else in the refresh path knows about.
+// See kdex-tech/host-manager#189.
+func idpClaimSnapshot(signingContext jwt.MapClaims) jwt.MapClaims {
+	snapshot := make(jwt.MapClaims, len(signingContext))
+	for k, v := range signingContext {
+		if _, reserved := reservedMintClaims[k]; reserved {
+			continue
+		}
+		snapshot[k] = v
+	}
+	return snapshot
+}
+
+// mergeIDPList unions an IdP-asserted roles/entitlements claim with the list
+// this host resolved for the same subject. The IdP value arrives as []string
+// straight off a freshly-parsed ID token but as []any once it has round-
+// tripped through the refresh record's JSON, so both shapes are handled --
+// a missed []any would silently drop every IdP-asserted role at the first
+// rotation, which is the exact class of failure #189 is about.
+func mergeIDPList(idpValue any, internal []string) any {
+	switch v := idpValue.(type) {
+	case []string:
+		return append(slices.Clone(v), internal...)
+	case []any:
+		merged := make([]string, 0, len(v)+len(internal))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				merged = append(merged, s)
+			}
+		}
+		return append(merged, internal...)
+	case string:
+		return append([]string{v}, internal...)
+	default:
+		return internal
 	}
 }

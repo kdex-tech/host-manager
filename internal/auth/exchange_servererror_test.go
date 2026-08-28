@@ -345,7 +345,7 @@ func TestMintTokensFromSubject_MarksItsOwnInfrastructureFailures(t *testing.T) {
 	require.NoError(t, err)
 	ex.config.Signer = *badSigner
 
-	ts, err := ex.mintTokensFromSubject("alice", "app", "openid", AuthMethodLocal)
+	ts, err := ex.mintTokensFromSubject("alice", "app", "openid", AuthMethodLocal, nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrServerError),
 		"mintTokensFromSubject must mark its own infrastructure failures (quad-findings item 8), "+
