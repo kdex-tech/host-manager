@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"maps"
 	"runtime/debug"
@@ -22,6 +23,45 @@ import (
 // (FAT, session/access, mint_token) flows through SignProjected, so raising it
 // surfaces exactly what claims went into every minted token.
 var signerLog = logf.Log.WithName("signer")
+
+// ErrSubjectlessCredential is the one error for a credential that names
+// nobody. A subject-less credential is NOT a supported configuration: every
+// gate in host-manager is keyed on who the caller is, so a token whose `sub`
+// is empty is attributable to no one, authorizable against nothing, and
+// auditable as nobody.
+//
+// It is reachable, which is why this is a check and not a comment.
+// jwt.MapClaims.GetSubject reports a MISSING `sub` as ("", nil) -- only a
+// wrong-TYPED `sub` errors (golang-jwt v5 map_claims.go) -- so a credential
+// source that vouches for a login without naming a subject silently produces
+// `sub: ""`. Two real sources do exactly that:
+//
+//   - a subject Secret keyed only by `email` (internal/auth/roles.go): the
+//     matcher accepts `email == subject`, and the claims it returns are the
+//     Secret's data keys minus `password`, so no `sub` key exists at all;
+//   - an http-lookup backend answering `{"ok":true}` or
+//     `{"ok":true,"claims":{}}` (internal/auth/lookup_http.go): the backend's
+//     `claims` object is returned verbatim, with an EMPTY MapClaims
+//     substituted when it is omitted.
+//
+// LoginLocal never derives a subject from `username`, so nothing downstream
+// repairs it.
+//
+// It lives HERE, in the mint package, because this is where the empty subject
+// is first manufactured and because internal/sign is the lowest package every
+// token path can reach: internal/auth and internal/auth/apitoken both depend
+// on it, and the dependency cannot run back. One sentinel means an operator
+// grepping for one message finds every site that refused.
+var ErrSubjectlessCredential = errors.New(
+	"subject-less credential: the credential source resolved without a `sub` claim")
+
+// SubjectlessRemedy is the operator-facing half of every subject-less
+// rejection: what to FIX, not what went wrong. Kept as one exported constant
+// so the JWT mint, the PASETO mint, and both validation paths give an
+// operator reading the logs the same instruction.
+const SubjectlessRemedy = "a credential that names nobody is not a supported configuration; " +
+	"fix the credential source so it supplies a subject -- add a `sub` key to the subject Secret, " +
+	"or return a non-empty `claims.sub` from the credential-check backend"
 
 type Signer struct {
 	audience   string
@@ -103,6 +143,22 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	sub, err := signingContext.GetSubject()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get subject from claims: %w", err)
+	}
+	// FAIL CLOSED. GetSubject cannot tell "no `sub`" from "sub: \"\"" -- both
+	// arrive here as ("", nil) -- and until this check existed the empty
+	// string was copied straight into the signed token. See
+	// ErrSubjectlessCredential for the credential sources that produce it.
+	//
+	// This is the FIRST of the mint chokepoints: it names the failure where
+	// the empty subject is manufactured, so the log line points at the
+	// credential source rather than at a signature that never happened.
+	// SignProjected below is the second, for the callers that hold a
+	// projection and never come back through here.
+	if sub == "" {
+		signerLog.Error(ErrSubjectlessCredential,
+			"refusing to project a token for a credential that names nobody; "+SubjectlessRemedy,
+			"issuer", s.issuer, "audience", s.audience)
+		return nil, ErrSubjectlessCredential
 	}
 
 	projected := jwt.MapClaims{
@@ -194,6 +250,20 @@ func compactEntitlements(v any) any {
 // iat/exp/jti are written first, then maps.Copy(outboundClaims, projected)
 // overrides anything the projection already carries.
 func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
+	// The LAST gate before a signature, and the reason the mint check is not
+	// only in Project: internal/host/mint_token.go and the FAT path in
+	// internal/host/proxy.go call SignProjected directly, the latter with a
+	// CACHED projection that was produced by some earlier request. Nothing
+	// signed by this Signer can bypass this line, so "we do not mint tokens
+	// nobody can be attributed to" is an invariant of the package rather than
+	// a property of its callers. See ErrSubjectlessCredential.
+	if sub, err := projected.GetSubject(); err != nil || sub == "" {
+		signerLog.Error(ErrSubjectlessCredential,
+			"refusing to sign a token for a credential that names nobody; "+SubjectlessRemedy,
+			"issuer", s.issuer, "audience", s.audience)
+		return "", ErrSubjectlessCredential
+	}
+
 	outboundClaims := make(jwt.MapClaims, len(projected)+3)
 	outboundClaims["exp"] = time.Now().Add(s.duration).Unix()
 	outboundClaims["iat"] = time.Now().Unix()

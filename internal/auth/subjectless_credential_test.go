@@ -16,6 +16,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,20 +54,8 @@ func (subjectlessStubProvider) FindInternalRolesAndEntitlements(string) ([]strin
 	return nil, nil, nil
 }
 
-// TestSubjectlessTokenIsReachableFromLocalLogin settles the reachability
-// question the denial contract's subject-less handling depends on: YES, a
-// validated credential can produce an auth context with an empty subject.
-//
-// The hinge is that jwt.MapClaims.GetSubject reports a MISSING `sub` as
-// ("", nil) rather than as an error, so sign.Signer.Project copies the empty
-// string into the token it signs and nothing downstream objects: the host
-// middleware validates only `iss` and `aud`, and `sub` is not a required claim
-// in golang-jwt v5.
-//
-// Every gate that treats the resulting caller as anonymous -- denial.Classify,
-// and the page gate's login-redirect bound -- is guarding a live case, not a
-// hypothetical one.
-func TestSubjectlessTokenIsReachableFromLocalLogin(t *testing.T) {
+func subjectlessExchanger(t *testing.T) (*Exchanger, *Config) {
+	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	cs := crypto.Signer(priv)
@@ -74,6 +65,7 @@ func TestSubjectlessTokenIsReachableFromLocalLogin(t *testing.T) {
 	cfg := Config{
 		Issuer:     "test-iss",
 		Audience:   "test-aud",
+		CookieName: "auth_token",
 		Signer:     *signer,
 		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
 	}
@@ -84,26 +76,134 @@ func TestSubjectlessTokenIsReachableFromLocalLogin(t *testing.T) {
 
 	ex, err := NewExchanger(context.Background(), cfg, cm, subjectlessStubProvider{})
 	require.NoError(t, err)
+	return ex, &cfg
+}
+
+// A subject-less credential is NOT a supported configuration. This is the
+// MINT end of that ruling.
+//
+// The hinge is that jwt.MapClaims.GetSubject reports a MISSING `sub` as
+// ("", nil) rather than as an error, so before this refusal existed
+// sign.Signer.Project copied the empty string into the token it signed and
+// nothing downstream objected: the host middleware validates only `iss` and
+// `aud`, and `sub` is not a required claim in golang-jwt v5. The credential
+// check SUCCEEDS here -- that is the point. What must not follow it is a
+// token nobody can be attributed to.
+func TestSubjectlessCredentialIsRefusedAtLogin(t *testing.T) {
+	ex, _ := subjectlessExchanger(t)
 
 	ts, err := ex.LoginLocal(context.Background(), "nobody@example.test", "pw", "", "", AuthMethodLocal)
-	require.NoError(t, err, "the credential check SUCCEEDED; this is a valid login")
-	require.NotEmpty(t, ts.AccessToken)
 
-	// Parse it exactly as WithAuthentication does: issuer + audience, nothing
-	// about the subject.
-	authContext := AuthContext{}
-	token, err := jwt.ParseWithClaims(ts.AccessToken, &authContext,
-		func(*jwt.Token) (any, error) { return cfg.ActivePair.Private.Public(), nil },
-		jwt.WithIssuer(cfg.Issuer),
-		jwt.WithAudience(cfg.Audience),
-	)
-	require.NoError(t, err, "the host's own middleware accepts this token")
-	require.True(t, token.Valid)
+	require.Error(t, err, "the credential check succeeded but named nobody; the login must fail closed")
+	assert.ErrorIs(t, err, sign.ErrSubjectlessCredential)
+	assert.ErrorIs(t, err, ErrServerError,
+		"no password the caller could type makes a Secret grow a `sub` key -- this is a server fault")
+	assert.Empty(t, ts.AccessToken, "no token may be minted for a credential that names nobody")
+	assert.Empty(t, ts.RefreshToken)
+}
 
-	sub, err := authContext.GetSubject()
+// The signer is the invariant behind the login check: nothing this process
+// signs can carry an empty subject, whichever call path reaches it. Project
+// is the first chokepoint (where the empty subject is manufactured);
+// SignProjected is the last (the direct callers in internal/host that hold a
+// projection and never come back through Project).
+func TestSignerRefusesToMintASubjectlessToken(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
-	if sub != "" {
-		t.Fatalf("sub = %q; this test exists because a validated credential CAN name nobody, "+
-			"and the gates' subject-less handling would be guarding nothing if it could not", sub)
+	cs := crypto.Signer(priv)
+	signer, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", nil)
+	require.NoError(t, err)
+
+	for name, ctx := range map[string]jwt.MapClaims{
+		"no sub claim": {"email": "nobody@example.test"},
+		"empty sub":    {"sub": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, perr := signer.Project(ctx)
+			assert.ErrorIs(t, perr, sign.ErrSubjectlessCredential, "Project must refuse")
+
+			_, serr := signer.Sign(ctx)
+			assert.ErrorIs(t, serr, sign.ErrSubjectlessCredential, "Sign must refuse")
+
+			// SignProjected is reached directly by internal/host/mint_token.go
+			// and the FAT path in internal/host/proxy.go, the latter with a
+			// CACHED projection, so it must refuse on its own account.
+			_, sperr := signer.SignProjected(ctx)
+			assert.ErrorIs(t, sperr, sign.ErrSubjectlessCredential, "SignProjected must refuse")
+		})
+	}
+}
+
+// The VALIDATION end of the same ruling, and the reason it is not enough to
+// refuse at mint: a token minted before this branch, or by any other holder
+// of the signing key, is still on the wire. WithAuthentication treats it as
+// an invalid credential -- which for a bearer means 401 + challenge, and for
+// a cookie means the cookie is cleared and the request continues anonymously.
+func TestSubjectlessTokenIsRefusedAtValidation(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+
+	c := &Config{
+		Audience:   "https://dev.example.test",
+		Issuer:     "https://dev.example.test",
+		CookieName: "auth_token",
+		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+	}
+
+	// Hand-signed with the host's own key so the ONLY thing wrong with it is
+	// the subject: right issuer, right audience, unexpired, valid signature.
+	mint := func(claims jwt.MapClaims) string {
+		claims["aud"] = c.Audience
+		claims["iss"] = c.Issuer
+		claims["iat"] = time.Now().Add(-time.Minute).Unix()
+		claims["exp"] = time.Now().Add(time.Hour).Unix()
+		signed, serr := jwt.NewWithClaims(jwt.SigningMethodES256, claims).SignedString(priv)
+		require.NoError(t, serr)
+		return signed
+	}
+
+	for name, claims := range map[string]jwt.MapClaims{
+		"no sub claim": {},
+		"empty sub":    {"sub": ""},
+	} {
+		t.Run(name+"/bearer", func(t *testing.T) {
+			var reached bool
+			handler := c.WithAuthentication(nil)(http.HandlerFunc(
+				func(http.ResponseWriter, *http.Request) { reached = true }))
+
+			req := httptest.NewRequest("GET", "/api/v1/mcp", nil)
+			req.Header.Set("Authorization", "Bearer "+mint(claims))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			assert.False(t, reached, "a credential that names nobody must not reach the handler")
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.NotEmpty(t, rec.Header().Get("WWW-Authenticate"),
+				"RFC 6750 §3: a 401 over the Bearer scheme MUST carry a challenge")
+		})
+
+		t.Run(name+"/cookie", func(t *testing.T) {
+			var got AuthContext
+			var reached bool
+			handler := c.WithAuthentication(nil)(http.HandlerFunc(
+				func(_ http.ResponseWriter, r *http.Request) {
+					reached = true
+					got, _ = GetAuthContext(r.Context())
+				}))
+
+			req := httptest.NewRequest("GET", "/some-page", nil)
+			req.AddCookie(&http.Cookie{Name: c.CookieName, Value: mint(claims)})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			// Same footing as any other invalid cookie: cleared, then the
+			// request continues ANONYMOUSLY so the wrapped handler decides
+			// (a gated page redirects to login, a public page renders).
+			assert.True(t, reached, "an invalid cookie continues anonymously; it does not 401")
+			assert.Nil(t, got, "no auth context may be injected for a credential that names nobody")
+			assert.Contains(t, rec.Header().Get("Set-Cookie"), "Max-Age=0",
+				"the unusable cookie must be cleared, as for any other invalid token")
+		})
 	}
 }

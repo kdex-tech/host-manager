@@ -9,6 +9,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -356,6 +357,29 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							log.Info("Token refreshed after expiry")
 						}
 					}
+				}
+			}
+
+			// FAIL CLOSED on a credential that names nobody, on the same
+			// footing as any other invalid token -- which is what folding it
+			// into `err` here (rather than adding a fourth branch below) buys:
+			// a cookie is cleared and the request continues anonymously, a
+			// bearer gets the 401 + challenge, and both behaviours stay
+			// wherever the invalid-token handling moves next.
+			//
+			// It is a SEPARATE, ERROR-level log because the two failures are
+			// not the same event for an operator. An expired token is the
+			// system working; this one means a credential SOURCE is
+			// misconfigured -- and the fix is in a Secret or a lookup backend,
+			// not in anything the caller did. jwt.MapClaims.GetSubject reports
+			// a missing `sub` as ("", nil), so nothing above this line has
+			// objected. See sign.ErrSubjectlessCredential.
+			if err == nil && token.Valid {
+				if sub, serr := authContext.GetSubject(); serr != nil || sub == "" {
+					log.Error(sign.ErrSubjectlessCredential,
+						"rejecting a credential that names nobody; "+sign.SubjectlessRemedy,
+						"source", authSource, "issuer", c.Issuer, "audience", c.Audience)
+					err = sign.ErrSubjectlessCredential
 				}
 			}
 

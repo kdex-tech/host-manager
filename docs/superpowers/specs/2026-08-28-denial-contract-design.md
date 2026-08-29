@@ -218,28 +218,60 @@ oversights:**
   rather than a status — `unwrap` only ever sees `>= 400`, so it cannot make
   this choice on the gate's behalf.
 
-  It also adds a second condition, and this one bounds a loop: the redirect
+  It also adds a second condition, and this one bounded a loop: the redirect
   fires only when the caller presented **no credential at all**. `Classify`
   calls a present-but-**subject-less** context `Unauthenticated` too, which is
   correct for the *status* — a credential naming nobody cannot clear an identity
   gate keyed on who the caller is — but wrong for this redirect, because the
-  login form is where such a credential comes from. A credential lookup that
-  resolves a subject with no `sub` claim (a Secret keyed only by `email`; an
-  http-lookup backend answering `{"ok":true,"claims":{}}`) makes `LoginLocal`
-  mint a session token whose `sub` is `""`: `jwt.MapClaims.GetSubject` reports a
-  *missing* key as `("", nil)` and `sign.Signer.Project` copies that straight
-  into the token, which the host middleware then accepts (only `iss` and `aud`
-  are checked). So the caller logs in, **succeeds**, is returned to the gated
-  page, is classified `Unauthenticated` again, and is sent back to the login
-  form — indefinitely, with nothing shown to say anything failed.
+  login form is where such a credential comes from: the caller logs in,
+  **succeeds**, is returned to the gated page, is classified `Unauthenticated`
+  again, and is sent back to the login form — indefinitely, with nothing shown
+  to say anything failed.
 
-  The discovery redirect's one-hop `denied=` marker cannot bound this: that
-  guard works because the redirect *target* carries the marker, whereas this
-  loop passes through `LoginPost`, which rebuilds the URL from `return=` and
-  drops everything else. The bound is the distinction itself. Reachability is
-  pinned by `TestSubjectlessTokenIsReachableFromLocalLogin`
-  (`internal/auth/subjectless_credential_test.go`); the behaviour is pinned at
-  both gates by `internal/host/subjectless_gate_test.go`.
+  **That loop is now unreachable, and the condition stays as defence in depth.**
+  A subject-less credential is not a supported configuration (see *Subject-less
+  credentials* below), so no such caller arrives at this gate carrying an auth
+  context at all. The condition is kept because the cost is one map lookup and
+  the failure mode it bounds is an unbounded redirect with no error surface —
+  this gate should not depend on an upstream invariant for a bound it can
+  assert itself — and because the distinction is still the right one on its own
+  terms: the discovery redirect's one-hop `denied=` marker cannot bound this
+  loop, since that guard works by having the redirect *target* carry the marker,
+  whereas this loop passes through `LoginPost`, which rebuilds the URL from
+  `return=` and drops everything else. The behaviour is pinned at both gates by
+  `internal/host/subjectless_gate_test.go`, which injects the auth context
+  directly and so exercises this branch rather than the upstream refusal.
+
+### Subject-less credentials are not a supported configuration
+
+`jwt.MapClaims.GetSubject` reports a **missing** `sub` as `("", nil)` — only a
+wrong-*typed* `sub` errors (golang-jwt v5 `map_claims.go`). So a credential
+source that vouches for a login without naming a subject silently produced
+`sub: ""`, `sign.Signer.Project` copied it into the signed token, and the host
+middleware accepted it (only `iss` and `aud` were checked). Two real sources do
+this: a subject Secret keyed only by `email` (`internal/auth/roles.go` — the
+matcher accepts `email == subject`, and the returned claims are the Secret's
+data keys minus `password`, so no `sub` key exists), and an http-lookup backend
+answering `{"ok":true}` or `{"ok":true,"claims":{}}`
+(`internal/auth/lookup_http.go`). `LoginLocal` never derives a subject from
+`username`, so nothing repaired it downstream.
+
+Every gate in host-manager is keyed on *who the caller is*. A token whose `sub`
+is empty is attributable to no one, authorizable against nothing, and auditable
+as nobody. It is therefore **refused at both ends**, JWT and PASETO:
+
+| end | chokepoint |
+|---|---|
+| mint (JWT) | `sign.Signer.Project` — where the empty subject is manufactured; and `sign.Signer.SignProjected` — the last line before a signature, which the direct callers in `internal/host/mint_token.go` and the FAT path in `internal/host/proxy.go` (with a *cached* projection) cannot bypass |
+| mint (PASETO) | `apitoken.TokenManager.MintStatelessKey` |
+| mint (diagnosis) | `Exchanger.LoginLocal` and `Exchanger.ExchangeToken` refuse before minting, in the only frame that still knows *which source* answered |
+| validation (JWT) | `auth.Config.WithAuthentication`, folded into `err` so it lands on the same footing as any other invalid token |
+| validation (PASETO) | `apitoken.TokenManager.ValidateToken` — `paseto.Token.GetSubject` already rejects a *missing* `sub`; this rejects a *present-but-empty* one, the shape a token minted before the guard carries |
+
+One sentinel, `sign.ErrSubjectlessCredential`, and one operator instruction,
+`sign.SubjectlessRemedy`, so every refusal logs the same sentence at **error
+level (V(0))** naming what to fix — the subject Secret or the credential-check
+backend — rather than a generic parse failure.
 
 ## Design
 
@@ -472,6 +504,30 @@ Two existing tests encode the old posture and invert:
   The host's *API* behaviour changes far more, which is the point of the branch.
   Operators wanting the truthful 403 in the browser too flip one helm value, no
   rollback.
+
+- **A host whose credential source omits `sub` stops working outright.** This is
+  the largest blast radius in the branch and it is deliberate: "not a supported
+  configuration" is what refusing it means. Concretely, a host with a subject
+  Secret keyed only by `email`, or an http-lookup backend answering
+  `{"ok":true}` / `{"ok":true,"claims":{}}`, half-worked before — login
+  *succeeded*, a session cookie was set, and every gate then treated the caller
+  as anonymous. After this change that login **fails**, with a `server_error`
+  at the token endpoint and an error-level log naming the credential source as
+  the thing to fix. An already-issued subject-less token stops being honoured
+  at the same moment: `WithAuthentication` clears the cookie and continues
+  anonymously, and a bearer gets 401 + challenge.
+
+  The failure is loud on purpose. The alternative — the status quo — is a host
+  where authentication appears to work and authorization silently never does,
+  diagnosable only by noticing that a logged-in user is classified anonymous.
+  There is no migration step: the fix is to make the credential source supply a
+  subject, which is what every other host already does.
+
+  The same rule closes a latent hole on the OIDC path: `ExchangeToken`'s
+  `no sub in id_token` check tested only `err != nil` and so never fired for an
+  id_token that simply omitted the claim. OIDC Core §2 makes `sub` mandatory, so
+  an IdP that omits it is broken and the login now fails closed rather than
+  minting an unattributable session.
 
 ## Out of scope
 

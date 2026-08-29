@@ -15,9 +15,17 @@ import (
 	"aidanwoods.dev/go-paseto"
 
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	corev1 "k8s.io/api/core/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// apitokenLog is the fallback logger for the mint path, which takes no
+// context to carry a request-scoped one. ValidateToken has a context and uses
+// logf.FromContext so its rejections correlate with the request that carried
+// the token.
+var apitokenLog = logf.Log.WithName("apitoken")
 
 var (
 	instance *KeyPairs
@@ -275,6 +283,20 @@ func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
 }
 
 func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, scope string, ttl time.Duration) (string, error) {
+	// FAIL CLOSED, the PASETO half of the JWT rule in sign.Signer. A PAT is a
+	// credential; a credential that names nobody is not a supported
+	// configuration. paseto.Token.SetSubject would happily write `sub: ""`,
+	// and unlike a MISSING claim (which Token.GetSubject rejects at parse) an
+	// EMPTY one survives every rule the parser applies -- so without this the
+	// only PASETO shape that can carry an unattributable identity is the one
+	// we would have minted ourselves. See sign.ErrSubjectlessCredential.
+	if sub == "" {
+		apitokenLog.Error(sign.ErrSubjectlessCredential,
+			"refusing to mint an API token for a credential that names nobody; "+sign.SubjectlessRemedy,
+			"audience", aud, "action", action)
+		return "", sign.ErrSubjectlessCredential
+	}
+
 	now := time.Now()
 	exp := now.Add(ttl)
 
@@ -368,6 +390,20 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 	subject, err := token.GetSubject()
 	if err != nil {
 		return nil, err
+	}
+	// FAIL CLOSED at the validation end too, symmetric with the mint above and
+	// with the JWT check in Config.WithAuthentication. GetSubject already
+	// rejects a MISSING `sub`; this rejects a PRESENT-but-empty one, which is
+	// what a token minted before the mint-side guard existed carries. Every
+	// caller of ValidateToken turns its success into an identity
+	// (hostPATIdentity, the proxy's PAT bridge) or into an answer ABOUT an
+	// identity (/-/apitokens/verify), so a token that names nobody has to be
+	// invalid here rather than anonymous later.
+	if subject == "" {
+		logf.FromContext(ctx).Error(sign.ErrSubjectlessCredential,
+			"rejecting an API token that names nobody; "+sign.SubjectlessRemedy,
+			"audience", expectedAudience)
+		return nil, sign.ErrSubjectlessCredential
 	}
 
 	action, err := token.GetString("act")

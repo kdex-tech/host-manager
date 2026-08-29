@@ -79,26 +79,37 @@ func (hh *HostHandler) pageHandlerFunc(
 				// context Unauthenticated, which is right for the STATUS --
 				// a credential naming nobody cannot clear an identity gate
 				// keyed on who the caller is -- but wrong for this redirect,
-				// because the login form is where such a credential COMES
-				// FROM. A credential lookup that resolves a subject without
-				// a `sub` claim (a Secret keyed only by `email`, an
-				// http-lookup backend answering `{"ok":true,"claims":{}}`)
-				// makes LoginLocal mint a session token whose sub is "":
-				// jwt.MapClaims.GetSubject returns ("", nil) for a MISSING
-				// key and sign.Signer.Project copies that into the token.
+				// because the login form is where such a credential would
+				// COME FROM: the caller would log in, SUCCEED, be returned
+				// here, be classified Unauthenticated again and be sent back
+				// to the form, forever, with nothing shown to say anything
+				// failed.
 				//
-				// So the caller logs in, SUCCEEDS, is returned here, is
-				// classified Unauthenticated again and sent back to the
-				// login form -- forever, with no error shown and no
-				// indication that anything failed.
+				// DEFENCE IN DEPTH, no longer load-bearing. This condition
+				// was added when a subject-less credential could reach this
+				// gate; it cannot any more. A subject-less credential is not
+				// a supported configuration and is now refused at both ends
+				// -- at mint (sign.Signer.Project / SignProjected,
+				// apitoken.MintStatelessKey, and the login paths that call
+				// them) and at validation (auth.Config.WithAuthentication
+				// for a JWT, apitoken.TokenManager.ValidateToken for a
+				// PASETO PAT) -- so no such caller arrives here carrying an
+				// auth context at all.
 				//
-				// The discovery redirect's one-hop `denied=` guard cannot
-				// bound this: that marker works because the redirect target
-				// carries it, whereas this loop passes through LoginPost,
-				// which rebuilds the URL from `return=` and drops everything
-				// else. The bound has to be the distinction itself. A
-				// subject-less caller falls through to the contract's 401 +
-				// challenge, which is truthful and terminates.
+				// It stays because the cost is one map lookup and the
+				// failure mode it bounds is an unbounded redirect loop with
+				// no error surface: this gate should not depend on an
+				// upstream invariant for a bound it can assert itself. The
+				// distinction is also still the RIGHT one on its own terms
+				// -- the discovery redirect's one-hop `denied=` marker
+				// cannot bound this loop, because that guard works by having
+				// the redirect TARGET carry it, whereas this loop passes
+				// through LoginPost, which rebuilds the URL from `return=`
+				// and drops everything else.
+				//
+				// Pinned by internal/host/subjectless_gate_test.go, which
+				// injects the context directly and so tests this branch
+				// rather than the upstream refusal.
 				_, hasCredential := auth.GetAuthContext(r.Context())
 
 				if outcome == denial.Unauthenticated && !hasCredential && hasLoginPage && acceptsHTML(r) {

@@ -19,6 +19,7 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	"golang.org/x/oauth2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -414,8 +415,20 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	signingContext["idp"] = "oidc"
 
 	sub, err := signingContext.GetSubject()
-	if err != nil {
-		return TokenSet{}, fmt.Errorf("no sub in id_token")
+	// `err != nil` alone never fired for the case this check was written for.
+	// jwt.MapClaims.GetSubject reports a MISSING `sub` as ("", nil) and errors
+	// only on a wrong-TYPED one, so "no sub in id_token" was unreachable for
+	// an id_token that simply omitted the claim -- the empty string went on to
+	// be signed into a host session. OIDC Core 2 makes `sub` mandatory, so an
+	// id_token without one is a broken IdP, and the login fails closed rather
+	// than minting a session nobody can be attributed to.
+	// See sign.ErrSubjectlessCredential.
+	if err != nil || sub == "" {
+		logf.FromContext(ctx).Error(sign.ErrSubjectlessCredential,
+			"the upstream IdP returned an id_token with no `sub`; "+
+				"OIDC Core 2 requires one -- fix the IdP or its scope/claims configuration",
+			"providerURL", e.config.OIDC.ProviderURL)
+		return TokenSet{}, fmt.Errorf("%w: no sub in id_token", sign.ErrSubjectlessCredential)
 	}
 
 	// Snapshot what the IdP asserted BEFORE the merges below fold our own
@@ -743,6 +756,28 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		// Flagged for the repo owner rather than guessed at; see the task
 		// report.
 		return TokenSet{}, err
+	}
+
+	// FAIL CLOSED before anything is minted. The credential source vouched for
+	// this login; if it did so without naming a subject, that is an operator
+	// misconfiguration and the login is refused rather than half-succeeding.
+	//
+	// The check is HERE, and not left to the signer, because this is the only
+	// frame that still knows WHICH source answered -- the log can name the
+	// thing to fix (`sp.Type()` is the subject Secret store, LDAP, or the
+	// http lookup) instead of reporting a signature that did not happen. The
+	// signer refuses too (sign.Signer.Project / SignProjected); that is the
+	// invariant, this is the diagnosis.
+	//
+	// It is ErrServerError because it is one: no password the caller could
+	// type would make a Secret grow a `sub` key. See
+	// sign.ErrSubjectlessCredential for the two sources that produce this.
+	if sub, serr := signingContext.GetSubject(); serr != nil || sub == "" {
+		logf.FromContext(ctx).Error(sign.ErrSubjectlessCredential,
+			"the credential source vouched for this login but named no subject; "+sign.SubjectlessRemedy,
+			"username", username, "authMethod", string(authMethod))
+		return TokenSet{Subject: username},
+			fmt.Errorf("%w: %w", ErrServerError, sign.ErrSubjectlessCredential)
 	}
 
 	// The credential store has vouched for this identity, so from here the
