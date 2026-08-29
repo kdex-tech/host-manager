@@ -197,7 +197,7 @@ func (hh *HostHandler) capabilityMintHandler(w http.ResponseWriter, r *http.Requ
 	ac, _ := auth.GetAuthContext(r.Context())
 	sub, _ := ac["sub"].(string)
 	if sub == "" {
-		denial.Write(w, r, denial.Opts{
+		writeDenial(w, r, denial.Opts{
 			Outcome: denial.Unauthenticated,
 			Issuer:  hh.issuerAddress(),
 		})

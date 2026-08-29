@@ -1061,7 +1061,7 @@ func (hh *HostHandler) stateHandler(mux *http.ServeMux, registeredPaths map[stri
 			// presented at all. This answered a bare 401, which violates
 			// RFC 7235 (a 401 MUST carry a challenge) and the contract's
 			// own "every 401 carries a challenge" constraint.
-			denial.Write(w, r, denial.Opts{
+			writeDenial(w, r, denial.Opts{
 				Outcome: denial.Unauthenticated,
 				Issuer:  hh.issuerAddress(),
 			})

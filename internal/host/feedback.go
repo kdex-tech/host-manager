@@ -268,7 +268,12 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			// hasEvaluatedSubject uses canGenerateSniffer's own definition
 			// of anonymous so the two can never disagree.
 			if hasEvaluatedSubject(r.Context()) {
-				w.Header().Set("X-KDex-Sniffer-Suppressed", "functions:create")
+				// PreserveHeader, not Header().Set: unwrap wipes the header
+				// map by provenance before re-rendering for an
+				// HTML-accepting caller, and this header is exactly the kind
+				// that has to survive it -- it explains the decision rather
+				// than describing the body being replaced.
+				ew.PreserveHeader("X-KDex-Sniffer-Suppressed", "functions:create")
 			}
 			invokeSniffer = false
 		}
@@ -343,36 +348,35 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 			// (like ReverseProxy) may have set headers -- notably
 			// Content-Length -- describing a body we've suppressed.
 			//
-			// WWW-Authenticate is exempt because it is REQUIRED on a 401
-			// (RFC 7235); deleting it produced a bare 401 for every
-			// HTML-accepting client and silently disabled OAuth discovery
-			// for browsers. It describes the rejection, not the body being
-			// replaced. Add a header here only when something actually sets
-			// it -- everything else is exactly what the wipe exists for.
+			// What survives is decided by PROVENANCE, not by name. An
+			// earlier form of this exemption allow-listed "WWW-Authenticate"
+			// and read it back with header.Get -- but errorResponseWriter
+			// embeds the ResponseWriter and does NOT override Header(), so
+			// ReverseProxy's copied upstream response headers land in this
+			// very map. A read-back cannot tell a host-authored challenge
+			// from one a KDexFunction backend returned, and a backend
+			// answering `401 WWW-Authenticate: Basic realm="Sign in"` would
+			// therefore make the browser render a NATIVE CREDENTIAL PROMPT
+			// on the host's origin -- a phishing primitive that the
+			// unconditional wipe used to suppress.
 			//
-			// X-KDex-Sniffer-Suppressed is exempt for the same reason: it
-			// names the entitlement the caller lacked when sniffer
-			// generation was suppressed (see DesignMiddleware above), and
-			// without the exemption it would be wiped for every
-			// HTML-accepting caller before it ever reached a browser.
+			// So ew.preserved holds only what THIS PROCESS recorded as it
+			// emitted it: the challenge and Cache-Control from writeDenial
+			// (internal/host/denial.go), the sniffer-suppression header from
+			// DesignMiddleware above, and the RFC 6749 5.2 Basic challenge
+			// from the OAuth2 token endpoint (internal/auth/oauth2.go).
+			// Everything else -- backend-supplied included -- is exactly what
+			// the wipe exists for.
 			//
-			// CONSTRAINT: this snapshots via Get/Set, which keeps only the
-			// FIRST value of a header. Every allow-listed header is
-			// single-valued today (both are written with .Set). A producer
-			// that ever uses .Add on one of these would silently lose its
-			// extra values here -- add such a header to the list only after
-			// switching this loop to header.Values/textproto append.
+			// CONSTRAINT: preserved is name -> single value. Every recorded
+			// header is single-valued today (all are written with .Set). A
+			// producer that needs .Add semantics must switch this map to
+			// []string first.
 			header := w.Header()
-			preserved := map[string]string{}
-			for _, k := range []string{"WWW-Authenticate", "X-KDex-Sniffer-Suppressed"} {
-				if v := header.Get(k); v != "" {
-					preserved[k] = v
-				}
-			}
 			for k := range header {
 				delete(header, k)
 			}
-			for k, v := range preserved {
+			for k, v := range ew.preserved {
 				header.Set(k, v)
 			}
 

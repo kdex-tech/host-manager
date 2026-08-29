@@ -635,7 +635,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					// MCP client cannot recover from.
 					meta = fh.issuer + protectedResourcePath + fn.Spec.API.BasePath
 				}
-				denial.Write(w, r, denial.Opts{
+				writeDenial(w, r, denial.Opts{
 					Outcome: denial.Classify(
 						r.Context(), authChecker, parsedUserEntitlements,
 						"functions", fn.Spec.API.BasePath),

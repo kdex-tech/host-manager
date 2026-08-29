@@ -321,7 +321,12 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 				// 5.2: 401 applies only when client authentication was
 				// attempted via the Authorization header, and then obliges
 				// a WWW-Authenticate challenge.
-				w.Header().Set("WWW-Authenticate", `Basic realm="token"`)
+				// PreserveHeader, not Header().Set: this handler runs inside
+				// the mux that internal/host's unwrap layer wraps, and that
+				// layer wipes the header map before re-rendering a >= 400 for
+				// an HTML-accepting caller. A challenge RFC 6749 5.2 makes
+				// mandatory has to be recorded as host-authored to survive it.
+				PreserveHeader(w, "WWW-Authenticate", `Basic realm="token"`)
 				writeOAuthError(w, http.StatusUnauthorized, errCodeInvalidClient, "client authentication failed")
 			} else {
 				// Public PKCE clients send no Authorization header, so 5.2

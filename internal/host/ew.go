@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/textproto"
+
+	"github.com/kdex-tech/host-manager/internal/auth"
 )
 
 type errorResponseWriter struct {
@@ -12,9 +15,31 @@ type errorResponseWriter struct {
 	statusCode  int
 	statusMsg   string
 	wroteHeader bool
+	// preserved records the response headers THIS PROCESS authored, so
+	// unwrap can restore them after wiping the header map (which by then
+	// also holds whatever ReverseProxy copied from the upstream response --
+	// errorResponseWriter does not override Header(), so the two share one
+	// map). Provenance, not an allow-list by name: a backend answering
+	// `401 WWW-Authenticate: Basic realm="..."` must not make a browser
+	// render a native credential prompt on the host's origin.
+	preserved map[string]string
 }
 
-var _ http.ResponseWriter = (*errorResponseWriter)(nil)
+var (
+	_ http.ResponseWriter  = (*errorResponseWriter)(nil)
+	_ auth.HeaderPreserver = (*errorResponseWriter)(nil)
+)
+
+// PreserveHeader sets a host-authored response header and records it as
+// host-authored, so unwrap's header wipe restores it. See the preserved
+// field, and auth.PreserveHeader for the writer-agnostic entry point.
+func (ew *errorResponseWriter) PreserveHeader(name, value string) {
+	ew.Header().Set(name, value)
+	if ew.preserved == nil {
+		ew.preserved = map[string]string{}
+	}
+	ew.preserved[textproto.CanonicalMIMEHeaderKey(name)] = value
+}
 
 // Flush implements the http.Flusher interface.
 func (ew *errorResponseWriter) Flush() {

@@ -119,7 +119,7 @@ func (hh *HostHandler) pageHandlerFunc(
 					log.V(2).Info("no accessible page to discover; rendering 403")
 				}
 
-				denial.Write(w, r, denial.Opts{
+				writeDenial(w, r, denial.Opts{
 					Outcome: outcome,
 					// Locked: pageHandlerFunc holds hh.mu.RLock from the
 					// top of the handler (see the defer above).
