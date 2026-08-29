@@ -591,6 +591,17 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			if bindErr != nil {
 				log.Error(bindErr, "requirement binding failed; denying",
 					"function", fn.Name, "route", key)
+				// DELIBERATELY OUTSIDE THE DENIAL CONTRACT, and a bare 403
+				// even for an anonymous caller. A bind failure is a
+				// server-side CR-configuration fault
+				// (entitlements.ErrUnboundPlaceholder): the requirement
+				// declares a placeholder this layer cannot supply. It says
+				// nothing about the caller's credential, so the contract's
+				// first row does not apply -- answering 401 would send an
+				// anonymous caller to authenticate in order to fix something
+				// that is not theirs to fix, and no credential they could
+				// present would change the outcome.
+				// docs/superpowers/specs/2026-08-28-denial-contract-design.md
 				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 				return
 			}

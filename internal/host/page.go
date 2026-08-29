@@ -37,15 +37,27 @@ func (hh *HostHandler) pageHandlerFunc(
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)
 
-			if err != nil {
-				log.Error(err, "authorization check failed", "resource", "pages", "resourceName", ph.BasePath())
-				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
-				return
-			}
-
-			if !authorized {
-				log.V(2).Info("unauthorized access attempt",
-					"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
+			// One condition, one vocabulary. The errored check used to
+			// answer 404 + r.URL.Path here, which is precisely the defect
+			// the denial contract retires -- and it left the two gates
+			// disagreeing, since the function proxy folds the same
+			// condition into denial.Write (internal/host/proxy.go).
+			//
+			// OPEN QUESTION, deliberately out of scope for this branch and
+			// filed separately: an errored authorization check is arguably a
+			// 500 at BOTH gates rather than a denial -- the checker failed,
+			// which says nothing about the caller. The design doc records
+			// the same question against the proxy arm ("Out of scope"). The
+			// log.Error below is the interim signal: we render it as a
+			// denial, but a failed check IS a server fault worth seeing.
+			if err != nil || !authorized {
+				if err != nil {
+					log.Error(err, "authorization check failed",
+						"resource", "pages", "resourceName", ph.BasePath())
+				} else {
+					log.V(2).Info("unauthorized access attempt",
+						"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
+				}
 
 				outcome := denial.Classify(r.Context(), hh.authChecker, "pages", ph.BasePath())
 
