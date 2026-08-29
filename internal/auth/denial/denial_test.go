@@ -198,13 +198,13 @@ func TestChallengeDropsUnsafeScopeValues(t *testing.T) {
 		Outcome:          InsufficientScope,
 		ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
 		Scopes: []string{
-			`bad"quote`,          // quote
-			"good:scope",         // kept (no unsafe chars)
-			`back\slash`,         // backslash
-			"has space",          // space
-			"has,comma",          // comma (auth-param delimiter)
-			"has\ttab",           // tab
-			"has\nnewline",       // newline
+			`bad"quote`,    // quote
+			"good:scope",   // kept (no unsafe chars)
+			`back\slash`,   // backslash
+			"has space",    // space
+			"has,comma",    // comma (auth-param delimiter)
+			"has\ttab",     // tab
+			"has\nnewline", // newline
 		},
 	})
 	want := `Bearer error="insufficient_scope", scope="good:scope", ` +
