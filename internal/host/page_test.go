@@ -180,35 +180,35 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 
 	handler := hh.pageHandlerFunc(page1, &hh.Translations)
 
-	// No login utility page is registered until the third subtest below, so
-	// an unauthenticated caller legitimately falls through to discovery here.
-	// Where a login page IS configured the login redirect wins instead --
-	// see TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage.
-	t.Run("Redirect to first authorized page when unauthenticated", func(t *testing.T) {
-		// NOT restored: the assertion (303 -> /page2) contradicts Task 6's
-		// "anonymous never discovers" guard (outcome != denial.Unauthenticated
-		// in internal/host/page.go) -- confirmed by running this subtest
-		// un-skipped, which gets 401, not 303. See task-6-report.md.
-		t.Skip("assertion predates the denial contract's anonymous-never-discovers rule; see task-6-report.md")
+	// No login utility page is registered until the third subtest below.
+	// Per the denial contract, an anonymous caller never discovers -- their
+	// fix is logging in, not being sent elsewhere -- so with nothing to send
+	// them to, they get the contract's 401. Where a login page IS configured
+	// the login redirect wins instead -- see
+	// TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage.
+	t.Run("401 rather than discovery when unauthenticated", func(t *testing.T) {
 		g := G.NewGomegaWithT(t)
 		req := httptest.NewRequest("GET", "/page1", nil)
 		w := httptest.NewRecorder()
 
 		handler(w, req)
 
-		g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
-		g.Expect(w.Header().Get("Location")).To(G.Equal("/page2"))
+		g.Expect(w.Code).To(G.Equal(http.StatusUnauthorized))
+		g.Expect(w.Header().Get("WWW-Authenticate")).NotTo(G.BeEmpty())
+		g.Expect(w.Header().Get("Location")).To(G.BeEmpty())
 	})
 
+	// The contract's discovery rendering: an authenticated caller who fails
+	// page1's gate is sent to the first page it can reach, carrying
+	// ?denied=<path> so the destination can say what was denied. The
+	// redirect only fires for a caller that can render HTML (hence the
+	// explicit Accept header) and is marked no-store so a cached denial
+	// can't outlive the grant that fixes it.
 	t.Run("Redirect to first authorized page when authenticated", func(t *testing.T) {
-		// NOT restored: the assertion (Location == "/page2") contradicts
-		// Task 6's mandatory ?denied=<path> marker -- confirmed by running
-		// this subtest un-skipped (with an Accept: text/html header added,
-		// since the guard is also acceptsHTML-conditional), which gets 303
-		// to "/page2?denied=%2Fpage1", not "/page2". See task-6-report.md.
-		t.Skip("assertion predates the denial contract's mandatory ?denied= marker; see task-6-report.md")
+		hh.SetPageDenialMode(PageDenialDiscover)
 		g := G.NewGomegaWithT(t)
 		req := httptest.NewRequest("GET", "/page1", nil)
+		req.Header.Set("Accept", "text/html")
 		// Simulate authenticated user
 		req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{"sub": "user1"}))
 		w := httptest.NewRecorder()
@@ -216,7 +216,8 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 		handler(w, req)
 
 		g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
-		g.Expect(w.Header().Get("Location")).To(G.Equal("/page2"))
+		g.Expect(w.Header().Get("Location")).To(G.Equal("/page2?denied=%2Fpage1"))
+		g.Expect(w.Header().Get("Cache-Control")).To(G.Equal("no-store"))
 	})
 
 	t.Run("Redirect to login when unauthenticated and no authorized pages", func(t *testing.T) {
@@ -237,14 +238,12 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 		g.Expect(w.Header().Get("Location")).To(G.Equal("/-/login?return=%2Fpage1"))
 	})
 
-	t.Run("Return 404 when no authorized pages and no login page", func(t *testing.T) {
-		// NOT restored: the assertion (404) contradicts the denial contract
-		// itself (Tasks 1-5), which replaced the page gate's anti-enumeration
-		// 404 with 401/403 -- confirmed by running this subtest un-skipped,
-		// which gets 403 (NoIdentity, the discovery fallback's floor), not
-		// 404. Unrelated to Task 6's own discover/forbid logic. See
-		// task-6-report.md.
-		t.Skip("assertion predates the denial contract's retirement of the page-gate 404; see task-6-report.md")
+	// The retired posture: an authenticated caller denied on every page, with
+	// no login page to fall back to, no longer gets the anti-enumeration
+	// 404 -- the denial contract replaced it with 403 (NoIdentity, the
+	// discovery fallback's floor). NoIdentity carries no challenge: naming a
+	// scope would imply a scope would fix it.
+	t.Run("403 rather than 404 when no authorized pages and no login page", func(t *testing.T) {
 		g := G.NewGomegaWithT(t)
 		delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
 		mock.verifyFn = func(kind string, name string, ent entitlements.ParsedEntitlements, req entitlements.ParsedRequirements, extra ...string) (bool, error) {
@@ -257,6 +256,7 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 
 		handler(w, req)
 
-		g.Expect(w.Code).To(G.Equal(http.StatusNotFound))
+		g.Expect(w.Code).To(G.Equal(http.StatusForbidden))
+		g.Expect(w.Header().Get("WWW-Authenticate")).To(G.BeEmpty())
 	})
 }
