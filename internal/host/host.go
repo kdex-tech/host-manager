@@ -402,7 +402,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 	// the signing key for FAT minting; without a fully built authConfig the
 	// call panics. Skip the function loop entirely when auth isn't set up
 	// (envtest fixtures with empty spec.auth, or pre-SetHost startup).
-	if hh.issuerAddress() != "" && hh.authConfig != nil && hh.authConfig.ActivePair != nil {
+	if hh.issuerAddressLocked() != "" && hh.authConfig != nil && hh.authConfig.ActivePair != nil {
 		for _, f := range hh.functions {
 			if f.Status.State != kdexv1alpha1.KDexFunctionStateReady {
 				continue
@@ -413,7 +413,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 			if f.Spec.Internal {
 				continue
 			}
-			h := hh.reverseProxyHandler(&f, hh.issuerAddress())
+			h := hh.reverseProxyHandler(&f, hh.issuerAddressLocked())
 			// reverseProxyHandler returns a plain error handler when it cannot
 			// build the proxy -- an unparseable function URL, an invalid
 			// ClaimMappings mapper, or a FAT signer it was refused. Assert
@@ -773,7 +773,26 @@ func (hh *HostHandler) isSecure() bool {
 	return hh.scheme == schemeHTTPS
 }
 
+// issuerAddress reads hh.host and hh.scheme under hh.mu.RLock. Both are
+// rewritten on every reconcile under hh.mu.Lock (SetHost), and hh.scheme is a
+// string -- a two-word value the Go memory model permits to tear -- so an
+// unsynchronised read is a genuine data race, not a stale-value nit.
+//
+// Call this ONLY from a path that holds no lock (an HTTP handler before it
+// takes its own RLock, typically). A caller already holding hh.mu must call
+// issuerAddressLocked instead: Go's RWMutex prohibits recursive read locking,
+// and a writer queued between the two RLocks deadlocks the host. That is the
+// exact shape of kdex-tech/host-manager#26 and #51, which is also why the fix
+// here is a split rather than a lock inside the shared body.
 func (hh *HostHandler) issuerAddress() string {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	return hh.issuerAddressLocked()
+}
+
+// issuerAddressLocked is issuerAddress for callers that already hold hh.mu
+// (read or write). Caller must hold hh.mu.
+func (hh *HostHandler) issuerAddressLocked() string {
 	if hh.host == nil || len(hh.host.Routing.Domains) == 0 {
 		return ""
 	}

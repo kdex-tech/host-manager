@@ -39,6 +39,11 @@ func (hh *HostHandler) protectedResourceHandler(mux *http.ServeMux, _ map[string
 // oauthProtectedResourceHandler serves the RFC 9728 metadata document for a
 // given resource path suffix.
 func (hh *HostHandler) oauthProtectedResourceHandler(w http.ResponseWriter, r *http.Request) {
+	// PRE-EXISTING and out of scope for the denial contract: this reads
+	// hh.functions through oauth2ProtectedResources without holding hh.mu,
+	// which that method's doc comment now requires. Tracked separately; the
+	// issuerAddress() call below is synchronised because it is the one this
+	// branch's new denial paths share.
 	resources := hh.oauth2ProtectedResources()
 	if len(resources) == 0 {
 		http.NotFound(w, r)

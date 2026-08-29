@@ -117,7 +117,9 @@ func (hh *HostHandler) pageHandlerFunc(
 
 				denial.Write(w, r, denial.Opts{
 					Outcome: outcome,
-					Issuer:  hh.issuerAddress(),
+					// Locked: pageHandlerFunc holds hh.mu.RLock from the
+					// top of the handler (see the defer above).
+					Issuer: hh.issuerAddressLocked(),
 				})
 				return
 			}

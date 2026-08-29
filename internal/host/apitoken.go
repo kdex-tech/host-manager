@@ -144,7 +144,8 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			denial.Write(w, r, denial.Opts{
 				Outcome: denial.Classify(
 					r.Context(), hh.authChecker, "apitokens", requestingSub, "revoke"),
-				Issuer: hh.issuerAddress(),
+				// Locked: hh.mu.RLock is held from above.
+				Issuer: hh.issuerAddressLocked(),
 			})
 			return
 		}
@@ -263,7 +264,8 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		log.V(1).Info("mint denied", "subject", subject)
 		denial.Write(w, r, denial.Opts{
 			Outcome: denial.Classify(r.Context(), hh.authChecker, "apitokens", subject, "mint"),
-			Issuer:  hh.issuerAddress(),
+			// Locked: hh.mu.RLock is held from above.
+			Issuer: hh.issuerAddressLocked(),
 		})
 		return
 	}

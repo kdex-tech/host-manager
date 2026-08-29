@@ -24,9 +24,13 @@ type OAuth2Resource struct {
 // this host, keyed by basePath. A function is included when ANY operation
 // declares the "oauth2" scheme; Scopes is the de-duplicated union of that
 // scheme's scope lists across the function's operations.
+//
+// Caller must hold hh.mu: it reads hh.functions and (via
+// issuerAddressLocked) hh.host and hh.scheme, all rewritten under
+// hh.mu.Lock on every reconcile.
 func (hh *HostHandler) oauth2ProtectedResources() map[string]OAuth2Resource {
 	out := map[string]OAuth2Resource{}
-	issuer := hh.issuerAddress()
+	issuer := hh.issuerAddressLocked()
 	if issuer == "" {
 		return out
 	}
@@ -87,7 +91,7 @@ func (hh *HostHandler) oauth2ResourceMetadataLocked() map[string]string {
 	if len(resources) == 0 {
 		return nil
 	}
-	issuer := hh.issuerAddress()
+	issuer := hh.issuerAddressLocked()
 	out := make(map[string]string, len(resources))
 	for basePath := range resources {
 		out[basePath] = issuer + protectedResourcePath + basePath
