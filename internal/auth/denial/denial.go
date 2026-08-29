@@ -20,6 +20,13 @@
 // GET than by probing. If /-/openapi is ever gated or caller-filtered, that
 // trade reverses and this package is what should be revisited.
 //
+// That condition is ENFORCED, not merely written down:
+// TestOpenAPIPublishesGatedFunctionPathsToAnonymousCallers
+// (internal/host/openapi_test.go) asserts a gated function path is present in
+// the document built for a caller who presented no credential. Gating or
+// caller-filtering /-/openapi turns that test red, which is the signal to
+// come back here.
+//
 // This package owns statuses and challenges, never bodies and never
 // redirects. Presentation belongs to the mux-wide unwrap layer
 // (internal/host/feedback.go), which re-renders every >= 400 per Accept.

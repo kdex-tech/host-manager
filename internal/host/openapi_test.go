@@ -102,3 +102,77 @@ func TestLoginHandler_CatchAllClientRouteDocumented(t *testing.T) {
 	assert.True(t, hasWildcardPathParam,
 		"documented catch-all must expose the wildcard {path...} parameter so the client-routing capability is discoverable")
 }
+
+// TestOpenAPIPublishesGatedFunctionPathsToAnonymousCallers is the enforceable
+// form of the denial contract's load-bearing dependency.
+//
+// The contract retires the anti-enumeration 404 on the grounds that /-/openapi
+// already serves every Ready, non-Internal function's paths to an anonymous
+// caller with no entitlement check -- so the 404 concealed a path that was
+// already published, and published more cheaply than probing. Two code
+// comments say "if /-/openapi is ever gated or caller-filtered, revisit this"
+// (internal/auth/denial/denial.go, internal/host/proxy.go) and, until this
+// test, nothing enforced either half.
+//
+// TestHostHandler_openapiHandler would catch an added AUTH GATE, because it
+// asserts a 200 -- but not a CALLER FILTER, because its assertions are on
+// /-/openapi's own unprotected entry. This one asserts the property that
+// actually matters: a function path whose operation DECLARES A SECURITY
+// REQUIREMENT is present in the document built for a caller who presented no
+// credential. If either half of the dependency is ever introduced, this fails
+// and the comments' instruction becomes an action rather than an aspiration.
+func TestOpenAPIPublishesGatedFunctionPathsToAnonymousCallers(t *testing.T) {
+	const gatedPath = "/api/v1/mcp"
+
+	cacheManager, _ := cache.NewCacheManager("", "", nil)
+	th := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+
+	// A Ready, non-Internal function whose only operation declares
+	// {"oauth2": ["mcp:tools:call"]} -- i.e. one the proxy gate denies to an
+	// anonymous caller.
+	fn := newReadyFunctionWithOAuth2(t, gatedPath, []string{"mcp:tools:call"})
+	paths := map[string]ko.PathInfo{
+		gatedPath: {API: *ko.FromKDexAPI(&fn.Spec.API), Type: ko.FunctionPathType},
+	}
+
+	th.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
+		DefaultLang: "en",
+		OpenAPI: kdexv1alpha1.OpenAPI{
+			TypesToInclude: []kdexv1alpha1.TypeToInclude{kdexv1alpha1.TypeFUNCTION},
+		},
+		Routing: kdexv1alpha1.Routing{Domains: []string{"test.example.com"}},
+	}, nil, nil, nil, nil, "", paths, []kdexv1alpha1.KDexFunction{fn}, nil, nil, "https", nil, time.Now())
+
+	// No auth context on the request: the purest anonymous caller there is.
+	req := httptest.NewRequest("GET", "/-/openapi", nil)
+	w := httptest.NewRecorder()
+	th.Mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: /-/openapi answering an anonymous caller anything else "+
+			"means the contract's anti-enumeration argument no longer holds -- revisit "+
+			"internal/auth/denial/denial.go and internal/host/proxy.go", w.Code)
+	}
+
+	var doc openapi3.T
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, w.Body.String())
+	}
+
+	item := doc.Paths.Find(gatedPath)
+	if item == nil {
+		t.Fatalf("gated path %q absent from the anonymous document. /-/openapi is now "+
+			"caller-filtered, so the 404 the denial contract retired concealed something "+
+			"after all -- revisit internal/auth/denial/denial.go and internal/host/proxy.go",
+			gatedPath)
+	}
+	if item.Post == nil {
+		t.Fatalf("gated path %q present but its operation was filtered out", gatedPath)
+	}
+	// Guard the fixture itself: if the operation ever stops declaring a
+	// requirement, this test would pass on an UNGATED path and prove nothing.
+	if item.Post.Security == nil || len(*item.Post.Security) == 0 {
+		t.Fatal("fixture no longer declares a security requirement; the test would " +
+			"then assert nothing about GATED paths")
+	}
+}

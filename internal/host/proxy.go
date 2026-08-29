@@ -624,6 +624,14 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// (internal/host/openapi.go), so enumeration was already
 				// cheaper by GET than by probing. If /-/openapi is ever
 				// gated or caller-filtered, revisit this.
+				//
+				// That condition is ENFORCED:
+				// TestOpenAPIPublishesGatedFunctionPathsToAnonymousCallers
+				// (internal/host/openapi_test.go) asserts a gated function
+				// path is present in the document built for a caller who
+				// presented no credential. Gating or caller-filtering
+				// /-/openapi turns it red, which is the signal to revisit
+				// this branch and internal/auth/denial.
 				// docs/superpowers/specs/2026-08-28-denial-contract-design.md
 				var meta string
 				if fh.oauth2Protected && fh.oauth2Resource != "" {
