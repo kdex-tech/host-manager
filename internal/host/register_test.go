@@ -11,6 +11,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	ko "github.com/kdex-tech/host-manager/internal/openapi"
 )
 
 // newTestHostHandlerWithDCR creates a minimal HostHandler with DCR enabled,
@@ -40,7 +41,7 @@ func newTestHostHandlerWithDCR(t *testing.T, domain string, schemes []string) *H
 func postRegister(t *testing.T, hh *HostHandler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	mux := http.NewServeMux()
-	hh.registerHandler(mux, nil)
+	hh.registerHandler(mux, map[string]ko.PathInfo{})
 	req := httptest.NewRequest("POST", "/-/oauth/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -56,7 +57,7 @@ const loopbackBody = `{"redirect_uris":["http://127.0.0.1:33418/cb"],"client_nam
 func postRegisterFrom(t *testing.T, hh *HostHandler, body, remoteAddr, xff string) *httptest.ResponseRecorder {
 	t.Helper()
 	mux := http.NewServeMux()
-	hh.registerHandler(mux, nil)
+	hh.registerHandler(mux, map[string]ko.PathInfo{})
 	req := httptest.NewRequest("POST", "/-/oauth/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if remoteAddr != "" {
@@ -287,5 +288,65 @@ func TestRegisterFailsWhenAllRedirectsInvalid(t *testing.T) {
 	rr := postRegister(t, hh, `{"redirect_uris":["http://evil.example/cb","gopher://x/y"]}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRegisterHandler_DocumentsItselfInOpenAPI pins the fix for the gap where
+// /-/oauth/register was mounted but never registered a ko.PathInfo, so it was
+// the one /-/ system endpoint absent from the OpenAPI document. Discovery
+// already advertised it via registration_endpoint, which is why the omission
+// went unnoticed.
+func TestRegisterHandler_DocumentsItselfInOpenAPI(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "example.com", []string{"http-loopback"})
+	paths := map[string]ko.PathInfo{}
+	hh.registerHandler(http.NewServeMux(), paths)
+
+	info, ok := paths[oauthRegisterPath]
+	if !ok {
+		t.Fatalf("%s missing from the OpenAPI paths; got %v", oauthRegisterPath, paths)
+	}
+	if info.Type != ko.SystemPathType {
+		t.Errorf("Type = %v, want SystemPathType (it is a /-/ system endpoint)", info.Type)
+	}
+
+	item, ok := info.API.Paths[oauthRegisterPath]
+	if !ok {
+		t.Fatalf("no PathItem for %s", oauthRegisterPath)
+	}
+	if item.Post == nil {
+		t.Fatal("no POST operation documented; the endpoint is POST-only")
+	}
+	if item.Post.RequestBody == nil || item.Post.RequestBody.Value == nil {
+		t.Fatal("no request body documented")
+	}
+
+	// redirect_uris is the only required field, and getting that wrong is the
+	// difference between a usable spec and a misleading one.
+	schema := item.Post.RequestBody.Value.Content["application/json"].Schema.Value
+	if got := schema.Required; len(got) != 1 || got[0] != "redirect_uris" {
+		t.Errorf("required = %v, want exactly [redirect_uris]", got)
+	}
+
+	// The statuses the handler can actually produce. 201 rather than 200 is the
+	// easy one to get wrong.
+	for _, status := range []string{"201", "400", "429"} {
+		if item.Post.Responses.Value(status) == nil {
+			t.Errorf("no %s response documented", status)
+		}
+	}
+}
+
+// TestRegisterHandler_NotDocumentedWhenDCRDisabled: the endpoint's ABSENCE is
+// load-bearing (anti-enumeration), so the document must not advertise a path
+// that 404s.
+func TestRegisterHandler_NotDocumentedWhenDCRDisabled(t *testing.T) {
+	hh := newTestHostHandlerWithDCR(t, "example.com", []string{"http-loopback"})
+	hh.authConfig.DCR.Enabled = false
+
+	paths := map[string]ko.PathInfo{}
+	hh.registerHandler(http.NewServeMux(), paths)
+
+	if _, ok := paths[oauthRegisterPath]; ok {
+		t.Errorf("%s documented while DCR is disabled, but the route is not mounted", oauthRegisterPath)
 	}
 }
