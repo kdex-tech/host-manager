@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -50,6 +51,18 @@ const (
 	// PageDenialForbid renders the 403 error page instead.
 	PageDenialForbid PageDenialMode = "forbid"
 )
+
+// PageDenialModes is every value --page-denial-mode accepts.
+var PageDenialModes = []PageDenialMode{PageDenialDiscover, PageDenialForbid}
+
+// IsValid reports whether m is a recognised mode. Callers that ACCEPT a mode
+// from an operator must check this and refuse to start otherwise:
+// SetPageDenialMode's coercion resolves an unrecognised value to the LESS
+// strict mode, so a typo would otherwise buy the opposite of what was asked
+// for with no diagnostic anywhere.
+func (m PageDenialMode) IsValid() bool {
+	return slices.Contains(PageDenialModes, m)
+}
 
 // ProxyTimeouts holds the http.Transport timeout knobs used when proxying
 // to KDexFunction backends. Zero-value fields fall back to defaults at
@@ -182,7 +195,18 @@ func (hh *HostHandler) SetProxyTimeouts(t ProxyTimeouts) *HostHandler {
 
 // SetPageDenialMode replaces the HostHandler's page-denial rendering mode.
 // An empty or unrecognised value resolves to PageDenialDiscover.
+//
+// This coercion is a SAFETY NET, not the validation. It resolves to the LESS
+// strict mode, so an operator typo reaching here would silently buy the
+// opposite of what was asked for -- which is why cmd/main.go refuses to start
+// on anything that is not exactly "discover" or "forbid", and why a coercion
+// that does happen is logged at V(0): reaching it means something bypassed
+// that check.
 func (hh *HostHandler) SetPageDenialMode(m PageDenialMode) *HostHandler {
+	if m != PageDenialForbid && m != PageDenialDiscover {
+		hh.log.V(0).Info("unrecognised page denial mode; coercing to the default",
+			"value", string(m), "coercedTo", string(PageDenialDiscover))
+	}
 	if m != PageDenialForbid {
 		m = PageDenialDiscover
 	}

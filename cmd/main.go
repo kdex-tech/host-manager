@@ -234,6 +234,19 @@ func main() {
 
 	setupLog.Info("named log levels", "levels", namedLogLevels)
 
+	// FAIL CLOSED on a typo. SetPageDenialMode coerces anything that is not
+	// exactly "forbid" to "discover" -- the LESS strict of the two -- so
+	// `--page-denial-mode=forbidden`, `Forbid` or a trailing space silently
+	// bought the opposite of what the operator asked for, with no diagnostic
+	// anywhere. A security knob must not resolve an unrecognised value to the
+	// permissive setting; refusing to start is the only answer that cannot be
+	// missed.
+	if !host.PageDenialMode(pageDenialMode).IsValid() {
+		setupLog.Error(nil, "invalid --page-denial-mode; refusing to start",
+			"value", pageDenialMode, "valid", host.PageDenialModes)
+		os.Exit(1)
+	}
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
