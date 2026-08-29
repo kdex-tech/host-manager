@@ -9,6 +9,7 @@ import (
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -76,15 +77,15 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 
 	ac, ok := auth.GetAuthContext(r.Context())
 	if !ok {
-		log.Error(nil, "Unauthorized: No auth context found")
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.V(1).Info("no auth context; rejecting")
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
 		return
 	}
 
 	requestingSub, err := ac.GetSubject()
 	if err != nil || requestingSub == "" {
-		log.Error(err, "Unauthorized: No subject found in auth context")
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.V(1).Info("no subject in auth context; rejecting")
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
 		return
 	}
 
@@ -138,8 +139,13 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			"revoke",
 		)
 		if err != nil || !authorized {
-			log.Error(err, "Forbidden: User not authorized to revoke tokens for another subject")
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			log.V(1).Info("revoke denied: caller may not revoke for another subject",
+				"subject", requestingSub)
+			denial.Write(w, r, denial.Opts{
+				Outcome: denial.Classify(
+					r.Context(), hh.authChecker, "apitokens", requestingSub, "revoke"),
+				Issuer: hh.issuerAddress(),
+			})
 			return
 		}
 	}
@@ -254,8 +260,11 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"mint",
 	)
 	if err != nil || !authorized {
-		log.Error(err, "Failed to check access")
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		log.V(1).Info("mint denied", "subject", subject)
+		denial.Write(w, r, denial.Opts{
+			Outcome: denial.Classify(r.Context(), hh.authChecker, "apitokens", subject, "mint"),
+			Issuer:  hh.issuerAddress(),
+		})
 		return
 	}
 

@@ -6,6 +6,7 @@ import (
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -196,7 +197,10 @@ func (hh *HostHandler) capabilityMintHandler(w http.ResponseWriter, r *http.Requ
 	ac, _ := auth.GetAuthContext(r.Context())
 	sub, _ := ac["sub"].(string)
 	if sub == "" {
-		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+		denial.Write(w, r, denial.Opts{
+			Outcome: denial.Unauthenticated,
+			Issuer:  hh.issuerAddress(),
+		})
 		return
 	}
 	held := stringSliceFromClaim(ac["entitlements"])
