@@ -142,8 +142,15 @@ Three RFC details that make this precise rather than approximate:
 
 **The contract applies to:** the function proxy (`internal/host/proxy.go:598`),
 the page gate (`internal/host/page.go:37`), apitoken mint/revoke
-(`internal/host/apitoken.go:133,249`), and capabilities mint
-(`internal/host/capabilities.go:199`).
+(`internal/host/apitoken.go:133,249`), capabilities mint
+(`internal/host/capabilities.go:199`), and `/-/state/`
+(`internal/host/handlers.go:1059`).
+
+`/-/state/` is the purest `Unauthenticated` row in the repo — it answers only a
+caller who presented a credential, so its sole denial is "you presented none" —
+and it answered a **bare 401**, violating both RFC 7235 and this contract's own
+"every 401 carries a challenge" constraint. It was missing from both lists in
+the first draft of this document.
 
 **Explicit exceptions, documented so they read as decisions rather than
 oversights:**
@@ -175,6 +182,29 @@ oversights:**
 - **`/-/transfer` keeps its uniform 410** (`internal/host/transfer.go:170`). A
   256-bit capability handle appears in no OpenAPI document, so the
   anti-enumeration argument that fails everywhere else genuinely holds here.
+- **The proxy's requirement-binding failure stays a bare 403**
+  (`internal/host/proxy.go:594`), including for an anonymous caller, where the
+  contract's first row would say 401. A bind failure is
+  `entitlements.ErrUnboundPlaceholder`: the CR declared a requirement
+  placeholder this layer cannot supply. That is a **server-side configuration
+  fault, not a statement about the caller's credential** — no credential the
+  caller could present would change the outcome, so telling an anonymous caller
+  to authenticate would send them to fix something that is not theirs to fix.
+  It sits four lines above the contract call and is now commented at the site so
+  it reads as a decision rather than an oversight.
+- **`apitokenVerifyHandler` keeps its bare 401** (`internal/host/apitoken.go:537`).
+  It is not a gate: it is an *answer* about a token the caller submitted **in the
+  request body**, so the 401 reports the verification outcome rather than
+  refusing the request. Its own OpenAPI publishes exactly that — 400/401/500,
+  with no 403 alongside — which is what distinguishes it from the mint and revoke
+  operations next to it. `internal/auth/middleware.go:481,485` carry bare 401s of
+  the same class (a capability token presented and found invalid or exhausted).
+  Together they are a coherent **fourth outcome the contract does not model** —
+  "a credential was presented and it is invalid" — not a local oversight. Folding
+  them in would mean either inventing a challenge for a token that was already
+  rejected, or (worse) `Config.bearerChallenge`'s `invalid_token`, which the
+  contract deliberately keeps separate. Left as-is; if a fourth row is ever
+  wanted, these are its sites.
 - **The anonymous page-gate login redirect stays, for HTML callers**
   (`internal/host/page.go:68`). A 303 to `/-/login?return=…` *is* the browser
   rendering of `Unauthenticated`, and #184 reordered that branch deliberately —
@@ -348,9 +378,27 @@ Two existing tests encode the old posture and invert:
   Mitigated by `insufficient_scope` + `scope=`, which is a better step-up signal
   than the 401 it replaces — but it is an observable change for any client that
   branches on the status alone.
-- **The page gate's browser behaviour does not change on upgrade** under the
-  `discover` default; its *API* behaviour does, which is the point. Operators
-  wanting the truthful 403 in the browser flip one helm value, no rollback.
+- **The page gate's browser behaviour changes in two ways on upgrade**, both
+  intended, neither covered by the `discover` default. (An earlier draft of this
+  section claimed browser behaviour was unchanged. It was wrong.)
+  1. *An anonymous browser on a host with no `LoginUtilityPage` now gets 401
+     instead of a discovery redirect.* The login branch is guarded on
+     `hasLoginPage`, and anonymous never falls through to discovery any more —
+     the discovery branch is guarded on `outcome != denial.Unauthenticated`.
+     Before this change, anonymous-with-no-login-page fell through to
+     `firstAuthorizedPage` and was sent to some arbitrary public page (or 404 if
+     there was none). That is the misdirection the contract exists to stop, so
+     the 401 is the point — but it *is* a browser-visible change, and it lands
+     on exactly the hosts that configure no login page.
+  2. *An authenticated browser's discovery redirect now carries `?denied=<path>`*
+     (plus `Cache-Control: no-store`, and a one-hop bound). The destination page
+     is the same; the URL is not. Anything that keys on the redirect target — a
+     test, an analytics rule, a nav script — sees a query string that was not
+     there before.
+
+  The host's *API* behaviour changes far more, which is the point of the branch.
+  Operators wanting the truthful 403 in the browser too flip one helm value, no
+  rollback.
 
 ## Out of scope
 
@@ -359,5 +407,11 @@ Two existing tests encode the old posture and invert:
   needed.
 - Backends behind the proxy. knowdb keeps answering however it answers; this
   contract governs what host-manager says.
-- The `err != nil` arm of the proxy gate. It keeps denying, though it is
-  arguably a 500 — worth its own issue, not this change.
+- The `err != nil` arm of **both** gates — the function proxy's and the page
+  gate's. Both now fold it into the same `denial.Write` as `!authorized`, with
+  one condition and one vocabulary, so the two gates agree; both keep
+  `log.Error`, because an errored check IS a server fault even while it is
+  rendered as a denial. Whether it should instead be a **500** at both sites is
+  a real question and is filed separately, not settled here. (The page gate's
+  arm answered `404 + r.URL.Path` until the final review caught it; leaving it
+  alone would have preserved the exact defect this branch retires.)
