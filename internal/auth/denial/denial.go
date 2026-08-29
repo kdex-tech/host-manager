@@ -223,17 +223,37 @@ func safeResourceMetadata(raw string) bool {
 }
 
 // safeScope joins scopes RFC 6749 style (space-delimited), dropping any
-// value that cannot sit in an HTTP quoted-string or would break the
-// delimiter. Scopes are operator-authored CR data, not caller-supplied --
-// but the same discipline the invalid_token challenge follows applies:
-// nothing unvalidated reaches a header.
+// value that is not a well-formed scope-token. Scopes are operator-authored
+// CR data, not caller-supplied -- but the same discipline the invalid_token
+// challenge follows applies: nothing unvalidated reaches a header.
+//
+// ALLOW-list, not deny-list. The deny-list this replaces
+// (strings.ContainsAny(s, "\"\\ \t\r\n,")) named the characters someone
+// thought of and let NUL, VT, FF, DEL and every non-ASCII byte through.
 func safeScope(scopes []string) string {
 	safe := make([]string, 0, len(scopes))
 	for _, s := range scopes {
-		if s == "" || strings.ContainsAny(s, "\"\\ \t\r\n,") {
-			continue
+		if isScopeToken(s) {
+			safe = append(safe, s)
 		}
-		safe = append(safe, s)
 	}
 	return strings.Join(safe, " ")
+}
+
+// isScopeToken reports whether s matches RFC 6749 3.3's scope-token:
+// 1*( %x21 / %x23-5B / %x5D-7E ) -- printable ASCII minus SP, `"` and `\`.
+// Byte-wise by construction: the production is defined over bytes, so a
+// multi-byte rune is out of range regardless of how it is decoded.
+func isScopeToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0x21 || (c >= 0x23 && c <= 0x5B) || (c >= 0x5D && c <= 0x7E) {
+			continue
+		}
+		return false
+	}
+	return true
 }

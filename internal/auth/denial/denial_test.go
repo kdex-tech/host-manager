@@ -265,17 +265,41 @@ func TestChallengeDropsUnsafeScopeValues(t *testing.T) {
 		ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
 		Scopes: []string{
 			`bad"quote`,    // quote
-			"good:scope",   // kept (no unsafe chars)
+			"good:scope",   // kept: every byte is a scope-token byte
 			`back\slash`,   // backslash
 			"has space",    // space
-			"has,comma",    // comma (auth-param delimiter)
 			"has\ttab",     // tab
 			"has\nnewline", // newline
+			"has\x00nul",   // NUL -- the deny-list this replaces let it through
+			"has\vvtab",    // VT  -- ditto
+			"has\fff",      // FF  -- ditto
+			"has\x7fdel",   // DEL -- ditto
+			"hasé-utf8",    // non-ASCII -- ditto
+			"",             // empty
 		},
 	})
 	want := `Bearer error="insufficient_scope", scope="good:scope", ` +
 		`resource_metadata="https://example.test/.well-known/oauth-protected-resource/api/v1/mcp"`
 	if got := rr.Header().Get("WWW-Authenticate"); got != want {
 		t.Fatalf("challenge = %q, want %q", got, want)
+	}
+}
+
+// The allow-list is RFC 6749 3.3's scope-token exactly, so it must accept
+// every byte in the production -- including `,`, which the deny-list this
+// replaces dropped. A comma inside a quoted-string is qdtext (RFC 7235), so
+// it cannot be mistaken for the auth-param delimiter.
+func TestIsScopeToken(t *testing.T) {
+	for c := 0; c < 256; c++ {
+		want := c == 0x21 || (c >= 0x23 && c <= 0x5B) || (c >= 0x5D && c <= 0x7E)
+		if got := isScopeToken(string([]byte{byte(c)})); got != want {
+			t.Fatalf("isScopeToken(%#x) = %v, want %v", c, got, want)
+		}
+	}
+	if isScopeToken("") {
+		t.Fatal("isScopeToken(\"\") = true; scope-token is 1*(...)")
+	}
+	if !isScopeToken("users:*:admin") {
+		t.Fatal("a real KDex scope must survive the allow-list")
 	}
 }
