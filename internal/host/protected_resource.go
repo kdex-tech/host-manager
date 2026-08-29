@@ -39,12 +39,26 @@ func (hh *HostHandler) protectedResourceHandler(mux *http.ServeMux, _ map[string
 // oauthProtectedResourceHandler serves the RFC 9728 metadata document for a
 // given resource path suffix.
 func (hh *HostHandler) oauthProtectedResourceHandler(w http.ResponseWriter, r *http.Request) {
-	// PRE-EXISTING and out of scope for the denial contract: this reads
-	// hh.functions through oauth2ProtectedResources without holding hh.mu,
-	// which that method's doc comment now requires. Tracked separately; the
-	// issuerAddress() call below is synchronised because it is the one this
-	// branch's new denial paths share.
+	// ONE snapshot, under ONE lock. Two problems came from splitting it:
+	// oauth2ProtectedResources reads hh.functions' slice header against
+	// SetHost's write (a genuine race, not a stale-value nit), and -- worse
+	// -- `resource` came from the unlocked read while `authorization_servers`
+	// came from a separately-locked issuerAddress(), so a reconcile landing
+	// between the two emitted a document naming TWO DIFFERENT HOSTS. This is
+	// the document every denial.Write resource_metadata= pointer sends an
+	// unauthenticated MCP caller to fetch, so an inconsistent one is a
+	// discovery dead end.
+	//
+	// oauth2ProtectedResources returns a fresh map of fresh values (Scopes
+	// included), so the snapshot is safe to use after the unlock. The JSON
+	// encode below deliberately runs OUTSIDE the lock: it can block on the
+	// client's socket, and holding hh.mu across that would let one slow
+	// reader starve every reconcile (the shape of #26, #51 and #59).
+	hh.mu.RLock()
 	resources := hh.oauth2ProtectedResources()
+	issuer := hh.issuerAddressLocked()
+	hh.mu.RUnlock()
+
 	if len(resources) == 0 {
 		http.NotFound(w, r)
 		return
@@ -79,7 +93,7 @@ func (hh *HostHandler) oauthProtectedResourceHandler(w http.ResponseWriter, r *h
 
 	md := ProtectedResourceMetadata{
 		Resource:               match.Resource,
-		AuthorizationServers:   []string{hh.issuerAddress()},
+		AuthorizationServers:   []string{issuer},
 		ScopesSupported:        scopes,
 		BearerMethodsSupported: []string{"header"},
 	}

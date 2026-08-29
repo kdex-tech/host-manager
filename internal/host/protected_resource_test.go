@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -61,4 +62,83 @@ func TestProtectedResourceMetadataUnknown404(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rr.Code)
 	}
+}
+
+// The handler read hh.functions with no lock and then took hh.mu separately
+// for the issuer, so a reconcile landing between the two emitted a document
+// whose `resource` named one host and whose `authorization_servers` named
+// another. Run under -race: the reader must both stay race-free against
+// SetHost's write AND never mix two hosts into one document.
+func TestProtectedResourceMetadataIsInternallyConsistentUnderReconcile(t *testing.T) {
+	const (
+		basePath = "/api/v1/mcp"
+		domainA  = "a.example.test"
+		domainB  = "b.example.test"
+	)
+
+	hh := newTestHostHandlerWithDomain(t, domainA)
+	hh.functions = []kdexv1alpha1.KDexFunction{
+		newReadyFunctionWithOAuth2(t, basePath, []string{"functions:" + basePath + ":read"}),
+	}
+	mux := http.NewServeMux()
+	hh.protectedResourceHandler(mux, nil)
+
+	// A writer with SetHost's shape: rewrite hh.host and hh.functions under
+	// hh.mu.Lock, exactly the fields the handler reads.
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		domains := []string{domainA, domainB}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			hh.mu.Lock()
+			hh.host = &kdexv1alpha1.KDexHostSpec{
+				Routing: kdexv1alpha1.Routing{Domains: []string{domains[i%2]}},
+			}
+			hh.functions = []kdexv1alpha1.KDexFunction{
+				newReadyFunctionWithOAuth2(t, basePath, []string{"functions:" + basePath + ":read"}),
+			}
+			hh.mu.Unlock()
+		}
+	}()
+
+	var readers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for j := 0; j < 200; j++ {
+				req := httptest.NewRequest("GET", "/.well-known/oauth-protected-resource"+basePath, nil)
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+				if rr.Code != http.StatusOK {
+					t.Errorf("status = %d, want 200", rr.Code)
+					return
+				}
+				var md ProtectedResourceMetadata
+				if err := json.Unmarshal(rr.Body.Bytes(), &md); err != nil {
+					t.Errorf("unmarshal: %v", err)
+					return
+				}
+				if len(md.AuthorizationServers) != 1 {
+					t.Errorf("authorization_servers = %v", md.AuthorizationServers)
+					return
+				}
+				if md.Resource != md.AuthorizationServers[0]+basePath {
+					t.Errorf("document names two hosts: resource=%q authorization_servers=%v",
+						md.Resource, md.AuthorizationServers)
+					return
+				}
+			}
+		}()
+	}
+	readers.Wait()
+	close(stop)
+	writer.Wait()
 }
