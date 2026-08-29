@@ -50,6 +50,9 @@ spec:
             - --proxy-idle-conn-timeout={{ . }}
             {{- end }}
             {{- end }}
+            {{- with .Values.pageDenialMode }}
+            - --page-denial-mode={{ . }}
+            {{- end }}
             {{- with .Values.server }}
             - --server-read-header-timeout={{ .readHeaderTimeout }}
             - --server-read-timeout={{ .readTimeout }}

@@ -185,7 +185,11 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 	// Where a login page IS configured the login redirect wins instead --
 	// see TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage.
 	t.Run("Redirect to first authorized page when unauthenticated", func(t *testing.T) {
-		t.Skip("restored behind --page-denial-mode in Task 6")
+		// NOT restored: the assertion (303 -> /page2) contradicts Task 6's
+		// "anonymous never discovers" guard (outcome != denial.Unauthenticated
+		// in internal/host/page.go) -- confirmed by running this subtest
+		// un-skipped, which gets 401, not 303. See task-6-report.md.
+		t.Skip("assertion predates the denial contract's anonymous-never-discovers rule; see task-6-report.md")
 		g := G.NewGomegaWithT(t)
 		req := httptest.NewRequest("GET", "/page1", nil)
 		w := httptest.NewRecorder()
@@ -197,7 +201,12 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 	})
 
 	t.Run("Redirect to first authorized page when authenticated", func(t *testing.T) {
-		t.Skip("restored behind --page-denial-mode in Task 6")
+		// NOT restored: the assertion (Location == "/page2") contradicts
+		// Task 6's mandatory ?denied=<path> marker -- confirmed by running
+		// this subtest un-skipped (with an Accept: text/html header added,
+		// since the guard is also acceptsHTML-conditional), which gets 303
+		// to "/page2?denied=%2Fpage1", not "/page2". See task-6-report.md.
+		t.Skip("assertion predates the denial contract's mandatory ?denied= marker; see task-6-report.md")
 		g := G.NewGomegaWithT(t)
 		req := httptest.NewRequest("GET", "/page1", nil)
 		// Simulate authenticated user
@@ -229,7 +238,13 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 	})
 
 	t.Run("Return 404 when no authorized pages and no login page", func(t *testing.T) {
-		t.Skip("restored behind --page-denial-mode in Task 6")
+		// NOT restored: the assertion (404) contradicts the denial contract
+		// itself (Tasks 1-5), which replaced the page gate's anti-enumeration
+		// 404 with 401/403 -- confirmed by running this subtest un-skipped,
+		// which gets 403 (NoIdentity, the discovery fallback's floor), not
+		// 404. Unrelated to Task 6's own discover/forbid logic. See
+		// task-6-report.md.
+		t.Skip("assertion predates the denial contract's retirement of the page-gate 404; see task-6-report.md")
 		g := G.NewGomegaWithT(t)
 		delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
 		mock.verifyFn = func(kind string, name string, ent entitlements.ParsedEntitlements, req entitlements.ParsedRequirements, extra ...string) (bool, error) {

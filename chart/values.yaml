@@ -57,6 +57,12 @@ proxy:
   responseHeaderTimeout: 60s
   idleConnTimeout: 90s
 
+# How the page gate renders a denial to a browser. "discover" sends the
+# caller to the first page they can reach, carrying ?denied=<path>;
+# "forbid" renders the 403 error page. Non-HTML callers receive 403 in
+# both modes -- this knob is about presentation, not about the contract.
+pageDenialMode: discover
+
 # Inbound webserver timeouts. These bound exposure on every accepted
 # connection (kdex-tech/host-manager#49). Streaming responses are not
 # severed at writeTimeout any more (#167); they are bounded per-request

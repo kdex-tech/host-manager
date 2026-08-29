@@ -99,3 +99,108 @@ func TestPageGateAuthenticatedUnderEntitledGets403(t *testing.T) {
 		t.Fatal("NoIdentity carries no challenge: naming a scope would imply a scope would fix it")
 	}
 }
+
+// discover mode: a browser is sent to a page it can reach, and told which
+// page it was denied.
+func TestPageGateDiscoverModeRedirectsHTMLWithDeniedMarker(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialDiscover)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", w.Code)
+	}
+	if got := w.Header().Get("Location"); got != "/pricing?denied=%2Fdeveloper-keys" {
+		t.Fatalf("Location = %q, want /pricing?denied=%%2Fdeveloper-keys", got)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store: a cached denial outlives the grant that fixes it", got)
+	}
+}
+
+// The knob is about the HTML rendering only.
+func TestPageGateDiscoverModeStill403sNonHTML(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialDiscover)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "application/json"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: the knob never changes what an API client sees", w.Code)
+	}
+}
+
+// One hop, maximum. firstAuthorizedPage can return a page that itself denies
+// -- the navigation walk and the page render are separate checks -- so a
+// request already carrying denied= renders the 403 rather than looping.
+func TestPageGateDiscoverModeDoesNotLoop(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialDiscover)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(
+		w, authedReq("GET", "/developer-keys?denied=%2Fsomething", "text/html"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 on a request already carrying denied=", w.Code)
+	}
+}
+
+// Nothing to discover -> the 403 page, which is the floor both modes stand on.
+func TestPageGateDiscoverModeFallsBackTo403(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated) // the only page is the denied one
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialDiscover)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 when no accessible page exists", w.Code)
+	}
+}
+
+// forbid mode: the truthful 403 in the browser too, and no redirect at all.
+func TestPageGateForbidModeReturns403ToHTML(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialForbid)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location = %q, want no redirect in forbid mode", loc)
+	}
+}
+
+// Discovery is only ever a rendering of FORBIDDEN. An anonymous caller is
+// UNAUTHENTICATED -- the fix is logging in, not being sent elsewhere.
+func TestPageGateDiscoverModeNeverDiscoversForAnonymous(t *testing.T) {
+	gated := newPage("developer-keys", "Developer Keys", "/developer-keys")
+	hh := gatedHostFixture(gated, newPage("pricing", "Pricing", "/pricing"))
+	hh.authChecker = denyPath("/developer-keys")
+	hh.SetPageDenialMode(PageDenialDiscover)
+	delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
+
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "text/html"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: anonymous never discovers", w.Code)
+	}
+}

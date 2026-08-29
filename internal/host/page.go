@@ -68,6 +68,41 @@ func (hh *HostHandler) pageHandlerFunc(
 					return
 				}
 
+				// FORBIDDEN has two browser renderings, selected by the
+				// knob. Non-HTML callers fall through to the 403 below in
+				// BOTH modes: the knob is about presentation, not about the
+				// contract.
+				//
+				// The redirect is bounded to one hop. firstAuthorizedPage
+				// can return a page that itself denies -- the navigation
+				// walk and the page render are separate checks -- so a
+				// request already carrying denied= renders the 403 instead
+				// of redirecting again.
+				if outcome != denial.Unauthenticated &&
+					hh.pageDenialMode != PageDenialForbid &&
+					acceptsHTML(r) &&
+					!r.URL.Query().Has("denied") {
+
+					first := hh.firstAuthorizedPage(r.Context(), &l, l.String() == hh.defaultLanguage)
+					if first != "" {
+						if l.String() != hh.defaultLanguage {
+							first = "/" + l.String() + first
+						}
+						// r.URL.Path, not RequestURI: this is a label, never
+						// a redirect target, so it needs no SafeReturnPath
+						// collapse -- but it IS caller-influenceable, so any
+						// consumer that renders it must treat it as text.
+						target := first + "?denied=" + url.QueryEscape(r.URL.Path)
+						log.V(2).Info("discovery redirect", "to", first, "denied", r.URL.Path)
+						// A cached denial follows the user past the grant
+						// change that fixed it.
+						w.Header().Set("Cache-Control", "no-store")
+						http.Redirect(w, r, target, http.StatusSeeOther)
+						return
+					}
+					log.V(2).Info("no accessible page to discover; rendering 403")
+				}
+
 				denial.Write(w, r, denial.Opts{
 					Outcome: outcome,
 					Issuer:  hh.issuerAddress(),

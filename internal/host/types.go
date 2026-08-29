@@ -37,6 +37,20 @@ const (
 	`
 )
 
+// PageDenialMode selects how the page gate renders FORBIDDEN to a browser.
+// It governs the HTML rendering ONLY -- a non-HTML caller gets 403 in every
+// mode, because the knob is about presentation, not about the contract.
+type PageDenialMode string
+
+const (
+	// PageDenialDiscover sends a browser to the first page it can reach,
+	// carrying ?denied=<path>. Preserves the behaviour that predates the
+	// denial contract. Default.
+	PageDenialDiscover PageDenialMode = "discover"
+	// PageDenialForbid renders the 403 error page instead.
+	PageDenialForbid PageDenialMode = "forbid"
+)
+
 // ProxyTimeouts holds the http.Transport timeout knobs used when proxying
 // to KDexFunction backends. Zero-value fields fall back to defaults at
 // transport-construction time (see newProxyTransport in proxy.go), so
@@ -84,6 +98,7 @@ type HostHandler struct {
 	mu                        sync.RWMutex
 	openapiBuilder            ko.Builder
 	packageReferences         []kdexv1alpha1.PackageReference
+	pageDenialMode            PageDenialMode
 	pathsCollectedInReconcile map[string]ko.PathInfo
 	proxyTimeouts             ProxyTimeouts
 	reconcileTime             time.Time
@@ -162,6 +177,16 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 // fields fall back to defaults inside newProxyTransport.
 func (hh *HostHandler) SetProxyTimeouts(t ProxyTimeouts) *HostHandler {
 	hh.proxyTimeouts = t
+	return hh
+}
+
+// SetPageDenialMode replaces the HostHandler's page-denial rendering mode.
+// An empty or unrecognised value resolves to PageDenialDiscover.
+func (hh *HostHandler) SetPageDenialMode(m PageDenialMode) *HostHandler {
+	if m != PageDenialForbid {
+		m = PageDenialDiscover
+	}
+	hh.pageDenialMode = m
 	return hh
 }
 

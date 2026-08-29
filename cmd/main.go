@@ -83,6 +83,7 @@ func main() {
 	var configFile string
 	var focalHost string
 	namedLogLevels := make(kdexlog.NamedLogLevelPairs)
+	var pageDenialMode string
 	var pprofAddr string
 	var requeueDelaySeconds int
 	var serviceName string
@@ -126,6 +127,11 @@ func main() {
 			"scale-from-zero cold start (gRPC + cloudsqlconn + OTel); bump higher for heavier functions.")
 	flag.DurationVar(&proxyIdleConnTimeout, "proxy-idle-conn-timeout", 90*time.Second,
 		"How long an unused keep-alive connection lingers in the proxy transport's pool.")
+
+	flag.StringVar(&pageDenialMode, "page-denial-mode", string(host.PageDenialDiscover),
+		"How the page gate renders a denial to a browser: \"discover\" sends the caller to the "+
+			"first page they can reach carrying ?denied=<path>; \"forbid\" renders the 403 error "+
+			"page. Non-HTML callers receive 403 in both modes.")
 
 	srvDefaults := server.DefaultTimeouts()
 	flag.DurationVar(&serverReadHeaderTimeout, "server-read-header-timeout", srvDefaults.ReadHeaderTimeout,
@@ -335,7 +341,8 @@ func main() {
 			DialTimeout:           proxyDialTimeout,
 			ResponseHeaderTimeout: proxyResponseHeaderTimeout,
 			IdleConnTimeout:       proxyIdleConnTimeout,
-		})
+		}).
+		SetPageDenialMode(host.PageDenialMode(pageDenialMode))
 	requeueDelay := time.Duration(requeueDelaySeconds) * time.Second
 
 	if err := (&controller.KDexInternalHostReconciler{
