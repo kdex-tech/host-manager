@@ -18,22 +18,33 @@ type fakeChecker struct {
 	identityOK bool
 	err        error
 	calls      int
+	// recorded arguments from ParseRequirements and VerifyResourceParsedEntitlements
+	parseReqsInput []kdexv1alpha1.SecurityRequirement
+	verifyResource string
+	verifyName     string
+	verifyReqs     entitlements.ParsedRequirements
+	verifyVerbs    []string
 }
 
 func (f *fakeChecker) GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements {
 	return entitlements.ParsedEntitlements{}
 }
 
-func (f *fakeChecker) ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+func (f *fakeChecker) ParseRequirements(reqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+	f.parseReqsInput = reqs
 	return entitlements.ParsedRequirements{}
 }
 
 func (f *fakeChecker) VerifyResourceParsedEntitlements(
-	_ string, _ string,
-	_ entitlements.ParsedEntitlements, _ entitlements.ParsedRequirements,
-	_ ...string,
+	resource string, name string,
+	_ entitlements.ParsedEntitlements, reqs entitlements.ParsedRequirements,
+	verbs ...string,
 ) (bool, error) {
 	f.calls++
+	f.verifyResource = resource
+	f.verifyName = name
+	f.verifyReqs = reqs
+	f.verifyVerbs = verbs
 	return f.identityOK, f.err
 }
 
@@ -68,6 +79,26 @@ func TestClassifyAuthenticatedWithIdentityIsInsufficientScope(t *testing.T) {
 func TestClassifyNilCheckerIsNoIdentity(t *testing.T) {
 	if got := Classify(authedCtx(), nil, "functions", "/api/v1/x"); got != NoIdentity {
 		t.Fatalf("Classify = %v, want NoIdentity", got)
+	}
+}
+
+func TestClassifyIdentityProbeUsesEmptyRequirementSet(t *testing.T) {
+	// The identity probe must pass nil/empty requirements so that
+	// VerifyResourceParsedEntitlements reduces to exactly the identity gate.
+	c := &fakeChecker{identityOK: true}
+	if got := Classify(authedCtx(), c, "functions", "/api/v1/x", "read", "write"); got != InsufficientScope {
+		t.Fatalf("Classify = %v, want InsufficientScope", got)
+	}
+	// ParseRequirements must be called with nil (not a non-nil empty slice)
+	if c.parseReqsInput != nil {
+		t.Fatalf("ParseRequirements called with %v, want nil", c.parseReqsInput)
+	}
+	// VerifyResourceParsedEntitlements must be called with correct resource and name
+	if c.verifyResource != "functions" {
+		t.Fatalf("VerifyResourceParsedEntitlements resource = %q, want \"functions\"", c.verifyResource)
+	}
+	if c.verifyName != "/api/v1/x" {
+		t.Fatalf("VerifyResourceParsedEntitlements name = %q, want \"/api/v1/x\"", c.verifyName)
 	}
 }
 
@@ -166,7 +197,15 @@ func TestChallengeDropsUnsafeScopeValues(t *testing.T) {
 	Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/mcp", nil), Opts{
 		Outcome:          InsufficientScope,
 		ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
-		Scopes:           []string{`bad"quote`, "good:scope", `back\slash`, "has space"},
+		Scopes: []string{
+			`bad"quote`,          // quote
+			"good:scope",         // kept (no unsafe chars)
+			`back\slash`,         // backslash
+			"has space",          // space
+			"has,comma",          // comma (auth-param delimiter)
+			"has\ttab",           // tab
+			"has\nnewline",       // newline
+		},
 	})
 	want := `Bearer error="insufficient_scope", scope="good:scope", ` +
 		`resource_metadata="https://example.test/.well-known/oauth-protected-resource/api/v1/mcp"`
