@@ -66,3 +66,34 @@ func TestApitokenRevokeUnderEntitledGets403WithoutChallenge(t *testing.T) {
 		t.Fatalf("challenge = %q, want none on a NoIdentity 403", got)
 	}
 }
+
+// The mint gate has no dedicated pre-check for an absent auth context (unlike
+// revoke's two anonymous checks) -- it relies on the authChecker denying and
+// denial.Classify itself reading auth.GetAuthContext. Assert that path lands
+// on 401 + challenge, not the old bare 403, by driving apitokenMintHandler
+// directly (this is the only test in the repo that calls it).
+func TestApitokenMintAnonymousGets401WithChallenge(t *testing.T) {
+	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
+	hh := &HostHandler{
+		authConfig: &auth.Config{TokenManager: tm},
+		host:       &kdexv1alpha1.KDexHostSpec{},
+		authChecker: &mockApitokenAuthChecker{
+			CheckAccessFn: func(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error) {
+				return false, nil // a real checker denies a caller with no credential
+			},
+		},
+	}
+
+	reqBody, _ := json.Marshal(MintRequest{Audience: "aud", Sub: "someone"})
+	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/mint", bytes.NewBuffer(reqBody))
+	rr := httptest.NewRecorder()
+
+	hh.apitokenMintHandler(rr, req) // no auth context
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for an anonymous caller", rr.Code)
+	}
+	if rr.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("401 with no WWW-Authenticate violates RFC 7235")
+	}
+}

@@ -237,6 +237,10 @@ func TestCapabilityMintHandler_AnonymousIs401(t *testing.T) {
 		mintReq(t, MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:read"}}))
 
 	g.Expect(rw.Code).To(Equal(http.StatusUnauthorized))
+	// RFC 7235: a 401 MUST carry a challenge. This site returned a bare 401
+	// before the denial contract landed; assert the header directly rather
+	// than trusting the status code alone to prove it.
+	g.Expect(rw.Header().Get("WWW-Authenticate")).ToNot(BeEmpty())
 }
 
 // Attenuation is a policy refusal, not a malformed request: the MCP path
