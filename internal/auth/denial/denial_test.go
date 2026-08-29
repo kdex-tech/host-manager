@@ -196,6 +196,23 @@ func TestWriteUnauthenticatedWithNoIssuerUsesBareBearer(t *testing.T) {
 // quote-bearing basePath is valid CR data and reaches Write concatenated into
 // the RFC 9728 URL. Emitting it raw would give the challenge a SECOND
 // resource_metadata parameter naming an attacker-run authorization server.
+// Every denial row carries no-store, for the reason the page gate's discovery
+// redirect already gives: a cached denial follows the user past the grant
+// change that fixed it.
+func TestWriteSetsNoStoreOnEveryOutcome(t *testing.T) {
+	for _, o := range []Outcome{Unauthenticated, NoIdentity, InsufficientScope} {
+		rr := httptest.NewRecorder()
+		Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/mcp", nil), Opts{
+			Outcome:          o,
+			Issuer:           "https://example.test",
+			ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
+		})
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q for %v, want no-store", got, o)
+		}
+	}
+}
+
 func TestWriteDropsQuoteBearingResourceMetadata(t *testing.T) {
 	const evil = `https://example.test/.well-known/oauth-protected-resource/a/b",resource_metadata="https://attacker.example/x`
 

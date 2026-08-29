@@ -132,6 +132,15 @@ func Classify(ctx context.Context, c Checker, resource, name string, verbs ...st
 // WWW-Authenticate header. It uses http.Error so the status text becomes
 // unwrap's statusMsg; it never renders HTML itself.
 func Write(w http.ResponseWriter, r *http.Request, o Opts) {
+	// Symmetry with the page gate's discovery redirect, which carries
+	// no-store for the reason that applies verbatim here: a cached denial
+	// follows the user past the grant change that fixed it. Not a live
+	// defect -- 401 and 403 are not heuristically cacheable (RFC 9111 4.2.2)
+	// -- but an intermediary or a service worker instructed to cache them
+	// would outlive the grant, and the whole point of insufficient_scope is
+	// that the caller is expected to come back with more.
+	w.Header().Set("Cache-Control", "no-store")
+
 	// meta is o.ResourceMetadata once it has earned its place in a header;
 	// "" when the resource is not oauth2-protected OR when the value could
 	// not be validated. o.ResourceMetadata itself stays the "is this resource
