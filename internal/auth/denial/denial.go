@@ -32,11 +32,13 @@ package denial
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Outcome is which of the three contract rows a denial fell into.
@@ -130,14 +132,30 @@ func Classify(ctx context.Context, c Checker, resource, name string, verbs ...st
 // WWW-Authenticate header. It uses http.Error so the status text becomes
 // unwrap's statusMsg; it never renders HTML itself.
 func Write(w http.ResponseWriter, r *http.Request, o Opts) {
+	// meta is o.ResourceMetadata once it has earned its place in a header;
+	// "" when the resource is not oauth2-protected OR when the value could
+	// not be validated. o.ResourceMetadata itself stays the "is this resource
+	// oauth2-protected" signal, so an unsafe URL costs the challenge its
+	// pointer, never the challenge itself.
+	meta := o.ResourceMetadata
+	if meta != "" && !safeResourceMetadata(meta) {
+		// V(0): an operator has authored a basePath that cannot be expressed
+		// in this header, and the only other symptom is an MCP client with no
+		// discovery pointer. That is worth seeing at the default verbosity.
+		logf.FromContext(r.Context()).V(0).Info(
+			"rejected resource-metadata URL; omitting resource_metadata from the challenge",
+			"resourceMetadata", meta)
+		meta = ""
+	}
+
 	switch o.Outcome {
 	case Unauthenticated:
 		// RFC 7235: a 401 MUST carry a challenge. RFC 6750 3.1: the error
 		// parameter is omitted when no credentials were sent -- claiming
 		// invalid_token would be a lie about a token never presented.
 		switch {
-		case o.ResourceMetadata != "":
-			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+o.ResourceMetadata+`"`)
+		case meta != "":
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+meta+`"`)
 		case o.Issuer != "":
 			w.Header().Set("WWW-Authenticate", `Bearer realm="`+o.Issuer+`"`)
 		default:
@@ -157,7 +175,9 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 			if scope := safeScope(o.Scopes); scope != "" {
 				c += `, scope="` + scope + `"`
 			}
-			c += `, resource_metadata="` + o.ResourceMetadata + `"`
+			if meta != "" {
+				c += `, resource_metadata="` + meta + `"`
+			}
 			w.Header().Set("WWW-Authenticate", c)
 		}
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
@@ -167,6 +187,39 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 		// naming a scope would imply a scope would fix it.
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}
+}
+
+// safeResourceMetadata reports whether raw may be emitted inside the
+// resource_metadata auth-param's HTTP quoted-string.
+//
+// The value Write receives is <issuer> + protectedResourcePath + basePath
+// (internal/host/protected_resource.go). The issuer half is hostname-validated;
+// basePath is NOT. Its CRD pattern is `^/\w+/\w+`, which is START-ANCHORED
+// ONLY, so `/a/b",resource_metadata="https://attacker.example/x` is a valid
+// spec.api.basePath. Emitting it raw would put a SECOND resource_metadata
+// parameter in the challenge and let an RFC 9728 client be steered to an
+// attacker-run authorization server. Go rewrites only CR/LF on write, so this
+// cannot split a response -- but it fully controls this header's auth-params,
+// which is enough.
+//
+// Anchoring the CRD pattern with `$` and giving it a MaxLength is the upstream
+// fix and lives in kdex-crds; this consumer-side check is the defence in depth
+// that holds whichever CRD version happens to be installed.
+func safeResourceMetadata(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		// The quoted-string delimiters, the quoted-pair escape, and anything
+		// a header value has no business carrying.
+		if c := raw[i]; c == '"' || c == '\\' || c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	// IsAbs: RFC 9728 names an absolute metadata URL. A relative value would
+	// resolve against whatever the client happens to be pointed at.
+	return err == nil && u.IsAbs()
 }
 
 // safeScope joins scopes RFC 6749 style (space-delimited), dropping any

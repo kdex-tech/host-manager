@@ -192,6 +192,72 @@ func TestWriteUnauthenticatedWithNoIssuerUsesBareBearer(t *testing.T) {
 	}
 }
 
+// spec.api.basePath's CRD pattern (`^/\w+/\w+`) is start-anchored only, so a
+// quote-bearing basePath is valid CR data and reaches Write concatenated into
+// the RFC 9728 URL. Emitting it raw would give the challenge a SECOND
+// resource_metadata parameter naming an attacker-run authorization server.
+func TestWriteDropsQuoteBearingResourceMetadata(t *testing.T) {
+	const evil = `https://example.test/.well-known/oauth-protected-resource/a/b",resource_metadata="https://attacker.example/x`
+
+	t.Run("unauthenticated falls back to the realm challenge", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		Write(rr, httptest.NewRequest(http.MethodGet, "/a/b", nil), Opts{
+			Outcome:          Unauthenticated,
+			Issuer:           "https://example.test",
+			ResourceMetadata: evil,
+		})
+		want := `Bearer realm="https://example.test"`
+		if got := rr.Header().Get("WWW-Authenticate"); got != want {
+			t.Fatalf("challenge = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("insufficient_scope keeps the challenge but drops the pointer", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		Write(rr, httptest.NewRequest(http.MethodGet, "/a/b", nil), Opts{
+			Outcome:          InsufficientScope,
+			Issuer:           "https://example.test",
+			ResourceMetadata: evil,
+			Scopes:           []string{"users:*:admin"},
+		})
+		want := `Bearer error="insufficient_scope", scope="users:*:admin"`
+		if got := rr.Header().Get("WWW-Authenticate"); got != want {
+			t.Fatalf("challenge = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestSafeResourceMetadata(t *testing.T) {
+	valid := []string{
+		"https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
+		"http://localhost:8080/.well-known/oauth-protected-resource/a/b",
+	}
+	for _, v := range valid {
+		if !safeResourceMetadata(v) {
+			t.Fatalf("safeResourceMetadata(%q) = false, want true", v)
+		}
+	}
+	invalid := map[string]string{
+		"empty":         "",
+		"quote":         `https://example.test/a"b`,
+		"backslash":     `https://example.test/a\b`,
+		"newline":       "https://example.test/a\nb",
+		"nul":           "https://example.test/a\x00b",
+		"del":           "https://example.test/a\x7fb",
+		"relative":      "/.well-known/oauth-protected-resource/api/v1/mcp",
+		"scheme-less":   "example.test/.well-known/oauth-protected-resource",
+		"unparseable":   "https://example.test/%zz",
+		"control-vtab":  "https://example.test/a\vb",
+		"control-ff":    "https://example.test/a\fb",
+		"embedded-crlf": "https://example.test/a\r\nX-Evil: 1",
+	}
+	for name, v := range invalid {
+		if safeResourceMetadata(v) {
+			t.Fatalf("safeResourceMetadata(%q) [%s] = true, want false", v, name)
+		}
+	}
+}
+
 func TestChallengeDropsUnsafeScopeValues(t *testing.T) {
 	rr := httptest.NewRecorder()
 	Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/mcp", nil), Opts{
