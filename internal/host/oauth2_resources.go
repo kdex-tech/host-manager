@@ -94,7 +94,7 @@ func (hh *HostHandler) oauth2ResourceMetadataLocked() map[string]string {
 	issuer := hh.issuerAddressLocked()
 	out := make(map[string]string, len(resources))
 	for basePath := range resources {
-		out[basePath] = issuer + protectedResourcePath + basePath
+		out[basePath] = resourceMetadataURL(issuer, basePath)
 	}
 	return out
 }

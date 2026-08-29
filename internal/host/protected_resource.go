@@ -30,6 +30,20 @@ type ProtectedResourceMetadata struct {
 
 const protectedResourcePath = "/.well-known/oauth-protected-resource"
 
+// resourceMetadataURL builds the RFC 9728 metadata URL for a function's
+// basePath: the document oauthProtectedResourceHandler serves, and the value
+// a WWW-Authenticate challenge's resource_metadata= points at.
+//
+// One builder, because the two producers -- oauth2ResourceMetadataLocked (the
+// snapshot handed to the authentication middleware) and the function proxy's
+// gate -- MUST agree byte for byte. If they drifted, the 401 would advertise
+// a metadata endpoint the host does not serve, which is the one failure an
+// MCP client cannot recover from. This branch's own final commit had to chase
+// exactly that drift in this pair.
+func resourceMetadataURL(issuer, basePath string) string {
+	return issuer + protectedResourcePath + basePath
+}
+
 // protectedResourceHandler registers the RFC 9728 well-known endpoints on mux.
 func (hh *HostHandler) protectedResourceHandler(mux *http.ServeMux, _ map[string]ko.PathInfo) {
 	mux.HandleFunc("GET "+protectedResourcePath, hh.oauthProtectedResourceHandler)

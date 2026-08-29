@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 
@@ -141,4 +142,48 @@ func TestProtectedResourceMetadataIsInternallyConsistentUnderReconcile(t *testin
 	readers.Wait()
 	close(stop)
 	writer.Wait()
+}
+
+// The challenge's resource_metadata= and the snapshot handed to the
+// authentication middleware are built by ONE function, so they cannot drift
+// apart -- and both must name the path protectedResourceHandler actually
+// serves. Assert the built URL round-trips through the live handler.
+func TestResourceMetadataURLMatchesTheServedDocument(t *testing.T) {
+	const (
+		domain   = "dev.knowdrive.ai"
+		basePath = "/api/v1/mcp"
+	)
+	hh := newTestHostHandlerWithDomain(t, domain)
+	hh.functions = []kdexv1alpha1.KDexFunction{
+		newReadyFunctionWithOAuth2(t, basePath, []string{"functions:" + basePath + ":read"}),
+	}
+
+	built := resourceMetadataURL("https://"+domain, basePath)
+	if want := "https://" + domain + "/.well-known/oauth-protected-resource" + basePath; built != want {
+		t.Fatalf("resourceMetadataURL = %q, want %q", built, want)
+	}
+
+	// The middleware snapshot must be the same string.
+	hh.mu.RLock()
+	snapshot := hh.oauth2ResourceMetadataLocked()
+	hh.mu.RUnlock()
+	if got := snapshot[basePath]; got != built {
+		t.Fatalf("oauth2ResourceMetadataLocked[%q] = %q, want %q", basePath, got, built)
+	}
+
+	// And the host must actually serve a document there.
+	mux := http.NewServeMux()
+	hh.protectedResourceHandler(mux, nil)
+	u, err := url.Parse(built)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	req := httptest.NewRequest("GET", u.Path, nil)
+	req.Host = domain
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d for %q; the challenge would advertise an endpoint the host does not serve",
+			rr.Code, built)
+	}
 }
