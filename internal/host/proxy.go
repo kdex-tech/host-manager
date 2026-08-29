@@ -627,7 +627,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// docs/superpowers/specs/2026-08-28-denial-contract-design.md
 				var meta string
 				if fh.oauth2Protected && fh.oauth2Resource != "" {
-					meta = fh.issuer + "/.well-known/oauth-protected-resource" + fn.Spec.API.BasePath
+					// protectedResourcePath, not a literal: this is the
+					// path protectedResourceHandler actually serves
+					// (internal/host/protected_resource.go). If the two
+					// drifted, the 401 would advertise an RFC 9728 metadata
+					// endpoint the host does not serve -- the one failure an
+					// MCP client cannot recover from.
+					meta = fh.issuer + protectedResourcePath + fn.Spec.API.BasePath
 				}
 				denial.Write(w, r, denial.Opts{
 					Outcome: denial.Classify(
