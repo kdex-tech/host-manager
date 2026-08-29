@@ -164,6 +164,36 @@ func Classify(
 // Write sets the status and, where the contract calls for one, the
 // WWW-Authenticate header. It uses http.Error so the status text becomes
 // unwrap's statusMsg; it never renders HTML itself.
+//
+// # Provenance
+//
+// Every header below goes out through auth.PreserveHeader rather than
+// Header().Set, so this process ASSERTS it authored them at the point it
+// authors them.
+//
+// unwrap (internal/host/feedback.go) wipes the whole header map before
+// re-rendering a >= 400 as HTML, because a suppressed proxy body leaves a
+// Content-Length describing bytes the client will never get. The challenge
+// written here has to survive that wipe -- RFC 7235 makes it mandatory on a
+// 401 -- but the header map it sits in is the SAME map ReverseProxy copied the
+// upstream response headers into (errorResponseWriter embeds the
+// ResponseWriter and does not override Header()). So the wipe cannot be an
+// allow-list by NAME: a backend answering `401 WWW-Authenticate: Basic
+// realm="Sign in"` would make the browser render a NATIVE CREDENTIAL PROMPT on
+// the host's origin -- a phishing primitive. unwrap restores by PROVENANCE
+// instead, and this is where that provenance is recorded.
+//
+// It is recorded HERE, and not by a host-side wrapper reading the headers back
+// out of the map afterwards, for the same reason the mechanism exists at all: a
+// read-back cannot tell "the host issued this challenge" from "a KDexFunction
+// backend returned one", so promoting whatever the map happens to hold would
+// reopen the exact forge window auth.HeaderPreserver closes. On a NoIdentity
+// outcome Write sets no challenge at all, and a read-back would have promoted
+// any WWW-Authenticate already sitting in the map.
+//
+// auth.PreserveHeader degrades to a plain Header().Set for a writer that cannot
+// record provenance (an httptest.ResponseRecorder, a gate reached outside the
+// mux), so this is safe to call unconditionally.
 func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 	// Symmetry with the page gate's discovery redirect, which carries
 	// no-store for the reason that applies verbatim here: a cached denial
@@ -172,7 +202,7 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 	// -- but an intermediary or a service worker instructed to cache them
 	// would outlive the grant, and the whole point of insufficient_scope is
 	// that the caller is expected to come back with more.
-	w.Header().Set("Cache-Control", "no-store")
+	auth.PreserveHeader(w, "Cache-Control", "no-store")
 
 	// meta is o.ResourceMetadata once it has earned its place in a header;
 	// "" when the resource is not oauth2-protected OR when the value could
@@ -193,14 +223,14 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 		// invalid_token would be a lie about a token never presented.
 		switch {
 		case meta != "":
-			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+meta+`"`)
+			auth.PreserveHeader(w, "WWW-Authenticate", `Bearer resource_metadata="`+meta+`"`)
 		case o.Issuer != "":
-			w.Header().Set("WWW-Authenticate", `Bearer realm="`+o.Issuer+`"`)
+			auth.PreserveHeader(w, "WWW-Authenticate", `Bearer realm="`+o.Issuer+`"`)
 		default:
 			// A host with no routing domain yet has no issuer to name.
 			// RFC 7235 permits a bare scheme, and a bare Bearer is a valid
 			// challenge -- realm="" would be worse than none.
-			w.Header().Set("WWW-Authenticate", "Bearer")
+			auth.PreserveHeader(w, "WWW-Authenticate", "Bearer")
 		}
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 
@@ -216,7 +246,7 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 			if meta != "" {
 				c += `, resource_metadata="` + meta + `"`
 			}
-			w.Header().Set("WWW-Authenticate", c)
+			auth.PreserveHeader(w, "WWW-Authenticate", c)
 		}
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 

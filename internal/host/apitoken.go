@@ -78,14 +78,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	ac, ok := auth.GetAuthContext(r.Context())
 	if !ok {
 		log.V(1).Info("no auth context; rejecting")
-		writeDenial(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
 		return
 	}
 
 	requestingSub, err := ac.GetSubject()
 	if err != nil || requestingSub == "" {
 		log.V(1).Info("no subject in auth context; rejecting")
-		writeDenial(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
 		return
 	}
 
@@ -154,7 +154,7 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			// Derived once, on the denial path only. This gate runs through
 			// CheckAccess, which parses its own copy internally, so there is
 			// nothing in scope to hand Classify.
-			writeDenial(w, r, denial.Opts{
+			denial.Write(w, r, denial.Opts{
 				Outcome: denial.Classify(
 					r.Context(), hh.authChecker,
 					hh.authChecker.GetParsedEntitlements(r.Context()),
@@ -285,7 +285,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		}
 		// Derived once, on the denial path only -- see the same shape in
 		// apitokenRevokeHandler above.
-		writeDenial(w, r, denial.Opts{
+		denial.Write(w, r, denial.Opts{
 			Outcome: denial.Classify(
 				r.Context(), hh.authChecker,
 				hh.authChecker.GetParsedEntitlements(r.Context()),

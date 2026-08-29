@@ -10,13 +10,13 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
-// A handler that denies the way the denial contract requires: through the
-// host's own gate helper, which records the challenge as host-authored.
-// unwrap must not destroy that challenge on its way to rendering the HTML
-// error page.
+// A handler that denies the way the denial contract requires: through
+// denial.Write, which asserts the challenge as host-authored at the line that
+// writes it. unwrap must not destroy that challenge on its way to rendering
+// the HTML error page.
 func denyingHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeDenial(w, r, denial.Opts{
+		denial.Write(w, r, denial.Opts{
 			Outcome: denial.Unauthenticated,
 			Issuer:  "https://example.test",
 		})
@@ -145,7 +145,7 @@ func TestUnwrapKeepsHostAuthoredChallengeForHTMLClients(t *testing.T) {
 	// gate then denies through the contract. Only the host's value survives.
 	http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="Sign in"`)
-		writeDenial(w, r, denial.Opts{
+		denial.Write(w, r, denial.Opts{
 			Outcome: denial.Unauthenticated,
 			Issuer:  "https://example.test",
 		})
@@ -157,5 +157,49 @@ func TestUnwrapKeepsHostAuthoredChallengeForHTMLClients(t *testing.T) {
 	}
 	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store to survive the wipe too", got)
+	}
+}
+
+// The NoIdentity row writes NO challenge, so nothing about WWW-Authenticate is
+// host-authored on this path -- and a backend challenge already sitting in the
+// shared header map must not acquire survival by association.
+//
+// This is the case a host-side wrapper could not get right. Recording
+// provenance by reading the headers back after denial.Write returned would
+// promote whatever the map happened to hold, which on this outcome is the
+// BACKEND's `Basic realm="Sign in"` -- a native credential prompt on the host's
+// origin, restored by the very mechanism that exists to prevent it. Provenance
+// is asserted where the value is authored; on this row there is no value, so
+// there is nothing to assert.
+func TestUnwrapDropsBackendChallengeOnNoIdentity(t *testing.T) {
+	hh := gatedHostFixture()
+	hh.utilityPages[kdexv1alpha1.ErrorUtilityPageType] = page.PageHandler{
+		Name:         "err",
+		MainTemplate: "<html><body>{{ .Title }}</body></html>",
+		Page: &kdexv1alpha1.KDexPageSpec{
+			Label: "err",
+			Paths: kdexv1alpha1.Paths{BasePath: "/-error"},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/backend", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rr := httptest.NewRecorder()
+
+	ew := &errorResponseWriter{ResponseWriter: rr}
+	http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="Sign in"`)
+		denial.Write(w, r, denial.Opts{
+			Outcome: denial.NoIdentity,
+			Issuer:  "https://example.test",
+		})
+	}).ServeHTTP(ew, req)
+	hh.unwrap(ew, req, rr)
+
+	if got := rr.Header().Get("WWW-Authenticate"); got != "" {
+		t.Fatalf("WWW-Authenticate = %q; NoIdentity authors no challenge, so nothing may survive the wipe", got)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store: denial.Write DID author this one", got)
 	}
 }

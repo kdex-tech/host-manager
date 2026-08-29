@@ -384,12 +384,18 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 			// unconditional wipe used to suppress.
 			//
 			// So ew.preserved holds only what THIS PROCESS recorded as it
-			// emitted it: the challenge and Cache-Control from writeDenial
-			// (internal/host/denial.go), the sniffer-suppression header from
+			// emitted it: the challenge and Cache-Control from denial.Write
+			// (internal/auth/denial), the sniffer-suppression header from
 			// DesignMiddleware above, and the RFC 6749 5.2 Basic challenge
 			// from the OAuth2 token endpoint (internal/auth/oauth2.go).
 			// Everything else -- backend-supplied included -- is exactly what
 			// the wipe exists for.
+			//
+			// Every one of those three asserts its provenance at the line that
+			// writes the value. There is deliberately no host-side wrapper
+			// promoting headers after the fact: reading a header back out of
+			// this map is the very thing that cannot distinguish host-authored
+			// from backend-supplied.
 			//
 			// CONSTRAINT: preserved is name -> single value. Every recorded
 			// header is single-valued today (all are written with .Set). A

@@ -642,7 +642,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					// (internal/host/protected_resource.go).
 					meta = resourceMetadataURL(fh.issuer, fn.Spec.API.BasePath)
 				}
-				writeDenial(w, r, denial.Opts{
+				denial.Write(w, r, denial.Opts{
 					Outcome: denial.Classify(
 						r.Context(), authChecker, parsedUserEntitlements,
 						"functions", fn.Spec.API.BasePath),
