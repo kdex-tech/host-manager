@@ -140,6 +140,44 @@ func TestHostHandler_DesignMiddleware_SnifferAuthGate(t *testing.T) {
 		}
 	})
 
+	// The 404 is truthful -- the path does not exist, which is why the
+	// sniffer was reached at all. But suppression was visible only at V(1),
+	// which is why "I expected a 303, got 404" is a documented question.
+	// Name the missing entitlement in a header so curl -i answers it,
+	// without relabelling an absence as a denial.
+	t.Run("names the missing entitlement in a response header", func(t *testing.T) {
+		ac := &snifferGateChecker{allow: false}
+		hh, ctx := newSnifferTestHandler(t, ac)
+
+		req := httptest.NewRequest("GET", "/v2/sniffer", nil)
+		ctx = auth.SetAuthContext(ctx, auth.AuthContext{"sub": "alice"})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		hh.DesignMiddleware(nextOK).ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code,
+			"the path really does not exist; the contract governs denials, not absences")
+		assert.Equal(t, "functions:create", w.Header().Get("X-KDex-Sniffer-Suppressed"))
+	})
+
+	// An anonymous caller is never told which entitlement they lack: they
+	// presented no credential, so the header would advertise the gate rather
+	// than explain a decision about them.
+	t.Run("says nothing to an anonymous caller", func(t *testing.T) {
+		ac := &snifferGateChecker{allow: true}
+		hh, ctx := newSnifferTestHandler(t, ac)
+
+		req := httptest.NewRequest("GET", "/v2/sniffer", nil)
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		hh.DesignMiddleware(nextOK).ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Empty(t, w.Header().Get("X-KDex-Sniffer-Suppressed"))
+	})
+
 	t.Run("allows logged-in user with functions:create entitlement", func(t *testing.T) {
 		ac := &snifferGateChecker{allow: true}
 		hh, ctx := newSnifferTestHandler(t, ac)

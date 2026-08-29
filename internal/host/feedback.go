@@ -253,6 +253,20 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		// Create a wrapper to capture the status code
 		if invokeSniffer && !hh.canGenerateSniffer(r.Context()) {
 			log.V(1).Info("sniffer suppressed: caller lacks functions:create entitlement", "path", r.URL.Path)
+			// The 404 that follows is truthful -- the path does not exist,
+			// which is why the sniffer was reached. But suppression was
+			// previously visible only at V(1), which is why "I expected a
+			// 303, got 404" is a documented question. Name the missing
+			// entitlement in a header so curl -i answers it, without
+			// relabelling an absence as a denial.
+			//
+			// Only for a caller whose subject was actually evaluated.
+			// canGenerateSniffer refuses an anonymous caller before
+			// CheckAccess runs, and naming the entitlement there would
+			// advertise the gate rather than explain a decision about them.
+			if _, authenticated := auth.GetAuthContext(r.Context()); authenticated {
+				w.Header().Set("X-KDex-Sniffer-Suppressed", "functions:create")
+			}
 			invokeSniffer = false
 		}
 
@@ -332,9 +346,15 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 			// for browsers. It describes the rejection, not the body being
 			// replaced. Add a header here only when something actually sets
 			// it -- everything else is exactly what the wipe exists for.
+			//
+			// X-KDex-Sniffer-Suppressed is exempt for the same reason: it
+			// names the entitlement the caller lacked when sniffer
+			// generation was suppressed (see DesignMiddleware above), and
+			// without the exemption it would be wiped for every
+			// HTML-accepting caller before it ever reached a browser.
 			header := w.Header()
 			preserved := map[string]string{}
-			for _, k := range []string{"WWW-Authenticate"} {
+			for _, k := range []string{"WWW-Authenticate", "X-KDex-Sniffer-Suppressed"} {
 				if v := header.Get(k); v != "" {
 					preserved[k] = v
 				}
