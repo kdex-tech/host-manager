@@ -637,7 +637,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				}
 				denial.Write(w, r, denial.Opts{
 					Outcome: denial.Classify(
-						r.Context(), authChecker, "functions", fn.Spec.API.BasePath),
+						r.Context(), authChecker, parsedUserEntitlements,
+						"functions", fn.Spec.API.BasePath),
 					Issuer:           fh.issuer,
 					ResourceMetadata: meta,
 					Scopes:           fh.oauth2Scopes,

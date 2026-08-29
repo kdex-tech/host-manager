@@ -151,9 +151,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 				log.V(1).Info("revoke denied: caller may not revoke for another subject",
 					"subject", requestingSub)
 			}
+			// Derived once, on the denial path only. This gate runs through
+			// CheckAccess, which parses its own copy internally, so there is
+			// nothing in scope to hand Classify.
 			denial.Write(w, r, denial.Opts{
 				Outcome: denial.Classify(
-					r.Context(), hh.authChecker, "apitokens", requestingSub, "revoke"),
+					r.Context(), hh.authChecker,
+					hh.authChecker.GetParsedEntitlements(r.Context()),
+					"apitokens", requestingSub, "revoke"),
 				// Locked: hh.mu.RLock is held from above.
 				Issuer: hh.issuerAddressLocked(),
 			})
@@ -278,8 +283,13 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		} else {
 			log.V(1).Info("mint denied", "subject", subject)
 		}
+		// Derived once, on the denial path only -- see the same shape in
+		// apitokenRevokeHandler above.
 		denial.Write(w, r, denial.Opts{
-			Outcome: denial.Classify(r.Context(), hh.authChecker, "apitokens", subject, "mint"),
+			Outcome: denial.Classify(
+				r.Context(), hh.authChecker,
+				hh.authChecker.GetParsedEntitlements(r.Context()),
+				"apitokens", subject, "mint"),
 			// Locked: hh.mu.RLock is held from above.
 			Issuer: hh.issuerAddressLocked(),
 		})

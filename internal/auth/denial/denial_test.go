@@ -26,10 +26,6 @@ type fakeChecker struct {
 	verifyVerbs    []string
 }
 
-func (f *fakeChecker) GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements {
-	return entitlements.ParsedEntitlements{}
-}
-
 func (f *fakeChecker) ParseRequirements(reqs []kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
 	f.parseReqsInput = reqs
 	return entitlements.ParsedRequirements{}
@@ -54,7 +50,7 @@ func authedCtx() context.Context {
 
 func TestClassifyAnonymousIsUnauthenticated(t *testing.T) {
 	c := &fakeChecker{identityOK: true}
-	if got := Classify(context.Background(), c, "functions", "/api/v1/x"); got != Unauthenticated {
+	if got := Classify(context.Background(), c, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x"); got != Unauthenticated {
 		t.Fatalf("Classify = %v, want Unauthenticated", got)
 	}
 	if c.calls != 0 {
@@ -62,22 +58,43 @@ func TestClassifyAnonymousIsUnauthenticated(t *testing.T) {
 	}
 }
 
+// A context that names nobody is anonymous. This is the definition every
+// other gate in host-manager already uses (hasEvaluatedSubject,
+// apitokenRevokeHandler, capabilityMintHandler); Classify used to treat any
+// PRESENT context as authenticated, which made the page and proxy gates
+// answer 403-with-no-challenge to a caller whose only fix is to authenticate.
+func TestClassifySubjectlessContextIsUnauthenticated(t *testing.T) {
+	for name, ac := range map[string]auth.AuthContext{
+		"no sub claim": {"aud": "https://example.test"},
+		"empty sub":    {"sub": ""},
+	} {
+		c := &fakeChecker{identityOK: true}
+		ctx := auth.SetAuthContext(context.Background(), ac)
+		if got := Classify(ctx, c, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x"); got != Unauthenticated {
+			t.Fatalf("Classify(%s) = %v, want Unauthenticated", name, got)
+		}
+		if c.calls != 0 {
+			t.Fatalf("identity probe ran %d times for %s, want 0", c.calls, name)
+		}
+	}
+}
+
 func TestClassifyAuthenticatedWithoutIdentityIsNoIdentity(t *testing.T) {
 	c := &fakeChecker{identityOK: false}
-	if got := Classify(authedCtx(), c, "functions", "/api/v1/x"); got != NoIdentity {
+	if got := Classify(authedCtx(), c, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x"); got != NoIdentity {
 		t.Fatalf("Classify = %v, want NoIdentity", got)
 	}
 }
 
 func TestClassifyAuthenticatedWithIdentityIsInsufficientScope(t *testing.T) {
 	c := &fakeChecker{identityOK: true}
-	if got := Classify(authedCtx(), c, "functions", "/api/v1/x"); got != InsufficientScope {
+	if got := Classify(authedCtx(), c, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x"); got != InsufficientScope {
 		t.Fatalf("Classify = %v, want InsufficientScope", got)
 	}
 }
 
 func TestClassifyNilCheckerIsNoIdentity(t *testing.T) {
-	if got := Classify(authedCtx(), nil, "functions", "/api/v1/x"); got != NoIdentity {
+	if got := Classify(authedCtx(), nil, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x"); got != NoIdentity {
 		t.Fatalf("Classify = %v, want NoIdentity", got)
 	}
 }
@@ -86,7 +103,7 @@ func TestClassifyIdentityProbeUsesEmptyRequirementSet(t *testing.T) {
 	// The identity probe must pass nil/empty requirements so that
 	// VerifyResourceParsedEntitlements reduces to exactly the identity gate.
 	c := &fakeChecker{identityOK: true}
-	if got := Classify(authedCtx(), c, "functions", "/api/v1/x", "read", "write"); got != InsufficientScope {
+	if got := Classify(authedCtx(), c, entitlements.ParsedEntitlements{}, "functions", "/api/v1/x", "read", "write"); got != InsufficientScope {
 		t.Fatalf("Classify = %v, want InsufficientScope", got)
 	}
 	// ParseRequirements must be called with nil (not a non-nil empty slice)

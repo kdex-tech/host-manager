@@ -59,7 +59,11 @@ func (hh *HostHandler) pageHandlerFunc(
 						"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
 				}
 
-				outcome := denial.Classify(r.Context(), hh.authChecker, "pages", ph.BasePath())
+				// parsedUserEntitlements, not a second
+				// GetParsedEntitlements: the gate above already derived it.
+				outcome := denial.Classify(
+					r.Context(), hh.authChecker, parsedUserEntitlements,
+					"pages", ph.BasePath())
 
 				// An anonymous caller gets the login page with a return trip
 				// -- but only if it can render one. This branch used to

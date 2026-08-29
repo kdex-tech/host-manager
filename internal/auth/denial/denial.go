@@ -71,8 +71,11 @@ func (o Outcome) String() string {
 // Checker is the subset of the host's authorization checker that Classify
 // needs. Declared here (rather than imported) so the package depends on
 // behaviour, not on the HostHandler.
+//
+// GetParsedEntitlements is deliberately NOT in this set: Classify takes the
+// caller's already-parsed entitlements instead of re-deriving them. See
+// Classify.
 type Checker interface {
-	GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements
 	ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 	VerifyResourceParsedEntitlements(
 		string, string,
@@ -100,17 +103,42 @@ type Opts struct {
 // after a gate has already denied, so the extra identity probe below is
 // never on the happy path.
 //
-// Anonymity is tested with auth.GetAuthContext rather than by inspecting
+// `held` is the caller's parsed entitlements, which every gate has ALREADY
+// computed to make the decision that failed. Classify takes it rather than
+// calling GetParsedEntitlements again: a second derivation costs another
+// map+slice allocation, another claim re-parse, and another RLock on the
+// per-host pattern cache that every concurrent request shares -- all to
+// recompute a value the caller is holding.
+//
+// Anonymity is tested against the auth context rather than by inspecting
 // entitlements: anonymous entitlements live inside the AuthorizationChecker
-// itself, not as a synthetic auth context, so !ok really does mean "no
-// credential presented".
+// itself, not as a synthetic auth context, so an absent context really does
+// mean "no credential presented".
+//
+// A context with an EMPTY subject counts as anonymous too. That is the
+// definition every other gate in host-manager already uses --
+// hasEvaluatedSubject (internal/host/feedback.go), apitokenRevokeHandler
+// (internal/host/apitoken.go) and capabilityMintHandler
+// (internal/host/capabilities.go) all require a non-empty sub -- and a
+// credential that names nobody cannot clear an identity gate keyed on who
+// the caller is, so NoIdentity would be a 403 the caller can never fix.
 //
 // The identity/requirement split needs no library change. An EMPTY
 // requirement set reduces VerifyResourceParsedEntitlements to exactly the
 // identity check -- the same reduction /-/check relies on and documents
 // (internal/host/check.go).
-func Classify(ctx context.Context, c Checker, resource, name string, verbs ...string) Outcome {
-	if _, authenticated := auth.GetAuthContext(ctx); !authenticated {
+func Classify(
+	ctx context.Context,
+	c Checker,
+	held entitlements.ParsedEntitlements,
+	resource, name string,
+	verbs ...string,
+) Outcome {
+	ac, authenticated := auth.GetAuthContext(ctx)
+	if !authenticated {
+		return Unauthenticated
+	}
+	if sub, _ := ac.GetSubject(); sub == "" {
 		return Unauthenticated
 	}
 	if c == nil {
@@ -118,7 +146,7 @@ func Classify(ctx context.Context, c Checker, resource, name string, verbs ...st
 	}
 	hasIdentity, err := c.VerifyResourceParsedEntitlements(
 		resource, name,
-		c.GetParsedEntitlements(ctx),
+		held,
 		c.ParseRequirements(nil),
 		verbs...,
 	)

@@ -223,27 +223,49 @@ oversights:**
 ```go
 type Outcome int // Unauthenticated | NoIdentity | InsufficientScope
 
-// Classify runs only after a gate has already denied.
-func Classify(ctx context.Context, c Checker, resource, name string,
-              reqs entitlements.ParsedRequirements) Outcome
+// Classify runs only after a gate has already denied. `held` is the
+// caller's parsed entitlements — the value the failed gate already
+// computed — so the denial path re-derives nothing.
+func Classify(ctx context.Context, c Checker,
+              held entitlements.ParsedEntitlements,
+              resource, name string, verbs ...string) Outcome
 
-// Write sets status and WWW-Authenticate. It never writes a body:
-// presentation belongs to unwrap.
+// Write sets status, Cache-Control and WWW-Authenticate. It never writes
+// a body: presentation belongs to unwrap.
 func Write(w http.ResponseWriter, r *http.Request, o Opts)
 
 type Opts struct {
-    Outcome  Outcome
-    Issuer   string   // realm for the non-oauth2 challenge
-    Resource string   // RFC 9728 resource, "" when not oauth2-protected
-    Scopes   []string // required scopes, for insufficient_scope
+    Outcome          Outcome
+    Issuer           string   // realm for the non-oauth2 challenge
+    ResourceMetadata string   // RFC 9728 metadata URL, "" when not oauth2-protected
+    Scopes           []string // required scopes, for insufficient_scope
 }
 ```
 
-`Classify` tests anonymity with `auth.GetAuthContext` — sound, because anonymous
-entitlements live inside the `AuthorizationChecker`
-(`internal/host/host.go:697`), not as a synthetic auth context, so `!ok` really
-does mean "no credential presented". The page gate already keys on that same
-test.
+`held` is a parameter rather than a `c.GetParsedEntitlements(ctx)` call because
+both major gates (`internal/host/page.go`, `internal/host/proxy.go`) are holding
+that exact value when they call `Classify`. Re-deriving it costs another
+map+slice allocation, another claim re-parse, and another `RLock` on the
+per-host pattern cache **shared by every concurrent request** — per denial, to
+recompute something the caller already has. Where a gate genuinely has none in
+scope (apitoken mint/revoke, which decide through `CheckAccess`) it derives one
+once, on the denial path only.
+
+**Anonymity is "no context, or a context that names nobody."** `Classify` tests
+`auth.GetAuthContext` and then requires a non-empty `sub`. The context test is
+sound because anonymous entitlements live inside the `AuthorizationChecker`
+(`internal/host/host.go:697`) rather than as a synthetic auth context, so an
+absent context really does mean "no credential presented". The subject test is
+what makes the five gates agree: `hasEvaluatedSubject`
+(`internal/host/feedback.go`), `apitokenRevokeHandler`
+(`internal/host/apitoken.go`) and `capabilityMintHandler`
+(`internal/host/capabilities.go`) all require a non-empty subject already.
+An earlier draft of this document asserted the test was uniform while
+`Classify` accepted any *present* context — it was not, and the disagreement
+was observable: a caller with a context but an empty `sub` got `NoIdentity`
+(403, no challenge) at the page and proxy gates, a 403 no credential they
+could present would ever fix, while the other three gates called the same
+caller anonymous. `Classify` now agrees with them and answers 401 + challenge.
 
 The checker stays pure, so the navigation filter keeps its boolean and nothing
 about it changes.
