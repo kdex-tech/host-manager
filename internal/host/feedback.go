@@ -196,9 +196,19 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		// takes hh.mu.RLock. Go's RWMutex prohibits recursive read
 		// locking, so a writer queued between the outer and inner
 		// RLock deadlocked the host. Same shape as #26 and #51.
+		//
+		// authChecker is snapshotted here for the same reason it is at
+		// internal/host/proxy.go: canGenerateSniffer runs AFTER this
+		// unlock, and SetHost rewrites hh.authChecker under hh.mu.Lock. An
+		// interface value's itab and data words are assigned
+		// non-atomically, so an unsynchronised read can observe itab-set /
+		// data-nil, pass a `== nil` guard, and nil-deref -- and this branch
+		// newly publishes that read's result to the wire as
+		// X-KDex-Sniffer-Suppressed.
 		hh.mu.RLock()
 		mux := hh.Mux
 		sniffer := hh.sniffer
+		authChecker := hh.authChecker
 		hh.mu.RUnlock()
 
 		h, p := mux.Handler(r)
@@ -251,7 +261,7 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Create a wrapper to capture the status code
-		if invokeSniffer && !hh.canGenerateSniffer(r.Context()) {
+		if invokeSniffer && !canGenerateSniffer(r.Context(), authChecker) {
 			log.V(1).Info("sniffer suppressed: caller lacks functions:create entitlement", "path", r.URL.Path)
 			// The 404 that follows is truthful -- the path does not exist,
 			// which is why the sniffer was reached. But suppression was
@@ -260,20 +270,33 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			// entitlement in a header so curl -i answers it, without
 			// relabelling an absence as a denial.
 			//
-			// Only for a caller whose subject was actually evaluated.
+			// ONLY in the p == "" arm. Suppression is reached from two arms,
+			// and the "the 404 that follows is truthful" reasoning holds for
+			// exactly one of them. In the other -- a matched, mutable
+			// function carrying X-KDex-* headers -- control falls through to
+			// next.ServeHTTP and the function can answer 200. A header
+			// saying "your missing entitlement suppressed something" riding
+			// on a successful response describes nothing that happened to
+			// that request.
+			//
+			// And only for a caller whose subject was actually evaluated.
 			// canGenerateSniffer refuses an anonymous caller -- no
 			// AuthContext, or one with an empty subject -- before
 			// CheckAccess runs, and naming the entitlement there would
 			// advertise the gate rather than explain a decision about them.
 			// hasEvaluatedSubject uses canGenerateSniffer's own definition
 			// of anonymous so the two can never disagree.
-			if hasEvaluatedSubject(r.Context()) {
+			if p == "" && hasEvaluatedSubject(r.Context()) {
 				// PreserveHeader, not Header().Set: unwrap wipes the header
 				// map by provenance before re-rendering for an
 				// HTML-accepting caller, and this header is exactly the kind
 				// that has to survive it -- it explains the decision rather
 				// than describing the body being replaced.
 				ew.PreserveHeader("X-KDex-Sniffer-Suppressed", "functions:create")
+				// Same reason denial.Write and the discovery redirect carry
+				// it: an entitlement grant that fixes the suppression must
+				// not be shadowed by a cached "you lack it".
+				ew.PreserveHeader("Cache-Control", "no-store")
 			}
 			invokeSniffer = false
 		}
@@ -415,13 +438,29 @@ func hasEvaluatedSubject(ctx context.Context) bool {
 	return sub != ""
 }
 
+// accessChecker is the single method canGenerateSniffer needs from the host's
+// authorization checker. Taking it as a parameter (rather than reading
+// hh.authChecker) is what lets DesignMiddleware snapshot the field under the
+// RLock it already takes and hand the value down -- the same shape
+// reverseProxyHandler uses. See kdex-tech/host-manager#59 for why that lock
+// cannot simply be held across the check itself.
+type accessChecker interface {
+	CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error)
+}
+
 // canGenerateSniffer reports whether the caller is permitted to auto-generate
 // KDexFunctions via the Request Sniffer. The caller must be logged in (have an
 // AuthContext with a subject) and hold the `functions:create` entitlement. When
-// no authChecker is wired (e.g. a host with auth disabled) the check is skipped
-// so the sniffer keeps working in dev contexts that never configured auth.
-func (hh *HostHandler) canGenerateSniffer(ctx context.Context) bool {
-	if hh.authChecker == nil {
+// no checker is wired (e.g. a host with auth disabled) the check is skipped so
+// the sniffer keeps working in dev contexts that never configured auth.
+//
+// checker is a SNAPSHOT taken under hh.mu, never hh.authChecker read live:
+// SetHost rewrites that field under hh.mu.Lock, an interface value's itab and
+// data words are assigned non-atomically, and a concurrent request could
+// otherwise observe itab-set/data-nil, clear the `== nil` guard, and
+// nil-deref.
+func canGenerateSniffer(ctx context.Context, checker accessChecker) bool {
+	if checker == nil {
 		return true
 	}
 
@@ -432,7 +471,7 @@ func (hh *HostHandler) canGenerateSniffer(ctx context.Context) bool {
 	requirement := kdexv1alpha1.SecurityRequirement{
 		"bearer": []string{"functions:create"},
 	}
-	authorized, err := hh.authChecker.CheckAccess(
+	authorized, err := checker.CheckAccess(
 		ctx,
 		"functions",
 		"*",

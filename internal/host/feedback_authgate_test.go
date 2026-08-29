@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,6 +216,65 @@ func TestHostHandler_DesignMiddleware_SnifferAuthGate(t *testing.T) {
 		assert.Contains(t, w.Header().Get("Location"), "/-/sniffer/inspect/")
 	})
 
+	// Suppression is reached from TWO arms and only one of them 404s. In the
+	// other -- a matched, mutable function carrying X-KDex-* headers -- control
+	// falls through to next.ServeHTTP, which can answer 200. A header saying
+	// "your missing entitlement suppressed something" riding on a successful
+	// response describes nothing that happened to that request.
+	t.Run("does not ride the header on the matched-function arm", func(t *testing.T) {
+		ac := &snifferGateChecker{allow: false}
+		hh, ctx := newSnifferTestHandler(t, ac)
+
+		fn := kdexv1alpha1.KDexFunction{
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				API: kdexv1alpha1.API{BasePath: "/v2/mutable"},
+			},
+		}
+		// Mutable: no spec.origin.executable and no spec.origin.source.
+		assert.True(t, isMutable(&fn), "fixture must exercise the mutable arm")
+		hh.mu.Lock()
+		hh.Mux.Handle("/v2/mutable", &KDexFunctionHandler{Function: &fn})
+		hh.mu.Unlock()
+
+		nextOK200 := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/v2/mutable", nil)
+		// Assigned into the raw map, NOT via Header.Set: DesignMiddleware
+		// tests strings.HasPrefix(k, "X-KDex-") against the header key
+		// verbatim, and Set/parse canonicalise to "X-Kdex-". The literal
+		// spelling is what actually arms this arm.
+		req.Header["X-KDex-Function-Name"] = []string{"anything"}
+		ctx = auth.SetAuthContext(ctx, auth.AuthContext{"sub": "alice"})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		hh.DesignMiddleware(nextOK200).ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code, "the matched function answers normally")
+		assert.Empty(t, w.Header().Get("X-KDex-Sniffer-Suppressed"),
+			"a suppression header must not ride on a 200")
+	})
+
+	// The 404 arm keeps it -- and carries no-store, so an entitlement grant
+	// that fixes the suppression is not shadowed by a cached answer.
+	t.Run("the 404 arm carries no-store alongside the header", func(t *testing.T) {
+		ac := &snifferGateChecker{allow: false}
+		hh, ctx := newSnifferTestHandler(t, ac)
+
+		req := httptest.NewRequest("GET", "/v2/sniffer", nil)
+		ctx = auth.SetAuthContext(ctx, auth.AuthContext{"sub": "alice"})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		hh.DesignMiddleware(nextOK).ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Equal(t, "functions:create", w.Header().Get("X-KDex-Sniffer-Suppressed"))
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	})
+
 	t.Run("preserves legacy behavior when no auth checker is wired", func(t *testing.T) {
 		hh, ctx := newSnifferTestHandler(t, nil)
 
@@ -227,4 +287,92 @@ func TestHostHandler_DesignMiddleware_SnifferAuthGate(t *testing.T) {
 		assert.Equal(t, http.StatusSeeOther, w.Code)
 		assert.Contains(t, w.Header().Get("Location"), "/-/sniffer/inspect/")
 	})
+}
+
+// DesignMiddleware deliberately releases hh.mu before the sniffer gate runs,
+// so canGenerateSniffer used to read hh.authChecker -- twice -- with no lock
+// while SetHost rewrites it. An interface value's itab and data words are
+// assigned non-atomically, so a concurrent request could observe
+// itab-set/data-nil, clear the `== nil` guard, and nil-deref. This branch
+// newly publishes the result of that read to the wire, so the read has to be
+// a snapshot. Run under -race.
+func TestDesignMiddleware_AuthCheckerReadIsSnapshotted(t *testing.T) {
+	hh, ctx := newSnifferTestHandler(t, &snifferGateChecker{allow: false})
+	// snifferGateChecker records its arguments into shared fields, which is
+	// a race of the TEST's own making. The subject here is hh.authChecker,
+	// so use a stateless denier.
+	hh.mu.Lock()
+	hh.authChecker = statelessDenier{}
+	hh.mu.Unlock()
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	handler := hh.DesignMiddleware(next)
+
+	// A writer with SetHost's shape on the one field the gate reads.
+	stop := make(chan struct{})
+	var writer sync.WaitGroup
+	writer.Add(1)
+	go func() {
+		defer writer.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			hh.mu.Lock()
+			if i%2 == 0 {
+				hh.authChecker = statelessDenier{}
+			} else {
+				hh.authChecker = nil
+			}
+			hh.mu.Unlock()
+		}
+	}()
+
+	reqCtx := auth.SetAuthContext(ctx, auth.AuthContext{"sub": "alice"})
+	var readers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for j := 0; j < 200; j++ {
+				req := httptest.NewRequest("GET", "/v2/sniffer", nil).WithContext(reqCtx)
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+			}
+		}()
+	}
+	readers.Wait()
+	close(stop)
+	writer.Wait()
+}
+
+// statelessDenier is an authChecker with no mutable state, so a test can share
+// one across goroutines without introducing a race of its own.
+type statelessDenier struct{}
+
+func (statelessDenier) CalculateRequirements(string, string, []kdexv1alpha1.SecurityRequirement, ...string) ([]kdexv1alpha1.SecurityRequirement, error) {
+	return nil, nil
+}
+
+func (statelessDenier) CheckAccess(context.Context, string, string, []kdexv1alpha1.SecurityRequirement, ...string) (bool, error) {
+	return false, nil
+}
+
+func (statelessDenier) GetParsedEntitlements(context.Context) entitlements.ParsedEntitlements {
+	return entitlements.ParsedEntitlements{}
+}
+
+func (statelessDenier) ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements {
+	return entitlements.ParsedRequirements{}
+}
+
+func (statelessDenier) BindRequirements(reqs entitlements.ParsedRequirements, _ entitlements.Binding) (entitlements.ParsedRequirements, error) {
+	return reqs, nil
+}
+
+func (statelessDenier) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
+	return false, nil
 }
