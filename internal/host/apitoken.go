@@ -458,6 +458,17 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 							openapi.WithStatus(400, &openapi.ResponseRef{
 								Ref: ko.RespRefBadRequest,
 							}),
+							// An anonymous caller now gets 401 + a challenge,
+							// not the 403 this endpoint used to answer for
+							// every denial. /-/openapi is the denial
+							// contract's load-bearing dependency -- retiring
+							// the anti-enumeration 404 is only safe because
+							// the spec already publishes every path -- so a
+							// spec that misdescribes the host's own auth
+							// endpoints undercuts the whole design.
+							openapi.WithStatus(401, &openapi.ResponseRef{
+								Ref: ko.RespRefUnauthorized,
+							}),
 							openapi.WithStatus(403, &openapi.ResponseRef{
 								Value: &openapi.Response{
 									Description: new("Forbidden"),
@@ -596,6 +607,11 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 							}),
 							openapi.WithStatus(400, &openapi.ResponseRef{
 								Ref: ko.RespRefBadRequest,
+							}),
+							// 401 for an anonymous caller, same as mint
+							// above -- pre-existing omission, same reason.
+							openapi.WithStatus(401, &openapi.ResponseRef{
+								Ref: ko.RespRefUnauthorized,
 							}),
 							openapi.WithStatus(403, &openapi.ResponseRef{
 								Value: &openapi.Response{

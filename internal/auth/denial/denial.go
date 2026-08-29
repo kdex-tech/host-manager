@@ -4,7 +4,14 @@
 //
 //	no credential presented            -> 401 + WWW-Authenticate
 //	credential, fails the identity gate -> 403, no challenge
-//	credential, fails the requirement   -> 403 + insufficient_scope
+//	credential, fails the requirement   -> 403 + insufficient_scope,
+//	                                       when oauth2-protected
+//
+// The qualifier on the third row is load-bearing: Write emits the
+// insufficient_scope challenge only when Opts.ResourceMetadata is set,
+// because RFC 6750 is an OAuth 2.0 bearer-token spec and there is no
+// resource metadata to point a client at otherwise. A non-oauth2 resource
+// gets the bare 403 of the second row.
 //
 // No status is ever chosen to conceal that a resource exists. The
 // anti-enumeration 404 this replaces concealed nothing: /-/openapi serves

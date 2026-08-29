@@ -355,6 +355,13 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 			// generation was suppressed (see DesignMiddleware above), and
 			// without the exemption it would be wiped for every
 			// HTML-accepting caller before it ever reached a browser.
+			//
+			// CONSTRAINT: this snapshots via Get/Set, which keeps only the
+			// FIRST value of a header. Every allow-listed header is
+			// single-valued today (both are written with .Set). A producer
+			// that ever uses .Add on one of these would silently lose its
+			// extra values here -- add such a header to the list only after
+			// switching this loop to header.Values/textproto append.
 			header := w.Header()
 			preserved := map[string]string{}
 			for _, k := range []string{"WWW-Authenticate", "X-KDex-Sniffer-Suppressed"} {
