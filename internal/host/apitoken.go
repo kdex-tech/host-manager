@@ -139,8 +139,18 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			"revoke",
 		)
 		if err != nil || !authorized {
-			log.V(1).Info("revoke denied: caller may not revoke for another subject",
-				"subject", requestingSub)
+			// The V(1) is right for the POLICY case: an under-entitled
+			// caller is expected traffic, not a fault (#181). It is wrong
+			// for the ERROR case -- a checker outage at an auth gate would
+			// otherwise leave no V(0) trace and render silently as a policy
+			// 403. Same split the function proxy makes.
+			if err != nil {
+				log.Error(err, "revoke authorization check failed",
+					"subject", requestingSub)
+			} else {
+				log.V(1).Info("revoke denied: caller may not revoke for another subject",
+					"subject", requestingSub)
+			}
 			denial.Write(w, r, denial.Opts{
 				Outcome: denial.Classify(
 					r.Context(), hh.authChecker, "apitokens", requestingSub, "revoke"),
@@ -261,7 +271,13 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"mint",
 	)
 	if err != nil || !authorized {
-		log.V(1).Info("mint denied", "subject", subject)
+		// V(1) for the policy denial (#181), Error for a checker failure --
+		// see the same split in apitokenRevokeHandler above.
+		if err != nil {
+			log.Error(err, "mint authorization check failed", "subject", subject)
+		} else {
+			log.V(1).Info("mint denied", "subject", subject)
+		}
 		denial.Write(w, r, denial.Opts{
 			Outcome: denial.Classify(r.Context(), hh.authChecker, "apitokens", subject, "mint"),
 			// Locked: hh.mu.RLock is held from above.
