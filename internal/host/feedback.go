@@ -323,12 +323,28 @@ func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.R
 		// Check if the client accepts HTML
 		accept := r.Header.Get("Accept")
 		if strings.Contains(accept, "text/html") {
-			// Important: Clear headers before calling serveError, as previous
-			// handlers (like ReverseProxy) might have set headers (e.g. Content-Length)
-			// based on a response body that we've suppressed.
+			// Clear headers before calling serveError: previous handlers
+			// (like ReverseProxy) may have set headers -- notably
+			// Content-Length -- describing a body we've suppressed.
+			//
+			// WWW-Authenticate is exempt because it is REQUIRED on a 401
+			// (RFC 7235); deleting it produced a bare 401 for every
+			// HTML-accepting client and silently disabled OAuth discovery
+			// for browsers. It describes the rejection, not the body being
+			// replaced. Add a header here only when something actually sets
+			// it -- everything else is exactly what the wipe exists for.
 			header := w.Header()
+			preserved := map[string]string{}
+			for _, k := range []string{"WWW-Authenticate"} {
+				if v := header.Get(k); v != "" {
+					preserved[k] = v
+				}
+			}
 			for k := range header {
 				delete(header, k)
+			}
+			for k, v := range preserved {
+				header.Set(k, v)
 			}
 
 			// Write the buffered status code structure
