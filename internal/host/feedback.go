@@ -321,8 +321,7 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.ResponseWriter) {
 	if ew.statusCode >= 400 {
 		// Check if the client accepts HTML
-		accept := r.Header.Get("Accept")
-		if strings.Contains(accept, "text/html") {
+		if acceptsHTML(r) {
 			// Clear headers before calling serveError: previous handlers
 			// (like ReverseProxy) may have set headers -- notably
 			// Content-Length -- describing a body we've suppressed.

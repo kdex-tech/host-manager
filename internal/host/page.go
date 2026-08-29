@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -44,48 +44,34 @@ func (hh *HostHandler) pageHandlerFunc(
 			}
 
 			if !authorized {
-				log.V(2).Info("unauthorized access attempt", "resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
+				log.V(2).Info("unauthorized access attempt",
+					"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
 
-				// An anonymous caller gets the login page with a return
-				// trip -- not a consolation page they happen to be allowed
-				// to see. This branch used to sit *after* the
-				// firstAuthorizedPage discovery below, which made it
-				// unreachable on any host with a non-empty
-				// anonymousEntitlements list: every caller has some
-				// authorized page, so discovery always matched first and
-				// the gate sent logged-out users somewhere arbitrary
-				// instead of letting them log in. See #184.
-				_, authenticated := auth.GetAuthContext(r.Context())
-				if !authenticated {
-					_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
-					if hasLoginPage {
-						log.V(2).Info("unauthenticated, redirecting to login")
-						// RequestURI, not Path: the return trip has to carry
-						// the query string too, or a gated /search?q=foo sends
-						// the user back to a bare /search. SafeReturnPath
-						// round-trips a query and still collapses anything
-						// cross-origin, so the value stays safe to redirect to.
-						http.Redirect(w, r, "/-/login?return="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
-						return
-					}
-				}
+				outcome := denial.Classify(r.Context(), hh.authChecker, "pages", ph.BasePath())
 
-				// Reached when the caller is already authenticated (logging
-				// in again would not help them) or when the host configures
-				// no login page at all.
-				log.V(2).Info("attempt discovery of first accessible page", "l10n", l.String())
-				first := hh.firstAuthorizedPage(r.Context(), &l, l.String() == hh.defaultLanguage)
-				if first != "" {
-					if l.String() != hh.defaultLanguage {
-						first = "/" + l.String() + first
-					}
-					log.V(2).Info("first accessible page", "page", first, "l10n", l.String())
-					http.Redirect(w, r, first, http.StatusSeeOther)
+				// An anonymous caller gets the login page with a return trip
+				// -- but only if it can render one. This branch used to
+				// redirect every anonymous caller, so an API client asking
+				// for a gated page received a 303 to an HTML form instead of
+				// the 401 that would have told it what to do. See #184 for
+				// why the branch sits here, ahead of discovery.
+				_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
+				if outcome == denial.Unauthenticated && hasLoginPage && acceptsHTML(r) {
+					log.V(2).Info("unauthenticated, redirecting to login")
+					// RequestURI, not Path: the return trip has to carry the
+					// query string too, or a gated /search?q=foo sends the
+					// user back to a bare /search. SafeReturnPath round-trips
+					// a query and still collapses anything cross-origin.
+					http.Redirect(w, r,
+						"/-/login?return="+url.QueryEscape(r.URL.RequestURI()),
+						http.StatusSeeOther)
 					return
 				}
 
-				log.V(2).Info("no accessible pages, send 404")
-				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
+				denial.Write(w, r, denial.Opts{
+					Outcome: outcome,
+					Issuer:  hh.issuerAddress(),
+				})
 				return
 			}
 		}
