@@ -129,7 +129,9 @@ Three RFC details that make this precise rather than approximate:
    parameter when no credentials were sent. `error="invalid_token"` would be a
    lie about a token that was never presented — which is why this challenge is
    *not* `Config.bearerChallenge` (`internal/auth/middleware.go:161`), whose job
-   is the genuinely-invalid-token case and which stays as it is.
+   is the genuinely-invalid-token case and which keeps its own vocabulary. The
+   two challenges stay separate; what they now **share** is the
+   `resource_metadata` validator — see *The `resource_metadata` pointer* below.
 2. **`insufficient_scope` is a 403 that still carries a challenge.** RFC 6750
    §3.1 defines it that way. This is what stops the 401→403 move from costing an
    MCP client its step-up path: it gets the required scope by name instead of a
@@ -292,6 +294,32 @@ gate with extra steps.
 `functionHandler` (`internal/host/types.go:185-216`) gains `oauth2Scopes []string`,
 captured at `internal/host/proxy.go:395` from the `OAuth2Resource.Scopes` union
 that is already computed there.
+
+### The `resource_metadata` pointer
+
+The value both challenge builders emit is `<issuer>` + the protected-resource
+path + `spec.api.basePath`. The issuer half is hostname-validated; **`basePath`
+is not** — its CRD pattern `^/\w+/\w+` is *start-anchored only*, so
+`/a/b",resource_metadata="https://attacker.example/x` is valid CR data. Emitted
+raw it gives the challenge a second `resource_metadata` parameter and steers an
+RFC 9728 client to an attacker-run authorization server.
+
+The check is therefore **one function, two callers**:
+`auth.CheckedResourceMetadata` (`internal/auth/resource_metadata.go`) parses the
+URL, requires it absolute, rejects `"`, `\` and control characters, logs a
+rejection at `V(0)`, and returns `""` — the caller then **omits the parameter**
+rather than emitting a cleaned value.
+
+It lives in `internal/auth` rather than in `internal/auth/denial` because
+`internal/auth/denial` imports `internal/auth`, so the dependency cannot run
+back. Both `denial.Write` and `Config.bearerChallenge` call it. That placement
+is the point: the first pass guarded only `denial.Write`, leaving the *more*
+reachable emitter — `bearerChallenge` fires on every invalid or expired bearer
+to a protected path, not only on a policy denial — with no validation at all.
+
+Anchoring the CRD pattern with `$` and giving it a `MaxLength` is the upstream
+fix and belongs to `kdex-crds`; this consumer-side check is the defence in depth
+that holds whichever CRD version happens to be installed.
 
 ### `unwrap` header allow-list
 

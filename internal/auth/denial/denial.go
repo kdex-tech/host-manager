@@ -39,13 +39,11 @@ package denial
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"strings"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Outcome is which of the three contract rows a denial fell into.
@@ -181,16 +179,12 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 	// not be validated. o.ResourceMetadata itself stays the "is this resource
 	// oauth2-protected" signal, so an unsafe URL costs the challenge its
 	// pointer, never the challenge itself.
-	meta := o.ResourceMetadata
-	if meta != "" && !safeResourceMetadata(meta) {
-		// V(0): an operator has authored a basePath that cannot be expressed
-		// in this header, and the only other symptom is an MCP client with no
-		// discovery pointer. That is worth seeing at the default verbosity.
-		logf.FromContext(r.Context()).V(0).Info(
-			"rejected resource-metadata URL; omitting resource_metadata from the challenge",
-			"resourceMetadata", meta)
-		meta = ""
-	}
+	//
+	// auth.CheckedResourceMetadata, not a copy of the rule: the same predicate
+	// guards auth.bearerChallenge, which emits this parameter on the far more
+	// reachable invalid/expired-token path. It lives in internal/auth because
+	// this package imports internal/auth and the dependency cannot run back.
+	meta := auth.CheckedResourceMetadata(r.Context(), o.ResourceMetadata)
 
 	switch o.Outcome {
 	case Unauthenticated:
@@ -231,39 +225,6 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 		// naming a scope would imply a scope would fix it.
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}
-}
-
-// safeResourceMetadata reports whether raw may be emitted inside the
-// resource_metadata auth-param's HTTP quoted-string.
-//
-// The value Write receives is <issuer> + protectedResourcePath + basePath
-// (internal/host/protected_resource.go). The issuer half is hostname-validated;
-// basePath is NOT. Its CRD pattern is `^/\w+/\w+`, which is START-ANCHORED
-// ONLY, so `/a/b",resource_metadata="https://attacker.example/x` is a valid
-// spec.api.basePath. Emitting it raw would put a SECOND resource_metadata
-// parameter in the challenge and let an RFC 9728 client be steered to an
-// attacker-run authorization server. Go rewrites only CR/LF on write, so this
-// cannot split a response -- but it fully controls this header's auth-params,
-// which is enough.
-//
-// Anchoring the CRD pattern with `$` and giving it a MaxLength is the upstream
-// fix and lives in kdex-crds; this consumer-side check is the defence in depth
-// that holds whichever CRD version happens to be installed.
-func safeResourceMetadata(raw string) bool {
-	if raw == "" {
-		return false
-	}
-	for i := 0; i < len(raw); i++ {
-		// The quoted-string delimiters, the quoted-pair escape, and anything
-		// a header value has no business carrying.
-		if c := raw[i]; c == '"' || c == '\\' || c < 0x20 || c == 0x7f {
-			return false
-		}
-	}
-	u, err := url.Parse(raw)
-	// IsAbs: RFC 9728 names an absolute metadata URL. A relative value would
-	// resolve against whatever the client happens to be pointed at.
-	return err == nil && u.IsAbs()
 }
 
 // safeScope joins scopes RFC 6749 style (space-delimited), dropping any

@@ -158,13 +158,23 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 // The value lands inside an HTTP quoted-string, so nothing derived from a
 // caller-supplied token may reach it — a parse error can carry attacker-chosen
 // bytes, and a stray quote would let it break out of the header.
-func (c *Config) bearerChallenge(path string, err error) string {
+//
+// The resource_metadata pointer is OPERATOR-supplied and gets the same
+// discipline, through the same CheckedResourceMetadata every other emitter of
+// that parameter uses: spec.api.basePath's CRD pattern is start-anchored only,
+// so a quote-bearing basePath reaches this concatenation and would give the
+// challenge a second resource_metadata parameter naming an attacker-run
+// authorization server. This path is the more reachable of the two — it fires on
+// every invalid or expired bearer to a protected path, not only on a policy
+// denial. A rejected pointer costs the challenge its pointer and nothing else:
+// error= and error_description= still identify the failure.
+func (c *Config) bearerChallenge(ctx context.Context, path string, err error) string {
 	desc := "the access token is invalid"
 	if errors.Is(err, jwt.ErrTokenExpired) {
 		desc = "the access token expired"
 	}
 	challenge := `Bearer error="invalid_token", error_description="` + desc + `"`
-	if md := c.resourceMetadataURL(path); md != "" {
+	if md := CheckedResourceMetadata(ctx, c.resourceMetadataURL(path)); md != "" {
 		challenge += `, resource_metadata="` + md + `"`
 	}
 	return challenge
@@ -407,7 +417,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				// caller (internal/host/proxy.go), but it is never reached from
 				// here — so without this the expired-token caller got a bare
 				// 401 and no way back. See kdex-tech/host-manager#180.
-				w.Header().Set("WWW-Authenticate", c.bearerChallenge(r.URL.Path, err))
+				w.Header().Set("WWW-Authenticate", c.bearerChallenge(r.Context(), r.URL.Path, err))
 				http.Error(w, "Invalid token", http.StatusUnauthorized)
 				return
 			}
