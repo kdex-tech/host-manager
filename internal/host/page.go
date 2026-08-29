@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
@@ -72,7 +73,35 @@ func (hh *HostHandler) pageHandlerFunc(
 				// the 401 that would have told it what to do. See #184 for
 				// why the branch sits here, ahead of discovery.
 				_, hasLoginPage := hh.utilityPages[v1alpha1.LoginUtilityPageType]
-				if outcome == denial.Unauthenticated && hasLoginPage && acceptsHTML(r) {
+
+				// ...and only for a caller who presented NO credential.
+				// denial.Classify also calls a present-but-SUBJECT-LESS
+				// context Unauthenticated, which is right for the STATUS --
+				// a credential naming nobody cannot clear an identity gate
+				// keyed on who the caller is -- but wrong for this redirect,
+				// because the login form is where such a credential COMES
+				// FROM. A credential lookup that resolves a subject without
+				// a `sub` claim (a Secret keyed only by `email`, an
+				// http-lookup backend answering `{"ok":true,"claims":{}}`)
+				// makes LoginLocal mint a session token whose sub is "":
+				// jwt.MapClaims.GetSubject returns ("", nil) for a MISSING
+				// key and sign.Signer.Project copies that into the token.
+				//
+				// So the caller logs in, SUCCEEDS, is returned here, is
+				// classified Unauthenticated again and sent back to the
+				// login form -- forever, with no error shown and no
+				// indication that anything failed.
+				//
+				// The discovery redirect's one-hop `denied=` guard cannot
+				// bound this: that marker works because the redirect target
+				// carries it, whereas this loop passes through LoginPost,
+				// which rebuilds the URL from `return=` and drops everything
+				// else. The bound has to be the distinction itself. A
+				// subject-less caller falls through to the contract's 401 +
+				// challenge, which is truthful and terminates.
+				_, hasCredential := auth.GetAuthContext(r.Context())
+
+				if outcome == denial.Unauthenticated && !hasCredential && hasLoginPage && acceptsHTML(r) {
 					log.V(2).Info("unauthenticated, redirecting to login")
 					// RequestURI, not Path: the return trip has to carry the
 					// query string too, or a gated /search?q=foo sends the

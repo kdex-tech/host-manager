@@ -218,6 +218,29 @@ oversights:**
   rather than a status — `unwrap` only ever sees `>= 400`, so it cannot make
   this choice on the gate's behalf.
 
+  It also adds a second condition, and this one bounds a loop: the redirect
+  fires only when the caller presented **no credential at all**. `Classify`
+  calls a present-but-**subject-less** context `Unauthenticated` too, which is
+  correct for the *status* — a credential naming nobody cannot clear an identity
+  gate keyed on who the caller is — but wrong for this redirect, because the
+  login form is where such a credential comes from. A credential lookup that
+  resolves a subject with no `sub` claim (a Secret keyed only by `email`; an
+  http-lookup backend answering `{"ok":true,"claims":{}}`) makes `LoginLocal`
+  mint a session token whose `sub` is `""`: `jwt.MapClaims.GetSubject` reports a
+  *missing* key as `("", nil)` and `sign.Signer.Project` copies that straight
+  into the token, which the host middleware then accepts (only `iss` and `aud`
+  are checked). So the caller logs in, **succeeds**, is returned to the gated
+  page, is classified `Unauthenticated` again, and is sent back to the login
+  form — indefinitely, with nothing shown to say anything failed.
+
+  The discovery redirect's one-hop `denied=` marker cannot bound this: that
+  guard works because the redirect *target* carries the marker, whereas this
+  loop passes through `LoginPost`, which rebuilds the URL from `return=` and
+  drops everything else. The bound is the distinction itself. Reachability is
+  pinned by `TestSubjectlessTokenIsReachableFromLocalLogin`
+  (`internal/auth/subjectless_credential_test.go`); the behaviour is pinned at
+  both gates by `internal/host/subjectless_gate_test.go`.
+
 ## Design
 
 ### `internal/auth/denial`
