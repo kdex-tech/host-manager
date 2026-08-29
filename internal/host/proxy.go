@@ -19,6 +19,7 @@ import (
 	"github.com/kdex-tech/dmapper"
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"github.com/kdex-tech/host-manager/internal/utils"
@@ -395,6 +396,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	if res, ok := hh.oauth2ProtectedResources()[fn.Spec.API.BasePath]; ok {
 		fh.oauth2Protected = true
 		fh.oauth2Resource = res.Resource
+		fh.oauth2Scopes = res.Scopes
 	}
 
 	if fh.oauth2Protected && hh.authConfig != nil && hh.authConfig.MintTokenEnabled {
@@ -604,17 +606,25 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				} else {
 					log.V(1).Info("unauthorized access attempt", "function", fn.Name)
 				}
-				// Defense-in-depth: only emit the 401 challenge when both flags are
-				// set AND oauth2Resource is non-empty. An empty resource would produce
-				// a malformed metadata URL (just the issuer root), so we fall through
-				// to the anti-enumeration 404 in that degenerate case.
+				// The denial contract retires the anti-enumeration 404 that
+				// used to be this branch's else. It concealed nothing:
+				// /-/openapi serves every Ready function's paths to
+				// anonymous callers with no entitlement check
+				// (internal/host/openapi.go), so enumeration was already
+				// cheaper by GET than by probing. If /-/openapi is ever
+				// gated or caller-filtered, revisit this.
+				// docs/superpowers/specs/2026-08-28-denial-contract-design.md
+				var meta string
 				if fh.oauth2Protected && fh.oauth2Resource != "" {
-					w.Header().Set("WWW-Authenticate",
-						`Bearer resource_metadata="`+fh.issuer+`/.well-known/oauth-protected-resource`+fn.Spec.API.BasePath+`"`)
-					http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-					return
+					meta = fh.issuer + "/.well-known/oauth-protected-resource" + fn.Spec.API.BasePath
 				}
-				http.Error(w, http.StatusText(http.StatusNotFound)+" "+r.URL.Path, http.StatusNotFound)
+				denial.Write(w, r, denial.Opts{
+					Outcome: denial.Classify(
+						r.Context(), authChecker, "functions", fn.Spec.API.BasePath),
+					Issuer:           fh.issuer,
+					ResourceMetadata: meta,
+					Scopes:           fh.oauth2Scopes,
+				})
 				return
 			}
 		}

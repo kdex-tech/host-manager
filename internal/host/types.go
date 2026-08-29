@@ -212,6 +212,12 @@ type KDexFunctionHandler struct {
 	// oauth2Resource is the RFC 8707 resource URI (issuer + basePath) a PAT must
 	// be bound to for this oauth2-protected function. Empty when not protected.
 	oauth2Resource string
+	// oauth2Scopes is the de-duplicated union of the oauth2 scheme's scopes
+	// across this function's operations -- the same union
+	// oauth2ProtectedResources() already computes. Named in an
+	// insufficient_scope challenge so a client can step up rather than
+	// dead-end. Empty when the function is not oauth2-protected.
+	oauth2Scopes []string
 	// issuer is the host's issuer address, captured at handler-build time.
 	issuer string
 	// asToolsEnabled opts this (oauth2-protected) MCP function into the AS tool

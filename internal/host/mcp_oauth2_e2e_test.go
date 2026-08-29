@@ -460,8 +460,9 @@ func TestMCPOAuth2E2E(t *testing.T) {
 		// (e2eOtherScope) do not satisfy the required functions:/api/v1/mcp:read.
 		assert.Empty(t, *h.backendFAT,
 			"denied subject must NOT reach the backend (no FAT forwarded)")
-		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, mcpRec.Code,
-			"gate must deny a subject lacking the required entitlement (401 or 404)")
+		assert.Equal(t, http.StatusForbidden, mcpRec.Code,
+			"an authenticated subject lacking the required entitlement gets 403, not 401: "+
+				"re-authenticating would not help them")
 	})
 }
 

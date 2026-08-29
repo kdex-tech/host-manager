@@ -129,16 +129,24 @@ func TestUnauthorizedOAuth2PathReturns401Challenge(t *testing.T) {
 	}
 }
 
-func TestUnauthorizedBearerOnlyPathStill404(t *testing.T) {
+// A bearer-only (non-oauth2) function used to return the anti-enumeration
+// 404 here. That concealed nothing -- /-/openapi publishes the same path to
+// the same anonymous caller -- so the contract returns an actionable 401
+// with a realm challenge instead.
+func TestUnauthorizedBearerOnlyPathReturns401WithRealm(t *testing.T) {
 	h := newBearerOnlyHandler(t, "dev.knowdrive.ai", "/v1/admin")
 	req := httptest.NewRequest("GET", "/v1/admin", nil)
 	req.Host = "dev.knowdrive.ai"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (anti-enum preserved)", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (anti-enum 404 retired)", rr.Code)
 	}
-	if rr.Header().Get("WWW-Authenticate") != "" {
-		t.Fatal("non-oauth2 path must NOT emit WWW-Authenticate")
+	got := rr.Header().Get("WWW-Authenticate")
+	if !strings.HasPrefix(got, `Bearer realm="`) {
+		t.Fatalf("challenge = %q, want a Bearer realm challenge", got)
+	}
+	if strings.Contains(got, "error=") {
+		t.Fatalf("challenge = %q; RFC 6750 3.1 omits error= when no credentials were sent", got)
 	}
 }
