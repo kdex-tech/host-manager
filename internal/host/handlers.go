@@ -9,6 +9,7 @@ import (
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/utils"
@@ -1056,7 +1057,14 @@ func (hh *HostHandler) stateHandler(mux *http.ServeMux, registeredPaths map[stri
 	mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 		authContext, ok := auth.GetAuthContext(r.Context())
 		if !ok {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			// The purest Unauthenticated row there is: no credential was
+			// presented at all. This answered a bare 401, which violates
+			// RFC 7235 (a 401 MUST carry a challenge) and the contract's
+			// own "every 401 carries a challenge" constraint.
+			denial.Write(w, r, denial.Opts{
+				Outcome: denial.Unauthenticated,
+				Issuer:  hh.issuerAddress(),
+			})
 			return
 		}
 
