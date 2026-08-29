@@ -16,7 +16,7 @@
 - **Go is pinned to 1.26.0.** Do not bump it.
 - **Run `make lint` from the workspace root** (`/home/rotty/projects/kdex/workspace`) after code changes; it fans out to every module.
 - **Run `make test` inside `kdex-host-manager`** for the module's own suite (includes envtest).
-- **Never widen the `unwrap` header allow-list beyond the three headers named in Task 2.** The blanket delete exists to drop a stale `Content-Length` from a suppressed proxy body; that reason still holds for everything else.
+- **The `unwrap` allow-list only ever exempts a header something actually sets.** Task 2 exempts `WWW-Authenticate`; Task 7 adds `X-KDex-Sniffer-Suppressed` beside the code that sets it. Never add a header speculatively — the blanket delete exists to drop a stale `Content-Length` from a suppressed proxy body, and that reason holds for everything without a producer.
 - **Challenge values must never carry caller-supplied bytes.** They land inside HTTP quoted-strings. This mirrors the existing discipline at `internal/auth/middleware.go:161`.
 - **Commit inside `kdex-host-manager`**, not at the workspace root.
 
@@ -433,7 +433,7 @@ git commit -m "feat(auth): add the denial package — one contract for every gat
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
-- Produces: nothing new. Behavioural guarantee only — a `WWW-Authenticate`, `Retry-After` or `X-KDex-Sniffer-Suppressed` header set by any handler survives the HTML error rendering.
+- Produces: nothing new. Behavioural guarantee only — a `WWW-Authenticate` header set by any handler survives the HTML error rendering. Task 7 extends the same list for its own header.
 
 This is a live bug, not a hypothetical. `DesignMiddleware` wraps the whole mux (`internal/host/host.go:618`), and `unwrap`'s HTML branch deletes every response header before rendering. Verified against dev on 2026-08-28:
 
@@ -463,14 +463,15 @@ import (
 func denyingHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="https://example.test"`)
-		w.Header().Set("Retry-After", "120")
 		w.Header().Set("Content-Length", "999") // the stale header unwrap exists to drop
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})
 }
 
 func TestUnwrapPreservesChallengeForHTMLClients(t *testing.T) {
-	hh := &HostHandler{}
+	// A real handler, not &HostHandler{}: unwrap's HTML branch renders through
+	// serveError, which locks hh.mu and reads hh.Translations.
+	hh := gatedHostFixture()
 
 	req := httptest.NewRequest(http.MethodGet, "/gated", nil)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
@@ -483,16 +484,13 @@ func TestUnwrapPreservesChallengeForHTMLClients(t *testing.T) {
 	if got := rr.Header().Get("WWW-Authenticate"); got != `Bearer realm="https://example.test"` {
 		t.Fatalf("WWW-Authenticate = %q; a 401 without a challenge violates RFC 7235", got)
 	}
-	if got := rr.Header().Get("Retry-After"); got != "120" {
-		t.Fatalf("Retry-After = %q, want 120", got)
-	}
 	if got := rr.Header().Get("Content-Length"); got == "999" {
 		t.Fatal("stale Content-Length survived; unwrap must still drop it")
 	}
 }
 
 func TestUnwrapPreservesChallengeForNonHTMLClients(t *testing.T) {
-	hh := &HostHandler{}
+	hh := gatedHostFixture()
 
 	req := httptest.NewRequest(http.MethodGet, "/gated", nil)
 	req.Header.Set("Accept", "*/*")
@@ -523,16 +521,15 @@ In `internal/host/feedback.go`, replace the header-wipe block inside `unwrap`:
 			// (like ReverseProxy) may have set headers -- notably
 			// Content-Length -- describing a body we've suppressed.
 			//
-			// Three headers are exempt. WWW-Authenticate is REQUIRED on a
-			// 401 (RFC 7235); deleting it produced a bare 401 for every
+			// WWW-Authenticate is exempt because it is REQUIRED on a 401
+			// (RFC 7235); deleting it produced a bare 401 for every
 			// HTML-accepting client and silently disabled OAuth discovery
-			// for browsers. Retry-After and X-KDex-Sniffer-Suppressed are
-			// likewise about the rejection itself, not about the body being
-			// replaced. Do not widen this list: everything else is exactly
-			// what the wipe exists for.
+			// for browsers. It describes the rejection, not the body being
+			// replaced. Add a header here only when something actually sets
+			// it -- everything else is exactly what the wipe exists for.
 			header := w.Header()
 			preserved := map[string]string{}
-			for _, k := range []string{"WWW-Authenticate", "Retry-After", "X-KDex-Sniffer-Suppressed"} {
+			for _, k := range []string{"WWW-Authenticate"} {
 				if v := header.Get(k); v != "" {
 					preserved[k] = v
 				}
@@ -1385,7 +1382,7 @@ git commit -m "feat(host): add --page-denial-mode with an explained, bounded dis
 - Test: `internal/host/feedback_authgate_test.go` (extend)
 
 **Interfaces:**
-- Consumes: the `unwrap` allow-list from Task 2 (which already exempts `X-KDex-Sniffer-Suppressed`).
+- Consumes: the `unwrap` allow-list from Task 2, which exempts `WWW-Authenticate` only. **This task adds `"X-KDex-Sniffer-Suppressed"` to that list** in `internal/host/feedback.go`, beside the code that sets it — an exemption belongs next to its producer, and without it the header is deleted for HTML-accepting callers.
 - Produces: nothing new.
 
 The sniffer's 404 is **correct and stays**: the path genuinely does not exist, which is why the sniffer was reached at all. The contract governs denials, never absences, so promoting this to 403 would break the rule in the other direction. What was missing is the reason — recorded only at `V(1)`, where no caller can see it. A response header answers the question the skill documents people asking ("I expected a 303, got 404") without misreporting the status.
@@ -1454,8 +1451,7 @@ In `internal/host/feedback.go`:
 			// previously visible only at V(1), which is why "I expected a
 			// 303, got 404" is a documented question. Name the missing
 			// entitlement in a header so curl -i answers it, without
-			// relabelling an absence as a denial. unwrap exempts this
-			// header from its wipe.
+			// relabelling an absence as a denial.
 			//
 			// Only for a caller whose subject was actually evaluated.
 			// canGenerateSniffer refuses an anonymous caller before
