@@ -150,6 +150,7 @@ func TestHostHandler_DesignMiddleware_SnifferAuthGate(t *testing.T) {
 		hh, ctx := newSnifferTestHandler(t, ac)
 
 		req := httptest.NewRequest("GET", "/v2/sniffer", nil)
+		req.Header.Set("Accept", "text/html")
 		ctx = auth.SetAuthContext(ctx, auth.AuthContext{"sub": "alice"})
 		req = req.WithContext(ctx)
 		w := httptest.NewRecorder()
@@ -175,6 +176,27 @@ func TestHostHandler_DesignMiddleware_SnifferAuthGate(t *testing.T) {
 		hh.DesignMiddleware(nextOK).ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Empty(t, w.Header().Get("X-KDex-Sniffer-Suppressed"))
+	})
+
+	// canGenerateSniffer treats an AuthContext with an empty subject the
+	// same as no AuthContext at all -- it returns before CheckAccess runs
+	// either way (mirrors the guard apitoken.go already applies after a
+	// successful GetAuthContext). The header guard must use the identical
+	// definition of anonymous, not merely "AuthContext present."
+	t.Run("says nothing to a caller with an empty subject", func(t *testing.T) {
+		ac := &snifferGateChecker{allow: true}
+		hh, ctx := newSnifferTestHandler(t, ac)
+
+		req := httptest.NewRequest("GET", "/v2/sniffer", nil)
+		ctx = auth.SetAuthContext(ctx, auth.AuthContext{})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		hh.DesignMiddleware(nextOK).ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+		assert.Empty(t, ac.resource, "CheckAccess must not run for a subject-less AuthContext")
 		assert.Empty(t, w.Header().Get("X-KDex-Sniffer-Suppressed"))
 	})
 

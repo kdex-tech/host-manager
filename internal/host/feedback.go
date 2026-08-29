@@ -261,10 +261,13 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			// relabelling an absence as a denial.
 			//
 			// Only for a caller whose subject was actually evaluated.
-			// canGenerateSniffer refuses an anonymous caller before
+			// canGenerateSniffer refuses an anonymous caller -- no
+			// AuthContext, or one with an empty subject -- before
 			// CheckAccess runs, and naming the entitlement there would
 			// advertise the gate rather than explain a decision about them.
-			if _, authenticated := auth.GetAuthContext(r.Context()); authenticated {
+			// hasEvaluatedSubject uses canGenerateSniffer's own definition
+			// of anonymous so the two can never disagree.
+			if hasEvaluatedSubject(r.Context()) {
 				w.Header().Set("X-KDex-Sniffer-Suppressed", "functions:create")
 			}
 			invokeSniffer = false
@@ -387,6 +390,20 @@ func isMutable(matchedFunction *kdexv1alpha1.KDexFunction) bool {
 		matchedFunction.Spec.GetOrigin().Source == nil
 }
 
+// hasEvaluatedSubject reports whether ctx carries an AuthContext with a
+// non-empty subject -- i.e. a caller canGenerateSniffer would treat as
+// logged in rather than anonymous. Both canGenerateSniffer and the sniffer-
+// suppression header in DesignMiddleware key off this single definition of
+// "anonymous" so they can never disagree about which callers get named.
+func hasEvaluatedSubject(ctx context.Context) bool {
+	authContext, ok := auth.GetAuthContext(ctx)
+	if !ok {
+		return false
+	}
+	sub, _ := authContext.GetSubject()
+	return sub != ""
+}
+
 // canGenerateSniffer reports whether the caller is permitted to auto-generate
 // KDexFunctions via the Request Sniffer. The caller must be logged in (have an
 // AuthContext with a subject) and hold the `functions:create` entitlement. When
@@ -397,12 +414,7 @@ func (hh *HostHandler) canGenerateSniffer(ctx context.Context) bool {
 		return true
 	}
 
-	authContext, ok := auth.GetAuthContext(ctx)
-	if !ok {
-		return false
-	}
-	sub, _ := authContext.GetSubject()
-	if sub == "" {
+	if !hasEvaluatedSubject(ctx) {
 		return false
 	}
 
