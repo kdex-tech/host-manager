@@ -140,6 +140,35 @@ Three RFC details that make this precise rather than approximate:
 3. **`NoIdentity` carries no challenge.** The caller cannot address the resource
    at all; naming a scope would imply a scope would fix it.
 
+### A fault is not a fourth row
+
+The table above has three rows and takes no fourth. **An authorization check
+that FAILED TO RUN is a 500 at both gates** — `internal/host/page.go` and
+`internal/host/proxy.go` — logged at error level and carrying no
+`WWW-Authenticate`, no challenge, and no redirect.
+
+The contract governs *denials*. A denial is a statement about the caller: it
+says a credential was absent, or insufficient, or unusable for this resource. A
+fault says nothing about the caller at all — the checker never reached a
+verdict, so the caller's standing is unknown in both directions. It is
+therefore neither a denial nor an absence, and the same rule that keeps a
+genuine not-found out of the table (*"a contract that turns a genuine
+not-found into a 401 is the same defect with the sign flipped"*) keeps a fault
+out of it.
+
+Rendering it as a denial — which both gates did, and which the page gate did as
+a `404 + r.URL.Path` before that — misattributes an operator's outage to the
+visitor and buries the fault at exactly the moment it needs surfacing.
+Measured against the tests that pin this: a faulted check answered **303** to
+an anonymous browser, **401 + challenge** to an anonymous API client, and
+**403** to an authenticated one, all for the same server-side failure. The 401
+is the worst of the three: it sends an MCP client off to re-authorize over
+something no credential can address.
+
+Splitting `err != nil` out of `!authorized` at **both** sites keeps the two
+gates agreeing, which is what the single folded condition was for. The
+agreement is on the split, not on the folding.
+
 ## What is a gate
 
 **The contract applies to:** the function proxy (`internal/host/proxy.go:598`),
@@ -365,8 +394,8 @@ gate with extra steps.
 
 | gate | today | after |
 |---|---|---|
-| function proxy | 404, or 401+challenge if oauth2 | `denial.Write` with the classified outcome |
-| page gate | 302 login / 302 first-authorized / 404 | anonymous + HTML + a login page → 303 login (position unchanged, now `Accept`-conditional); anonymous otherwise → 401; authenticated → 403, rendered to HTML per the knob |
+| function proxy | 404, or 401+challenge if oauth2 | `denial.Write` with the classified outcome; an **errored** check is split out as a 500 |
+| page gate | 302 login / 302 first-authorized / 404 | anonymous + HTML + a login page → 303 login (position unchanged, now `Accept`-conditional); anonymous otherwise → 401; authenticated → 403, rendered to HTML per the knob; an **errored** check is split out as a 500 |
 | sniffer | silent fall-through to 404 | 404 unchanged (a real absence) + `X-KDex-Sniffer-Suppressed: functions:create` |
 | apitoken mint/revoke | 401 / 403 ad hoc | `denial.Write` (already contract-shaped; unified for one vocabulary) |
 | capabilities mint | 401 | `denial.Write` |
@@ -489,7 +518,11 @@ TDD, RED first. Three contract rows against each gate, in both `Accept` shapes
   the 403 page rather than redirecting again;
 - `Cache-Control: no-store` on the discovery redirect;
 - `Classify` unit tests covering the identity-vs-requirement split, driven
-  through `ParseRequirements(nil)`.
+  through `ParseRequirements(nil)`;
+- an errored checker at **each** gate answering 500 and not a denial status
+  (`internal/host/authcheck_fault_test.go`) — asserted with no
+  `WWW-Authenticate` and no `Location`, since the three renderings it replaces
+  were a 303, a 401 + challenge and a 403.
 
 Two existing tests encode the old posture and invert:
 
@@ -561,11 +594,3 @@ Two existing tests encode the old posture and invert:
   needed.
 - Backends behind the proxy. knowdb keeps answering however it answers; this
   contract governs what host-manager says.
-- The `err != nil` arm of **both** gates — the function proxy's and the page
-  gate's. Both now fold it into the same `denial.Write` as `!authorized`, with
-  one condition and one vocabulary, so the two gates agree; both keep
-  `log.Error`, because an errored check IS a server fault even while it is
-  rendered as a denial. Whether it should instead be a **500** at both sites is
-  a real question and is filed separately, not settled here. (The page gate's
-  arm answered `404 + r.URL.Path` until the final review caught it; leaving it
-  alone would have preserved the exact defect this branch retires.)

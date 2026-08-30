@@ -38,27 +38,32 @@ func (hh *HostHandler) pageHandlerFunc(
 			authorized, err := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath(), parsedUserEntitlements, *ph.ParsedRequirements)
 
-			// One condition, one vocabulary. The errored check used to
-			// answer 404 + r.URL.Path here, which is precisely the defect
-			// the denial contract retires -- and it left the two gates
-			// disagreeing, since the function proxy folds the same
-			// condition into denial.Write (internal/host/proxy.go).
+			// A CHECK THAT FAILED TO RUN IS A SERVER FAULT, NOT A DENIAL.
+			// The contract governs denials; a fault is neither a denial nor
+			// an absence, so it is deliberately outside the three-row table
+			// and gets no status from it -- no WWW-Authenticate, no
+			// challenge, nothing that would tell the caller a credential
+			// could fix this. It cannot: the checker never reached a verdict,
+			// so nothing is known about the caller either way.
 			//
-			// OPEN QUESTION, deliberately out of scope for this branch and
-			// filed separately: an errored authorization check is arguably a
-			// 500 at BOTH gates rather than a denial -- the checker failed,
-			// which says nothing about the caller. The design doc records
-			// the same question against the proxy arm ("Out of scope"). The
-			// log.Error below is the interim signal: we render it as a
-			// denial, but a failed check IS a server fault worth seeing.
-			if err != nil || !authorized {
-				if err != nil {
-					log.Error(err, "authorization check failed",
-						"resource", "pages", "resourceName", ph.BasePath())
-				} else {
-					log.V(2).Info("unauthorized access attempt",
-						"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
-				}
+			// Rendering it as a denial (which this gate did, and before that
+			// as a 404 + r.URL.Path) misattributes an operator's outage to
+			// the visitor and buries the fault at exactly the moment it needs
+			// surfacing. The proxy gate answers 500 here too, so the two
+			// gates still agree -- one condition, one vocabulary, with the
+			// fault split out of it at BOTH sites rather than folded in at
+			// both. docs/superpowers/specs/2026-08-28-denial-contract-design.md
+			if err != nil {
+				log.Error(err, "authorization check failed",
+					"resource", "pages", "resourceName", ph.BasePath())
+				http.Error(w, http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError)
+				return
+			}
+
+			if !authorized {
+				log.V(2).Info("unauthorized access attempt",
+					"resource", "pages", "resourceName", ph.BasePath(), "l10n", l.String())
 
 				// parsedUserEntitlements, not a second
 				// GetParsedEntitlements: the gate above already derived it.

@@ -611,12 +611,25 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			authorized, err := authChecker.VerifyResourceParsedEntitlements(
 				"functions", fn.Spec.API.BasePath, parsedUserEntitlements, reqs)
 
-			if err != nil || !authorized {
-				if err != nil {
-					log.Error(err, "authorization check failed", "function", fn.Name)
-				} else {
-					log.V(1).Info("unauthorized access attempt", "function", fn.Name)
-				}
+			// A CHECK THAT FAILED TO RUN IS A SERVER FAULT, NOT A DENIAL.
+			// The contract governs denials; a fault is neither a denial nor an
+			// absence, so it is deliberately outside the three-row table and
+			// takes no status from it -- in particular no WWW-Authenticate,
+			// which would tell an MCP client to re-authorize over a failure no
+			// credential can address. The checker never reached a verdict, so
+			// nothing is known about this caller either way. The page gate
+			// answers 500 here too (internal/host/page.go), so the two gates
+			// still agree.
+			// docs/superpowers/specs/2026-08-28-denial-contract-design.md
+			if err != nil {
+				log.Error(err, "authorization check failed", "function", fn.Name)
+				http.Error(w, http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError)
+				return
+			}
+
+			if !authorized {
+				log.V(1).Info("unauthorized access attempt", "function", fn.Name)
 				// The denial contract retires the anti-enumeration 404 that
 				// used to be this branch's else. It concealed nothing:
 				// /-/openapi serves every Ready function's paths to
