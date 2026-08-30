@@ -273,6 +273,31 @@ One sentinel, `sign.ErrSubjectlessCredential`, and one operator instruction,
 level (V(0))** naming what to fix — the subject Secret or the credential-check
 backend — rather than a generic parse failure.
 
+The same ruling reaches the OAuth2 endpoints, where a subject-less session was
+convertible into a *durable* credential:
+
+- **`/-/oauth/authorize`** (`internal/auth/oauth2.go`) gated on the **presence**
+  of an auth context and accepted `GetSubject()`'s `("", nil)`, so a session
+  naming nobody minted an authorization code with `Subject: ""` — redeemable for
+  a full JWT plus a rotating refresh token. It now answers **500** (the session
+  was already accepted upstream, so this is a server fault and no caller action
+  changes it), with no redirect to either the callback or the login form.
+- **`/-/oauth/token`** — one check on `ts.Subject` after the grant switch, the
+  single frame every grant passes through with its subject decided, so no grant
+  added later can miss it. This is the arm that mattered: `ts.Subject` is what
+  `writeResourcePATResponse` hands to `MintResourcePAT`, so an empty one minted
+  a PASETO PAT with `sub: ""` — a bearer credential naming nobody that the
+  function proxy would bridge into an auth context. RFC 6749 §5.2 JSON,
+  `server_error`.
+- **The OIDC callback** (`OAuthGet` → `Exchanger.ExchangeToken`) — its subject
+  read had the same `err != nil`-only shape and is fixed with the mint-side
+  refusals above.
+
+Both endpoint checks are defence in depth once `WithAuthentication` refuses to
+inject a subject-less context at all. They stay because each is a doorway to a
+durable credential and must not depend on an upstream invariant for a property
+it can assert itself.
+
 ## Design
 
 ### `internal/auth/denial`

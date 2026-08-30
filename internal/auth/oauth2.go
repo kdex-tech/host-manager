@@ -10,6 +10,7 @@ import (
 	"time"
 
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -142,10 +143,31 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We need the Subject.
+	// We need the Subject -- and it must NAME somebody. An authorization code
+	// is redeemable for a full JWT plus a rotating refresh token, so a code
+	// carrying `Subject: ""` would launder a credential that names nobody into
+	// a durable session that no gate can evaluate and no audit trail can
+	// attribute. Gating on the PRESENCE of an auth context is not enough:
+	// jwt.MapClaims.GetSubject reports a MISSING `sub` as ("", nil), so the
+	// `err != nil` test alone never fired for the shape it was written for.
+	//
+	// 500, not a redirect and not a 4xx: a session that reached this handler
+	// was already accepted by the middleware, so an empty subject here is a
+	// server-side fault -- an operator misconfiguration -- and no action the
+	// caller can take will change it. Same ruling, same framing, as the mint
+	// and validation refusals (sign.ErrSubjectlessCredential).
+	//
+	// DEFENCE IN DEPTH: WithAuthentication now refuses to inject a
+	// subject-less context at all, so this should be unreachable. It stays
+	// because this handler is the doorway to a durable credential and must not
+	// depend on an upstream invariant for a property it can assert itself.
 	subject, err = authCtx.GetSubject()
-	if err != nil {
-		err = fmt.Errorf("failed to get subject from auth context")
+	if err != nil || subject == "" {
+		log.Error(sign.ErrSubjectlessCredential,
+			"refusing to issue an authorization code for a session that names nobody; "+
+				sign.SubjectlessRemedy,
+			"client_id", clientId)
+		err = fmt.Errorf("%w: authorization code", sign.ErrSubjectlessCredential)
 		http.Error(w, "Invalid session", http.StatusInternalServerError)
 		return
 	}
@@ -406,6 +428,27 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		// the classified description reaches the client.
 		err = fmt.Errorf("token request failed: %w", err)
 		writeOAuthError(w, status, code, description)
+		return
+	}
+
+	// The same ruling as /-/oauth/authorize, applied to every grant this
+	// endpoint serves. All four arms above return a TokenSet whose Subject is
+	// the identity the tokens were minted for, and `ts.Subject` is what
+	// writeResourcePATResponse hands to MintResourcePAT -- so an empty one
+	// would mint a PASETO PAT with `sub: ""`, a bearer credential naming
+	// nobody that the function proxy would then bridge into an auth context.
+	//
+	// One check here rather than four in the arms: this is the single frame
+	// every grant passes through with its subject decided, so no grant added
+	// later can miss it. 500 server_error for the reason the authorize handler
+	// gives -- a credential source that vouches without naming is a server
+	// misconfiguration, not anything the client did wrong.
+	if ts.Subject == "" {
+		log.Error(sign.ErrSubjectlessCredential,
+			"refusing to issue tokens for a grant that resolved no subject; "+sign.SubjectlessRemedy,
+			"client_id", clientId, "grant_type", grantType)
+		err = fmt.Errorf("%w: %s grant", sign.ErrSubjectlessCredential, grantType)
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
 		return
 	}
 
