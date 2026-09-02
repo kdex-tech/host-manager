@@ -45,6 +45,20 @@ func patternRegistered(mux *http.ServeMux, pattern string) bool {
 	return matched == pattern
 }
 
+// defaultLangRedirectHandler returns a handler that 301-redirects a request
+// under the default language's own literal prefix (e.g. "/en/pricing/") to
+// the canonical bare path ("/pricing/"), by trimming barePath -- the
+// "/<default>" prefix itself (e.g. "/en") -- once from the front of
+// r.URL.Path. Trimming the known prefix, rather than string-replacing the
+// language code, keeps a segment like "/en/enterprise/" from being mangled
+// into something other than "/enterprise/".
+func defaultLangRedirectHandler(barePath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := strings.TrimPrefix(r.URL.Path, barePath)
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	}
+}
+
 func (hh *HostHandler) addHandlerAndRegister(
 	mux *http.ServeMux,
 	pr pageRender,
@@ -158,8 +172,11 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// wildcard (which matched ANY first path segment -- the root-namespace
 	// bug this loop removes). The default language gets the bare route with
 	// no prefix; every other supported language gets its own concrete
-	// "/<lang>" + finalPath route. Task 2.2 adds the redirect from the
-	// default language's own prefix; it is deliberately not registered here.
+	// "/<lang>" + finalPath route. The default language additionally gets
+	// its own literal prefix, but registered as a 301 redirect to the
+	// canonical bare path (see defaultLangRedirectHandler) rather than a
+	// second copy of the page, so /en/pricing/ canonicalizes to /pricing/
+	// instead of existing under two indexable URLs.
 	for _, lang := range translations.Languages() {
 		handler := hh.pageHandlerFunc(pr.ph, translations, lang)
 
@@ -170,6 +187,20 @@ func (hh *HostHandler) addHandlerAndRegister(
 			if patternPath != "" {
 				if registerIfNew("GET "+patternPath, handler) {
 					regFunc(patternPath, pr.ph.Name, label, true, "")
+				}
+			}
+
+			defaultPrefix := "/" + lang.String()
+			redirectHandler := defaultLangRedirectHandler(defaultPrefix)
+
+			prefixedFinalPath := defaultPrefix + finalPath
+			if registerIfNew("GET "+prefixedFinalPath, redirectHandler) {
+				regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
+			}
+			if patternPath != "" {
+				prefixedPatternPath := defaultPrefix + patternPath
+				if registerIfNew("GET "+prefixedPatternPath, redirectHandler) {
+					regFunc(prefixedPatternPath, pr.ph.Name, label, true, lang.String())
 				}
 			}
 			continue

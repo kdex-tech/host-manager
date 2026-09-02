@@ -109,6 +109,16 @@ func assertNotMatched(t *testing.T, mux *http.ServeMux, method string, path stri
 	assert.Empty(t, pat, "expected %s %s to not match any registered pattern, got %q", method, path, pat)
 }
 
+// doRequest executes method+path against mux and returns the recorded
+// response.
+func doRequest(t *testing.T, mux *http.ServeMux, method string, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
 // TestEnumeratedPrefixes_RegisterPerLanguage is the RED/GREEN pin for task
 // 2.1: a KDexPage must register one literal prefix per supported
 // non-default language plus a bare default route -- never the /{l10n}
@@ -124,4 +134,17 @@ func TestEnumeratedPrefixes_RegisterPerLanguage(t *testing.T) {
 	assertNoPattern(t, mux, "GET /{l10n}/pricing/{$}")                  // wildcard gone
 	// unknown root falls through — no page/wildcard swallows it
 	assertNotMatched(t, mux, "GET", "/robots.txt")
+}
+
+// TestDefaultLanguagePrefixRedirectsToBare is the RED/GREEN pin for task
+// 2.2: requesting a page under the default language's own literal prefix
+// (e.g. /en/pricing/ when en is the default) must 301 to the canonical bare
+// path (/pricing/) rather than 404 (Task 2.1 left the prefix unregistered)
+// or serving a duplicate copy under two URLs.
+func TestDefaultLanguagePrefixRedirectsToBare(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.registerPageForTest(t, "pricing", "/pricing")
+	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/") // en == default
+	require.Equal(t, http.StatusMovedPermanently, rr.Code)
+	require.Equal(t, "/pricing/", rr.Header().Get("Location"))
 }
