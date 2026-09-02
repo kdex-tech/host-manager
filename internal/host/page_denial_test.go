@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -34,7 +35,7 @@ func TestPageGateAnonymousNonHTMLGets401(t *testing.T) {
 	hh.authChecker = denyPath("/developer-keys")
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "application/json"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, anonReq("GET", "/developer-keys", "application/json"))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
@@ -55,7 +56,7 @@ func TestPageGateAnonymousHTMLStillRedirectsToLogin(t *testing.T) {
 	hh.authChecker = denyPath("/developer-keys")
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, anonReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", w.Code)
@@ -74,7 +75,7 @@ func TestPageGateAnonymousNoLoginPageGets401(t *testing.T) {
 	delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, anonReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 when there is no login page to send them to", w.Code)
@@ -90,7 +91,7 @@ func TestPageGateAuthenticatedUnderEntitledGets403(t *testing.T) {
 	hh.authChecker = denyPath("/developer-keys")
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "application/json"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, authedReq("GET", "/developer-keys", "application/json"))
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
@@ -109,7 +110,7 @@ func TestPageGateDiscoverModeRedirectsHTMLWithDeniedMarker(t *testing.T) {
 	hh.SetPageDenialMode(PageDenialDiscover)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, authedReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303", w.Code)
@@ -130,7 +131,7 @@ func TestPageGateDiscoverModeStill403sNonHTML(t *testing.T) {
 	hh.SetPageDenialMode(PageDenialDiscover)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "application/json"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, authedReq("GET", "/developer-keys", "application/json"))
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: the knob never changes what an API client sees", w.Code)
@@ -147,7 +148,7 @@ func TestPageGateDiscoverModeDoesNotLoop(t *testing.T) {
 	hh.SetPageDenialMode(PageDenialDiscover)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(
 		w, authedReq("GET", "/developer-keys?denied=%2Fsomething", "text/html"))
 
 	if w.Code != http.StatusForbidden {
@@ -163,7 +164,7 @@ func TestPageGateDiscoverModeFallsBackTo403(t *testing.T) {
 	hh.SetPageDenialMode(PageDenialDiscover)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, authedReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 when no accessible page exists", w.Code)
@@ -178,7 +179,7 @@ func TestPageGateForbidModeReturns403ToHTML(t *testing.T) {
 	hh.SetPageDenialMode(PageDenialForbid)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, authedReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, authedReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", w.Code)
@@ -198,7 +199,7 @@ func TestPageGateDiscoverModeNeverDiscoversForAnonymous(t *testing.T) {
 	delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, anonReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401: anonymous never discovers", w.Code)

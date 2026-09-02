@@ -13,6 +13,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/page"
 	G "github.com/onsi/gomega"
+	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -102,7 +103,7 @@ func TestPageHandlerFunc_UnauthenticatedPrefersLoginOverAuthorizedPage(t *testin
 	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, req)
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, req)
 
 	g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
 	g.Expect(w.Header().Get("Location")).To(G.Equal("/-/login?return=%2Fdeveloper-keys"))
@@ -123,7 +124,7 @@ func TestPageHandlerFunc_LoginReturnPreservesQueryString(t *testing.T) {
 	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, req)
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, req)
 
 	g.Expect(w.Code).To(G.Equal(http.StatusSeeOther))
 	g.Expect(w.Header().Get("Location")).To(
@@ -178,7 +179,7 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 	}
 	hh.authChecker = mock
 
-	handler := hh.pageHandlerFunc(page1, &hh.Translations)
+	handler := hh.pageHandlerFunc(page1, &hh.Translations, language.Make(hh.defaultLanguage))
 
 	// No login utility page is registered until the third subtest below.
 	// Per the denial contract, an anonymous caller never discovers -- their

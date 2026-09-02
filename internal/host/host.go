@@ -365,8 +365,19 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 
 	pageHandlers := hh.Pages.List()
 	if len(pageHandlers) == 0 && len(hh.functions) == 0 {
-		mux.HandleFunc("GET /{$}", hh.notReadyHandler)
-		mux.HandleFunc("GET /{l10n}/{$}", hh.notReadyHandler)
+		// One literal prefix per supported language, replacing the /{l10n}
+		// wildcard -- same enumerated-prefix treatment as page routes in
+		// addHandlerAndRegister. newTranslations (not hh.Translations,
+		// which this snapshot has not been swapped into yet) is the source
+		// of truth for this build's supported languages.
+		for _, lang := range newTranslations.Languages() {
+			handler := hh.notReadyHandlerFunc(lang)
+			if lang.String() == defaultLanguageResource {
+				mux.HandleFunc("GET /{$}", handler)
+				continue
+			}
+			mux.HandleFunc("GET /"+lang.String()+"/{$}", handler)
+		}
 		return rebuildSnapshot{
 			translations:    newTranslations,
 			registeredPaths: registeredPaths,
@@ -603,7 +614,20 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// startup and expect JSON, not the HTML announcement page. The
 	// announcement only applies to page paths. See kdex-tech/host-manager#33.
 	if hh.GetStatus() == HostStatusInitializing && !isSystemPath(r.URL.Path) {
-		hh.notReadyHandler(w, r)
+		// Unlike the registered not-ready routes (one literal prefix per
+		// supported language -- see rebuildMuxSnapshot), this fires for
+		// ANY request path while the host is still initializing, before
+		// mux dispatch even applies. There is no literal prefix to read
+		// the language from here, so it still resolves per-request via
+		// GetLang (Accept-Language / ?l10n= fallback), same as before.
+		hh.mu.RLock()
+		l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
+		hh.mu.RUnlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		hh.notReadyHandlerFunc(l)(w, r)
 		return
 	}
 

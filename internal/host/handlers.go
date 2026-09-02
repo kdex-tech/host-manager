@@ -10,9 +10,9 @@ import (
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
-	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/utils"
+	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -63,13 +63,18 @@ func (hh *HostHandler) addHandlerAndRegister(
 	finalPath := toFinalPath(basePath)
 	label := pr.ph.Label()
 
-	handler := hh.pageHandlerFunc(pr.ph, translations)
+	// regFunc registers OpenAPI docs for one concrete route. lang is the
+	// empty string for the bare default-language route, else the literal
+	// prefix's language tag (e.g. "fr") -- passed through concretely now
+	// that there is no single shared "/{l10n}" wildcard route to describe.
+	regFunc := func(p string, n string, l string, pattern bool, lang string) {
+		localized := lang != ""
+		langSuffix := utils.IfElse(localized, " ("+lang+")", "")
 
-	regFunc := func(p string, n string, l string, pattern bool, localized bool) {
 		reqs := hh.convertRequirements(pr.ph.Page.Security)
 
 		op := &openapi.Operation{
-			Description: fmt.Sprintf("Get HTML for %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), utils.IfElse(localized, " (localized)", "")),
+			Description: fmt.Sprintf("Get HTML for %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
 			OperationID: fmt.Sprintf("%s%s%s-get", n, utils.IfElse(pattern, "-pattern", ""), utils.IfElse(localized, "-localized", "")),
 			Parameters:  ko.ExtractParameters(p, "", http.Header{}),
 			Responses: openapi.NewResponses(
@@ -85,7 +90,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 								},
 							},
 						},
-						Description: new(fmt.Sprintf("HTML for %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), utils.IfElse(localized, " (localized)", ""))),
+						Description: new(fmt.Sprintf("HTML for %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix)),
 					},
 				}),
 				openapi.WithStatus(303, &openapi.ResponseRef{
@@ -102,7 +107,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 				}),
 			),
 			Security: reqs,
-			Summary:  fmt.Sprintf("Get %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), utils.IfElse(localized, " (localized)", "")),
+			Summary:  fmt.Sprintf("Get %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
 			Tags:     []string{n, "page"},
 		}
 
@@ -111,9 +116,9 @@ func (hh *HostHandler) addHandlerAndRegister(
 				BasePath: p,
 				Paths: map[string]ko.PathItem{
 					p: {
-						Description: fmt.Sprintf("HTML page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), utils.IfElse(localized, " (localized)", "")),
+						Description: fmt.Sprintf("HTML page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
 						Get:         op,
-						Summary:     fmt.Sprintf("Page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), utils.IfElse(localized, " (localized)", "")),
+						Summary:     fmt.Sprintf("Page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
 					},
 				},
 			},
@@ -125,7 +130,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// so duplicate registrations are skipped cleanly instead of panicking
 	// through the recover below. The recover is kept as a safety net for
 	// genuinely invalid patterns (mux.HandleFunc also panics on those).
-	registerIfNew := func(pattern string) bool {
+	registerIfNew := func(pattern string, handler http.HandlerFunc) bool {
 		if patternRegistered(mux, pattern) {
 			hh.log.V(1).Info(
 				"pattern already registered, skipping",
@@ -144,20 +149,41 @@ func (hh *HostHandler) addHandlerAndRegister(
 		}
 	}()
 
-	if registerIfNew("GET " + finalPath) {
-		regFunc(finalPath, pr.ph.Name, label, false, false)
-	}
-	if registerIfNew("GET /{l10n}" + finalPath) {
-		regFunc("/{l10n}"+finalPath, pr.ph.Name, label, false, true)
+	patternPath := ""
+	if pr.ph.Page != nil {
+		patternPath = pr.ph.Page.PatternPath
 	}
 
-	if pr.ph.Page != nil && pr.ph.Page.PatternPath != "" {
-		patternPath := pr.ph.Page.PatternPath
-		if registerIfNew("GET " + patternPath) {
-			regFunc(patternPath, pr.ph.Name, label, true, false)
+	// One literal prefix per supported language, replacing the /{l10n}
+	// wildcard (which matched ANY first path segment -- the root-namespace
+	// bug this loop removes). The default language gets the bare route with
+	// no prefix; every other supported language gets its own concrete
+	// "/<lang>" + finalPath route. Task 2.2 adds the redirect from the
+	// default language's own prefix; it is deliberately not registered here.
+	for _, lang := range translations.Languages() {
+		handler := hh.pageHandlerFunc(pr.ph, translations, lang)
+
+		if lang.String() == hh.defaultLanguage {
+			if registerIfNew("GET "+finalPath, handler) {
+				regFunc(finalPath, pr.ph.Name, label, false, "")
+			}
+			if patternPath != "" {
+				if registerIfNew("GET "+patternPath, handler) {
+					regFunc(patternPath, pr.ph.Name, label, true, "")
+				}
+			}
+			continue
 		}
-		if registerIfNew("GET /{l10n}" + patternPath) {
-			regFunc("/{l10n}"+patternPath, pr.ph.Name, label, true, true)
+
+		prefixedFinalPath := "/" + lang.String() + finalPath
+		if registerIfNew("GET "+prefixedFinalPath, handler) {
+			regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
+		}
+		if patternPath != "" {
+			prefixedPatternPath := "/" + lang.String() + patternPath
+			if registerIfNew("GET "+prefixedPatternPath, handler) {
+				regFunc(prefixedPatternPath, pr.ph.Name, label, true, lang.String())
+			}
 		}
 	}
 
@@ -704,45 +730,48 @@ func (hh *HostHandler) navigationHandler(mux *http.ServeMux, registeredPaths map
 	}, registeredPaths)
 }
 
-func (hh *HostHandler) notReadyHandler(w http.ResponseWriter, r *http.Request) {
-	log := logf.FromContext(r.Context())
+// notReadyHandlerFunc returns the not-ready (announcement) handler bound to
+// lang. Like pageHandlerFunc, the language is fixed at registration time by
+// the literal path prefix (or the default, for the bare route) instead of
+// resolved per-request from a {l10n} wildcard segment -- so this no longer
+// calls GetLang, and the 400 it could return for an unsupported l10n segment
+// is gone structurally.
+func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log := logf.FromContext(r.Context())
 
-	hh.mu.RLock()
-	defer hh.mu.RUnlock()
+		hh.mu.RLock()
+		defer hh.mu.RUnlock()
 
-	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+		l := lang
 
-	// applyCachingHeadersWithLang folds the language tag into the ETag
-	// so en-CA and fr-CA announcement renders get distinct ETags.
-	// See kdex-tech/host-manager#43.
-	if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
-		return
-	}
+		// applyCachingHeadersWithLang folds the language tag into the ETag
+		// so en-CA and fr-CA announcement renders get distinct ETags.
+		// See kdex-tech/host-manager#43.
+		if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
+			return
+		}
 
-	rendered := hh.renderUtilityPage(
-		kdexv1alpha1.AnnouncementUtilityPageType,
-		l,
-		map[string]any{},
-		&hh.Translations,
-	)
+		rendered := hh.renderUtilityPage(
+			kdexv1alpha1.AnnouncementUtilityPageType,
+			l,
+			map[string]any{},
+			&hh.Translations,
+		)
 
-	if rendered == "" {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
+		if rendered == "" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
-	log.V(1).Info("serving announcement page", "language", l.String())
+		log.V(1).Info("serving announcement page", "language", l.String())
 
-	w.Header().Set("Content-Language", l.String())
-	w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Language", l.String())
+		w.Header().Set("Content-Type", "text/html")
 
-	_, err = w.Write([]byte(rendered))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if _, err := w.Write([]byte(rendered)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}
 }
 

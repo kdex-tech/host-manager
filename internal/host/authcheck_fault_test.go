@@ -22,6 +22,7 @@ import (
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -77,7 +78,7 @@ func TestPageGateErroredCheckIs500NotADenial(t *testing.T) {
 			hh.authChecker = faultyChecker{}
 
 			w := httptest.NewRecorder()
-			hh.pageHandlerFunc(gated, &hh.Translations)(w, req)
+			hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, req)
 
 			if w.Code != http.StatusInternalServerError {
 				t.Fatalf("status = %d, want 500: a check that failed to run says nothing "+

@@ -10,7 +10,6 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	"github.com/kdex-tech/host-manager/internal/cache"
-	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"golang.org/x/text/language"
 	"kdex.dev/crds/api/v1alpha1"
@@ -20,6 +19,7 @@ import (
 func (hh *HostHandler) pageHandlerFunc(
 	ph page.PageHandler,
 	translations *Translations,
+	lang language.Tag,
 ) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log := logf.FromContext(r.Context())
@@ -27,11 +27,12 @@ func (hh *HostHandler) pageHandlerFunc(
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 
-		l, err := kdexhttp.GetLang(r, hh.defaultLanguage, translations.Languages())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// lang is fixed at registration time by the literal path prefix
+		// (or the default, for the bare route) -- there is no {l10n}
+		// wildcard segment left to resolve per-request, so the class of
+		// 400 that a malformed/unsupported l10n segment used to produce
+		// here is gone structurally.
+		l := lang
 
 		if hh.IsAuthEnabled() && hh.authChecker != nil && ph.ParsedRequirements != nil {
 			parsedUserEntitlements := hh.authChecker.GetParsedEntitlements(r.Context())

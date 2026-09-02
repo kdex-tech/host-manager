@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -56,7 +57,7 @@ func TestPageGateSubjectlessCallerGets401InBothAcceptShapes(t *testing.T) {
 				hh.authChecker = denyPath("/developer-keys")
 
 				w := httptest.NewRecorder()
-				hh.pageHandlerFunc(gated, &hh.Translations)(
+				hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(
 					w, subjectlessReq("GET", "/developer-keys", accept, ac))
 
 				if w.Code != http.StatusUnauthorized {
@@ -84,7 +85,7 @@ func TestPageGateAnonymousStillRedirectsAfterTheSubjectlessBound(t *testing.T) {
 	hh.authChecker = denyPath("/developer-keys")
 
 	w := httptest.NewRecorder()
-	hh.pageHandlerFunc(gated, &hh.Translations)(w, anonReq("GET", "/developer-keys", "text/html"))
+	hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(w, anonReq("GET", "/developer-keys", "text/html"))
 
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303: the bound must not cost the anonymous caller its login page", w.Code)
@@ -104,7 +105,7 @@ func TestPageGateSubjectlessNeverDiscovers(t *testing.T) {
 			delete(hh.utilityPages, kdexv1alpha1.LoginUtilityPageType)
 
 			w := httptest.NewRecorder()
-			hh.pageHandlerFunc(gated, &hh.Translations)(
+			hh.pageHandlerFunc(gated, &hh.Translations, language.Make(hh.defaultLanguage))(
 				w, subjectlessReq("GET", "/developer-keys", "text/html", auth.AuthContext{"sub": ""}))
 
 			if w.Code != http.StatusUnauthorized {
