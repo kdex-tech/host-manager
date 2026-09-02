@@ -36,6 +36,14 @@ func newTestHostHandler(t *testing.T, defaultLang string, langs []string) *HostH
 	require.NoError(t, err)
 	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
 	hh.defaultLanguage = defaultLang
+	// pageRequirements (host.go) dereferences hh.host unconditionally; a nil
+	// hh.host (NewHostHandler's default) only bites once a request actually
+	// reaches pageHandlerFunc, which none of the existing enumerated_l10n_test
+	// doRequest calls did (they hit the redirect handler or fall through
+	// unmatched). textpage_test.go's end-to-end serve tests are the first
+	// callers here to exercise pageHandlerFunc itself, so this needs the same
+	// minimal &KDexHostSpec{} page_test.go already sets locally.
+	hh.host = &kdexv1alpha1.KDexHostSpec{}
 
 	translationResources := map[string]kdexv1alpha1.KDexTranslationSpec{}
 	for _, lang := range langs {

@@ -84,6 +84,19 @@ func (hh *HostHandler) addHandlerAndRegister(
 	}
 
 	finalPath := toFinalPath(basePath)
+	// A text-mime page (KDexPage.MimeType != "") registers at its EXACT
+	// basePath instead of finalPath's trailing-slash + {$} anchor: a client
+	// requesting GET /robots.txt (or any other exact resource name) must get
+	// a 200, not a 307 to /robots.txt/. finalPath's anchor is meant for the
+	// HTML "directory" pages this router otherwise serves (/pricing/,
+	// /pricing/{$}) and stays exactly as-is for those. regPath is what
+	// actually gets registered below; finalPath is kept alongside it because
+	// the default-language redirect target still needs the canonical
+	// (non-text) form for HTML pages -- see its use further down.
+	regPath := finalPath
+	if pr.ph.Page != nil && pr.ph.Page.MimeType != "" {
+		regPath = basePath
+	}
 	label := pr.ph.Label()
 
 	// regFunc registers OpenAPI docs for one concrete route. lang is the
@@ -198,8 +211,8 @@ func (hh *HostHandler) addHandlerAndRegister(
 		handler := hh.pageHandlerFunc(pr.ph, translations, lang)
 
 		if lang.String() == hh.defaultLanguage {
-			if registerIfNew("GET "+finalPath, handler) {
-				regFunc(finalPath, pr.ph.Name, label, false, "")
+			if registerIfNew("GET "+regPath, handler) {
+				regFunc(regPath, pr.ph.Name, label, false, "")
 			}
 			if patternPath != "" {
 				if registerIfNew("GET "+patternPath, handler) {
@@ -214,7 +227,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			defaultPrefix := "/" + lang.String()
 			redirectHandler := defaultLangRedirectHandler(defaultPrefix)
 
-			prefixedFinalPath := defaultPrefix + finalPath
+			prefixedFinalPath := defaultPrefix + regPath
 			if registerIfNew("GET "+prefixedFinalPath, redirectHandler) {
 				regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 			}
@@ -231,7 +244,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			continue
 		}
 
-		prefixedFinalPath := "/" + lang.String() + finalPath
+		prefixedFinalPath := "/" + lang.String() + regPath
 		if registerIfNew("GET "+prefixedFinalPath, handler) {
 			regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 		}

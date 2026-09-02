@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package host
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -18,6 +19,17 @@ import (
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
+
+// withText sets MimeType and Body on the spec built by registerPageForTest,
+// exercising a text-mime KDexPage (task 3.2) the same way withLocalizedFalse
+// exercises Localized. Missing from enumerated_l10n_test.go's helper set
+// until now -- added here since it is textpage-specific.
+func withText(mime string, body string) pageSpecOption {
+	return func(spec *kdexv1alpha1.KDexPageSpec) {
+		spec.MimeType = mime
+		spec.Body = body
+	}
+}
 
 // textPageForTest builds a minimal page.PageHandler for a text-mime KDexPage
 // -- MimeType + Body set, no archetype/header/footer/navigation content --
@@ -81,4 +93,28 @@ func TestL10nRenderText_TranslatesAndOmitsChrome(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "KnowDrive — the knowledge engine", out)
 	require.NotContains(t, out, "<html", "text render must not wrap in archetype HTML")
+}
+
+// TestTextPage_ExactPathNoRedirect is the RED/GREEN pin for task 3.2: a
+// text-mime KDexPage must register at its EXACT basePath -- no
+// toFinalPath trailing-slash + {$} anchor -- so GET /robots.txt serves
+// directly instead of 307-redirecting to /robots.txt/.
+func TestTextPage_ExactPathNoRedirect(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.registerPageForTest(t, "robots", "/robots.txt", withText("txt", "ok"), withLocalizedFalse())
+	rr := doRequest(t, hh.currentMux(t), "GET", "/robots.txt")
+	require.Equal(t, http.StatusOK, rr.Code) // NOT 307
+	require.Empty(t, rr.Header().Get("Location"))
+}
+
+// TestTextPage_ServesBodyWithContentType is the deferred end-to-end pin from
+// task 3.1: with exact-path registration (task 3.2) landed, GET /robots.txt
+// serves the rendered body with the mapped Content-Type.
+func TestTextPage_ServesBodyWithContentType(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.registerPageForTest(t, "robots", "/robots.txt", withText("txt", "ok"), withLocalizedFalse())
+	rr := doRequest(t, hh.currentMux(t), "GET", "/robots.txt")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "text/plain; charset=utf-8", rr.Header().Get("Content-Type"))
+	require.Equal(t, "ok", rr.Body.String())
 }
