@@ -168,6 +168,23 @@ func TestDefaultLanguagePrefixRedirectsToBare(t *testing.T) {
 	require.Equal(t, "/pricing/", rr.Header().Get("Location"))
 }
 
+// TestUnknownRootIs404NeverBadRequest is the end-to-end guard for #137/#177:
+// with the /{l10n} wildcard removed (task 2.1), an unregistered root path --
+// whether it simply has no page (/robots.txt, /sitemap.xml) or names an
+// unsupported language prefix (/xx/pricing) -- must fall through to the
+// mux's default not-found handling (404), never get swallowed into a 400.
+func TestUnknownRootIs404NeverBadRequest(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.registerPageForTest(t, "pricing", "/pricing")
+	mux := hh.currentMux(t) // mux + Go's built-in not-found fallthrough
+
+	for _, p := range []string{"/robots.txt", "/sitemap.xml", "/xx/pricing"} {
+		rr := doRequest(t, mux, "GET", p)
+		require.NotEqual(t, http.StatusBadRequest, rr.Code, "%s must never be 400", p)
+		require.Equal(t, http.StatusNotFound, rr.Code, "%s should be 404", p)
+	}
+}
+
 // TestLocalizedFalse_BareOnly is the RED/GREEN pin for task 2.3: a page with
 // Localized:false must register only the bare (default-language) route --
 // neither a non-default "/<lang>/..." twin nor the default-language
