@@ -45,6 +45,15 @@ func patternRegistered(mux *http.ServeMux, pattern string) bool {
 	return matched == pattern
 }
 
+// isLocalized reports whether a page should register its per-language
+// enumerated routes (the non-default "/<lang>/..." twins and the
+// default-language "/<default>/..." redirect). A nil Localized (the CRD's
+// default, "" -> true) or an explicit *true means localized; only an
+// explicit *false opts a page out to a bare-path-only registration.
+func isLocalized(b *bool) bool {
+	return b == nil || *b
+}
+
 // defaultLangRedirectHandler returns a handler that 301-redirects a request
 // under the default language's own literal prefix (e.g. "/en/pricing/") to
 // the canonical bare path ("/pricing/"), by trimming barePath -- the
@@ -164,8 +173,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 	}()
 
 	patternPath := ""
+	localized := true
 	if pr.ph.Page != nil {
 		patternPath = pr.ph.Page.PatternPath
+		localized = isLocalized(pr.ph.Page.Localized)
 	}
 
 	// One literal prefix per supported language, replacing the /{l10n}
@@ -177,6 +188,12 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// canonical bare path (see defaultLangRedirectHandler) rather than a
 	// second copy of the page, so /en/pricing/ canonicalizes to /pricing/
 	// instead of existing under two indexable URLs.
+	//
+	// All of that -- the non-default "/<lang>/..." twins AND the
+	// default-language redirect -- is per-language enumeration and is gated
+	// behind localized (KDexPage.Localized, default true). A page with
+	// Localized:false registers only the bare default-language route below,
+	// unconditionally, on every pass through the loop.
 	for _, lang := range translations.Languages() {
 		handler := hh.pageHandlerFunc(pr.ph, translations, lang)
 
@@ -188,6 +205,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 				if registerIfNew("GET "+patternPath, handler) {
 					regFunc(patternPath, pr.ph.Name, label, true, "")
 				}
+			}
+
+			if !localized {
+				continue
 			}
 
 			defaultPrefix := "/" + lang.String()
@@ -203,6 +224,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 					regFunc(prefixedPatternPath, pr.ph.Name, label, true, lang.String())
 				}
 			}
+			continue
+		}
+
+		if !localized {
 			continue
 		}
 

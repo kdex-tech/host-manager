@@ -56,19 +56,38 @@ func newTestHostHandler(t *testing.T, defaultLang string, langs []string) *HostH
 	return hh
 }
 
+// pageSpecOption mutates a KDexPageSpec built by registerPageForTest, letting
+// individual tests opt into non-default spec fields (e.g. Localized) without
+// widening registerPageForTest's required parameter list.
+type pageSpecOption func(*kdexv1alpha1.KDexPageSpec)
+
+// withLocalizedFalse sets Localized to a pointer to false, exercising the
+// "not localized" branch of addHandlerAndRegister (task 2.3).
+func withLocalizedFalse() pageSpecOption {
+	f := false
+	return func(spec *kdexv1alpha1.KDexPageSpec) {
+		spec.Localized = &f
+	}
+}
+
 // registerPageForTest builds a minimal page.PageHandler for name/basePath and
 // runs it through addHandlerAndRegister against a fresh mux, stashing the
 // result on hh.Mux for currentMux to return.
-func (hh *HostHandler) registerPageForTest(t *testing.T, name string, basePath string) {
+func (hh *HostHandler) registerPageForTest(t *testing.T, name string, basePath string, opts ...pageSpecOption) {
 	t.Helper()
+
+	spec := &kdexv1alpha1.KDexPageSpec{
+		Label: name,
+		Paths: kdexv1alpha1.Paths{BasePath: basePath},
+	}
+	for _, opt := range opts {
+		opt(spec)
+	}
 
 	ph := page.PageHandler{
 		Name:         name,
 		MainTemplate: "<html><body>" + name + "</body></html>",
-		Page: &kdexv1alpha1.KDexPageSpec{
-			Label: name,
-			Paths: kdexv1alpha1.Paths{BasePath: basePath},
-		},
+		Page:         spec,
 	}
 
 	mux := http.NewServeMux()
@@ -147,4 +166,18 @@ func TestDefaultLanguagePrefixRedirectsToBare(t *testing.T) {
 	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/") // en == default
 	require.Equal(t, http.StatusMovedPermanently, rr.Code)
 	require.Equal(t, "/pricing/", rr.Header().Get("Location"))
+}
+
+// TestLocalizedFalse_BareOnly is the RED/GREEN pin for task 2.3: a page with
+// Localized:false must register only the bare (default-language) route --
+// neither a non-default "/<lang>/..." twin nor the default-language
+// "/<default>/..." redirect that a localized page gets (task 2.2).
+func TestLocalizedFalse_BareOnly(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.registerPageForTest(t, "pricing", "/pricing", withLocalizedFalse())
+	mux := hh.currentMux(t)
+
+	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}") // bare still registers
+	assertNoPattern(t, mux, "GET /fr/pricing/{$}")                // no non-default localized twin
+	assertNoPattern(t, mux, "GET /en/pricing/{$}")                // no default-language redirect either
 }
