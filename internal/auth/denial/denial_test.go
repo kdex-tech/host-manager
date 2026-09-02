@@ -152,19 +152,48 @@ func TestWriteUnauthenticatedOAuth2UsesResourceMetadataAndNoErrorParam(t *testin
 	}
 }
 
-func TestWriteNoIdentityIs403WithoutChallenge(t *testing.T) {
+// #194: NoIdentity on an oauth2-protected resource is a caller who presented a
+// valid credential but lacks the identity-gate scope -- and that scope is
+// exactly what the resource's own RFC 9728 document advertises, so the
+// authorization server can grant it. Withholding the challenge here was a
+// regression against v0.7.1 that left an OAuth/MCP client a dead end. When the
+// operation scope equals the identity gate -- the natural authoring choice, and
+// what the functions:<basePath>:read convention encourages -- every scoped
+// denial routes through NoIdentity and InsufficientScope becomes structurally
+// unreachable, so this branch is the only one that can carry the step-up.
+func TestWriteNoIdentityOAuth2EmitsInsufficientScopeChallenge(t *testing.T) {
 	rr := httptest.NewRecorder()
-	Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/x", nil), Opts{
+	Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/mcp", nil), Opts{
 		Outcome:          NoIdentity,
 		Issuer:           "https://example.test",
-		ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/x",
+		ResourceMetadata: "https://example.test/.well-known/oauth-protected-resource/api/v1/mcp",
 		Scopes:           []string{"users:*:admin"},
 	})
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
+	want := `Bearer error="insufficient_scope", scope="users:*:admin", ` +
+		`resource_metadata="https://example.test/.well-known/oauth-protected-resource/api/v1/mcp"`
+	if got := rr.Header().Get("WWW-Authenticate"); got != want {
+		t.Fatalf("challenge = %q, want %q: an oauth2 NoIdentity caller can step up to the gate scope the AS grants", got, want)
+	}
+}
+
+// A non-oauth2 resource has no RFC 9728 document and no authorization server to
+// step up to, so the NoIdentity outcome stays a bare 403:
+// naming a scope would imply a scope would fix it, and none would.
+func TestWriteNoIdentityNonOAuth2Is403WithoutChallenge(t *testing.T) {
+	rr := httptest.NewRecorder()
+	Write(rr, httptest.NewRequest(http.MethodGet, "/api/v1/x", nil), Opts{
+		Outcome: NoIdentity,
+		Issuer:  "https://example.test",
+		Scopes:  []string{"users:*:admin"},
+	})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rr.Code)
+	}
 	if got := rr.Header().Get("WWW-Authenticate"); got != "" {
-		t.Fatalf("challenge = %q, want none: naming a scope implies a scope would fix it", got)
+		t.Fatalf("challenge = %q, want none for a non-oauth2 resource", got)
 	}
 }
 

@@ -2,16 +2,22 @@
 //
 // One question — "may this caller have this?" — gets one answer shape:
 //
-//	no credential presented            -> 401 + WWW-Authenticate
-//	credential, fails the identity gate -> 403, no challenge
-//	credential, fails the requirement   -> 403 + insufficient_scope,
-//	                                       when oauth2-protected
+//	no credential presented                -> 401 + WWW-Authenticate
+//	credential, fails identity or the scope -> 403 + insufficient_scope,
+//	                                           when oauth2-protected
 //
-// The qualifier on the third row is load-bearing: Write emits the
-// insufficient_scope challenge only when Opts.ResourceMetadata is set,
-// because RFC 6750 is an OAuth 2.0 bearer-token spec and there is no
-// resource metadata to point a client at otherwise. A non-oauth2 resource
-// gets the bare 403 of the second row.
+// The qualifier is load-bearing: Write emits the insufficient_scope
+// challenge only when Opts.ResourceMetadata is set, because RFC 6750 is an
+// OAuth 2.0 bearer-token spec and there is no resource metadata to point a
+// client at otherwise. A non-oauth2 resource gets a bare 403.
+//
+// The two ways to fail a 403 — NoIdentity (fails the identity gate) and
+// InsufficientScope (clears identity, fails the requirement) — stay distinct
+// OUTCOMES for logs and metrics but render identically: on an oauth2 resource
+// the client's fix is the same either way, so both carry the step-up. Emitting
+// the challenge from NoIdentity too closed a regression (#194) where an
+// under-scoped oauth2 client lost its discovery pointer whenever the operation
+// scope equalled the identity gate.
 //
 // No status is ever chosen to conceal that a resource exists. The
 // anti-enumeration 404 this replaces concealed nothing: /-/openapi serves
@@ -46,7 +52,7 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
-// Outcome is which of the three contract rows a denial fell into.
+// Outcome is which of the three contract outcomes a denial fell into.
 type Outcome int
 
 const (
@@ -234,10 +240,14 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 		}
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 
-	case InsufficientScope:
-		// RFC 6750 3.1 defines insufficient_scope as a 403 that still
-		// carries a challenge, which is what gives a client a step-up path
-		// instead of a dead end.
+	case InsufficientScope, NoIdentity:
+		// Both render identically: the RFC 6750 insufficient_scope step-up
+		// challenge on an oauth2-protected resource (o.ResourceMetadata != ""),
+		// a bare 403 otherwise. They remain distinct outcomes -- Classify
+		// separates them, String() names them -- but from an oauth2 client's
+		// side the fix is the same either way. The package doc carries the full
+		// rationale: why NoIdentity now carries the challenge (#194, a
+		// regression against v0.7.1) and why a non-oauth2 resource stays bare.
 		if o.ResourceMetadata != "" {
 			c := `Bearer error="insufficient_scope"`
 			if scope := safeScope(o.Scopes); scope != "" {
@@ -250,9 +260,11 @@ func Write(w http.ResponseWriter, r *http.Request, o Opts) {
 		}
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 
-	default: // NoIdentity
-		// No challenge: the caller cannot address the resource at all, so
-		// naming a scope would imply a scope would fix it.
+	default:
+		// A defensive bare 403 for an Outcome outside the closed set above.
+		// Unreachable today -- Classify only ever returns the three outcomes -- but a
+		// deny is the safe rendering of an unknown verdict, and it preserves
+		// the pre-#194 behaviour for this branch exactly.
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 	}
 }

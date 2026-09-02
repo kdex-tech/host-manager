@@ -118,7 +118,7 @@ distinction the skill says causes the most confusion is nearly free.
 | caller state | outcome | status | `WWW-Authenticate` |
 |---|---|---|---|
 | no credential presented | `Unauthenticated` | **401** | `Bearer realm="<issuer>"`, or `Bearer resource_metadata="<issuer>/.well-known/oauth-protected-resource<basePath>"` when the resource is oauth2-protected |
-| credential present, fails the identity gate | `NoIdentity` | **403** | none |
+| credential present, fails the identity gate | `NoIdentity` | **403** | `Bearer error="insufficient_scope", scope="<required scopes>"` when oauth2-protected (#194 — see note 3) |
 | credential present, passes identity, fails the requirement | `InsufficientScope` | **403** | `Bearer error="insufficient_scope", scope="<required scopes>"` when oauth2-protected |
 
 **No status is ever chosen to conceal.** Concealment is retired as a posture.
@@ -137,8 +137,17 @@ Three RFC details that make this precise rather than approximate:
    MCP client its step-up path: it gets the required scope by name instead of a
    dead end. `oauth2ProtectedResources()` already computes the de-duplicated
    scope union per basePath, so the `scope=` value costs nothing to produce.
-3. **`NoIdentity` carries no challenge.** The caller cannot address the resource
-   at all; naming a scope would imply a scope would fix it.
+3. **`NoIdentity` carries the same step-up challenge as `InsufficientScope` on
+   an oauth2 resource, and none otherwise (#194).** The two 403 outcomes stay
+   distinct for logs and metrics but render identically: on an oauth2 resource
+   the client's fix is the same either way — request the scope the resource's own
+   RFC 9728 document names. Withholding it from `NoIdentity` was a regression
+   against v0.7.1: when the operation scope equals the identity gate (the
+   `functions:<basePath>:read` authoring convention), every scoped denial routes
+   through `NoIdentity` and `InsufficientScope` is structurally unreachable, so
+   `NoIdentity` is the only row that can carry the step-up. A non-oauth2 resource
+   has no metadata document and no authorization server to step up to, so it
+   keeps the bare 403 — naming a scope would imply a scope would fix it.
 
 ### A fault is not a fourth row
 

@@ -99,3 +99,51 @@ func TestInsufficientScopeChallengeAtTheProxyGate(t *testing.T) {
 		t.Fatalf("challenge = %q, want the RFC 9728 resource_metadata pointer", got)
 	}
 }
+
+// TestNoIdentityChallengeAtTheProxyGate is the gate-level guard for #194: an
+// authenticated caller who FAILS the identity gate on an oauth2-protected
+// resource must still receive the RFC 9728 step-up challenge, not the bare 403
+// v0.8.0 regressed to. Like TestInsufficientScopeChallengeAtTheProxyGate, it
+// proves the CALL SITE populates Opts.ResourceMetadata/Scopes on the NoIdentity
+// path -- a hand-built Opts unit test in internal/auth/denial cannot catch a
+// call site that passes neither, which is exactly how #194 shipped.
+//
+// The operation scope here IS the identity gate (functions:<basePath>:read --
+// the authoring convention). That collapses InsufficientScope into
+// unreachability, so every scoped denial arrives as NoIdentity and this branch
+// is the only one that can carry the client's step-up.
+func TestNoIdentityChallengeAtTheProxyGate(t *testing.T) {
+	const (
+		domain   = "dev.knowdrive.ai"
+		basePath = "/api/v1/mcp"
+		gate     = "functions:/api/v1/mcp:read"
+	)
+
+	h := insufficientScopeFixture(t, domain, basePath, gate)
+
+	req := httptest.NewRequest(http.MethodPost, basePath, strings.NewReader("{}"))
+	req.Host = domain
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		// A real subject, but holding nothing -- fails the identity gate.
+		"sub": "mcp-carol",
+	}))
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a credential that fails the identity gate", rr.Code)
+	}
+
+	got := rr.Header().Get("WWW-Authenticate")
+	if !strings.Contains(got, `error="insufficient_scope"`) {
+		t.Fatalf("challenge = %q, want error=\"insufficient_scope\": #194 restores the step-up path an "+
+			"under-scoped oauth2 caller lost", got)
+	}
+	if !strings.Contains(got, `scope="`+gate+`"`) {
+		t.Fatalf("challenge = %q, want scope=%q naming the gate scope the AS can grant", got, gate)
+	}
+	if !strings.Contains(got, `resource_metadata="https://`+domain+`/.well-known/oauth-protected-resource`+basePath+`"`) {
+		t.Fatalf("challenge = %q, want the RFC 9728 resource_metadata pointer", got)
+	}
+}
