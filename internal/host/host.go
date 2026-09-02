@@ -213,17 +213,29 @@ func (hh *HostHandler) IsAuthEnabled() bool {
 	return hh.authConfig != nil && hh.authConfig.IsAuthEnabled()
 }
 
-func (hh *HostHandler) L10nRender(
+// l10nRenderer builds the render.Renderer fields shared by every l10n render
+// path. The [[ ]]-delimited template's translation FuncMap (render.go's
+// funcs["l10n"]) is driven by MessagePrinter, and every render -- whether it
+// produces a full archetype-wrapped HTML page (L10nRender) or a bare page
+// body (L10nRenderText) -- needs the same language details behind it plus
+// the same base host/page details.
+//
+// Chrome-specific fields (Theme, Contents, Footer, Header, Navigations,
+// TemplateContent, FootScript, HeadScript, Meta) are deliberately NOT set
+// here: L10nRender adds those on top for the HTML path. L10nRenderText
+// leaves them at their zero value, so TemplateData() renders each as an
+// empty string instead of pulling a header/footer/nav/theme template into a
+// text page's output.
+func (hh *HostHandler) l10nRenderer(
 	handler page.PageHandler,
 	pageMap map[string]any,
 	l language.Tag,
 	extraTemplateData map[string]any,
 	translations *Translations,
-) (string, error) {
-
+) render.Renderer {
 	// make sure everything passed to the renderer is mutation safe (i.e. copy it)
 
-	renderer := render.Renderer{
+	return render.Renderer{
 		Extra:   maps.Clone(extraTemplateData),
 		PageMap: maps.Clone(pageMap),
 
@@ -237,26 +249,65 @@ func (hh *HostHandler) L10nRender(
 		BrandName:    hh.getBrandName(),
 		LastModified: hh.reconcileTime,
 		Organization: hh.getOrganization(),
-		Theme:        hh.ThemeAssetsToString(),
 
 		// page details
-		BasePath:        handler.BasePath(),
-		Contents:        handler.ContentToHTMLMap(),
-		Footer:          handler.Footer,
-		Header:          handler.Header,
-		Navigations:     handler.NavigationToHTMLMap(),
-		PatternPath:     handler.PatternPath(),
-		TemplateContent: handler.MainTemplate,
-		TemplateName:    handler.Name,
-		Title:           handler.Label(),
-
-		// combined details
-		FootScript: hh.FootScriptToHTML(handler),
-		HeadScript: hh.HeadScriptToHTML(handler),
-		Meta:       hh.MetaToString(handler, l),
+		BasePath:     handler.BasePath(),
+		PatternPath:  handler.PatternPath(),
+		TemplateName: handler.Name,
+		Title:        handler.Label(),
 	}
+}
+
+func (hh *HostHandler) L10nRender(
+	handler page.PageHandler,
+	pageMap map[string]any,
+	l language.Tag,
+	extraTemplateData map[string]any,
+	translations *Translations,
+) (string, error) {
+	renderer := hh.l10nRenderer(handler, pageMap, l, extraTemplateData, translations)
+
+	// chrome: only the full-HTML render assembles the archetype's
+	// header/footer/navigation/theme/head+foot script slots.
+	renderer.Theme = hh.ThemeAssetsToString()
+	renderer.Contents = handler.ContentToHTMLMap()
+	renderer.Footer = handler.Footer
+	renderer.Header = handler.Header
+	renderer.Navigations = handler.NavigationToHTMLMap()
+	renderer.TemplateContent = handler.MainTemplate
+	renderer.FootScript = hh.FootScriptToHTML(handler)
+	renderer.HeadScript = hh.HeadScriptToHTML(handler)
+	renderer.Meta = hh.MetaToString(handler, l)
 
 	return renderer.RenderPage()
+}
+
+// L10nRenderText renders a text-mime KDexPage's body (ph.Page.Body) through
+// the same [[ ]] Go-template + l10n translation pipeline L10nRender uses --
+// same FuncMap, same MessagePrinter, built by the shared l10nRenderer -- but
+// executes ONLY the body as the top-level template, with none of
+// L10nRender's archetype/header/footer/navigation chrome assembled around
+// it. TemplateData() still runs (it renders the untouched chrome fields to
+// empty strings), which is what keeps this a thin wrapper around the same
+// pipeline rather than a parallel one.
+func (hh *HostHandler) L10nRenderText(
+	ph page.PageHandler,
+	lang language.Tag,
+	translations *Translations,
+) (string, error) {
+	renderer := hh.l10nRenderer(ph, nil, lang, map[string]any{}, translations)
+
+	templateData, err := renderer.TemplateData()
+	if err != nil {
+		return "", err
+	}
+
+	var body string
+	if ph.Page != nil {
+		body = ph.Page.Body
+	}
+
+	return renderer.RenderOne(ph.Name+"-body", body, templateData)
 }
 
 func (hh *HostHandler) L10nRenders(

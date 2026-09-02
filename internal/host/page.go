@@ -186,6 +186,30 @@ func (hh *HostHandler) pageHandlerFunc(
 
 		cacheKey := ph.CacheKey(l)
 
+		// A non-empty spec.mimeType marks this as a text-mime KDexPage: its
+		// Body renders through L10nRenderText -- the l10n engine alone, none
+		// of the archetype/header/footer/navigation chrome an HTML page
+		// gets -- and is served with the mapped Content-Type instead of the
+		// hardcoded "text/html" (serveRendered). Both kinds share the same
+		// pageCache / cacheKey / hit-or-miss structure below; only the
+		// render + serve calls differ, so those are the only branch points.
+		isTextPage := ph.Page != nil && ph.Page.MimeType != ""
+
+		renderPage := func(p page.PageHandler, lang language.Tag, trans *Translations) (string, error) {
+			if isTextPage {
+				return hh.L10nRenderText(p, lang, trans)
+			}
+			return hh.L10nRender(p, nil, lang, map[string]any{}, trans)
+		}
+
+		servePage := func(rendered string) {
+			if isTextPage {
+				hh.serveText(w, log, l, ph.Name, rendered, contentTypeFor(ph.Page.MimeType))
+				return
+			}
+			hh.serveRendered(w, log, l, ph.Name, rendered)
+		}
+
 		rendered, ok, isCurrent, err := pageCache.Get(r.Context(), cacheKey)
 		if err != nil {
 			log.Error(err, "failed to get from cache", "page", ph.Name, "language", l)
@@ -207,7 +231,7 @@ func (hh *HostHandler) pageHandlerFunc(
 					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 
-					newRender, err := hh.L10nRender(p, nil, lang, map[string]any{}, trans)
+					newRender, err := renderPage(p, lang, trans)
 					if err == nil {
 						_ = pageCache.Set(bgCtx, cacheKey, newRender)
 					} else {
@@ -219,12 +243,12 @@ func (hh *HostHandler) pageHandlerFunc(
 			log.V(2).Info("serving from cache", "page", ph.Name, "lang", l)
 
 			// Serve the cached content (Current or Stale)
-			hh.serveRendered(w, log, l, ph.Name, rendered)
+			servePage(rendered)
 			return
 		}
 
 		// 2. Cache Miss: Synchronous Render
-		rendered, err = hh.L10nRender(ph, nil, l, map[string]any{}, translations)
+		rendered, err = renderPage(ph, l, translations)
 		if err != nil {
 			log.Error(err, "failed to render page", "page", ph.Name, "language", l)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -236,7 +260,7 @@ func (hh *HostHandler) pageHandlerFunc(
 			log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
 		}
 
-		hh.serveRendered(w, log, l, ph.Name, rendered)
+		servePage(rendered)
 	}
 }
 
@@ -245,6 +269,17 @@ func (hh *HostHandler) serveRendered(w http.ResponseWriter, log logr.Logger, l l
 	log.V(1).Info("serving", "page", name, "language", l)
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
+	if _, err := w.Write([]byte(rendered)); err != nil {
+		log.Error(err, "failed to write response", "page", name, "language", l)
+	}
+}
+
+// serveText mirrors serveRendered for a text-mime KDexPage: it sets the
+// mapped Content-Type (contentTypeFor) instead of hardcoding "text/html".
+func (hh *HostHandler) serveText(w http.ResponseWriter, log logr.Logger, l language.Tag, name string, rendered string, contentType string) {
+	log.V(1).Info("serving", "page", name, "language", l, "contentType", contentType)
+	w.Header().Set("Content-Language", l.String())
+	w.Header().Set("Content-Type", contentType)
 	if _, err := w.Write([]byte(rendered)); err != nil {
 		log.Error(err, "failed to write response", "page", name, "language", l)
 	}
