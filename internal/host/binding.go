@@ -178,6 +178,54 @@ func resolveBinding(r *http.Request, pattern string, spec bindingSpec, keys []st
 	return b
 }
 
+// bindFailureIsClientError classifies an ErrUnboundPlaceholder from
+// BindRequirements as a caller-fixable client error (true) rather than a
+// server-side CR-configuration fault (false).
+//
+// entitlements.ErrUnboundPlaceholder conflates two conditions the gate must
+// answer differently (#195): a placeholder whose declared source is a
+// header/query value the caller simply OMITTED is a client error the caller can
+// fix by re-sending the request (400) -- not a server fault, and answering 500
+// would let an unauthenticated caller drive error-logged 5xx by omitting a
+// header. A placeholder with no source the caller can supply -- undeclared and
+// not a path segment, or declared only from a path that did not match -- is the
+// genuine fault: no request the caller could make would bind it (500).
+//
+// The unbound key is one of `keys` (placeholderKeys) that resolveBinding left
+// absent from `binding`. Pattern-segment placeholders always resolve from the
+// matched path, so an absent key is a spec-declared one; it is caller-fixable
+// exactly when its chain offers a header or query source. The classification is
+// caller-fixable only when EVERY absent key is -- a single unresolvable key
+// means the operator must act, so the whole answer is the fault (500). An empty
+// absent set (the placeholder had no entry in `keys` at all -- undeclared and
+// not in the pattern) is likewise a fault.
+func bindFailureIsClientError(spec bindingSpec, binding entitlements.Binding, keys []string) bool {
+	absent := 0
+	for _, key := range keys {
+		if _, ok := binding[key]; ok {
+			continue
+		}
+		absent++
+		if !hasCallerSuppliableSource(spec[key]) {
+			return false
+		}
+	}
+	return absent > 0
+}
+
+// hasCallerSuppliableSource reports whether a placeholder's source chain offers
+// a value the caller controls per-request (a header or query parameter). A
+// path-only chain, or no chain at all, is not caller-suppliable: the caller
+// cannot change the matched route to bind it.
+func hasCallerSuppliableSource(chain []bindingSource) bool {
+	for _, src := range chain {
+		if src.In == bindingInHeader || src.In == bindingInQuery {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (string, bool) {
 	if chain, ok := spec[key]; ok {
 		for _, src := range chain {

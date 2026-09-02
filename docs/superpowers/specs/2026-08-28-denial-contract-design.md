@@ -222,16 +222,21 @@ oversights:**
 - **`/-/transfer` keeps its uniform 410** (`internal/host/transfer.go:170`). A
   256-bit capability handle appears in no OpenAPI document, so the
   anti-enumeration argument that fails everywhere else genuinely holds here.
-- **The proxy's requirement-binding failure stays a bare 403**
-  (`internal/host/proxy.go:594`), including for an anonymous caller, where the
-  contract's first row would say 401. A bind failure is
-  `entitlements.ErrUnboundPlaceholder`: the CR declared a requirement
-  placeholder this layer cannot supply. That is a **server-side configuration
-  fault, not a statement about the caller's credential** — no credential the
-  caller could present would change the outcome, so telling an anonymous caller
-  to authenticate would send them to fix something that is not theirs to fix.
-  It sits four lines above the contract call and is now commented at the site so
-  it reads as a decision rather than an oversight.
+- **The proxy's requirement-binding failure is classified, not a blanket status
+  (#195).** A bind failure is `entitlements.ErrUnboundPlaceholder`, which covers
+  two conditions the gate must answer differently. A placeholder whose declared
+  source is a header/query value the caller **omitted** is a client error the
+  caller can fix by re-sending — a **400**, logged at `V(1)`; answering 500 there
+  would let an unauthenticated caller drive error-logged 5xx just by omitting a
+  header. A placeholder with **no source the caller can supply** — undeclared and
+  not a path segment, or a path source that did not match — is a genuine
+  server-side CR-configuration fault that no request the caller could make would
+  bind, so it joins the checker-error fault at **500** (proxy-only: the page gate
+  has no per-request bind step, so there is nothing symmetric to change there —
+  see #196). Both were a bare 403 originally, which misattributed an operator's
+  authoring defect to the visitor and, for the caller-omitted case, reported a
+  client error as a denial. `internal/host/binding.go`'s
+  `bindFailureIsClientError` draws the line; `internal/host/proxy.go` acts on it.
 - **`apitokenVerifyHandler` keeps its bare 401** (`internal/host/apitoken.go:537`).
   It is not a gate: it is an *answer* about a token the caller submitted **in the
   request body**, so the 401 reports the verification outcome rather than
@@ -403,7 +408,7 @@ gate with extra steps.
 
 | gate | today | after |
 |---|---|---|
-| function proxy | 404, or 401+challenge if oauth2 | `denial.Write` with the classified outcome; an **errored** check is split out as a 500 |
+| function proxy | 404, or 401+challenge if oauth2 | `denial.Write` with the classified outcome; an **errored** check is split out as a 500, and a **bind failure** as a 400 (caller-omitted source) or 500 (unresolvable placeholder) per #195 |
 | page gate | 302 login / 302 first-authorized / 404 | anonymous + HTML + a login page → 303 login (position unchanged, now `Accept`-conditional); anonymous otherwise → 401; authenticated → 403, rendered to HTML per the knob; an **errored** check is split out as a 500 |
 | sniffer | silent fall-through to 404 | 404 unchanged (a real absence) + `X-KDex-Sniffer-Suppressed: functions:create` |
 | apitoken mint/revoke | 401 / 403 ad hoc | `denial.Write` (already contract-shaped; unified for one vocabulary) |

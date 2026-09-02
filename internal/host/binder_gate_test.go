@@ -126,10 +126,15 @@ func TestGate_BindsPathPlaceholder_DeniesOtherStore(t *testing.T) {
 	assert.False(t, *reached, "upstream must not be reached")
 }
 
-// An unbound placeholder must DENY even for a wildcard holder. Without the
-// bind-error branch this silently admits every wildcard holder, because an
-// unbound placeholder is an ordinary literal and a wildcard matches any literal.
-func TestGate_UnboundPlaceholderDenies(t *testing.T) {
+// A caller who OMITS a declared header/query binding source is making a CLIENT
+// error, not triggering a server fault: the source is declared, the request
+// simply lacks it, and a corrected request (supplying the header) binds. So the
+// gate answers 400 -- NOT the 500 reserved for a genuinely unresolvable
+// placeholder (#195). Answering 500 here would let an unauthenticated caller
+// drive error-logged 5xx just by omitting a header (security review of #195).
+// The security invariant is unchanged: the wildcard holder is refused and the
+// upstream is never reached until the header is supplied.
+func TestGate_UnboundPlaceholder_CallerOmittedSource_Is400(t *testing.T) {
 	fn := &kdexv1alpha1.KDexFunction{
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-ingest", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
@@ -160,13 +165,49 @@ func TestGate_UnboundPlaceholderDenies(t *testing.T) {
 	// the pre-fix belief, this never depends on the placeholder outcome.
 	held := []string{"functions:/api/v1/ingest:all", "vector_stores::all"} // wildcard holder
 
-	code := requestAs(t, h, "POST", "/api/v1/ingest", held, nil) // no header -> unbound
-	assert.Equal(t, http.StatusForbidden, code, "unbound placeholder must hit the bind-error branch (403), not the verify deny (404)")
+	code := requestAs(t, h, "POST", "/api/v1/ingest", held, nil) // no header -> declared source omitted
+	assert.Equal(t, http.StatusBadRequest, code, "a declared header the caller omitted is a client error (400), not a server fault (#195)")
 	assert.False(t, *reached)
 
 	*reached = false
 	code = requestAs(t, h, "POST", "/api/v1/ingest", held, map[string]string{"X-Vector-Store-Id": "vs_abc"})
 	assert.Equal(t, http.StatusOK, code, "a bound header must pass for a wildcard holder")
+}
+
+// A requirement placeholder with NO caller-suppliable source -- here a
+// {vector_store_id} the operation neither declares an x-entitlement-binding for
+// nor exposes as a path segment -- is a genuine server-side CR-configuration
+// fault: no request the caller could make would bind it. That is the 500 case
+// (#195), distinct from the caller-omitted-source 400 above. The header is
+// supplied here precisely to prove it cannot help: with no binding declaring
+// that header, the placeholder stays unbound regardless.
+func TestGate_UnboundPlaceholder_NoSuppliableSource_Is500(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-misconfigured", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: "/api/v1/ingest",
+				Paths: map[string]kdexv1alpha1.PathItem{
+					"/api/v1/ingest": {
+						Post: &runtime.RawExtension{Raw: []byte(`{
+							"operationId": "ingest",
+							"security": [{"bearer": [
+								"functions:/api/v1/ingest:create",
+								"vector_stores:{vector_store_id}:write"
+							]}]
+						}`)},
+					},
+				},
+			},
+		},
+	}
+	h, reached := binderFixture(t, fn)
+	held := []string{"functions:/api/v1/ingest:all", "vector_stores::all"} // wildcard holder
+
+	code := requestAs(t, h, "POST", "/api/v1/ingest", held, map[string]string{"X-Vector-Store-Id": "vs_abc"})
+	assert.Equal(t, http.StatusInternalServerError, code, "a placeholder with no caller-suppliable source is a server fault (500) (#195)")
+	assert.False(t, *reached)
 }
 
 // Additivity: a CR with no {param} must behave exactly as before.

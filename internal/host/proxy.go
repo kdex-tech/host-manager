@@ -586,23 +586,37 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// BindRequirements is a no-op for placeholder-free requirement sets,
 			// so this is safe to call unconditionally -- no guard needed.
 			spec := fh.bindingSpecs[key]
-			binding := resolveBinding(r, pattern, spec, placeholderKeys(spec, pattern))
+			pkeys := placeholderKeys(spec, pattern)
+			binding := resolveBinding(r, pattern, spec, pkeys)
 			boundReqs, bindErr := authChecker.BindRequirements(reqs, binding)
 			if bindErr != nil {
-				log.Error(bindErr, "requirement binding failed; denying",
-					"function", fn.Name, "route", key)
-				// DELIBERATELY OUTSIDE THE DENIAL CONTRACT, and a bare 403
-				// even for an anonymous caller. A bind failure is a
-				// server-side CR-configuration fault
-				// (entitlements.ErrUnboundPlaceholder): the requirement
-				// declares a placeholder this layer cannot supply. It says
-				// nothing about the caller's credential, so the contract's
-				// first row does not apply -- answering 401 would send an
-				// anonymous caller to authenticate in order to fix something
-				// that is not theirs to fix, and no credential they could
-				// present would change the outcome.
+				// ErrUnboundPlaceholder covers two conditions that answer
+				// differently (#195). A placeholder whose declared source is a
+				// header/query value the caller OMITTED is a client error the
+				// caller can fix by re-sending -- a 400, NOT a 500. Answering
+				// 500 here let an unauthenticated caller drive error-logged 5xx
+				// just by omitting a header (a pre-auth 5xx/log amplifier).
+				if bindFailureIsClientError(spec, binding, pkeys) {
+					log.V(1).Info("requirement binding failed: caller omitted a declared source",
+						"function", fn.Name, "route", key)
+					http.Error(w, http.StatusText(http.StatusBadRequest),
+						http.StatusBadRequest)
+					return
+				}
+				// Otherwise it is a genuine server-side CR-configuration fault:
+				// the requirement declares a placeholder no request the caller
+				// could make would bind (undeclared and not a path segment, or a
+				// path source that did not match). It says nothing about the
+				// caller's credential, so -- like the checker-error branch a few
+				// lines below -- it is a 500, not a denial. Rendering it as a 403
+				// misattributed an operator's authoring defect to the visitor and
+				// made it indistinguishable from a genuine denial except by an
+				// incidental missing header.
 				// docs/superpowers/specs/2026-08-28-denial-contract-design.md
-				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				log.Error(bindErr, "requirement binding failed; server fault",
+					"function", fn.Name, "route", key)
+				http.Error(w, http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError)
 				return
 			}
 			reqs = boundReqs
