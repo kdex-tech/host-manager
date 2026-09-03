@@ -729,10 +729,19 @@ func (hh *HostHandler) SetHost(
 	hh.log.V(3).Info("[SetHost] obtained lock")
 
 	hh.checksum = ""
+	// Canonicalize once, here, at the single point hh.defaultLanguage is
+	// set. Every comparison against it (addHandlerAndRegister's and
+	// rebuildMuxSnapshot's `lang.String() == hh.defaultLanguage`, plus the
+	// pre-existing ones in page.go) compares to a language.Tag.String(),
+	// which is always BCP-47-canonicalized (e.g. "en-ca" -> "en-CA"). A
+	// valid-but-non-canonical host.DefaultLang (the platform ships
+	// region-qualified tags like "en-CA") left raw would never equal any
+	// lang.String(), so the bare (unprefixed) route would never register --
+	// a full site-root outage. See kdex-tech/host-manager review Fix 1.
 	if host.DefaultLang != "" {
-		hh.defaultLanguage = host.DefaultLang
+		hh.defaultLanguage = language.Make(host.DefaultLang).String()
 	} else {
-		hh.defaultLanguage = "en"
+		hh.defaultLanguage = language.Make("en").String()
 	}
 	hh.functions = functions
 	hh.host = host

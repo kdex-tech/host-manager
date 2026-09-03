@@ -20,6 +20,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
@@ -34,7 +35,13 @@ func newTestHostHandler(t *testing.T, defaultLang string, langs []string) *HostH
 	cacheManager, err := cache.NewCacheManager("", "test-host", nil)
 	require.NoError(t, err)
 	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
-	hh.defaultLanguage = defaultLang
+	// Canonicalize defaultLang the same way SetHost does (see Fix 1 in
+	// host.go), since this helper is a stand-in for SetHost's assignment of
+	// hh.defaultLanguage -- a raw, non-canonical defaultLang here (e.g.
+	// "en-ca") would never equal translations.Languages()'s
+	// BCP-47-canonicalized lang.String() (e.g. "en-CA") and reproduce the
+	// bare-route outage this helper's callers register against.
+	hh.defaultLanguage = language.Make(defaultLang).String()
 	// pageRequirements (host.go) dereferences hh.host unconditionally; a nil
 	// hh.host (NewHostHandler's default) only bites once a request actually
 	// reaches pageHandlerFunc, which none of the existing enumerated_l10n_test
@@ -176,6 +183,24 @@ func TestDefaultLanguagePrefixRedirectsToBare(t *testing.T) {
 	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/") // en == default
 	require.Equal(t, http.StatusMovedPermanently, rr.Code)
 	require.Equal(t, "/pricing/", rr.Header().Get("Location"))
+}
+
+// TestDefaultLanguageCanonicalization_BareRouteRegisters is the RED/GREEN pin
+// for Fix 1 (CRITICAL): addHandlerAndRegister's language loop decides whether
+// the bare (unprefixed) route registers via
+// `lang.String() == hh.defaultLanguage`. lang comes from
+// translations.Languages(), which is always BCP-47-canonicalized (e.g.
+// "en-ca" -> "en-CA"). If hh.defaultLanguage is left as the raw,
+// non-canonical KDexHostSpec.DefaultLang string, it never equals any
+// lang.String(), so the bare route never registers -- every unprefixed URL
+// 404s, a full site-root outage. A host configured with the valid-but-non-
+// canonical default "en-ca" must still register the bare route.
+func TestDefaultLanguageCanonicalization_BareRouteRegisters(t *testing.T) {
+	hh := newTestHostHandler(t, "en-ca", []string{"en-ca"})
+	hh.registerPageForTest(t, "pricing", "/pricing")
+	mux := hh.currentMux(t)
+
+	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}")
 }
 
 // TestUnknownRootIs404NeverBadRequest is the end-to-end guard for #137/#177:
