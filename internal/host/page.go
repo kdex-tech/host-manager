@@ -280,6 +280,10 @@ func (hh *HostHandler) serveText(w http.ResponseWriter, log logr.Logger, l langu
 	log.V(1).Info("serving", "page", name, "language", l, "contentType", contentType)
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", contentType)
+	// Text pages serve un-escaped operator-authored content at canonical
+	// URLs (e.g. /llms.txt); nosniff stops a browser from MIME-sniffing past
+	// the declared Content-Type.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if _, err := w.Write([]byte(rendered)); err != nil {
 		log.Error(err, "failed to write response", "page", name, "language", l)
 	}

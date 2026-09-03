@@ -149,3 +149,17 @@ func TestTextPage_ServesBodyWithContentType(t *testing.T) {
 	require.Equal(t, "text/plain; charset=utf-8", rr.Header().Get("Content-Type"))
 	require.Equal(t, "ok", rr.Body.String())
 }
+
+// TestTextPage_NoSniffHeader is the RED/GREEN pin for Fix 2 (security R1):
+// serveText serves un-escaped operator-authored content at canonical URLs
+// (e.g. /llms.txt) but, unlike serveRendered's HTML pages which browsers
+// treat as opaque, a text-mime response is a MIME-sniffing target -- so it
+// must carry X-Content-Type-Options: nosniff to stop a browser from
+// second-guessing the declared Content-Type.
+func TestTextPage_NoSniffHeader(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.registerPageForTest(t, "robots", "/robots.txt", withText("txt", "ok"), withLocalizedFalse())
+	rr := doRequest(t, hh.currentMux(t), "GET", "/robots.txt")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
+}
