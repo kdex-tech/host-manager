@@ -251,3 +251,18 @@ func TestOpenAPIOperationIDsAreUnique_AcrossLanguages(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// TestDefaultLanguagePrefixRedirectPreservesQueryString is the RED/GREEN pin
+// for fix M1: the default-language 301 (task 2.2) must carry the request's
+// query string through to the canonicalized Location, the same way
+// TestPageHandlerFunc_LoginReturnPreservesQueryString requires of the login
+// redirect. GET /en/pricing/?tab=x must 301 to /pricing/?tab=x, not drop the
+// query string.
+func TestDefaultLanguagePrefixRedirectPreservesQueryString(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.registerPageForTest(t, "pricing", "/pricing")
+
+	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/?tab=x")
+	require.Equal(t, http.StatusMovedPermanently, rr.Code)
+	require.Equal(t, "/pricing/?tab=x", rr.Header().Get("Location"))
+}

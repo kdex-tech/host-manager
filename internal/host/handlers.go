@@ -64,6 +64,12 @@ func isLocalized(b *bool) bool {
 func defaultLangRedirectHandler(barePath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		target := strings.TrimPrefix(r.URL.Path, barePath)
+		// A canonicalizing 301 must not drop the caller's query string (e.g.
+		// GET /en/pricing/?tab=x should land on /pricing/?tab=x, not
+		// /pricing/) -- precedent: TestPageHandlerFunc_LoginReturnPreservesQueryString.
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	}
 }
