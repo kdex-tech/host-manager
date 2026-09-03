@@ -17,7 +17,6 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/cache"
-	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,8 +98,11 @@ func (hh *HostHandler) registerPageForTest(t *testing.T, name string, basePath s
 	}
 
 	mux := http.NewServeMux()
-	registeredPaths := map[string]ko.PathInfo{}
-	err := hh.addHandlerAndRegister(mux, pageRender{ph: ph}, registeredPaths, &hh.Translations)
+	// Register into hh.registeredPaths (already non-nil from NewHostHandler)
+	// rather than a throwaway local map, so tests that need to inspect the
+	// OpenAPI operations collected for the page (e.g. operationId uniqueness)
+	// can read it back afterward via hh.registeredPaths.
+	err := hh.addHandlerAndRegister(mux, pageRender{ph: ph}, hh.registeredPaths, &hh.Translations)
 	require.NoError(t, err)
 
 	hh.Mux = mux
@@ -205,4 +207,47 @@ func TestLocalizedFalse_BareOnly(t *testing.T) {
 	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}") // bare still registers
 	assertNoPattern(t, mux, "GET /fr/pricing/{$}")                // no non-default localized twin
 	assertNoPattern(t, mux, "GET /en/pricing/{$}")                // no default-language redirect either
+}
+
+// collectOperationIDs walks every OpenAPI GET operation registerPageForTest
+// collected on hh.registeredPaths and returns the list of operationIds, in
+// the same order map iteration happens to produce (order does not matter for
+// the uniqueness assertion below).
+func collectOperationIDs(t *testing.T, hh *HostHandler) []string {
+	t.Helper()
+	var ids []string
+	for path, info := range hh.registeredPaths {
+		for p, item := range info.API.Paths {
+			if item.Get == nil {
+				continue
+			}
+			require.NotEmpty(t, item.Get.OperationID, "path %s (operation %s) has an empty OperationID", path, p)
+			ids = append(ids, item.Get.OperationID)
+		}
+	}
+	return ids
+}
+
+// TestOpenAPIOperationIDsAreUnique_AcrossLanguages is the RED/GREEN pin for
+// fix I1: registering a page with a non-default language (task 2.2's
+// default-language redirect route, plus the non-default language's own
+// literal-prefix route) must not collapse onto the same OperationID. Both
+// used to share the generic "-localized" suffix (e.g. both "/fr/pricing/"
+// and the "/en/pricing/" redirect produced "pricing-localized-get"), which
+// violates OpenAPI 3's document-wide operationId uniqueness requirement and
+// corrupts the /-/openapi artifact the agent-discovery flow keys on.
+func TestOpenAPIOperationIDsAreUnique_AcrossLanguages(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.registerPageForTest(t, "pricing", "/pricing")
+
+	ids := collectOperationIDs(t, hh)
+	// Sanity: the bare default route, the fr twin, and the en redirect are
+	// all present, so this assertion isn't vacuous.
+	require.GreaterOrEqual(t, len(ids), 3, "expected at least 3 registered GET operations, got %v", ids)
+
+	seen := map[string]bool{}
+	for _, id := range ids {
+		require.False(t, seen[id], "duplicate OperationID %q found in %v", id, ids)
+		seen[id] = true
+	}
 }

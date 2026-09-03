@@ -111,7 +111,15 @@ func (hh *HostHandler) addHandlerAndRegister(
 
 		op := &openapi.Operation{
 			Description: fmt.Sprintf("Get HTML for %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
-			OperationID: fmt.Sprintf("%s%s%s-get", n, utils.IfElse(pattern, "-pattern", ""), utils.IfElse(localized, "-localized", "")),
+			// The concrete language (not the generic "localized" bool) makes
+			// this unique: every non-default language's own route AND the
+			// default language's redirect route pass a distinct lang here,
+			// so folding lang in (instead of a shared "-localized" suffix)
+			// keeps operationId unique per OpenAPI 3's document-wide
+			// requirement -- e.g. "pricing-fr-get" vs. the "/en/pricing"
+			// redirect's "pricing-en-get", instead of both colliding on
+			// "pricing-localized-get".
+			OperationID: fmt.Sprintf("%s%s%s-get", n, utils.IfElse(pattern, "-pattern", ""), utils.IfElse(localized, "-"+lang, "")),
 			Parameters:  ko.ExtractParameters(p, "", http.Header{}),
 			Responses: openapi.NewResponses(
 				openapi.WithStatus(200, &openapi.ResponseRef{
