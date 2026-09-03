@@ -283,13 +283,19 @@ func (hh *HostHandler) L10nRender(
 }
 
 // L10nRenderText renders a text-mime KDexPage's body (ph.Page.Body) through
-// the same [[ ]] Go-template + l10n translation pipeline L10nRender uses --
-// same FuncMap, same MessagePrinter, built by the shared l10nRenderer -- but
-// executes ONLY the body as the top-level template, with none of
-// L10nRender's archetype/header/footer/navigation chrome assembled around
-// it. TemplateData() still runs (it renders the untouched chrome fields to
-// empty strings), which is what keeps this a thin wrapper around the same
-// pipeline rather than a parallel one.
+// the same [[ ]]-delimited Go-template + l10n translation pipeline
+// L10nRender uses -- same FuncMap, same MessagePrinter, built by the shared
+// l10nRenderer -- but executes ONLY the body as the top-level template, with
+// none of L10nRender's archetype/header/footer/navigation chrome assembled
+// around it. TemplateData() still runs (it renders the untouched chrome
+// fields to empty strings), which is what keeps this a thin wrapper around
+// the same pipeline rather than a parallel one.
+//
+// Unlike L10nRender, this uses render.Renderer.RenderOneText (text/template)
+// rather than RenderOne (html/template): text-mime bodies (text/plain, json,
+// yaml, markdown, xml) are not HTML, so an interpolated [[ l10n "key" ]]
+// value must come through verbatim -- html/template's auto-escaping would
+// corrupt any &, <, >, or " in a translation or template value.
 func (hh *HostHandler) L10nRenderText(
 	ph page.PageHandler,
 	lang language.Tag,
@@ -307,7 +313,7 @@ func (hh *HostHandler) L10nRenderText(
 		body = ph.Page.Body
 	}
 
-	return renderer.RenderOne(ph.Name+"-body", body, templateData)
+	return renderer.RenderOneText(ph.Name+"-body", body, templateData)
 }
 
 func (hh *HostHandler) L10nRenders(

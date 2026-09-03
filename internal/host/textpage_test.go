@@ -95,6 +95,37 @@ func TestL10nRenderText_TranslatesAndOmitsChrome(t *testing.T) {
 	require.NotContains(t, out, "<html", "text render must not wrap in archetype HTML")
 }
 
+// TestL10nRenderText_DoesNotEscapeHTMLSpecialChars is the RED/GREEN pin for
+// fix I2: L10nRenderText must render ph.Page.Body through
+// render.Renderer.RenderOneText (text/template), NOT RenderOne
+// (html/template), so an interpolated [[ l10n "key" ]] value containing
+// HTML-special characters (&, <, >, ") is served VERBATIM in text/plain,
+// json, and markdown output instead of HTML-entity-escaped.
+func TestL10nRenderText_DoesNotEscapeHTMLSpecialChars(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+
+	translations, err := NewTranslations("en", map[string]kdexv1alpha1.KDexTranslationSpec{
+		"tr-en": {
+			Translations: []kdexv1alpha1.Translation{
+				{Lang: "en", KeysAndValues: map[string]string{"org": `R&D <core> "x"`}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	hh.Translations = *translations
+
+	ph := textPageForTest(t, "llms", "/llms.txt", "txt",
+		`org: [[ l10n "org" ]]`)
+
+	out, err := hh.L10nRenderText(ph, language.Make("en"), &hh.Translations)
+	require.NoError(t, err)
+	require.Equal(t, `org: R&D <core> "x"`, out)
+	require.NotContains(t, out, "&amp;")
+	require.NotContains(t, out, "&lt;")
+	require.NotContains(t, out, "&gt;")
+	require.NotContains(t, out, "&#34;")
+}
+
 // TestTextPage_ExactPathNoRedirect is the RED/GREEN pin for task 3.2: a
 // text-mime KDexPage must register at its EXACT basePath -- no
 // toFinalPath trailing-slash + {$} anchor -- so GET /robots.txt serves
