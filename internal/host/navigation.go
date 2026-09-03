@@ -165,7 +165,10 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 
 	l, err := kdexhttp.GetLang(r, defaultLang, translations.Languages())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// {l10n} here is a caller-supplied API path parameter (unlike page
+		// routes), so a bad/unsupported value is a CLIENT error, never a
+		// server fault. See kdex-tech/host-manager task 4.1.
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

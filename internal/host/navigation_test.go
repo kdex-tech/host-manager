@@ -2,12 +2,15 @@ package host
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message/catalog"
 	corev1 "k8s.io/api/core/v1"
@@ -192,4 +195,44 @@ func TestFirstAuthorizedPage_IsDeterministicWhenWeightsTie(t *testing.T) {
 	}
 
 	assert.Equal(t, "/pricing", first, "a weight tie must break on BasePath")
+}
+
+// registerNavigationForTest builds a mux with only the
+// /-/navigation/{navKey}/{l10n}/{basePathMinusLeadingSlash...} route
+// registered (mirroring registerPageForTest's pattern in
+// enumerated_l10n_test.go, but via navigationHandler directly since
+// NavigationGet's page lookup goes through hh.Pages, not the mux), and adds
+// a page at basePath so NavigationGet's page lookup succeeds before it
+// reaches the language check under test.
+func (hh *HostHandler) registerNavigationForTest(t *testing.T, basePath string) *http.ServeMux {
+	t.Helper()
+
+	hh.Pages.Set(page.PageHandler{
+		Name: "test-page",
+		Page: &kdexv1alpha1.KDexPageSpec{
+			Label: "Test Page",
+			Paths: kdexv1alpha1.Paths{BasePath: basePath},
+		},
+		Navigations: map[string]string{"main": "<ul></ul>"},
+	})
+
+	mux := http.NewServeMux()
+	hh.navigationHandler(mux, map[string]ko.PathInfo{})
+	hh.Mux = mux
+	return mux
+}
+
+// TestNavigationBadLanguageIs400NotServerError is the RED/GREEN pin for task
+// 4.1: {l10n} on the navigation-fragment route is a caller-supplied API path
+// parameter (unlike page routes, which after this plan's earlier tasks no
+// longer parse an arbitrary segment as a language). An unsupported/malformed
+// value is a CLIENT error -- kdexhttp.GetLang's failure must map to 400,
+// never the 500 an out-of-range server fault would imply.
+func TestNavigationBadLanguageIs400NotServerError(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := hh.registerNavigationForTest(t, "/pricing")
+
+	rr := doRequest(t, mux, "GET", "/-/navigation/main/not-a-lang/pricing")
+
+	require.Equal(t, http.StatusBadRequest, rr.Code) // was 500
 }
