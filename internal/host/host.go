@@ -375,6 +375,11 @@ type rebuildSnapshot struct {
 	// hh.functionHandlers with the empty map) from the not-ready case
 	// (don't touch hh.functionHandlers at all).
 	hasFunctionHandlers bool
+	// routeCollisions is this build's page-vs-page route collisions (see
+	// RouteCollision). Always assigned (possibly nil/empty) on every
+	// successful build, so a rebuild that no longer collides clears a
+	// previously-recorded collision instead of leaving it stale.
+	routeCollisions []RouteCollision
 }
 
 func (hh *HostHandler) RebuildMux() {
@@ -390,9 +395,61 @@ func (hh *HostHandler) RebuildMux() {
 	hh.Translations = *snap.translations
 	hh.registeredPaths = snap.registeredPaths
 	hh.Mux = snap.mux
+	hh.routeCollisions = snap.routeCollisions
 	if snap.hasFunctionHandlers {
 		hh.functionHandlers = snap.functionHandlers
 	}
+}
+
+// routeOwner identifies the page that claimed a route pattern: name is the
+// page's unique key in the PageStore, basePath is its configured basePath --
+// both are carried into a RouteCollision so an operator (and a log line) can
+// tell the two pages apart.
+type routeOwner struct {
+	name     string
+	basePath string
+}
+
+// routeRegistry tracks, within one rebuildMuxSnapshot pass, which page owns
+// each registered "METHOD /path" mux pattern. It lets addHandlerAndRegister
+// tell a page re-registering its OWN pattern (idempotent -- e.g. its
+// patternPath happens to equal its regPath) apart from a DIFFERENT page's
+// pattern already claiming the slot -- a genuine collision, and not
+// something the pre-existing patternRegistered probe alone can distinguish.
+type routeRegistry struct {
+	owners     map[string]routeOwner
+	collisions []RouteCollision
+}
+
+func newRouteRegistry() *routeRegistry {
+	return &routeRegistry{owners: map[string]routeOwner{}}
+}
+
+// claimedBy reports the owner of pattern and whether it has one yet.
+func (rr *routeRegistry) claimedBy(pattern string) (routeOwner, bool) {
+	owner, ok := rr.owners[pattern]
+	return owner, ok
+}
+
+// claim records pattern as newly owned by owner. Callers must only call this
+// after confirming (via claimedBy) that pattern is not already owned by a
+// DIFFERENT page -- claim itself does not check, so a collision must be
+// detected and recorded (see recordCollision) before this is reached.
+func (rr *routeRegistry) claim(pattern string, owner routeOwner) {
+	rr.owners[pattern] = owner
+}
+
+// recordCollision appends a RouteCollision for pattern between the existing
+// owner (winner -- it registered first and keeps the route) and loser (the
+// page whose registration was refused).
+func (rr *routeRegistry) recordCollision(pattern string, winner routeOwner, loser routeOwner) {
+	rr.collisions = append(rr.collisions, RouteCollision{
+		Pattern:        pattern,
+		WinnerName:     winner.name,
+		WinnerBasePath: winner.basePath,
+		LoserName:      loser.name,
+		LoserBasePath:  loser.basePath,
+	})
 }
 
 // rebuildMuxSnapshot performs all reads and assembles the new mux under a
@@ -502,10 +559,25 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		}
 	}
 
+	// Deterministic registration order: sort by basePath before registering,
+	// so a page-vs-page route collision (see RouteCollision) always resolves
+	// to the SAME winner across reconciles instead of flipping with Go's
+	// randomized map iteration order over renderedPages (and, upstream,
+	// hh.Pages.List()). The loser is not silently served or silently
+	// dropped -- routeRegistry records it below and rebuildSnapshot carries
+	// it out to hh.RouteCollisions() for the reconciler to surface.
+	sortedBasePaths := make([]string, 0, len(renderedPages))
+	for basePath := range renderedPages {
+		sortedBasePaths = append(sortedBasePaths, basePath)
+	}
+	sort.Strings(sortedBasePaths)
+
 	// Mux mutations happen on local objects (mux + registeredPaths) — no hh
 	// state is touched here, so this can stay under the read lock.
-	for _, pr := range renderedPages {
-		if err := hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations); err != nil {
+	routes := newRouteRegistry()
+	for _, basePath := range sortedBasePaths {
+		pr := renderedPages[basePath]
+		if err := hh.addHandlerAndRegister(mux, pr, registeredPaths, newTranslations, routes); err != nil {
 			hh.log.Error(err, "skipping")
 		}
 	}
@@ -524,6 +596,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		mux:                 mux,
 		functionHandlers:    actualHandlers,
 		hasFunctionHandlers: true,
+		routeCollisions:     routes.collisions,
 	}, true
 }
 

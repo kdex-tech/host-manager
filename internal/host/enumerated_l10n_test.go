@@ -109,7 +109,12 @@ func (hh *HostHandler) registerPageForTest(t *testing.T, name string, basePath s
 	// rather than a throwaway local map, so tests that need to inspect the
 	// OpenAPI operations collected for the page (e.g. operationId uniqueness)
 	// can read it back afterward via hh.registeredPaths.
-	err := hh.addHandlerAndRegister(mux, pageRender{ph: ph}, hh.registeredPaths, &hh.Translations)
+	//
+	// A fresh routeRegistry per call matches this helper's existing
+	// per-call-fresh-mux semantics: no cross-call collision tracking here.
+	// Collision-specific tests build their own shared mux + routeRegistry
+	// directly (see route_collision_test.go) instead of using this helper.
+	err := hh.addHandlerAndRegister(mux, pageRender{ph: ph}, hh.registeredPaths, &hh.Translations, newRouteRegistry())
 	require.NoError(t, err)
 
 	hh.Mux = mux

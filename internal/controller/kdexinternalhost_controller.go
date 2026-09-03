@@ -679,6 +679,9 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			kdexv1alpha1.ConditionReasonReconcileSuccess,
 			"functions registered; waiting for packages image",
 		)
+		// Runs AFTER the SetConditions above so it has the last word on
+		// Degraded specifically -- see setRouteCollisionCondition.
+		r.setRouteCollisionCondition(&internalHost)
 		log.V(1).Info("reconciled; packages image pending")
 		return packagesRequeue, nil
 	}
@@ -693,6 +696,9 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		kdexv1alpha1.ConditionReasonReconcileSuccess,
 		"Reconciliation successful",
 	)
+	// Runs AFTER the SetConditions above so it has the last word on Degraded
+	// specifically -- see setRouteCollisionCondition.
+	r.setRouteCollisionCondition(&internalHost)
 
 	log.V(1).Info("reconciled")
 
@@ -2022,6 +2028,68 @@ func objectStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
 		bc.Conditions[i].LastTransitionTime = metav1.Time{}
 	}
 	return equality.Semantic.DeepEqual(ac, bc)
+}
+
+// routeCollisionConditionReason is the Degraded condition's Reason when
+// setRouteCollisionCondition finds a page-vs-page route collision.
+// ConditionReason has no fixed enum in the CRD schema (see kdex-crds's
+// conditions.go: it is a bare string type checked only against the
+// Kubernetes API convention regex on Reason), so this is a controller-local
+// constant rather than a new kdex-crds constant -- adding one there would
+// mean a kdex-crds release for a reason string this controller alone emits.
+const routeCollisionConditionReason kdexv1alpha1.ConditionReason = "RouteCollision"
+
+// setRouteCollisionCondition surfaces the HostHandler's most recently
+// detected page-vs-page route collisions (host.RouteCollision -- collected
+// during rebuildMuxSnapshot, see internal/host/host.go and handlers.go) as
+// the KDexInternalHost's Degraded condition, so an operator sees the
+// authoring conflict without having to go find the Error-level host-manager
+// log line (registerIfNew, internal/host/handlers.go).
+//
+// Call this AFTER the caller's own kdexv1alpha1.SetConditions for this
+// reconcile outcome (the packagesRequeue branch or the final success branch
+// in Reconcile): passing only Degraded in ConditionStatuses leaves
+// Progressing/Ready untouched (SetConditions skips any "" status), so this
+// call always has the last word on Degraded specifically without disturbing
+// whichever Ready/Progressing state the caller just set.
+//
+// A collision does not fail the reconcile or block Ready: the host is still
+// up and serving every route except the refused loser's page, so Ready
+// continues to reflect that. Degraded is the independent, additional signal
+// that something needs an operator's attention.
+func (r *KDexInternalHostReconciler) setRouteCollisionCondition(internalHost *kdexv1alpha1.KDexInternalHost) {
+	collisions := r.HostHandler.RouteCollisions()
+	if len(collisions) == 0 {
+		kdexv1alpha1.SetConditions(
+			&internalHost.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{Degraded: metav1.ConditionFalse},
+			kdexv1alpha1.ConditionReasonReconcileSuccess,
+			"no route collisions",
+		)
+		return
+	}
+
+	kdexv1alpha1.SetConditions(
+		&internalHost.Status.Conditions,
+		kdexv1alpha1.ConditionStatuses{Degraded: metav1.ConditionTrue},
+		routeCollisionConditionReason,
+		formatRouteCollisions(collisions),
+	)
+}
+
+// formatRouteCollisions renders collisions as a single Degraded-condition
+// message naming every colliding pattern and the two pages fighting over it.
+func formatRouteCollisions(collisions []host.RouteCollision) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d route collision(s) detected; each loser page is unreachable at its colliding pattern: ", len(collisions))
+	for i, c := range collisions {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "%s claimed by page %q (basePath %q), refused for page %q (basePath %q)",
+			c.Pattern, c.WinnerName, c.WinnerBasePath, c.LoserName, c.LoserBasePath)
+	}
+	return b.String()
 }
 
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {

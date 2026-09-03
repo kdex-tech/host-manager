@@ -79,6 +79,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 	pr pageRender,
 	registeredPaths map[string]ko.PathInfo,
 	translations *Translations,
+	routes *routeRegistry,
 ) (err error) {
 	// Snapshot basePath once so every downstream use (finalPath, probe checks,
 	// error messages) reads a consistent value, even if pr.ph's underlying
@@ -176,20 +177,56 @@ func (hh *HostHandler) addHandlerAndRegister(
 		}, registeredPaths)
 	}
 
+	owner := routeOwner{name: pr.ph.Name, basePath: basePath}
+
 	// Defensive idempotency: query the mux state directly before registering,
 	// so duplicate registrations are skipped cleanly instead of panicking
 	// through the recover below. The recover is kept as a safety net for
 	// genuinely invalid patterns (mux.HandleFunc also panics on those).
+	//
+	// A pattern already answered by the mux falls into one of three cases,
+	// told apart via routes (the ownership tracker threaded through this
+	// build's whole page loop, see rebuildMuxSnapshot):
+	//   - no tracked owner: a built-in/system route (muxWithDefaultsLocked)
+	//     already claims it -- pre-existing behavior, unchanged, V(1) log.
+	//   - tracked owner is THIS page: idempotent self-re-registration (e.g.
+	//     patternPath happens to equal regPath) -- not a bug, V(1) log.
+	//   - tracked owner is a DIFFERENT page: a genuine cross-page route
+	//     collision (kdex-tech/host-manager route-collision fix). The
+	//     colliding page's route is refused -- never silently served, never
+	//     silently dropped without a record -- logged at Error and recorded
+	//     on routes for the reconciler to surface as a Degraded condition.
 	registerIfNew := func(pattern string, handler http.HandlerFunc) bool {
-		if patternRegistered(mux, pattern) {
-			hh.log.V(1).Info(
-				"pattern already registered, skipping",
-				"pattern", pattern, "page", pr.ph.Name, "basePath", basePath,
+		if !patternRegistered(mux, pattern) {
+			routes.claim(pattern, owner)
+			mux.HandleFunc(pattern, handler)
+			return true
+		}
+
+		if existingOwner, ok := routes.claimedBy(pattern); ok {
+			if existingOwner == owner {
+				hh.log.V(1).Info(
+					"pattern already registered by this page, skipping",
+					"pattern", pattern, "page", pr.ph.Name, "basePath", basePath,
+				)
+				return false
+			}
+
+			routes.recordCollision(pattern, existingOwner, owner)
+			hh.log.Error(nil,
+				"route collision: refusing to register page's route because another page already claims this pattern",
+				"pattern", pattern,
+				"winnerPage", existingOwner.name, "winnerBasePath", existingOwner.basePath,
+				"loserPage", owner.name, "loserBasePath", owner.basePath,
 			)
 			return false
 		}
-		mux.HandleFunc(pattern, handler)
-		return true
+
+		hh.log.V(1).Info(
+			"pattern already registered, skipping",
+			"pattern", pattern, "page", pr.ph.Name, "basePath", basePath,
+		)
+		return false
 	}
 
 	// capture any panics from invalid patterns

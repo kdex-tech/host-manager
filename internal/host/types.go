@@ -124,10 +124,51 @@ type HostHandler struct {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
 		DocsHandler(http.ResponseWriter, *http.Request)
 	}
+	routeCollisions      []RouteCollision
 	status               *kdexv1alpha1.KDexObjectStatus
 	themeAssets          []kdexv1alpha1.Asset
 	translationResources map[string]kdexv1alpha1.KDexTranslationSpec
 	utilityPages         map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler
+}
+
+// RouteCollision records a page registration refused during the most recent
+// RebuildMux because a DIFFERENT, earlier-claimed page already owns the
+// literal "METHOD /path" ServeMux pattern it wanted.
+//
+// This is the enumerated-per-language-prefix collision class: replacing the
+// old "/{l10n}" wildcard with one literal route per supported language means
+// a page whose basePath equals "/<lang>" (or "/<lang>/...") produces the
+// SAME pattern as another, independently-authored page's own language-
+// prefixed (or bare, for text-mime pages) route. E.g. with "en" (default)
+// and "fr" supported, the home page (basePath "/") registers "GET /fr/{$}"
+// as its French route, and a page at basePath "/fr" wants that exact
+// pattern for its own bare route.
+//
+// The winner is whichever page registration-time ordering (basePath-sorted,
+// see rebuildMuxSnapshot) processes first; the loser's route is refused
+// outright rather than silently served or silently dropped -- see
+// RouteCollisions.
+type RouteCollision struct {
+	// Pattern is the "METHOD /path" ServeMux pattern both pages wanted.
+	Pattern string
+	// WinnerName / WinnerBasePath identify the page that keeps the route.
+	WinnerName     string
+	WinnerBasePath string
+	// LoserName / LoserBasePath identify the page whose registration for
+	// Pattern was refused.
+	LoserName     string
+	LoserBasePath string
+}
+
+// RouteCollisions returns the page-vs-page route collisions detected by the
+// most recent RebuildMux. Empty when none were found. Callers (e.g. the
+// KDexInternalHost reconciler) use this to surface a Degraded status
+// condition -- registration itself never silently serves or drops a
+// colliding route without recording it here.
+func (hh *HostHandler) RouteCollisions() []RouteCollision {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	return slices.Clone(hh.routeCollisions)
 }
 
 type HostStatus string

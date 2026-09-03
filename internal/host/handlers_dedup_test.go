@@ -127,7 +127,7 @@ func TestAddHandlerAndRegister_EmptyBasePathSkipped(t *testing.T) {
 	pr := pageRender{ph: page.PageHandler{Name: "broken"}}
 
 	// We want to verify the early-return guard fires without touching mux.
-	err := hh.addHandlerAndRegister(mux, pr, nil, &hh.Translations)
+	err := hh.addHandlerAndRegister(mux, pr, nil, &hh.Translations, newRouteRegistry())
 	require.NoError(t, err)
 
 	// Probe: no patterns should be attached to mux.
