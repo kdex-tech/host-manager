@@ -56,14 +56,14 @@ func isLocalized(b *bool) bool {
 
 // defaultLangRedirectHandler returns a handler that 301-redirects a request
 // under the default language's own literal prefix (e.g. "/en/pricing/") to
-// the canonical bare path ("/pricing/"), by trimming barePath -- the
+// the canonical bare path ("/pricing/"), by trimming langPrefix -- the
 // "/<default>" prefix itself (e.g. "/en") -- once from the front of
 // r.URL.Path. Trimming the known prefix, rather than string-replacing the
 // language code, keeps a segment like "/en/enterprise/" from being mangled
 // into something other than "/enterprise/".
-func defaultLangRedirectHandler(barePath string) http.HandlerFunc {
+func defaultLangRedirectHandler(langPrefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		target := strings.TrimPrefix(r.URL.Path, barePath)
+		target := strings.TrimPrefix(r.URL.Path, langPrefix)
 		// A canonicalizing 301 must not drop the caller's query string (e.g.
 		// GET /en/pricing/?tab=x should land on /pricing/?tab=x, not
 		// /pricing/) -- precedent: TestPageHandlerFunc_LoginReturnPreservesQueryString.
