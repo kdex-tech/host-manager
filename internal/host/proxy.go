@@ -333,7 +333,10 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// cached grants (membership mutations are rare).
 			if hh.authExchanger != nil &&
 				shouldInvalidateGrants(fn, resp.Request.Method, resp.StatusCode) {
-				hh.authExchanger.BumpGrantGeneration(resp.Request.Context())
+				// The mutation already committed (2xx); use a background context so
+				// this client's disconnect can't cancel the Valkey Set and leave the
+				// invalidation half-applied (#203 review).
+				hh.authExchanger.BumpGrantGeneration(context.Background())
 			}
 			return nil
 		},

@@ -56,7 +56,10 @@ func (e *Exchanger) resolveClaimsDirect(subject string) jwt.MapClaims {
 // skipped; resolve failures fail open to the frozen token; only claims the token
 // was scoped for are overlaid. Results are coalesced in the shared grant cache,
 // keyed by generation so a membership mutation (which bumps the generation)
-// forces a fresh resolve.
+// forces a fresh resolve. On a cache miss the resolve itself is additionally
+// coalesced in-process via a singleflight.Group keyed the same way, so a
+// parallel fan-out of requests for one subject (e.g. a page load right after a
+// generation bump) fires exactly one live resolve instead of one per request.
 func (c *Config) refreshSessionGrants(ac AuthContext, e *Exchanger) {
 	if ac == nil || e == nil {
 		return
@@ -85,38 +88,51 @@ func (c *Config) refreshSessionGrants(ac AuthContext, e *Exchanger) {
 		}
 	}
 
-	// Miss / stale generation: resolve fresh against live membership.
-	roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(subject)
+	// Miss / stale generation: resolve fresh against live membership. Coalesced
+	// per "<generation>|<subject>" so a parallel fan-out of requests from one
+	// subject (e.g. right after a generation bump) collapses to a single live
+	// resolve; each caller still overlays onto its own ac/scope below.
+	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
+		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(subject)
+		if rerr != nil {
+			return nil, rerr // fail open — leave ac as the frozen token carried it
+		}
+		backend := e.resolveClaimsDirect(subject)
+
+		// Mirror the mint-time signing context (subjectSigningContext): roles and
+		// entitlements are always present (empty when none) so the claim-mapping runs
+		// the same way it does at mint. Backend Lookup claims are merged in. Note:
+		// like the Dev-validated reference, this re-derives from internal roles +
+		// backend Lookup and does NOT re-fetch idp-frozen claims (out of scope —
+		// knowdrive derives entitlements from internal roles + backend membership).
+		if roles == nil {
+			roles = []string{}
+		}
+		if ents == nil {
+			ents = []string{}
+		}
+		signingContext := jwt.MapClaims{"sub": subject, "roles": roles, "entitlements": ents}
+		for k, v := range backend {
+			signingContext[k] = v
+		}
+
+		projected, perr := c.Signer.Project(signingContext)
+		if perr != nil {
+			return nil, perr // fail open
+		}
+		if e.grantCache != nil {
+			if payload, merr := json.Marshal(projected); merr == nil {
+				_ = e.grantCache.Set(ctx, key, string(payload))
+			}
+		}
+		return projected, nil
+	})
 	if rerr != nil {
 		return // fail open — leave ac as the frozen token carried it
 	}
-	backend := e.resolveClaimsDirect(subject)
-
-	// Mirror the mint-time signing context (subjectSigningContext): roles and
-	// entitlements are always present (empty when none) so the claim-mapping runs
-	// the same way it does at mint. Backend Lookup claims are merged in. Note:
-	// like the Dev-validated reference, this re-derives from internal roles +
-	// backend Lookup and does NOT re-fetch idp-frozen claims (out of scope —
-	// knowdrive derives entitlements from internal roles + backend membership).
-	if roles == nil {
-		roles = []string{}
-	}
-	if ents == nil {
-		ents = []string{}
-	}
-	signingContext := jwt.MapClaims{"sub": subject, "roles": roles, "entitlements": ents}
-	for k, v := range backend {
-		signingContext[k] = v
-	}
-
-	projected, perr := c.Signer.Project(signingContext)
-	if perr != nil {
+	projected, ok := result.(jwt.MapClaims)
+	if !ok {
 		return // fail open
-	}
-	if e.grantCache != nil {
-		if payload, merr := json.Marshal(projected); merr == nil {
-			_ = e.grantCache.Set(ctx, key, string(payload))
-		}
 	}
 	overlayScopedClaims(ac, projected, scope)
 }

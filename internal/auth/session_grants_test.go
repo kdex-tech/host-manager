@@ -6,6 +6,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,7 +72,27 @@ func (p *changingGrantProvider) ResolveClaims(string) jwt.MapClaims {
 	return jwt.MapClaims{"vs_entitlements": grants}
 }
 
-func newGrantTestSetup(t *testing.T) (*Config, *Exchanger, *changingGrantProvider, *ecdsa.PrivateKey) {
+// countingGrantProvider is a changingGrantProvider variant whose resolve
+// methods atomically count invocations and sleep briefly, so a test can prove
+// concurrent callers collapse into a single live resolve (singleflight, #203)
+// rather than mutating the shared changingGrantProvider stub used elsewhere.
+type countingGrantProvider struct {
+	changingGrantProvider
+	calls atomic.Int64
+	delay time.Duration
+}
+
+func (p *countingGrantProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
+	p.calls.Add(1)
+	if p.delay > 0 {
+		time.Sleep(p.delay)
+	}
+	return p.changingGrantProvider.FindInternalRolesAndEntitlements(subject)
+}
+
+// buildGrantTestConfig builds the shared session-signing Config used by every
+// grant-refresh test, keyed off a fresh EC key pair.
+func buildGrantTestConfig(t *testing.T) (*Config, *ecdsa.PrivateKey) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -92,12 +114,31 @@ func newGrantTestSetup(t *testing.T) (*Config, *Exchanger, *changingGrantProvide
 		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
 		Signer:     *signer,
 	}
+	return cfg, priv
+}
+
+func newGrantTestSetup(t *testing.T) (*Config, *Exchanger, *changingGrantProvider, *ecdsa.PrivateKey) {
+	t.Helper()
+	cfg, priv := buildGrantTestConfig(t)
 	cm, err := cache.NewCacheManager("", "grant-test", nil)
 	require.NoError(t, err)
 	p := &changingGrantProvider{}
 	ex, err := NewExchanger(context.Background(), *cfg, cm, p)
 	require.NoError(t, err)
 	return cfg, ex, p, priv
+}
+
+// newCountingGrantTestSetup is newGrantTestSetup with a countingGrantProvider,
+// for tests that need to observe how many times the live resolve ran.
+func newCountingGrantTestSetup(t *testing.T, delay time.Duration) (*Config, *Exchanger, *countingGrantProvider) {
+	t.Helper()
+	cfg, _ := buildGrantTestConfig(t)
+	cm, err := cache.NewCacheManager("", "grant-coalesce-test", nil)
+	require.NoError(t, err)
+	p := &countingGrantProvider{delay: delay}
+	ex, err := NewExchanger(context.Background(), *cfg, cm, p)
+	require.NoError(t, err)
+	return cfg, ex, p
 }
 
 func TestRefreshSessionGrantsSeesMembershipChanges(t *testing.T) {
@@ -170,4 +211,40 @@ func TestRefreshSessionGrantsCoalescesWithinGeneration(t *testing.T) {
 	cfg.refreshSessionGrants(b, ex)
 	require.Contains(t, b["entitlements"], "vector_stores:a:read")
 	require.NotContains(t, b["entitlements"], "vector_stores:b:read")
+}
+
+// TestRefreshSessionGrantsSingleflightCoalescesConcurrentMisses proves the
+// #203 review fix: a burst of parallel requests for the same subject, all
+// missing the cache at once (e.g. right after a generation bump), collapses
+// into exactly one live resolve instead of firing one per request.
+func TestRefreshSessionGrantsSingleflightCoalescesConcurrentMisses(t *testing.T) {
+	cfg, ex, p := newCountingGrantTestSetup(t, 20*time.Millisecond)
+	p.grants = []string{"vector_stores:a:read"}
+
+	const n = 20
+	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	release := make(chan struct{})
+	results := make([]AuthContext, n)
+
+	ready.Add(n)
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			ac := AuthContext{"sub": "carol", "scope": "entitlements", "entitlements": []any{}}
+			results[i] = ac
+			ready.Done()
+			<-release // all goroutines fire together, guaranteeing overlap in Do
+			cfg.refreshSessionGrants(ac, ex)
+		}(i)
+	}
+	ready.Wait()
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int64(1), p.calls.Load(), "concurrent misses for one subject must coalesce to a single live resolve")
+	for _, ac := range results {
+		require.Contains(t, ac["entitlements"], "vector_stores:a:read")
+	}
 }

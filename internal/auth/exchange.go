@@ -21,6 +21,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -69,6 +70,12 @@ type Exchanger struct {
 	// naturally missed. Both are shared (Valkey) so invalidation is fleet-wide.
 	grantCache    cache.Cache
 	grantGenCache cache.Cache
+	// grantGroup coalesces concurrent miss-path resolves for the same
+	// "<generation>|<subject>" key so a burst of parallel requests from one
+	// subject (e.g. a page's fan-out right after a generation bump) fires a
+	// single live ResolveClaims/Project instead of one per request (#203).
+	// Zero-value singleflight.Group is ready to use.
+	grantGroup    singleflight.Group
 	maxSessionAge time.Duration
 	sp            InternalIdentityProvider
 }
