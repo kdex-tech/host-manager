@@ -504,6 +504,13 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				}
 			}
 
+			// Refresh browser-session grants against live membership so a grant
+			// or revocation takes effect on the next request without a re-login
+			// (#203). Fails open to the frozen token; capability tokens skipped.
+			if authSource == COOKIE && exchanger != nil {
+				c.refreshSessionGrants(authContext, exchanger)
+			}
+
 			// Bounded-use capability tokens carry the CapUsesClaim marker and a
 			// jti-keyed budget. Decrement atomically; reject (fail-closed) when the
 			// counter is missing or exhausted. Ordinary tokens (no marker) are
