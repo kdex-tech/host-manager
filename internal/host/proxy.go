@@ -27,6 +27,24 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// AnnotationInvalidatesGrantsOnWrite marks a KDexFunction whose successful
+// writes mutate membership/role state; host-manager bumps the shared grant
+// generation on such a response so browser sessions re-resolve (#203).
+const AnnotationInvalidatesGrantsOnWrite = "kdex.dev/invalidates-grants-on-write"
+
+// shouldInvalidateGrants reports whether a proxied response should bump the
+// grant generation: a 2xx, state-changing method on a grants-source function.
+func shouldInvalidateGrants(fn *kdexv1alpha1.KDexFunction, method string, status int) bool {
+	if fn == nil || fn.Annotations[AnnotationInvalidatesGrantsOnWrite] != "true" {
+		return false
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return status >= 200 && status < 300
+}
+
 // fatAudienceFor returns the audience to mint a Function Access Token for.
 //
 // For Knative-deployed functions (no Spec.Backend), each function has its
@@ -307,6 +325,15 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// defaults to the domain the user actually visited (your proxy).
 				// You could also explicitly replace it with your proxy's domain.
 				resp.Header["Set-Cookie"][i] = hh.stripCookieDomain(cookie)
+			}
+
+			// #203: a successful membership mutation on a grants-source function
+			// bumps the shared grant generation so browser sessions re-resolve
+			// on their next request. Coarse: any 2xx write invalidates all
+			// cached grants (membership mutations are rare).
+			if hh.authExchanger != nil &&
+				shouldInvalidateGrants(fn, resp.Request.Method, resp.StatusCode) {
+				hh.authExchanger.BumpGrantGeneration(resp.Request.Context())
 			}
 			return nil
 		},
