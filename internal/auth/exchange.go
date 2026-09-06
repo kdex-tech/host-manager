@@ -63,14 +63,26 @@ type Exchanger struct {
 	// PAT/OAuth calls from one subject doesn't hit the backend every time. Short
 	// TTL keeps grants fresh (the point of #138). Keyed by subject.
 	subjectResolveCache cache.Cache
-	maxSessionAge       time.Duration
-	sp                  InternalIdentityProvider
+	// grantCache memoizes projected browser-session grants (#203), keyed by
+	// "<generation>|<subject>". grantGenCache holds the current generation
+	// token; a membership mutation bumps it so stale-generation entries are
+	// naturally missed. Both are shared (Valkey) so invalidation is fleet-wide.
+	grantCache    cache.Cache
+	grantGenCache cache.Cache
+	maxSessionAge time.Duration
+	sp            InternalIdentityProvider
 }
 
 // subjectResolveCacheTTL bounds how stale a bridged caller's re-resolved backend
 // claims can be. Short by design — the whole point of the fresh resolve is that
 // a membership change reflects quickly (unlike a login-time snapshot).
 const subjectResolveCacheTTL = 60 * time.Second
+
+const (
+	sessionGrantTTL = 60 * time.Second
+	grantGenTTL     = 24 * time.Hour
+	grantGenKey     = "current"
+)
 
 // MaxRefreshGraceWindow is the hard ceiling on Config.RefreshGraceWindow.
 // The window exists to absorb the few hundred milliseconds a real client's
@@ -199,6 +211,17 @@ func NewExchanger(
 		srTTL := subjectResolveCacheTTL
 		ex.subjectResolveCache = cacheManager.GetCache("subject-resolve", cache.CacheOptions{
 			TTL:      &srTTL,
+			Uncycled: true,
+		})
+		// Browser-session grant cache + its generation key. See #203.
+		sgTTL := sessionGrantTTL
+		ex.grantCache = cacheManager.GetCache("session-grants", cache.CacheOptions{
+			TTL:      &sgTTL,
+			Uncycled: true,
+		})
+		ggTTL := grantGenTTL
+		ex.grantGenCache = cacheManager.GetCache("session-grant-gen", cache.CacheOptions{
+			TTL:      &ggTTL,
 			Uncycled: true,
 		})
 		// Grace window for concurrent refresh presentations (#169). Holds
