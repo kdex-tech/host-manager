@@ -5,12 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -70,11 +73,18 @@ type Exchanger struct {
 	// naturally missed. Both are shared (Valkey) so invalidation is fleet-wide.
 	grantCache    cache.Cache
 	grantGenCache cache.Cache
+	// grantGenNonce + grantGenSeq produce a generation token that is unique per
+	// process regardless of the wall clock, so a backward clock step can never
+	// reproduce a still-cached generation value. See BumpGrantGeneration (#203).
+	grantGenNonce string
+	grantGenSeq   atomic.Uint64
 	// grantGroup coalesces concurrent miss-path resolves for the same
 	// "<generation>|<subject>" key so a burst of parallel requests from one
 	// subject (e.g. a page's fan-out right after a generation bump) fires a
 	// single live ResolveClaims/Project instead of one per request (#203).
-	// Zero-value singleflight.Group is ready to use.
+	// Zero-value singleflight.Group is ready to use. It coalesces within this
+	// process only — a fan-out landing on multiple replicas still resolves once
+	// per replica, acceptable because each resolve is cheap and idempotent.
 	grantGroup    singleflight.Group
 	maxSessionAge time.Duration
 	sp            InternalIdentityProvider
@@ -86,9 +96,18 @@ type Exchanger struct {
 const subjectResolveCacheTTL = 60 * time.Second
 
 const (
+	// sessionGrantTTL is intentionally kept equal to subjectResolveCacheTTL by
+	// design (they bound the same freshness horizon), but is not required to be —
+	// each may move independently if a future freshness requirement diverges.
 	sessionGrantTTL = 60 * time.Second
 	grantGenTTL     = 24 * time.Hour
 	grantGenKey     = "current"
+	// grantResolveTimeout bounds every shared-cache (Valkey) call refreshSessionGrants
+	// makes, so a slow shared cache cannot hang the whole cookie-authenticated
+	// surface. A timeout surfaces as a Get/Set error the existing fail-open paths
+	// already absorb (a gen/Get error → resolve; a resolve under the timed-out ctx
+	// → fail open to the frozen token). See kdex-tech/host-manager#203 (PERF-F2).
+	grantResolveTimeout = 50 * time.Millisecond
 )
 
 // MaxRefreshGraceWindow is the hard ceiling on Config.RefreshGraceWindow.
@@ -191,6 +210,14 @@ type TokenSet struct {
 	Subject      string
 }
 
+// newUncycledCache constructs an unconditional, Uncycled cache class with the
+// given TTL. Factored so the several identically-shaped grant/token caches share
+// one construction site (#203 DRY-5). Conditionally-created caches (e.g. the
+// #169 refresh-grace cache, which also sets MaxItems) build their options inline.
+func newUncycledCache(cm cache.CacheManager, class string, ttl time.Duration) cache.Cache {
+	return cm.GetCache(class, cache.CacheOptions{TTL: &ttl, Uncycled: true})
+}
+
 func NewExchanger(
 	ctx context.Context,
 	cfg Config,
@@ -203,34 +230,24 @@ func NewExchanger(
 		maxSessionAge:   cfg.MaxSessionAge,
 		sp:              sp,
 	}
+	// Seed the per-process grant-generation nonce once. Combined with an atomic
+	// counter in BumpGrantGeneration it makes each generation token unique for
+	// this process's lifetime, independent of the wall clock (#203).
+	var nonce [8]byte
+	if _, rerr := rand.Read(nonce[:]); rerr != nil {
+		ex.grantGenNonce = strconv.FormatInt(time.Now().UnixNano(), 10)
+	} else {
+		ex.grantGenNonce = hex.EncodeToString(nonce[:])
+	}
 	if cacheManager != nil {
-		ex.refreshTokenCache = cacheManager.GetCache("refresh-tokens", cache.CacheOptions{
-			TTL:      &ex.refreshTokenTTL,
-			Uncycled: true,
-		})
+		ex.refreshTokenCache = newUncycledCache(cacheManager, "refresh-tokens", ex.refreshTokenTTL)
 		// Single-use tracking for authorization codes. See #65.
-		ttl := authCodeTTL
-		ex.authCodeCache = cacheManager.GetCache("auth-codes", cache.CacheOptions{
-			TTL:      &ttl,
-			Uncycled: true,
-		})
+		ex.authCodeCache = newUncycledCache(cacheManager, "auth-codes", authCodeTTL)
 		// Short-lived memoization of the token-bridge backend claim resolve. See #138.
-		srTTL := subjectResolveCacheTTL
-		ex.subjectResolveCache = cacheManager.GetCache("subject-resolve", cache.CacheOptions{
-			TTL:      &srTTL,
-			Uncycled: true,
-		})
+		ex.subjectResolveCache = newUncycledCache(cacheManager, "subject-resolve", subjectResolveCacheTTL)
 		// Browser-session grant cache + its generation key. See #203.
-		sgTTL := sessionGrantTTL
-		ex.grantCache = cacheManager.GetCache("session-grants", cache.CacheOptions{
-			TTL:      &sgTTL,
-			Uncycled: true,
-		})
-		ggTTL := grantGenTTL
-		ex.grantGenCache = cacheManager.GetCache("session-grant-gen", cache.CacheOptions{
-			TTL:      &ggTTL,
-			Uncycled: true,
-		})
+		ex.grantCache = newUncycledCache(cacheManager, "session-grants", sessionGrantTTL)
+		ex.grantGenCache = newUncycledCache(cacheManager, "session-grant-gen", grantGenTTL)
 		// Grace window for concurrent refresh presentations (#169). Holds
 		// the winner's MINTED RESULT keyed by the CONSUMED token id, so
 		// losers replay it rather than minting a second lineage.
@@ -351,13 +368,7 @@ func (e *Exchanger) ResolveSubjectClaims(subject string) jwt.MapClaims {
 	// backend claims. Test stubs and other providers simply don't, so the
 	// bridge gets nil (role-only) without every InternalIdentityProvider having
 	// to implement it.
-	resolver, ok := e.sp.(interface {
-		ResolveClaims(string) jwt.MapClaims
-	})
-	if !ok {
-		return nil
-	}
-	claims := resolver.ResolveClaims(subject)
+	claims, _ := e.resolveClaimsRaw(subject) // cached bridge path keeps prior behaviour: an unavailable lookup yields nil
 	if e.subjectResolveCache != nil && len(claims) > 0 {
 		if payload, err := json.Marshal(claims); err == nil {
 			_ = e.subjectResolveCache.Set(context.Background(), subject, string(payload))

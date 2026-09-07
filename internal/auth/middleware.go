@@ -508,7 +508,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			// or revocation takes effect on the next request without a re-login
 			// (#203). Fails open to the frozen token; capability tokens skipped.
 			if authSource == COOKIE && exchanger != nil {
-				c.refreshSessionGrants(authContext, exchanger)
+				c.refreshSessionGrants(r.Context(), authContext, exchanger)
 			}
 
 			// Bounded-use capability tokens carry the CapUsesClaim marker and a

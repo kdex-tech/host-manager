@@ -331,6 +331,20 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// bumps the shared grant generation so browser sessions re-resolve
 			// on their next request. Coarse: any 2xx write invalidates all
 			// cached grants (membership mutations are rare).
+			//
+			// This is a global epoch, so one mutation costs O(active sessions) of
+			// re-resolve work on the next request wave — accepted because
+			// membership mutations are rare relative to reads. The follow-up if it
+			// ever bites is per-subject precise invalidation (already listed under
+			// the design's "Out of scope"); this is the SEC-S2/PERF-F4 record.
+			// Deliberately NO debounce on the bump: debouncing would let a mutation
+			// landing inside the window of a prior consumed bump lag to the 60s TTL,
+			// defeating the immediate-revocation guarantee this feature exists for.
+			//
+			// Immediacy also depends on the generation cache being shared (Valkey):
+			// without it, in a multi-replica deployment each replica falls back to
+			// its own 60s TTL for a bump raised on another replica (SEC-S5) — the
+			// ≤60s backstop still holds.
 			if hh.authExchanger != nil &&
 				shouldInvalidateGrants(fn, resp.Request.Method, resp.StatusCode) {
 				// The mutation already committed (2xx); use a background context so

@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"testing"
 
-	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 func fnWithAnnotation(v string) *kdexv1alpha1.KDexFunction {

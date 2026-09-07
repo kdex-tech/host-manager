@@ -224,6 +224,36 @@ func (rp *scopeProvider) ResolveClaims(subject string) jwt.MapClaims {
 	return merged
 }
 
+// ResolveClaimsWithError is ResolveClaims but surfaces a Lookup-unavailable error
+// instead of swallowing it, so an authorization path that must fail open on a
+// backend outage can distinguish "no claims" from "could not ask". Any configured
+// Lookup returning an error makes the merged result untrustworthy, so it fails the
+// whole resolve rather than returning a partial set. #203.
+func (rp *scopeProvider) ResolveClaimsWithError(subject string) (jwt.MapClaims, error) {
+	if subject == "" {
+		return nil, nil
+	}
+	var merged jwt.MapClaims
+	for _, lookup := range rp.lookups {
+		claims, err := lookup.ResolveClaims(subject)
+		if err != nil {
+			return nil, fmt.Errorf("resolve backend claims: %w", err)
+		}
+		if len(claims) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = jwt.MapClaims{}
+		}
+		for k, v := range claims {
+			if _, exists := merged[k]; !exists {
+				merged[k] = v
+			}
+		}
+	}
+	return merged, nil
+}
+
 func (rp *scopeProvider) collectRoles() (*kdexv1alpha1.KDexRoleList, error) {
 	var roles kdexv1alpha1.KDexRoleList
 	if err := rp.Client.List(rp.Context, &roles, client.InNamespace(rp.ControllerNamespace), client.MatchingFields{
