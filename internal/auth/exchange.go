@@ -368,7 +368,14 @@ func (e *Exchanger) ResolveSubjectClaims(subject string) jwt.MapClaims {
 	// backend claims. Test stubs and other providers simply don't, so the
 	// bridge gets nil (role-only) without every InternalIdentityProvider having
 	// to implement it.
-	claims, _ := e.resolveClaimsRaw(subject) // cached bridge path keeps prior behaviour: an unavailable lookup yields nil
+	// The cached bridge path swallows the resolve error → nil. Identical to the
+	// pre-#203 best-effort behaviour for 0/1 configured lookups or when all
+	// succeed (the reference deployment is a single HTTP lookup). Only a
+	// MULTI-lookup partial outage differs: this now yields nil rather than a
+	// partial merge of the healthy lookups — fail-closed (fewer claims, never
+	// more). If a multi-lookup deployment ever ships, route this path through the
+	// best-effort ResolveClaims instead of resolveClaimsRaw to restore the merge.
+	claims, _ := e.resolveClaimsRaw(subject)
 	if e.subjectResolveCache != nil && len(claims) > 0 {
 		if payload, err := json.Marshal(claims); err == nil {
 			_ = e.subjectResolveCache.Set(context.Background(), subject, string(payload))
