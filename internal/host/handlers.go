@@ -319,6 +319,7 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 		AuthConfig:        hh.authConfig,
 		AuthExchanger:     hh.authExchanger,
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		ExchangeTargets:   hh.exchangeTargetAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 
@@ -904,6 +905,7 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 		AuthConfig:        hh.authConfig,
 		AuthExchanger:     hh.authExchanger,
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		ExchangeTargets:   hh.exchangeTargetAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 	// Shared with the redirect_uri derivation in internal/auth: the provider
@@ -1273,6 +1275,7 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 		AuthConfig:        hh.authConfig,
 		AuthExchanger:     hh.authExchanger,
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
+		ExchangeTargets:   hh.exchangeTargetAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
 	}
 	const path = "/-/token"

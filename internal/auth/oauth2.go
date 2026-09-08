@@ -23,6 +23,11 @@ type OAuth2 struct {
 	// this set, the authorization_code grant mints an audience-bound PASETO
 	// PAT as the access_token instead of the standard JWT.
 	ResourceAudiences map[string]bool
+	// ExchangeTargets maps a token-exchange `resource` value (basePath or
+	// issuer+basePath) to the target function's audience. Includes internal
+	// functions. Snapshot handed in by the host, same pattern as
+	// ResourceAudiences.
+	ExchangeTargets map[string]string
 	// AccessTokenTTL is the lifetime applied to a minted resource PAT.
 	AccessTokenTTL time.Duration
 }

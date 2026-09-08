@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -124,4 +125,40 @@ func TestOAuth2ProtectedResources(t *testing.T) {
 	if _, ok := got["/v1/auth"]; ok {
 		t.Fatal("/v1/auth must NOT be oauth2-protected (bearer only)")
 	}
+}
+
+// TestExchangeTargetAudiences_IncludesInternal pins the internal-inclusive
+// contract: exchangeTargetAudiences (unlike oauth2ProtectedResources) must
+// resolve a spec.Internal function, since internal functions are the primary
+// direct B-to-B token-exchange targets. Non-Ready functions must never be
+// resolvable, regardless of Internal.
+func TestExchangeTargetAudiences_IncludesInternal(t *testing.T) {
+	hh := newTestHostHandlerWithDomain(t, "dev.knowdrive.ai")
+	hh.functions = []kdexv1alpha1.KDexFunction{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "public-fn"},
+			Spec:       kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/v1/public"}},
+			Status:     kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady, URL: "https://public-fn.ns.svc.cluster.local"},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "internal-fn"},
+			Spec:       kdexv1alpha1.KDexFunctionSpec{Internal: true, API: kdexv1alpha1.API{BasePath: "/v1/internal"}},
+			Status:     kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady, URL: "https://internal-fn.ns.svc.cluster.local"},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "pending-fn"},
+			Spec:       kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/v1/pending"}},
+			Status:     kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStatePending, URL: "https://pending-fn.ns.svc.cluster.local"},
+		},
+	}
+
+	got := hh.exchangeTargetAudiences()
+
+	// internal function resolves by basePath -> its cluster-local audience
+	assert.Equal(t, "https://internal-fn.ns.svc.cluster.local", got["/v1/internal"])
+	// public function too
+	assert.Equal(t, "https://public-fn.ns.svc.cluster.local", got["/v1/public"])
+	// pending function is excluded
+	_, ok := got["/v1/pending"]
+	assert.False(t, ok, "non-Ready functions must not be resolvable targets")
 }

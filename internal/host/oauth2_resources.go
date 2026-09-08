@@ -114,3 +114,35 @@ func (hh *HostHandler) oauth2ResourceAudiences() map[string]bool {
 	}
 	return out
 }
+
+// exchangeTargetAudiences maps a token-exchange `resource` value to the target
+// function's minted audience. Unlike oauth2ProtectedResources, it includes
+// spec.Internal functions (the primary direct B-to-B targets) and does NOT
+// require oauth2 protection — a token-exchange target only needs a resolvable
+// audience, which every Ready function has. Both the basePath and the full
+// issuer+basePath form are keys so a caller may send either as `resource`.
+// The mapped value is fatAudienceFor(fn), the single source of truth the proxy
+// FAT mint also uses, so exchange-minted and proxy-minted audiences never drift.
+//
+// Caller must hold hh.mu: it reads hh.functions and (via issuerAddressLocked)
+// hh.host and hh.scheme.
+func (hh *HostHandler) exchangeTargetAudiences() map[string]string {
+	out := map[string]string{}
+	issuer := hh.issuerAddressLocked()
+	if issuer == "" {
+		return out
+	}
+	for i := range hh.functions {
+		fn := &hh.functions[i]
+		if fn.Status.State != kdexv1alpha1.KDexFunctionStateReady {
+			continue
+		}
+		aud := fatAudienceFor(fn)
+		if aud == "" {
+			continue
+		}
+		out[fn.Spec.API.BasePath] = aud
+		out[issuer+fn.Spec.API.BasePath] = aud
+	}
+	return out
+}
