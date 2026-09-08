@@ -347,6 +347,78 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 	return e.sp.FindInternalRolesAndEntitlements(subject)
 }
 
+// ExchangeSubjectToken performs an RFC 8693 token exchange: it verifies a
+// host-issued subject_token (a FAT), re-resolves the subject's entitlements,
+// and mints a fresh JWT addressed to targetAudience. The subject_token's
+// audience is intentionally NOT checked -- a FAT's aud is a function, not the
+// host -- but its signature, issuer and expiry are. The minted token carries
+// the subject's re-resolved entitlements (never the subject_token's), so the
+// target function's own entitlement checks remain authoritative. An `act` claim
+// records the calling function (the subject_token's audience) for audit.
+func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (TokenSet, error) {
+	if e == nil || !e.config.IsAuthEnabled() {
+		return TokenSet{}, fmt.Errorf("%w: auth not enabled", ErrServerError)
+	}
+	if e.config.ActivePair == nil {
+		return TokenSet{}, fmt.Errorf("%w: no active key pair", ErrServerError)
+	}
+
+	claims := jwt.MapClaims{}
+	tok, err := jwt.ParseWithClaims(
+		subjectToken, claims,
+		func(*jwt.Token) (any, error) { return e.config.ActivePair.Private.Public(), nil },
+		jwt.WithIssuer(e.config.Issuer),
+		jwt.WithExpirationRequired(),
+	)
+	if err != nil || !tok.Valid {
+		return TokenSet{}, fmt.Errorf("invalid subject_token: %w", err)
+	}
+
+	sub, _ := claims.GetSubject()
+	if sub == "" {
+		return TokenSet{}, fmt.Errorf("subject_token has no subject")
+	}
+
+	// The calling function is the subject_token's audience (the FAT aud).
+	actorAud := ""
+	if auds, aerr := claims.GetAudience(); aerr == nil && len(auds) > 0 {
+		actorAud = auds[0]
+	}
+
+	roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(sub)
+	if rerr != nil {
+		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
+	}
+
+	signer, err := sign.NewSigner(
+		targetAudience,
+		e.config.TokenTTL,
+		e.config.Issuer,
+		&e.config.ActivePair.Private,
+		e.config.ActivePair.KeyId,
+		nil,
+	)
+	if err != nil {
+		return TokenSet{}, fmt.Errorf("%w: failed to build signer for %s: %v", ErrServerError, targetAudience, err)
+	}
+
+	signingContext := jwt.MapClaims{
+		"sub":          sub,
+		"roles":        roles,
+		"entitlements": ents,
+	}
+	if actorAud != "" {
+		signingContext["act"] = map[string]any{"sub": actorAud}
+	}
+
+	accessToken, err := signer.Sign(signingContext)
+	if err != nil {
+		return TokenSet{}, fmt.Errorf("%w: failed to sign exchanged token: %v", ErrServerError, err)
+	}
+
+	return TokenSet{AccessToken: accessToken, Subject: sub}, nil
+}
+
 // ResolveSubjectClaims resolves a subject's data-driven backend claims (e.g.
 // a backend claim) FRESH and password-lessly for the token bridge, memoized for
 // a short window to bound backend load. Returns nil when the identity provider
