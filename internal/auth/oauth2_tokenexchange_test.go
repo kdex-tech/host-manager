@@ -17,6 +17,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"testing"
@@ -173,4 +174,106 @@ func TestTokenHandler_TokenExchange_NoClientRequired(t *testing.T) {
 	rec := postToken(t, o, form)
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// erroringIdentityProvider satisfies InternalIdentityProvider but fails
+// FindInternalRolesAndEntitlements unconditionally, so ExchangeSubjectToken's
+// re-resolve step (internal/auth/exchange.go's `rerr != nil` branch) fires
+// and wraps the failure as ErrServerError -- the resolver-failure path named
+// in the fix-wave task, as opposed to a fault in the subject_token itself.
+type erroringIdentityProvider struct{}
+
+func (erroringIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
+	return jwt.MapClaims{}, nil
+}
+
+func (erroringIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+	return nil, nil, errors.New("boom: role lookup unavailable")
+}
+
+// newTestOAuth2WithErroringIdentityProvider mirrors newTestOAuth2 exactly
+// except it wires an identity provider whose FindInternalRolesAndEntitlements
+// always errors, so ExchangeSubjectToken's resolve step fails and the handler
+// must surface that as 500 server_error rather than 400 invalid_request --
+// the same classification handleTokenExchange applies to any other
+// errors.Is(err, ErrServerError) fault.
+func newTestOAuth2WithErroringIdentityProvider(t *testing.T) *OAuth2 {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+
+	cfg := Config{
+		Issuer: texIssuer,
+		ActivePair: &keys.KeyPair{
+			ActiveKey: true,
+			KeyId:     texKeyID,
+			Private:   cs,
+		},
+		TokenTTL: time.Hour,
+	}
+
+	ex, err := NewExchanger(context.Background(), cfg, nil, erroringIdentityProvider{})
+	require.NoError(t, err)
+
+	return &OAuth2{
+		AuthConfig:        &ex.config,
+		AuthExchanger:     ex,
+		ResourceAudiences: map[string]bool{},
+		ExchangeTargets: map[string]string{
+			"/v1/internal": "https://fn-b.ns.svc.cluster.local",
+		},
+		AccessTokenTTL: time.Hour,
+	}
+}
+
+// TestTokenHandler_TokenExchange_ResolverFailureIsServerError drives
+// handleTokenExchange down the ErrServerError branch: a well-formed,
+// validly-signed subject_token whose entitlement re-resolve
+// (FindInternalRolesAndEntitlements) fails server-side. Per the handler's
+// "Subject-token faults are the client's; resolver/signer faults are ours"
+// comment, this must produce 500 + {"error":"server_error"}, not a 400 --
+// the caller did nothing wrong.
+func TestTokenHandler_TokenExchange_ResolverFailureIsServerError(t *testing.T) {
+	o := newTestOAuth2WithErroringIdentityProvider(t)
+	fat := mintTestFAT(t, o, "alice", "https://fn-a.ns.svc.cluster.local")
+
+	form := url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {fat},
+		"subject_token_type": {"urn:ietf:params:oauth:token-type:access_token"},
+		"resource":           {"/v1/internal"},
+	}
+
+	rec := postToken(t, o, form)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+	body := decodeOAuthError(t, rec)
+	assert.Equal(t, "server_error", body["error"])
+}
+
+// TestTokenHandler_TokenExchange_UnrecognizedSubjectTokenTypeIsInvalidRequest
+// pins handleTokenExchange's subject_token_type gate: a value that is
+// neither empty nor the one accepted type
+// (urn:ietf:params:oauth:token-type:access_token) -- here
+// urn:ietf:params:oauth:token-type:id_token, RFC 8693's own token type for
+// an OIDC ID token -- must be rejected as 400 invalid_request before the
+// exchange is even attempted.
+func TestTokenHandler_TokenExchange_UnrecognizedSubjectTokenTypeIsInvalidRequest(t *testing.T) {
+	o := newTestOAuth2(t)
+	fat := mintTestFAT(t, o, "alice", "https://fn-a.ns.svc.cluster.local")
+
+	form := url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {fat},
+		"subject_token_type": {"urn:ietf:params:oauth:token-type:id_token"},
+		"resource":           {"/v1/internal"},
+	}
+
+	rec := postToken(t, o, form)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	body := decodeOAuthError(t, rec)
+	assert.Equal(t, "invalid_request", body["error"])
 }

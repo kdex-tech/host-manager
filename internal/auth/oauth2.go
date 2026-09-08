@@ -604,7 +604,14 @@ func (o *OAuth2) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		AccessToken:     ts.AccessToken,
 		IssuedTokenType: "urn:ietf:params:oauth:token-type:access_token",
 		TokenType:       tokenTypeBearer,
-		ExpiresIn:       int(o.AccessTokenTTL.Seconds()),
+		// The token minted here is signed by ExchangeSubjectToken with
+		// e.config.TokenTTL (via sign.NewSigner), not o.AccessTokenTTL --
+		// that field is the resource-PAT lifetime used by
+		// writeResourcePATResponse's audience-bound PATs, an entirely
+		// different grant path. GetTokenTTL() reports the TTL that was
+		// actually signed into this token, matching the standard-JWT
+		// response just above in OAuth2TokenHandler.
+		ExpiresIn: int(o.AuthExchanger.GetTokenTTL().Seconds()),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
