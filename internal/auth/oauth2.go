@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,11 @@ import (
 	"github.com/kdex-tech/host-manager/internal/sign"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// tokenTypeBearer is the RFC 6749 5.1 `token_type` value every grant this
+// endpoint serves returns. Factored to a constant because handleTokenExchange
+// pushed the literal's occurrence count past goconst's threshold.
+const tokenTypeBearer = "Bearer"
 
 type OAuth2 struct {
 	AuthConfig    *Config
@@ -310,6 +316,16 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The RFC 8693 token-exchange grant is CLIENTLESS: the subject_token (a
+	// host-issued FAT) is the authentication, not a client_id/client_secret.
+	// This branch therefore runs BEFORE the client-authentication block below
+	// so no client is required.
+	grantType = r.FormValue("grant_type")
+	if grantType == GRANT_TYPE_TOKEN_EXCHANGE {
+		o.handleTokenExchange(w, r)
+		return
+	}
+
 	// client_id and client_secret may arrive through basic auth
 	var usedBasicAuth bool
 	clientId, clientSecret, usedBasicAuth = r.BasicAuth()
@@ -367,7 +383,6 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	codeVerifier = r.FormValue("code_verifier")
-	grantType = r.FormValue("grant_type")
 	scope = r.FormValue("scope")
 	resource := r.FormValue("resource")
 
@@ -471,7 +486,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		IDToken:      ts.IDToken,
 		RefreshToken: ts.RefreshToken,
 		Scope:        ts.Scope,
-		TokenType:    "Bearer",
+		TokenType:    tokenTypeBearer,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -521,7 +536,7 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 		ExpiresIn:    int(o.AccessTokenTTL.Seconds()),
 		RefreshToken: ts.RefreshToken,
 		Scope:        ts.Scope,
-		TokenType:    "Bearer",
+		TokenType:    tokenTypeBearer,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	// RFC 6749 5.1 requires no-store on the token endpoint's success
@@ -538,10 +553,63 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 
 // TokenResponse represents the OAuth2 token response.
 type TokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	IDToken      string `json:"id_token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	Scope        string `json:"scope,omitempty"`
-	TokenType    string `json:"token_type"`
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int    `json:"expires_in"`
+	IDToken     string `json:"id_token,omitempty"`
+	// IssuedTokenType is RFC 8693 2.2.1's required field on a token-exchange
+	// response, naming the type of the issued access_token. Empty (and thus
+	// omitted) for every other grant this endpoint serves.
+	IssuedTokenType string `json:"issued_token_type,omitempty"`
+	RefreshToken    string `json:"refresh_token,omitempty"`
+	Scope           string `json:"scope,omitempty"`
+	TokenType       string `json:"token_type"`
+}
+
+// handleTokenExchange implements the RFC 8693 token-exchange grant. It is
+// clientless: the subject_token (a host-issued FAT) is the authentication, so
+// this path deliberately runs before OAuth2TokenHandler's client-auth block.
+func (o *OAuth2) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
+	subjectToken := r.FormValue("subject_token")
+	subjectTokenType := r.FormValue("subject_token_type")
+	resource := r.FormValue("resource")
+
+	if subjectToken == "" || resource == "" {
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "subject_token and resource are required")
+		return
+	}
+	// Accept the access_token subject type (JWT). Reject others explicitly.
+	if subjectTokenType != "" && subjectTokenType != "urn:ietf:params:oauth:token-type:access_token" {
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "unsupported subject_token_type")
+		return
+	}
+
+	targetAudience, ok := o.ExchangeTargets[resource]
+	if !ok {
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidTarget, "unknown resource")
+		return
+	}
+
+	ts, err := o.AuthExchanger.ExchangeSubjectToken(subjectToken, targetAudience)
+	if err != nil {
+		// Subject-token faults are the client's; resolver/signer faults are ours.
+		if errors.Is(err, ErrServerError) {
+			writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
+			return
+		}
+		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidRequest, "invalid subject_token")
+		return
+	}
+
+	resp := TokenResponse{
+		AccessToken:     ts.AccessToken,
+		IssuedTokenType: "urn:ietf:params:oauth:token-type:access_token",
+		TokenType:       tokenTypeBearer,
+		ExpiresIn:       int(o.AccessTokenTTL.Seconds()),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, genericServerErrorDescription)
+	}
 }

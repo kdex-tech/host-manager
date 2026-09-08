@@ -51,6 +51,24 @@ func TestDiscoveryAdvertisesRefreshTokenGrant(t *testing.T) {
 		"AS metadata must advertise refresh_token: the token endpoint and DCR both support it")
 }
 
+// TestDiscoveryAdvertisesTokenExchangeGrant pins that the authorization-server
+// metadata advertises the RFC 8693 token-exchange grant. OAuth2TokenHandler
+// handles grant_type=urn:ietf:params:oauth:grant-type:token-exchange, so a
+// caller that reads grant_types_supported to decide whether the exchange is
+// available must see it here.
+func TestDiscoveryAdvertisesTokenExchangeGrant(t *testing.T) {
+	handler := DiscoveryHandler("http://example.com", "")
+	req := httptest.NewRequest("GET", "/.well-known/openid-configuration", nil)
+	w := httptest.NewRecorder()
+
+	handler(w, req)
+
+	var config OpenIDConfiguration
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &config))
+
+	assert.Contains(t, config.GrantTypesSupported, "urn:ietf:params:oauth:grant-type:token-exchange")
+}
+
 func TestDiscoveryAdvertisesRegistrationAndPKCE(t *testing.T) {
 	h := DiscoveryHandler("https://dev.knowdrive.ai", "https://dev.knowdrive.ai/-/oauth/register")
 	req := httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil)

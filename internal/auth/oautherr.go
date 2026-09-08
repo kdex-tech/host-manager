@@ -69,6 +69,9 @@ const (
 	errCodeUnsupportedGrantType = "unsupported_grant_type"
 	errCodeInvalidScope         = "invalid_scope"
 	errCodeServerError          = "server_error"
+	// errCodeInvalidTarget is RFC 8693 2.2.2's error code for a token-exchange
+	// request whose `resource` does not resolve to a known target audience.
+	errCodeInvalidTarget = "invalid_target"
 )
 
 // genericServerErrorDescription is what an unauthenticated caller sees when
