@@ -145,7 +145,7 @@ func (hh *HostHandler) pageHandlerFunc(
 					acceptsHTML(r) &&
 					!r.URL.Query().Has("denied") {
 
-					first := hh.firstAuthorizedPage(r.Context(), &l, l.String() == hh.defaultLanguage)
+					first := hh.discoverLandingPage(r.Context(), &l, l.String() == hh.defaultLanguage, &parsedUserEntitlements)
 					if first != "" {
 						if l.String() != hh.defaultLanguage {
 							first = "/" + l.String() + first

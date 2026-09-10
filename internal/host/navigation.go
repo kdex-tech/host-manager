@@ -75,6 +75,45 @@ func (hh *HostHandler) firstAuthorizedPage(
 	return ""
 }
 
+// discoverLandingPage picks where to send a caller the page gate denied. It
+// honors the host's ordered spec.auth.defaultLandingPaths first — returning the
+// first entry the caller is entitled to render, checked with the same
+// VerifyResourceParsedEntitlements the gate uses — and falls back to
+// firstAuthorizedPage when the list is empty/unset or nothing in it is
+// reachable. The returned value is a bare basePath (no language prefix); the
+// caller applies the /<lang> prefix, exactly as it does for firstAuthorizedPage.
+// See docs/superpowers/specs/2026-09-10-default-landing-paths-design.md.
+func (hh *HostHandler) discoverLandingPage(
+	ctx context.Context,
+	l *language.Tag,
+	isDefaultLanguage bool,
+	userEntitlements *entitlements.ParsedEntitlements,
+) string {
+	if hh.host != nil && hh.host.Auth != nil {
+		for _, candidate := range hh.host.Auth.DefaultLandingPaths {
+			for _, handler := range hh.Pages.List() {
+				if handler.BasePath() != candidate {
+					continue
+				}
+				// A page with requirements is a candidate only when the caller
+				// satisfies them — the same check the gate runs. A checker
+				// fault or a denial drops this candidate (try the next path); a
+				// page with no requirements is reachable by everyone.
+				if hh.IsAuthEnabled() && hh.authChecker != nil &&
+					userEntitlements != nil && handler.ParsedRequirements != nil {
+					access, err := hh.authChecker.VerifyResourceParsedEntitlements(
+						"pages", candidate, *userEntitlements, *handler.ParsedRequirements)
+					if err != nil || !access {
+						break
+					}
+				}
+				return candidate
+			}
+		}
+	}
+	return hh.firstAuthorizedPage(ctx, l, isDefaultLanguage)
+}
+
 func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
