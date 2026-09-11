@@ -110,6 +110,107 @@ the '--force' flag and manually ensure that any custom configuration
 previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
 is manually re-applied afterwards.
 
+## Auth Event Hooks (`http-event-hook` Secret)
+
+The host-manager can notify (advisory) or gate (enforcing) external HTTP
+endpoints on auth lifecycle events — login, logout, login-failed, and
+session-refresh. One or more Secrets configure the hooks; each hook is a
+separate Secret, discovered by the `kdexinternalhost` controller alongside
+the `http-lookup-auth` Secret.
+
+A Secret is picked up as an event hook when it:
+
+- is annotated with `kdex.dev/secret-type: http-event-hook`
+- is annotated with `kdex.dev/active-key: "true"`
+
+Unlike `http-lookup-auth` (only the newest active one is used), **every**
+active `http-event-hook` Secret becomes a hook — multiple hooks may run
+side by side. When more than one enforcing hook subscribes to the same
+event, they are evaluated in Secret-name order (sorted lexicographically).
+
+### Data keys
+
+| key | required | default | meaning |
+|---|---|---|---|
+| `url` | yes | — | endpoint POSTed for each subscribed event |
+| `shared-secret` | yes | — | HMAC-SHA256 key; must be at least 32 raw bytes |
+| `events` | yes | — | comma-separated subset of `login`, `logout`, `login-failed`, `session-refresh` |
+| `mode` | no | `advisory` | `advisory` or `enforcing`; `enforcing` is only honored for `login`/`logout` — for `login-failed`/`session-refresh` it is silently treated as advisory (both are always fired async) |
+| `timeout-ms` | no | `2000` | integer milliseconds; bounds every call to this hook, sync and async |
+| `failure-mode` | no | per-event (see below) | `fail-open` or `fail-closed`; only meaningful for enforcing hooks |
+
+### Request contract
+
+```
+POST <url>
+Content-Type: application/json
+X-K-CNAS-Event-Timestamp: <unix-millis>
+X-K-CNAS-Event-Signature: hex(hmac-sha256(shared-secret, timestamp + "." + body))
+```
+
+The endpoint MUST verify the HMAC over `timestamp + "." + body` (same
+convention as the `http-lookup-auth` Secret's `X-K-CNAS-Lookup-*` headers).
+
+Body envelope:
+
+```json
+{
+  "event": "login",              // login | logout | login-failed | session-refresh
+  "timestamp": 1699999999999,    // unix millis, matches the signature timestamp
+  "host": "acme.example",        // the KDexHost identity
+  "subject": "alice",            // sub; may be "" for logout when no token could be decoded
+  "auth_method": "local",        // local | oidc | ... (omitted when unknown)
+  "client_id": "…",              // omitted when not applicable
+  "scope": "openid profile …",   // omitted when not applicable
+  "claims": { "…": "…" },        // populated for login/session-refresh (minus roles/entitlements, which are broken out below); best-effort/omitted for logout; absent for login-failed
+  "roles": ["…"],                // omitted when empty
+  "entitlements": ["…"],         // omitted when empty
+  "session_id": "…",             // refresh/session id, where available; omitted otherwise
+  "reason": "…"                  // login-failed only: why the login failed
+}
+```
+
+Fields are `omitempty` — a hook only sees the keys that apply to the event
+that fired it. For `logout`, identity is recovered best-effort by decoding
+the refresh/session token before it is cleared; if no token is available,
+`subject` (and the other identity fields) are simply absent and the event
+still fires.
+
+### Response contract
+
+Read **only** for **enforcing `login`**:
+
+```json
+{ "ok": true, "reason": "" }
+```
+
+- `ok: false` denies the login; `reason` (default `"denied"` when empty) is
+  surfaced as the login failure reason.
+- For advisory calls, all async-only events (`login-failed`,
+  `session-refresh`), and enforcing `logout`, the response body is ignored —
+  only delivery (a 2xx status that decodes) is tracked, and failures are
+  logged, never surfaced to the caller.
+
+### Advisory vs. enforcing, and failure modes
+
+- **Advisory** hooks fire in a background goroutine, best-effort, bounded by
+  `timeout-ms`. A failure (timeout, dial error, non-2xx, decode failure) is
+  logged and never affects the auth flow. `login-failed` and
+  `session-refresh` are *always* dispatched this way, regardless of a hook's
+  configured `mode`.
+- **Enforcing `login`** hooks run inline on the login path, sequentially in
+  Secret-name order, short-circuiting on the first `ok: false`; every
+  enforcing hook must return `ok: true` for the login to proceed
+  (`ErrLoginHookDenied`). On a transport/timeout/decode failure, the
+  effective `failure-mode` decides: **default is `fail-closed`** (deny the
+  login with a generic reason) — only an explicit `failure-mode:
+  fail-open` on that hook's Secret allows the login through when the hook is
+  unreachable.
+- **Enforcing `logout`** hooks run as sequential *barriers*, each bounded by
+  its own `timeout-ms`, but **never refuse the logout** — a failure (or an
+  `ok: false` response) is logged and logout proceeds regardless of
+  `failure-mode`. Advisory `logout` hooks fire async afterward.
+
 ## Contributing
 // TODO(user): Add detailed information on how you would like others to contribute to this project
 
