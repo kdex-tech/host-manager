@@ -1492,6 +1492,22 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		published = true
 	}
 
+	// session-refresh is async-only (no gate, never blocks the grant). Fired
+	// only on this, the actual mint/rotation success path -- not on the
+	// #169 replay return above, which hands a concurrent loser the SAME
+	// TokenSet the winner already minted and emitted for, so replaying it
+	// here would double-report one refresh per concurrent loser.
+	// ts.RefreshToken is the newly-rotated token's cache key (createRefreshToken
+	// returns the id it just wrote), i.e. the new session id succeeding tokenID.
+	e.eventDispatcher.NotifySessionRefresh(ctx, EventPayload{
+		Event:      EventSessionRefresh,
+		Subject:    claims.Subject,
+		ClientID:   claims.ClientID,
+		Scope:      claims.Scope,
+		AuthMethod: string(claims.AuthMethod),
+		SessionID:  ts.RefreshToken,
+	})
+
 	return ts, nil
 }
 
