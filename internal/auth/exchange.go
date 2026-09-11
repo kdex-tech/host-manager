@@ -646,7 +646,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// session, and no client_id exists in this frame. See
 	// kdex-tech/host-manager#189 (loginPayload/GateLogin, Task 4) and the
 	// same reasoning as LoginLocal's gate on ErrGrantFailure vs ErrServerError.
-	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC))); gerr != nil {
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(signingContext, sub, "", grantedScope, string(AuthMethodOIDC))); gerr != nil {
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event:      EventLoginFailed,
 			Subject:    sub,
@@ -683,7 +683,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		}
 	}
 
-	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC)))
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(signingContext, sub, "", grantedScope, string(AuthMethodOIDC)))
 	return ts, nil
 }
 
@@ -1032,7 +1032,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// rejected client to retry instead of that the login was refused. See
 	// oautherr.go's ErrServerError/ErrGrantFailure doc comments; there is no
 	// third sentinel (an "ErrAccessDenied" does not exist in this codebase).
-	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event:      EventLoginFailed,
 			Subject:    username,
@@ -1078,7 +1078,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		}
 	}
 
-	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)))
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(signingContext, username, clientID, grantedScopeStr, string(authMethod)))
 	return ts, nil
 }
 
@@ -1094,9 +1094,9 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 // `type AuthContext jwt.MapClaims` -- and its parseToStringArray-backed
 // getters do the identical []string/[]any/string coercion, so this reuses
 // in-package code instead of duplicating the coercion a second time.
-func loginPayload(event EventType, signingContext jwt.MapClaims, subject, clientID, scope, authMethod string) EventPayload {
+func loginPayload(signingContext jwt.MapClaims, subject, clientID, scope, authMethod string) EventPayload {
 	p := EventPayload{
-		Event:      event,
+		Event:      EventLogin,
 		Subject:    subject,
 		ClientID:   clientID,
 		Scope:      scope,

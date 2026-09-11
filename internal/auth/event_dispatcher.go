@@ -102,7 +102,6 @@ func (d *EventDispatcher) GateLogin(ctx context.Context, p EventPayload) error {
 
 func (d *EventDispatcher) fireAsync(p EventPayload, hooks []*httpEventHook) {
 	for _, h := range hooks {
-		h := h
 		go func() {
 			cctx, cancel := bgTimeout(h)
 			defer cancel()
