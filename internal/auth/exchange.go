@@ -590,6 +590,22 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	grantedScopes := applyScopeFilter(signingContext, "", defaultSessionScopes)
 	grantedScope := strings.Join(grantedScopes, " ")
 
+	// Enforcing login hooks get a say before anything is minted, exactly as
+	// LoginLocal's gate does. ClientID is empty for the same reason the
+	// refresh-token claims below leave it empty: this is a browser cookie
+	// session, and no client_id exists in this frame. See
+	// kdex-tech/host-manager#189 (loginPayload/GateLogin, Task 4) and the
+	// same reasoning as LoginLocal's gate on ErrGrantFailure vs ErrServerError.
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC))); gerr != nil {
+		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+			Event:      EventLoginFailed,
+			Subject:    sub,
+			AuthMethod: string(AuthMethodOIDC),
+			Reason:     gerr.Error(),
+		})
+		return TokenSet{Subject: sub}, grantFailuref("login denied: %v", gerr)
+	}
+
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return TokenSet{}, err
@@ -617,6 +633,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		}
 	}
 
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC)))
 	return ts, nil
 }
 
