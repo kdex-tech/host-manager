@@ -168,6 +168,20 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 				}
 			}
 
+			// Project the page's spec.tags onto the nav entry so templates can
+			// render tag-driven badges, groupings, tooltips, or external links
+			// via [[ range $t := $value.Tags ]].
+			if len(ph.Tags) > 0 {
+				pageEntry.Tags = make([]render.PageTag, 0, len(ph.Tags))
+				for _, tag := range ph.Tags {
+					pageEntry.Tags = append(pageEntry.Tags, render.PageTag{
+						Name:        tag.Name,
+						Description: tag.Description,
+						URL:         tag.URL,
+					})
+				}
+			}
+
 			hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)
 
 			(*entry.Children)[label] = pageEntry

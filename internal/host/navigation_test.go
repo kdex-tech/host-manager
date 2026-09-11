@@ -145,6 +145,40 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:              "with tags",
+			isDefaultLanguage: true,
+			items: &map[string]page.PageHandler{
+				"docs": {
+					Name: "docs",
+					Page: &kdexv1alpha1.KDexPageSpec{
+						Label: "Docs",
+						Paths: kdexv1alpha1.Paths{
+							BasePath: "/docs",
+						},
+						Metadata: kdexv1alpha1.Metadata{
+							Tags: []kdexv1alpha1.Tag{
+								{Name: "beta", Description: "Beta feature", URL: "https://example.com/beta"},
+								{Name: "new"},
+							},
+						},
+					},
+				},
+			},
+			want: &map[string]any{
+				"Docs": render.PageEntry{
+					BasePath: "/docs",
+					Href:     "/docs",
+					Label:    "Docs",
+					Name:     "docs",
+					Tags: []render.PageTag{
+						{Name: "beta", Description: "Beta feature", URL: "https://example.com/beta"},
+						{Name: "new"},
+					},
+					Weight: resource.MustParse("0"),
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
