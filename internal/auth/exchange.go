@@ -889,6 +889,12 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		// this was flagged for, without that misclassification cost.
 		// Flagged for the repo owner rather than guessed at; see the task
 		// report.
+		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+			Event:      EventLoginFailed,
+			Subject:    username,
+			AuthMethod: string(authMethod),
+			Reason:     err.Error(),
+		})
 		return TokenSet{}, err
 	}
 
@@ -951,6 +957,25 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	grantedScopes := applyScopeFilter(signingContext, scope, defaultSessionScopes)
 	grantedScopeStr := strings.Join(grantedScopes, " ")
 
+	// Enforcing login hooks get a say before anything is minted. A deny here
+	// is a client-visible refusal of THIS login attempt -- not a failure of
+	// our own infrastructure -- so it is reported as ErrGrantFailure (via
+	// grantFailuref), which oauthErrorForRedemption maps to RFC 6749 5.2's
+	// 400 invalid_grant with the message echoed verbatim. ErrServerError
+	// would be wrong here: it maps to 500 server_error, which tells a
+	// rejected client to retry instead of that the login was refused. See
+	// oautherr.go's ErrServerError/ErrGrantFailure doc comments; there is no
+	// third sentinel (an "ErrAccessDenied" does not exist in this codebase).
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
+		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+			Event:      EventLoginFailed,
+			Subject:    username,
+			AuthMethod: string(authMethod),
+			Reason:     gerr.Error(),
+		})
+		return TokenSet{Subject: username}, grantFailuref("login denied: %v", gerr)
+	}
+
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return failed("%w: failed to sign access token: %v", ErrServerError, err)
@@ -987,7 +1012,41 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		}
 	}
 
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)))
 	return ts, nil
+}
+
+// loginPayload builds the EventPayload for a login event out of the signing
+// context LoginLocal assembled: the well-known roles/entitlements claims go
+// into their typed EventPayload fields, everything else lands in Claims.
+//
+// Coercion reuses AuthContext.GetRoles/GetEntitlements (context.go) rather
+// than a new helper. internal/host/mint_token.go has an equivalent
+// stringSliceFromClaim, but internal/host imports internal/auth (e.g.
+// internal/host/login.go), so importing it back from here would cycle.
+// AuthContext is already in this package -- it is literally
+// `type AuthContext jwt.MapClaims` -- and its parseToStringArray-backed
+// getters do the identical []string/[]any/string coercion, so this reuses
+// in-package code instead of duplicating the coercion a second time.
+func loginPayload(event EventType, signingContext jwt.MapClaims, subject, clientID, scope, authMethod string) EventPayload {
+	p := EventPayload{
+		Event:      event,
+		Subject:    subject,
+		ClientID:   clientID,
+		Scope:      scope,
+		AuthMethod: authMethod,
+		Claims:     make(map[string]any, len(signingContext)),
+	}
+	ac := AuthContext(signingContext)
+	p.Roles, _ = ac.GetRoles()
+	p.Entitlements, _ = ac.GetEntitlements()
+	for k, v := range signingContext {
+		if k == "roles" || k == "entitlements" {
+			continue
+		}
+		p.Claims[k] = v
+	}
+	return p
 }
 
 // RedeemAuthorizationCode validates and exchanges an authorization code for a TokenSet.
