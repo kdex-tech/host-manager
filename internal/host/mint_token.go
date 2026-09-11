@@ -183,17 +183,33 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 	return false
 }
 
-// mintCapabilityToken verifies requested ⊆ held (directional attenuation),
-// clamps ttl/uses to the host policy, and signs a short-lived HOST-AUDIENCE
-// JWT whose entitlements claim is exactly the requested (attenuated) set. The
-// caller (interception layer) supplies sub + held from the request auth context.
+// mintCapabilityToken is the MCP mint_token surface's entry point: it mints
+// with the MCP ttl ceiling (cfg.MintTokenTTLCap). The REST /-/capabilities/mint
+// surface calls mintCapabilityTokenWithCap directly with its own ceiling
+// (cfg.MintTokenCapabilityTTLCap) so the two surfaces can carry different ttl
+// caps for their different callers. See kdex-tech/host-manager and the
+// capabilityTtlCapSeconds field on KDexHost.spec.auth.mintToken.
+func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
+	// A nil config is handled inside the core; guard the deref for the cap read.
+	var ttlCap time.Duration
+	if hh.authConfig != nil {
+		ttlCap = hh.authConfig.MintTokenTTLCap
+	}
+	return hh.mintCapabilityTokenWithCap(ctx, sub, held, req, baseURL, ttlCap)
+}
+
+// mintCapabilityTokenWithCap is the shared core: it verifies requested ⊆ held
+// (directional attenuation), clamps ttl to the supplied ttlCap and uses to the
+// host policy, and signs a short-lived HOST-AUDIENCE JWT whose entitlements
+// claim is exactly the requested (attenuated) set. The caller supplies both the
+// request auth context (sub + held) and the surface's ttl ceiling.
 //
 // Phase 1: the token is a stateless windowed JWT. `Uses` is clamped and
 // reflected in UsesRemaining but no counter is provisioned yet (Phase 2 adds
 // the jti-keyed Valkey counter and the middleware decrement). The
 // auth.CapUsesClaim marker is always set so Phase 2 activates without
 // re-minting semantics.
-func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
+func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string, ttlCap time.Duration) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
 		return MintTokenResult{}, mintErrf(mintRefused, "mint_token is not enabled on this host")
@@ -223,8 +239,8 @@ func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held
 		return MintTokenResult{}, mintErrf(mintRefused, "entitlement not held by caller: %s", offender)
 	}
 
-	// Clamp ttl.
-	ttl := cfg.MintTokenTTLCap
+	// Clamp ttl to the surface's ceiling (supplied by the caller).
+	ttl := ttlCap
 	if req.TTLSeconds > 0 {
 		reqTTL := time.Duration(req.TTLSeconds) * time.Second
 		if reqTTL < ttl {

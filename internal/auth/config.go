@@ -88,6 +88,7 @@ type Config struct {
 	MintCapCache              cache.Cache
 	MintTokenEnabled          bool
 	MintTokenTTLCap           time.Duration
+	MintTokenCapabilityTTLCap time.Duration
 	MintTokenUsesCap          int
 	MintTokenDestructiveVerbs []string
 	MintTokenURLDelivery      bool
@@ -388,6 +389,15 @@ func applyMintTokenPolicy(cfg *Config, mintToken *kdexv1alpha1.MintToken) {
 		ttlCap = 60
 	}
 	cfg.MintTokenTTLCap = time.Duration(ttlCap) * time.Second
+
+	// The REST /-/capabilities/mint surface has its own ceiling. Unset (zero)
+	// inherits the MCP ttlCap resolved just above, so a host that never sets
+	// capabilityTtlCapSeconds behaves exactly as it did before the field existed.
+	capabilityTTLCap := mintToken.CapabilityTTLCapSeconds
+	if capabilityTTLCap <= 0 {
+		capabilityTTLCap = ttlCap
+	}
+	cfg.MintTokenCapabilityTTLCap = time.Duration(capabilityTTLCap) * time.Second
 
 	usesCap := mintToken.UsesCap
 	if usesCap <= 0 {

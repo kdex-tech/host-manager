@@ -48,8 +48,9 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 	// which refuse a PAT so a key cannot mint a longer-lived credential than
 	// itself: a capability is bounded BELOW the key by construction — its
 	// entitlements are attenuated from the caller's own, its lifetime is clamped
-	// to MintTokenTTLCap, and url delivery is single-use. Only a HOST-audience
-	// key is accepted; a function-bound key stays anonymous.
+	// to MintTokenCapabilityTTLCap (this REST surface's own ceiling, which falls
+	// back to MintTokenTTLCap when unset), and url delivery is single-use. Only a
+	// HOST-audience key is accepted; a function-bound key stays anonymous.
 	mux.Handle("POST "+capabilitiesMintPath,
 		hh.authConfig.WithAPITokenIdentity(hh.authExchanger)(
 			hh.authConfig.AddAuthentication(
@@ -86,7 +87,7 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 													}},
 													"ttl_seconds": &openapi.SchemaRef{Value: &openapi.Schema{
 														Type:        &openapi.Types{openapi.TypeInteger},
-														Description: "Requested lifetime in seconds; capped server-side by mintToken.ttlCapSeconds.",
+														Description: "Requested lifetime in seconds; capped server-side by mintToken.capabilityTtlCapSeconds (which falls back to mintToken.ttlCapSeconds when unset).",
 													}},
 													"uses": &openapi.SchemaRef{Value: &openapi.Schema{
 														Type:        &openapi.Types{openapi.TypeInteger},
@@ -205,7 +206,16 @@ func (hh *HostHandler) capabilityMintHandler(w http.ResponseWriter, r *http.Requ
 	}
 	held := stringSliceFromClaim(ac["entitlements"])
 
-	res, err := hh.mintCapabilityToken(r.Context(), sub, held, req, transferBaseURL(r))
+	// The REST surface uses its own ttl ceiling. applyMintTokenPolicy already
+	// bakes the unset⇒ttlCap fallback for CR-derived configs; repeat it here so a
+	// hand-constructed Config that sets only MintTokenTTLCap can't yield a
+	// zero-lifetime (and therefore dead-on-arrival) capability.
+	capTTLCap := hh.authConfig.MintTokenCapabilityTTLCap
+	if capTTLCap <= 0 {
+		capTTLCap = hh.authConfig.MintTokenTTLCap
+	}
+
+	res, err := hh.mintCapabilityTokenWithCap(r.Context(), sub, held, req, transferBaseURL(r), capTTLCap)
 	if err != nil {
 		status := mintStatus(err)
 		if status == http.StatusInternalServerError {
