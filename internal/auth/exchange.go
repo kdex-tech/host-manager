@@ -351,14 +351,64 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 }
 
 // EmitLogout dispatches the logout event to any configured event hooks.
-// Subject/claims recovery from refreshTokenID/idToken is deferred to Task 6;
-// for now this is a stub that fires a bare EventLogout so the wiring
-// compiles end to end. Nil-safe (both e and e.eventDispatcher).
-func (e *Exchanger) EmitLogout(ctx context.Context, refreshTokenID, idToken string) {
+// When refreshTokenID names a still-cached refresh token, its
+// RefreshTokenClaims are read (without consuming the record -- the caller
+// typically still needs it for its own RevokeRefreshToken call) and used to
+// populate Subject/ClientID/Scope/AuthMethod/SessionID on the payload.
+// Logout STILL fires, with an empty Subject, when refreshTokenID is empty,
+// unknown, or its record fails to parse -- a hook must see every logout, not
+// only the ones with a resolvable identity.
+//
+// idToken is currently unused; the parameter is reserved for future OIDC
+// end-session correlation.
+//
+// Nil-safe (both e and e.eventDispatcher). This is a barrier: it may block
+// the caller up to the slowest enforcing-logout hook's timeout.
+func (e *Exchanger) EmitLogout(ctx context.Context, refreshTokenID, _ string) {
 	if e == nil {
 		return
 	}
-	e.eventDispatcher.Logout(ctx, EventPayload{Event: EventLogout})
+	p := EventPayload{Event: EventLogout}
+	if refreshTokenID != "" {
+		if claims, ok := e.lookupRefreshClaims(ctx, refreshTokenID); ok {
+			p.Subject = claims.Subject
+			p.ClientID = claims.ClientID
+			p.Scope = claims.Scope
+			p.AuthMethod = string(claims.AuthMethod)
+			p.SessionID = refreshTokenID
+		}
+	}
+	e.eventDispatcher.Logout(ctx, p)
+}
+
+// lookupRefreshClaims reads (without consuming) the RefreshTokenClaims cached
+// under tokenID. Returns ok=false when refresh tokens aren't enabled, the
+// record is absent, the cache read errors, or the record doesn't parse --
+// callers treat every one of those as "nothing to recover", never as an
+// error to surface. Uses Get rather than RevokeRefreshToken's GetAndDelete:
+// EmitLogout must not consume the record out from under a RevokeRefreshToken
+// call the caller may still make.
+func (e *Exchanger) lookupRefreshClaims(ctx context.Context, tokenID string) (RefreshTokenClaims, bool) {
+	if !e.IsRefreshTokenEnabled() {
+		return RefreshTokenClaims{}, false
+	}
+	raw, found, _, err := e.refreshTokenCache.Get(ctx, tokenID)
+	if err != nil || !found {
+		return RefreshTokenClaims{}, false
+	}
+	return decodeRefreshTokenClaims(raw)
+}
+
+// decodeRefreshTokenClaims unmarshals a raw refresh-token cache record into
+// RefreshTokenClaims. Shared by every reader of that record (RevokeRefreshToken,
+// which reaches it via GetAndDelete, and lookupRefreshClaims, via Get) so the
+// record's shape is decoded in exactly one place.
+func decodeRefreshTokenClaims(raw string) (RefreshTokenClaims, bool) {
+	var claims RefreshTokenClaims
+	if json.Unmarshal([]byte(raw), &claims) != nil {
+		return RefreshTokenClaims{}, false
+	}
+	return claims, true
 }
 
 // ExchangeSubjectToken performs an RFC 8693 token exchange: it verifies a
@@ -737,8 +787,7 @@ func (e *Exchanger) RevokeRefreshToken(ctx context.Context, tokenID string) erro
 	}
 	_ = e.refreshGraceCache.Delete(ctx, tokenID)
 	if found {
-		var claims RefreshTokenClaims
-		if json.Unmarshal([]byte(raw), &claims) == nil && claims.PredecessorID != "" {
+		if claims, ok := decodeRefreshTokenClaims(raw); ok && claims.PredecessorID != "" {
 			_ = e.refreshGraceCache.Delete(ctx, claims.PredecessorID)
 		}
 	}

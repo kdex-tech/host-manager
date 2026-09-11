@@ -145,9 +145,22 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 	// kdex-tech/host-manager#84.
 	if hh.authConfig != nil && hh.authExchanger != nil {
 		if c, err := r.Cookie(hh.authConfig.CookieName + "_refresh"); err == nil && c.Value != "" {
+			// Barrier: run before RevokeRefreshToken so enforcing-logout
+			// hooks can still read the refresh token's claims from cache --
+			// RevokeRefreshToken deletes that same record. The ID token
+			// isn't read yet at this point in the handler (only further
+			// down, on the OIDC end-session path), so "" is passed; the
+			// parameter is reserved for future OIDC end-session correlation.
+			hh.authExchanger.EmitLogout(r.Context(), c.Value, "")
+
 			// Fire-and-forget: errors here shouldn't block the logout
 			// from completing.
 			_ = hh.authExchanger.RevokeRefreshToken(r.Context(), c.Value)
+		} else {
+			// No refresh cookie (e.g. refresh tokens disabled, or an
+			// already-expired session): the logout barrier must still run,
+			// with an empty subject, so enforcing hooks see every logout.
+			hh.authExchanger.EmitLogout(r.Context(), "", "")
 		}
 	}
 
