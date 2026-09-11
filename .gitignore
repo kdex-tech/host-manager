@@ -34,3 +34,6 @@ chart/charts/*.tgz
 # Local agent/session scratch (not part of the codebase)
 .superpowers/
 .claude/
+
+# SDD isolated worktrees
+.worktrees/
