@@ -1114,7 +1114,7 @@ func TestMint_SubjectMints_MergeBackendClaimsPreAttenuation(t *testing.T) {
 
 	t.Run("refresh mint carries backend grant", func(t *testing.T) {
 		e := newTestExchanger(t, newSP(true), enrichmentClaimMappingConfig())
-		ts, err := e.mintTokensFromSubject("alice", "c", "entitlements", AuthMethodOAuth2, nil)
+		ts, _, err := e.mintTokensFromSubject("alice", "c", "entitlements", AuthMethodOAuth2, nil)
 		require.NoError(t, err)
 		assert.Contains(t, tokenEntitlements(t, ts.AccessToken), "resource:rx:all")
 	})

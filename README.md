@@ -176,6 +176,12 @@ the refresh/session token before it is cleared; if no token is available,
 `subject` (and the other identity fields) are simply absent and the event
 still fires.
 
+`login` and `session-refresh` payloads carry the caller's full claim set
+(`claims`/`roles`/`entitlements`), which may include PII such as email or
+profile data — a hook endpoint must be trusted and secured accordingly
+(TLS, network policy, credential handling for the shared secret) exactly as
+if it were an internal identity system.
+
 ### Response contract
 
 Read **only** for **enforcing `login`**:

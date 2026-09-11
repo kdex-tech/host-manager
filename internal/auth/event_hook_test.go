@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -98,6 +99,14 @@ func TestHTTPEventHook_Call_SignsAndSendsEnvelope(t *testing.T) {
 	g.Expect(json.Unmarshal(gotBody, &env)).To(Succeed())
 	g.Expect(env.Event).To(Equal(EventLogin))
 	g.Expect(env.Subject).To(Equal("alice"))
+
+	// The body's `timestamp` must equal the header/signed timestamp -- the
+	// contract documented in README.md and the design spec ("matches the
+	// signature timestamp"). Regression lock for the call() fix that used to
+	// take a second, independent time.Now() reading for the header/HMAC.
+	gotTsInt, err := strconv.ParseInt(gotTs, 10, 64)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(env.Timestamp).To(Equal(gotTsInt))
 }
 
 func TestHTTPEventHook_Call_OKFalseAndErrors(t *testing.T) {

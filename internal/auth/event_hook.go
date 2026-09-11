@@ -166,11 +166,23 @@ func (h *httpEventHook) enforcingFor(e EventType) bool {
 // A transport/status/decode failure returns a non-nil err; a clean ok=false is
 // err==nil with ok==false.
 func (h *httpEventHook) call(ctx context.Context, payload EventPayload) (bool, string, error) {
+	// The dispatcher normally stamps Timestamp before calling in (GateLogin /
+	// NotifyLoginSuccess / NotifySessionRefresh / Logout all set it). A caller
+	// that reaches call() directly without going through the dispatcher (unit
+	// tests included) may leave it at the zero value, so it is filled in here
+	// as the single source of truth -- this is the ONLY time reading in this
+	// method. The body's `timestamp` field and the signed/header timestamp
+	// must be the same value (see README/design spec: "matches the signature
+	// timestamp"), so both are derived from payload.Timestamp after this
+	// point rather than each taking their own reading.
+	if payload.Timestamp == 0 {
+		payload.Timestamp = time.Now().UnixMilli()
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return false, "", fmt.Errorf("httpEventHook: marshal: %w", err)
 	}
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	ts := strconv.FormatInt(payload.Timestamp, 10)
 	sig := computeSignature(h.sharedSecret, ts, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, bytes.NewReader(body))

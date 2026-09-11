@@ -646,7 +646,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// session, and no client_id exists in this frame. See
 	// kdex-tech/host-manager#189 (loginPayload/GateLogin, Task 4) and the
 	// same reasoning as LoginLocal's gate on ErrGrantFailure vs ErrServerError.
-	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(signingContext, sub, "", grantedScope, string(AuthMethodOIDC))); gerr != nil {
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC))); gerr != nil {
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event:      EventLoginFailed,
 			Subject:    sub,
@@ -683,7 +683,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		}
 	}
 
-	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(signingContext, sub, "", grantedScope, string(AuthMethodOIDC)))
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, sub, "", grantedScope, string(AuthMethodOIDC)))
 	return ts, nil
 }
 
@@ -1032,7 +1032,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// rejected client to retry instead of that the login was refused. See
 	// oautherr.go's ErrServerError/ErrGrantFailure doc comments; there is no
 	// third sentinel (an "ErrAccessDenied" does not exist in this codebase).
-	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
+	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event:      EventLoginFailed,
 			Subject:    username,
@@ -1078,13 +1078,17 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		}
 	}
 
-	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(signingContext, username, clientID, grantedScopeStr, string(authMethod)))
+	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)))
 	return ts, nil
 }
 
-// loginPayload builds the EventPayload for a login event out of the signing
-// context LoginLocal assembled: the well-known roles/entitlements claims go
-// into their typed EventPayload fields, everything else lands in Claims.
+// loginPayload builds the rich EventPayload -- login or session-refresh --
+// out of a signing context (LoginLocal/ExchangeToken's for login,
+// mintTokensFromSubject's re-resolved one for session-refresh): the
+// well-known roles/entitlements claims go into their typed EventPayload
+// fields, everything else lands in Claims. `event` selects which of the two
+// the caller is building; the shape of the payload is otherwise identical,
+// per the design spec ("rich for login/session-refresh").
 //
 // Coercion reuses AuthContext.GetRoles/GetEntitlements (context.go) rather
 // than a new helper. internal/host/mint_token.go has an equivalent
@@ -1094,9 +1098,9 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 // `type AuthContext jwt.MapClaims` -- and its parseToStringArray-backed
 // getters do the identical []string/[]any/string coercion, so this reuses
 // in-package code instead of duplicating the coercion a second time.
-func loginPayload(signingContext jwt.MapClaims, subject, clientID, scope, authMethod string) EventPayload {
+func loginPayload(event EventType, signingContext jwt.MapClaims, subject, clientID, scope, authMethod string) EventPayload {
 	p := EventPayload{
-		Event:      EventLogin,
+		Event:      event,
 		Subject:    subject,
 		ClientID:   clientID,
 		Scope:      scope,
@@ -1441,7 +1445,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// infrastructure failures, exactly as mintTokensFromCode does, so the
 	// classification is a property of the function that knows what failed
 	// rather than of this one caller. %w keeps the mark in the chain.
-	ts, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod, idpClaims)
+	ts, refreshSigningContext, err := e.mintTokensFromSubject(claims.Subject, claims.ClientID, claims.Scope, claims.AuthMethod, idpClaims)
 	if err != nil {
 		return failed("failed to mint tokens from refresh: %w", err)
 	}
@@ -1497,16 +1501,17 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// #169 replay return above, which hands a concurrent loser the SAME
 	// TokenSet the winner already minted and emitted for, so replaying it
 	// here would double-report one refresh per concurrent loser.
+	//
+	// Built via loginPayload from refreshSigningContext -- the SAME
+	// re-resolved roles/entitlements/claims mintTokensFromSubject just signed
+	// into the new access token, not the stale RefreshTokenClaims snapshot --
+	// so session-refresh carries the rich claim set the design spec and
+	// README promise ("rich for login/session-refresh"), matching login.
 	// ts.RefreshToken is the newly-rotated token's cache key (createRefreshToken
 	// returns the id it just wrote), i.e. the new session id succeeding tokenID.
-	e.eventDispatcher.NotifySessionRefresh(ctx, EventPayload{
-		Event:      EventSessionRefresh,
-		Subject:    claims.Subject,
-		ClientID:   claims.ClientID,
-		Scope:      claims.Scope,
-		AuthMethod: string(claims.AuthMethod),
-		SessionID:  ts.RefreshToken,
-	})
+	refreshPayload := loginPayload(EventSessionRefresh, refreshSigningContext, claims.Subject, claims.ClientID, ts.Scope, string(claims.AuthMethod))
+	refreshPayload.SessionID = ts.RefreshToken
+	e.eventDispatcher.NotifySessionRefresh(ctx, refreshPayload)
 
 	return ts, nil
 }
@@ -1765,11 +1770,19 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 // it: the caller's re-wrap was correct but invisible from here, and a second
 // caller would have silently reported an outage as invalid_grant. See
 // kdex-tech/host-manager#168.
-func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod, idpClaims jwt.MapClaims) (TokenSet, error) {
+//
+// The second return value is the re-resolved signing context (roles,
+// entitlements, backend/IdP claims -- the same jwt.MapClaims passed to
+// SignScoped for the returned TokenSet's access token), nil on error. It
+// exists so RedeemRefreshToken can build a rich session-refresh event
+// payload (loginPayload) out of the SAME re-resolved grant that was actually
+// minted, rather than the stale RefreshTokenClaims snapshot -- see the
+// design spec's "rich for login/session-refresh".
+func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authMethod AuthMethod, idpClaims jwt.MapClaims) (TokenSet, jwt.MapClaims, error) {
 	// As in mintTokensFromCode: subject is an input, so every failure below
 	// can be attributed. See kdex-tech/host-manager#158.
-	failed := func(format string, args ...any) (TokenSet, error) {
-		return TokenSet{Subject: subject}, fmt.Errorf(format, args...)
+	failed := func(format string, args ...any) (TokenSet, jwt.MapClaims, error) {
+		return TokenSet{Subject: subject}, nil, fmt.Errorf(format, args...)
 	}
 
 	roles, entitlements, backend, err := e.subjectSigningContext(subject)
@@ -1830,7 +1843,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		IDToken:     idToken,
 		Scope:       grantedScope,
 		Subject:     subject,
-	}, nil
+	}, signingContext, nil
 }
 
 // restoreConsumedRefreshToken puts a consumed refresh record back after the

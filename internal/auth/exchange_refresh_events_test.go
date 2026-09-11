@@ -17,6 +17,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -36,6 +37,11 @@ import (
 // refresh-token grant never calls FindInternal directly, but
 // mintTokensFromSubject re-resolves roles/entitlements through
 // FindInternalRolesAndEntitlements on every redemption.
+//
+// Non-empty roles/entitlements are returned (rather than nil) so
+// TestRedeemRefreshToken_FiresSessionRefresh can assert the session-refresh
+// payload actually carries the re-resolved grant, per the design spec's
+// "rich for login/session-refresh".
 type refreshEventsStubProvider struct{}
 
 func (refreshEventsStubProvider) FindInternal(subject, _ string) (jwt.MapClaims, error) {
@@ -43,7 +49,7 @@ func (refreshEventsStubProvider) FindInternal(subject, _ string) (jwt.MapClaims,
 }
 
 func (refreshEventsStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
-	return nil, nil, nil
+	return []string{"member"}, []string{"functions:/api/v1/ingest:read"}, nil
 }
 
 // newRefreshEventsExchanger wires an Exchanger with the same Config/Signer
@@ -105,14 +111,17 @@ func seedRefreshToken(t *testing.T, ex *Exchanger, tokenID string, claims Refres
 // TestRedeemRefreshToken_FiresSessionRefresh pins the success-emission
 // insertion for the refresh_token grant: a successful redemption/rotation
 // must fire the async session-refresh hook, carrying the redeemed claims'
-// Subject/ClientID/Scope/AuthMethod and the newly-rotated refresh token id
-// as SessionID.
+// Subject/ClientID/Scope/AuthMethod, the newly-rotated refresh token id as
+// SessionID, and -- per the design spec's "rich for login/session-refresh"
+// -- the re-resolved roles/entitlements/claims, exactly like login.
 func TestRedeemRefreshToken_FiresSessionRefresh(t *testing.T) {
 	g := NewWithT(t)
 	var hit atomic.Int32
+	var gotBody []byte
 	done := make(chan struct{}, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit.Add(1)
+		gotBody, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 		done <- struct{}{}
 	}))
@@ -135,6 +144,18 @@ func TestRedeemRefreshToken_FiresSessionRefresh(t *testing.T) {
 
 	g.Eventually(done, "2s").Should(Receive())
 	g.Expect(hit.Load()).To(Equal(int32(1)))
+
+	var env EventPayload
+	g.Expect(json.Unmarshal(gotBody, &env)).To(Succeed())
+	g.Expect(env.Event).To(Equal(EventSessionRefresh))
+	g.Expect(env.Subject).To(Equal("alice"))
+	g.Expect(env.SessionID).To(Equal(ts.RefreshToken))
+	// The rich claim set: refreshEventsStubProvider.FindInternalRolesAndEntitlements
+	// returns a fixed non-empty roles/entitlements pair, so a session-refresh
+	// payload built from the stale RefreshTokenClaims (which carries neither)
+	// would fail this -- it must come from the re-resolved signing context.
+	g.Expect(env.Roles).To(ContainElement("member"))
+	g.Expect(env.Entitlements).To(ContainElement("functions:/api/v1/ingest:read"))
 }
 
 // TestRedeemRefreshToken_RejectionDoesNotFireSessionRefresh pins the other
