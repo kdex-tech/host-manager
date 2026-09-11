@@ -61,7 +61,7 @@ func newPKCETestExchanger(t *testing.T) *Exchanger {
 	cm, err := cache.NewCacheManager("", "pkce-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, pkceStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, pkceStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }

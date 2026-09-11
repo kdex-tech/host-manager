@@ -282,7 +282,7 @@ func TestLoginClient_M2MNotConfiguredIsServerError(t *testing.T) {
 	// is the "M2M auth not configured" branch specifically, not
 	// GetClient's "invalid client_id" a moment later.
 	cfg := Config{Issuer: "test-iss", Audience: "test-aud", Signer: *signer}
-	ex, err := NewExchanger(context.Background(), cfg, nil, rotationStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, nil, rotationStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	require.False(t, ex.config.IsM2MEnabled())
 
@@ -311,7 +311,7 @@ func TestRedeemRefreshToken_StorageNotConfiguredIsServerError(t *testing.T) {
 		RefreshTokenTTL: time.Hour,
 		Clients:         map[string]AuthClient{"app": {ClientID: "app"}},
 	}
-	ex, err := NewExchanger(context.Background(), cfg, nil, rotationStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, nil, rotationStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	require.False(t, ex.IsRefreshTokenEnabled())
 
@@ -388,7 +388,7 @@ func newLoginLocalExchanger(t *testing.T, sp InternalIdentityProvider) *Exchange
 		Signer:     *signer,
 		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
 	}
-	ex, err := NewExchanger(context.Background(), cfg, nil, sp)
+	ex, err := NewExchanger(context.Background(), cfg, nil, sp, nil)
 	require.NoError(t, err)
 	return ex
 }

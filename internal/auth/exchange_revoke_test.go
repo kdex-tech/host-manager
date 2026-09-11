@@ -58,7 +58,7 @@ func newRevokeTestExchanger(t *testing.T) *Exchanger {
 	cm, err := cache.NewCacheManager("", "revoke-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, revokeStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, revokeStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }

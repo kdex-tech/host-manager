@@ -136,7 +136,7 @@ func patProxyFixtureParts(t *testing.T, idp auth.InternalIdentityProvider, fn kd
 	tm, err := apitoken.NewTokenManager(patProxyIssuer, apitoken.GenerateDevmodeKeyPair(), nil)
 	require.NoError(t, err)
 
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp)
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp, nil)
 	require.NoError(t, err)
 
 	fn.Status.URL = upstream.URL

@@ -214,7 +214,7 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 	}
 	exCfg.OIDC.BlockKey = "e2e-block-key-0123456789abcdef"
 
-	ex, err := auth.NewExchanger(t.Context(), exCfg, cacheManager, idp)
+	ex, err := auth.NewExchanger(t.Context(), exCfg, cacheManager, idp, nil)
 	require.NoError(t, err)
 
 	fn := newReadyFunctionWithOAuth2(t, e2eBasePath, []string{e2eScope})

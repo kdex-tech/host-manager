@@ -53,7 +53,7 @@ func newPATTestConfig(t *testing.T, cacheName string) (Config, *Exchanger, *apit
 		TokenManager: tm,
 	}
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, patHostIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, patHostIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	return cfg, ex, tm

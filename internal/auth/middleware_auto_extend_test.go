@@ -68,7 +68,7 @@ func newAutoExtendTestSetup(t *testing.T) (*Config, *Exchanger, *ecdsa.PrivateKe
 	cm, err := cache.NewCacheManager("", "auto-extend-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), *cfg, cm, autoExtendStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), *cfg, cm, autoExtendStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	return cfg, ex, priv

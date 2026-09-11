@@ -72,7 +72,7 @@ func newReplayTestExchanger(t *testing.T) *Exchanger {
 	cm, err := cache.NewCacheManager("", "auth-replay-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, stubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, stubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }

@@ -84,7 +84,7 @@ func TestHostPAT_EntitlementsAreClaimMappingEnriched(t *testing.T) {
 		ClaimMapper:   mapper,
 	}
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, patEnrichIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, patEnrichIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	var seen AuthContext

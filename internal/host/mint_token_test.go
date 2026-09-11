@@ -274,7 +274,7 @@ func newTestHostHandlerForProxy(t *testing.T, cfg *auth.Config) *HostHandler {
 		t.Fatalf("cache.NewCacheManager: %v", err)
 	}
 
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, stubInternalIdentityProvider{})
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, stubInternalIdentityProvider{}, nil)
 	if err != nil {
 		t.Fatalf("auth.NewExchanger: %v", err)
 	}

@@ -67,7 +67,7 @@ func newTestOAuth2(t *testing.T) *OAuth2 {
 		subject:      "alice",
 		roles:        []string{"internal-reader"},
 		entitlements: []string{"functions:/v1/internal:read"},
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	return &OAuth2{
@@ -214,7 +214,7 @@ func newTestOAuth2WithErroringIdentityProvider(t *testing.T) *OAuth2 {
 		TokenTTL: time.Hour,
 	}
 
-	ex, err := NewExchanger(context.Background(), cfg, nil, erroringIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, nil, erroringIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	return &OAuth2{

@@ -74,7 +74,7 @@ func subjectlessExchanger(t *testing.T) (*Exchanger, *Config) {
 	cm, err := cache.NewCacheManager("", "subjectless-credential-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, subjectlessStubProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, subjectlessStubProvider{}, nil)
 	require.NoError(t, err)
 	return ex, &cfg
 }

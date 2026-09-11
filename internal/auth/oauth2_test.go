@@ -46,7 +46,7 @@ func TestOAuth2TokenHandler(t *testing.T) {
 			return []string{"role1"}, []string{"entitlement1"}, nil
 		},
 	}
-	ex, _ := NewExchanger(context.Background(), cfg, nil, sp)
+	ex, _ := NewExchanger(context.Background(), cfg, nil, sp, nil)
 
 	// Helper to generate a valid code
 	validCode, _ := ex.CreateAuthorizationCode(context.Background(), AuthorizationCodeClaims{

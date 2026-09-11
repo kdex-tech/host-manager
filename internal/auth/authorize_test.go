@@ -140,7 +140,7 @@ func TestHostHandler_AuthorizeHandler(t *testing.T) {
 			g.Expect(err).NotTo(G.HaveOccurred())
 			cfg.Signer = *signer
 
-			exchanger, err := NewExchanger(context.Background(), *cfg, nil, nil)
+			exchanger, err := NewExchanger(context.Background(), *cfg, nil, nil, nil)
 			g.Expect(err).NotTo(G.HaveOccurred())
 
 			o := &OAuth2{
@@ -237,7 +237,7 @@ func TestAuthorizeHandler_DoesNotLogAuthorizationCode(t *testing.T) {
 	g.Expect(err).NotTo(G.HaveOccurred())
 	cfg.Signer = *signer
 
-	exchanger, err := NewExchanger(context.Background(), *cfg, nil, nil)
+	exchanger, err := NewExchanger(context.Background(), *cfg, nil, nil, nil)
 	g.Expect(err).NotTo(G.HaveOccurred())
 
 	o := &OAuth2{AuthConfig: cfg, AuthExchanger: exchanger}

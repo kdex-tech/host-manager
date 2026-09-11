@@ -88,7 +88,7 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 	tm, err := apitoken.NewTokenManager("api-token-issuer", apitoken.GenerateDevmodeKeyPair(), nil)
 	require.NoError(t, err)
 
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp)
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp, nil)
 	require.NoError(t, err)
 
 	// Permissive gate by default (this suite isolates the PASETO->authContext

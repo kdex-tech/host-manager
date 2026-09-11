@@ -111,7 +111,7 @@ func TestOAuth2TokenHandlerMintsPATForResource(t *testing.T) {
 			return []string{"role1"}, []string{"entitlement1"}, nil
 		},
 	}
-	ex, _ := NewExchanger(context.Background(), cfg, nil, sp)
+	ex, _ := NewExchanger(context.Background(), cfg, nil, sp, nil)
 
 	resource := "https://dev.knowdrive.ai/api/v1/mcp"
 
@@ -251,7 +251,7 @@ func TestOAuth2TokenHandlerMintsPATForResourceOnRefresh(t *testing.T) {
 		},
 	}
 	// Passing the cacheManager enables the refresh-token store.
-	ex, _ := NewExchanger(context.Background(), cfg, cm, sp)
+	ex, _ := NewExchanger(context.Background(), cfg, cm, sp, nil)
 	require.True(t, ex.IsRefreshTokenEnabled(), "refresh tokens must be enabled for this test")
 
 	resource := "https://dev.knowdrive.ai/api/v1/mcp"

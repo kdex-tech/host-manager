@@ -73,7 +73,7 @@ func newClientCredsExchanger(t *testing.T, allowedScopes []string, idp InternalI
 	cm, err := cache.NewCacheManager("", "client-creds-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, idp)
+	ex, err := NewExchanger(context.Background(), cfg, cm, idp, nil)
 	require.NoError(t, err)
 	return ex
 }

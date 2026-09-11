@@ -573,7 +573,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
 
-	authExchanger, err := auth.NewExchanger(ctx, *authConfig, r.HostHandler.GetCacheManager(), rp)
+	eventDispatcher, err := auth.NewEventDispatcherFromSecrets(internalHost.Name, secrets, logf.FromContext(ctx))
+	if err != nil {
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
+	}
+
+	authExchanger, err := auth.NewExchanger(ctx, *authConfig, r.HostHandler.GetCacheManager(), rp, eventDispatcher)
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}

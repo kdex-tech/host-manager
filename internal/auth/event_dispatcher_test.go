@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-logr/logr"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func hookTo(t *testing.T, name, url, events, mode string, extra map[string]string) *httpEventHook {
@@ -165,4 +166,62 @@ func TestSelecting_EnforcingModeIgnoredForNonEnforceableEvents(t *testing.T) {
 	g.Expect(d.selecting(EventLoginFailed, false)).To(ConsistOf(loginFailedHook))
 	g.Expect(d.selecting(EventSessionRefresh, true)).To(BeEmpty())
 	g.Expect(d.selecting(EventSessionRefresh, false)).To(ConsistOf(sessionRefreshHook))
+}
+
+// activeHookSecret builds an http-event-hook Secret annotated as the active
+// key, as NewEventDispatcherFromSecrets expects to find it.
+func activeHookSecret(name, url string, extra map[string]string) corev1.Secret {
+	s := makeEventHookSecret(name, url, extra)
+	s.Annotations = map[string]string{
+		"kdex.dev/secret-type": HTTPEventHookSecretType,
+		"kdex.dev/active-key":  "true",
+	}
+	return s
+}
+
+func TestNewEventDispatcherFromSecrets_FiltersByAnnotations(t *testing.T) {
+	g := NewWithT(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	active := activeHookSecret("active", srv.URL, map[string]string{"events": "login"})
+
+	inactive := activeHookSecret("inactive", srv.URL, map[string]string{"events": "login"})
+	inactive.Annotations["kdex.dev/active-key"] = "false"
+
+	wrongType := makeEventHookSecret("wrong-type", srv.URL, map[string]string{"events": "login"})
+	wrongType.Annotations = map[string]string{
+		"kdex.dev/secret-type": "ldap",
+		"kdex.dev/active-key":  "true",
+	}
+
+	unrelated := corev1.Secret{}
+
+	d, err := NewEventDispatcherFromSecrets("h", []corev1.Secret{active, inactive, wrongType, unrelated}, logr.Discard())
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(d).ToNot(BeNil())
+	g.Expect(d.hooks).To(HaveLen(1))
+	g.Expect(d.hooks[0].name).To(Equal("active"))
+}
+
+func TestNewEventDispatcherFromSecrets_ReturnsFirstParseError(t *testing.T) {
+	g := NewWithT(t)
+
+	bad := activeHookSecret("bad", "", map[string]string{"events": "login"}) // missing url
+
+	d, err := NewEventDispatcherFromSecrets("h", []corev1.Secret{bad}, logr.Discard())
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("url"))
+	g.Expect(d).To(BeNil())
+}
+
+func TestNewEventDispatcherFromSecrets_NoMatchesReturnsUsableDispatcher(t *testing.T) {
+	g := NewWithT(t)
+
+	d, err := NewEventDispatcherFromSecrets("h", nil, logr.Discard())
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(d).ToNot(BeNil())
+	g.Expect(d.hooks).To(BeEmpty())
 }

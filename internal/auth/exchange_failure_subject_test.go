@@ -81,7 +81,7 @@ func newSubjectAuditExchanger(t *testing.T) *Exchanger {
 	cm, err := cache.NewCacheManager("", "subject-audit-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, subjectAuditStubProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, subjectAuditStubProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }

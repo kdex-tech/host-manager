@@ -58,7 +58,7 @@ func newMintScopeExchanger(t *testing.T) (*Exchanger, *keys.KeyPair) {
 	cm, err := cache.NewCacheManager("", "mint-scope-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, mintScopeStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, mintScopeStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex, cfg.ActivePair
 }

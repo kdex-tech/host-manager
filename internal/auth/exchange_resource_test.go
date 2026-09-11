@@ -84,7 +84,7 @@ func newTestExchangerWithDCR(t *testing.T) (*Exchanger, string) {
 	}
 	cfg.OIDC.BlockKey = "0123456789abcdef0123456789abcdef"
 
-	ex, err := NewExchanger(ctx, cfg, cm, resourceStubIdentityProvider{})
+	ex, err := NewExchanger(ctx, cfg, cm, resourceStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	return ex, registered.ClientID

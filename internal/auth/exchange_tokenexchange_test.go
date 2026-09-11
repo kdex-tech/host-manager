@@ -72,7 +72,7 @@ func newTokenExchangeExchanger(t *testing.T, cs *crypto.Signer, kid, issuer stri
 		subject:      "alice",
 		roles:        []string{"internal-reader"},
 		entitlements: []string{"functions:/v1/internal:read"},
-	})
+	}, nil)
 	require.NoError(t, err)
 	return ex
 }

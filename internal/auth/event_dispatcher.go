@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ErrLoginHookDenied is returned by GateLogin when an enforcing login hook
@@ -24,6 +25,28 @@ type EventDispatcher struct {
 func NewEventDispatcher(host string, hooks []*httpEventHook, log logr.Logger) *EventDispatcher {
 	sortHooksByName(hooks)
 	return &EventDispatcher{host: host, hooks: hooks, log: log}
+}
+
+// NewEventDispatcherFromSecrets filters secrets down to the active
+// http-event-hook Secrets (kdex.dev/secret-type == HTTPEventHookSecretType
+// and kdex.dev/active-key == "true"), parses each into an httpEventHook, and
+// wraps the result in an EventDispatcher. Returns the first parse error
+// encountered, if any. httpEventHook is unexported, so this is the only way
+// a caller outside the auth package can build a dispatcher from Secrets.
+func NewEventDispatcherFromSecrets(host string, secrets []corev1.Secret, log logr.Logger) (*EventDispatcher, error) {
+	var hooks []*httpEventHook
+	for _, s := range secrets {
+		if s.Annotations["kdex.dev/secret-type"] != HTTPEventHookSecretType ||
+			s.Annotations["kdex.dev/active-key"] != "true" {
+			continue
+		}
+		h, err := NewHTTPEventHook(s)
+		if err != nil {
+			return nil, err
+		}
+		hooks = append(hooks, h)
+	}
+	return NewEventDispatcher(host, hooks, log), nil
 }
 
 // bgTimeout derives a background context bounded by the hook's own timeout, so

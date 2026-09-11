@@ -75,7 +75,7 @@ func newRotationTestExchangerWithGrace(t *testing.T, window time.Duration) *Exch
 	cm, err := cache.NewCacheManager("", "rotation-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, rotationStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, rotationStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }

@@ -59,7 +59,7 @@ func newOIDCFixture(t *testing.T, scopes ...string) *oidcFixture {
 
 	ih.Handler = MockOIDCProvider(*cfg)
 
-	ex, err := NewExchanger(ctx, *cfg, cacheManager, scopeProviderForOIDC())
+	ex, err := NewExchanger(ctx, *cfg, cacheManager, scopeProviderForOIDC(), nil)
 	require.NoError(t, err)
 
 	return &oidcFixture{ex: ex, cfg: cfg, ctx: ctx}

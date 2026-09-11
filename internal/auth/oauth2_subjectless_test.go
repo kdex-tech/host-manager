@@ -63,7 +63,7 @@ func subjectlessOAuth2(t *testing.T) *OAuth2 {
 	cm, err := cache.NewCacheManager("", "oauth2-subjectless-test", nil)
 	require.NoError(t, err)
 
-	ex, err := NewExchanger(context.Background(), cfg, cm, subjectlessStubProvider{})
+	ex, err := NewExchanger(context.Background(), cfg, cm, subjectlessStubProvider{}, nil)
 	require.NoError(t, err)
 
 	return &OAuth2{AuthConfig: &cfg, AuthExchanger: ex}

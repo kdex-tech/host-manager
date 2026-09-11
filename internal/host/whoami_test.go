@@ -413,7 +413,7 @@ func TestReverseProxy_WhoamiWiresEffectiveEntitlements(t *testing.T) {
 		roles: []string{"reader"},
 		ents:  []string{"pages:/:read", "vector_stores:vs_role:read"},
 	}
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, idp)
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, idp, nil)
 	require.NoError(t, err)
 
 	cfg := testAuthConfigForMint(t)
@@ -495,7 +495,7 @@ func TestReverseProxy_WhoamiDoesNotResolvePIIBehindTheScope(t *testing.T) {
 	require.NoError(t, err)
 	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, resolvingIdentityProvider{
 		stubInternalIdentityProvider{roles: []string{"reader"}, ents: []string{"pages:/:read"}},
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	fn := newServiceBackedMCPFunction(t, upstream.URL)

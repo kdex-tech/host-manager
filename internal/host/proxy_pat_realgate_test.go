@@ -87,7 +87,7 @@ func realGateFixture(t *testing.T, fn kdexv1alpha1.KDexFunction, idp auth.Intern
 	tm, err := apitoken.NewTokenManager(patProxyIssuer, apitoken.GenerateDevmodeKeyPair(), nil)
 	require.NoError(t, err)
 
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, idp)
+	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, idp, nil)
 	require.NoError(t, err)
 
 	fn.Status.URL = upstream.URL

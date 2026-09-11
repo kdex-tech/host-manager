@@ -85,9 +85,10 @@ type Exchanger struct {
 	// Zero-value singleflight.Group is ready to use. It coalesces within this
 	// process only — a fan-out landing on multiple replicas still resolves once
 	// per replica, acceptable because each resolve is cheap and idempotent.
-	grantGroup    singleflight.Group
-	maxSessionAge time.Duration
-	sp            InternalIdentityProvider
+	grantGroup      singleflight.Group
+	maxSessionAge   time.Duration
+	sp              InternalIdentityProvider
+	eventDispatcher *EventDispatcher
 }
 
 // subjectResolveCacheTTL bounds how stale a bridged caller's re-resolved backend
@@ -223,12 +224,14 @@ func NewExchanger(
 	cfg Config,
 	cacheManager cache.CacheManager,
 	sp InternalIdentityProvider,
+	dispatcher *EventDispatcher,
 ) (*Exchanger, error) {
 	ex := &Exchanger{
 		config:          cfg,
 		refreshTokenTTL: cfg.RefreshTokenTTL,
 		maxSessionAge:   cfg.MaxSessionAge,
 		sp:              sp,
+		eventDispatcher: dispatcher,
 	}
 	// Seed the per-process grant-generation nonce once. Combined with an atomic
 	// counter in BumpGrantGeneration it makes each generation token unique for
@@ -345,6 +348,17 @@ func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]strin
 		return nil, nil, nil
 	}
 	return e.sp.FindInternalRolesAndEntitlements(subject)
+}
+
+// EmitLogout dispatches the logout event to any configured event hooks.
+// Subject/claims recovery from refreshTokenID/idToken is deferred to Task 6;
+// for now this is a stub that fires a bare EventLogout so the wiring
+// compiles end to end. Nil-safe (both e and e.eventDispatcher).
+func (e *Exchanger) EmitLogout(ctx context.Context, refreshTokenID, idToken string) {
+	if e == nil {
+		return
+	}
+	e.eventDispatcher.Logout(ctx, EventPayload{Event: EventLogout})
 }
 
 // ExchangeSubjectToken performs an RFC 8693 token exchange: it verifies a

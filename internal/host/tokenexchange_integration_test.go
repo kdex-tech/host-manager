@@ -113,7 +113,7 @@ func newTokenExchangeE2EMux(t *testing.T) (mux http.Handler, functionA, function
 		},
 		TokenTTL: ttl,
 	}
-	ex, err := auth.NewExchanger(t.Context(), exCfg, nil, texStubIdentityProvider{})
+	ex, err := auth.NewExchanger(t.Context(), exCfg, nil, texStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 
 	// authConfig drives the HTTP endpoints: ActivePair gates IsAuthEnabled

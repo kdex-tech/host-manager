@@ -24,7 +24,7 @@ func newGenTestExchanger(t *testing.T) *Exchanger {
 	t.Helper()
 	cm, err := cache.NewCacheManager("", "grant-gen-test", nil)
 	require.NoError(t, err)
-	ex, err := NewExchanger(context.Background(), Config{}, cm, autoExtendStubIdentityProvider{})
+	ex, err := NewExchanger(context.Background(), Config{}, cm, autoExtendStubIdentityProvider{}, nil)
 	require.NoError(t, err)
 	return ex
 }
@@ -136,7 +136,7 @@ func newGrantTestSetup(t *testing.T) (*Config, *Exchanger, *changingGrantProvide
 	cm, err := cache.NewCacheManager("", "grant-test", nil)
 	require.NoError(t, err)
 	p := &changingGrantProvider{}
-	ex, err := NewExchanger(context.Background(), *cfg, cm, p)
+	ex, err := NewExchanger(context.Background(), *cfg, cm, p, nil)
 	require.NoError(t, err)
 	return cfg, ex, p, priv
 }
@@ -149,7 +149,7 @@ func newCountingGrantTestSetup(t *testing.T, delay time.Duration) (*Config, *Exc
 	cm, err := cache.NewCacheManager("", "grant-coalesce-test", nil)
 	require.NoError(t, err)
 	p := &countingGrantProvider{delay: delay}
-	ex, err := NewExchanger(context.Background(), *cfg, cm, p)
+	ex, err := NewExchanger(context.Background(), *cfg, cm, p, nil)
 	require.NoError(t, err)
 	return cfg, ex, p
 }
@@ -317,7 +317,7 @@ func TestRefreshSessionGrantsBackendCannotOverrideIdentity(t *testing.T) {
 	cm, err := cache.NewCacheManager("", "grant-di-f1", nil)
 	require.NoError(t, err)
 	p := &backendOverrideProvider{roles: []string{"role-internal"}}
-	ex, err := NewExchanger(context.Background(), *cfg, cm, p)
+	ex, err := NewExchanger(context.Background(), *cfg, cm, p, nil)
 	require.NoError(t, err)
 
 	ac := AuthContext{

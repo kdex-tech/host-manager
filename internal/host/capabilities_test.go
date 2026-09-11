@@ -153,7 +153,7 @@ func TestCapabilitiesRoute_AcceptsHostAudienceDeveloperKey(t *testing.T) {
 	tm, err := apitoken.NewTokenManager(issuer, apitoken.GenerateDevmodeKeyPair(), nil)
 	g.Expect(err).ToNot(HaveOccurred())
 	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager,
-		stubInternalIdentityProvider{})
+		stubInternalIdentityProvider{}, nil)
 	g.Expect(err).ToNot(HaveOccurred())
 
 	cfg := testURLAuthConfig(t)
