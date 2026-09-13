@@ -105,7 +105,8 @@ func newTokenExchangeE2EMux(t *testing.T) (mux http.Handler, functionA, function
 	// signer below and equal the host issuer so the "iss == host issuer"
 	// assertion holds.
 	exCfg := auth.Config{
-		Issuer: texE2EIssuer,
+		Issuer:   texE2EIssuer,
+		Audience: texE2EIssuer, // a real host sets Audience (= issuer); the FAT gate requires it
 		ActivePair: &keys.KeyPair{
 			ActiveKey: true,
 			KeyId:     texE2EKeyID,

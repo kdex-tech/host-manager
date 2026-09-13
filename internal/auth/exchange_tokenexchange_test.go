@@ -59,7 +59,8 @@ func newTokenExchangeExchanger(t *testing.T, cs *crypto.Signer, kid, issuer stri
 	t.Helper()
 
 	cfg := Config{
-		Issuer: issuer,
+		Issuer:   issuer,
+		Audience: issuer, // a real host sets Audience (= issuer); the FAT gate needs it
 		ActivePair: &keys.KeyPair{
 			ActiveKey: true,
 			KeyId:     kid,

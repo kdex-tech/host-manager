@@ -54,7 +54,8 @@ func newTestOAuth2(t *testing.T) *OAuth2 {
 	cs := crypto.Signer(priv)
 
 	cfg := Config{
-		Issuer: texIssuer,
+		Issuer:   texIssuer,
+		Audience: texIssuer,
 		ActivePair: &keys.KeyPair{
 			ActiveKey: true,
 			KeyId:     texKeyID,
@@ -205,7 +206,8 @@ func newTestOAuth2WithErroringIdentityProvider(t *testing.T) *OAuth2 {
 	cs := crypto.Signer(priv)
 
 	cfg := Config{
-		Issuer: texIssuer,
+		Issuer:   texIssuer,
+		Audience: texIssuer,
 		ActivePair: &keys.KeyPair{
 			ActiveKey: true,
 			KeyId:     texKeyID,

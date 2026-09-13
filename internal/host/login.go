@@ -135,65 +135,81 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 
 	returnURL := "/"
 
+	// Snapshot the host-swapped state under a BRIEF read lock, then release it
+	// before any hook I/O. EmitLogout runs the enforcing-logout hooks as a
+	// blocking barrier (an outbound HTTP call bounded only by the hook timeout);
+	// holding hh.mu.RLock across that would let a slow/hung logout hook stall a
+	// concurrent reconcile's hh.mu.Lock() and, by RWMutex writer priority, every
+	// request that needs the read lock. `scheme` is snapshotted too: SetHost
+	// rewrites hh.scheme under hh.mu.Lock on every reconcile, and an unsynchronised
+	// read of it is a documented data race (see host.go's issuerAddress /
+	// issuerAddressLocked split), so the cookie Secure flag and the redirect base
+	// below MUST use the local, never hh.isSecure()/hh.serverAddress() after
+	// RUnlock. isSameOrigin (originAllowed, above) already runs lock-free.
+	// See the #206 quad (PERF-1) and its re-review (RR-1).
 	hh.mu.RLock()
-	defer hh.mu.RUnlock()
+	authConfig := hh.authConfig
+	authExchanger := hh.authExchanger
+	scheme := hh.scheme
+	hh.mu.RUnlock()
+	secure := scheme == schemeHTTPS
 
 	// Revoke the server-side refresh-token entry BEFORE we tell the
 	// browser to forget the cookie. Without this a stolen `_refresh`
 	// cookie value (XSS, log leak, shared-device residual) replays
 	// for up to RefreshTokenTTL after the user "logs out". See
 	// kdex-tech/host-manager#84.
-	if hh.authConfig != nil && hh.authExchanger != nil {
-		if c, err := r.Cookie(hh.authConfig.CookieName + "_refresh"); err == nil && c.Value != "" {
+	if authConfig != nil && authExchanger != nil {
+		if c, err := r.Cookie(authConfig.CookieName + "_refresh"); err == nil && c.Value != "" {
 			// Barrier: run before RevokeRefreshToken so enforcing-logout
 			// hooks can still read the refresh token's claims from cache --
 			// RevokeRefreshToken deletes that same record. The ID token
 			// isn't read yet at this point in the handler (only further
 			// down, on the OIDC end-session path), so "" is passed; the
 			// parameter is reserved for future OIDC end-session correlation.
-			hh.authExchanger.EmitLogout(r.Context(), c.Value, "")
+			authExchanger.EmitLogout(r.Context(), c.Value, "")
 
 			// Fire-and-forget: errors here shouldn't block the logout
 			// from completing.
-			_ = hh.authExchanger.RevokeRefreshToken(r.Context(), c.Value)
+			_ = authExchanger.RevokeRefreshToken(r.Context(), c.Value)
 		} else {
 			// No refresh cookie (e.g. refresh tokens disabled, or an
 			// already-expired session): the logout barrier must still run,
 			// with an empty subject, so enforcing hooks see every logout.
-			hh.authExchanger.EmitLogout(r.Context(), "", "")
+			authExchanger.EmitLogout(r.Context(), "", "")
 		}
 	}
 
 	// Clear local cookies
 	http.SetCookie(w, &http.Cookie{
-		Name:     hh.authConfig.CookieName,
+		Name:     authConfig.CookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1, // Tells browser to delete immediately
 		HttpOnly: true,
-		Secure:   hh.isSecure(),
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     hh.authConfig.CookieName + "_refresh",
+		Name:     authConfig.CookieName + "_refresh",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1, // Tells browser to delete immediately
 		HttpOnly: true,
-		Secure:   hh.isSecure(),
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 
 	// Build the OIDC Logout URL
-	logoutURLString, err := hh.authExchanger.EndSessionURL()
+	logoutURLString, err := authExchanger.EndSessionURL()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if logoutURLString != "" {
-		store := hh.authConfig.OIDC.IDTokenStore
+		store := authConfig.OIDC.IDTokenStore
 
 		// Get the ID Token from the user's session
 		idToken, err := store.Get(r)
@@ -208,7 +224,7 @@ func (hh *HostHandler) LogoutPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		returnURL := fmt.Sprintf("%s%s", hh.serverAddress(r), returnURL)
+		returnURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, returnURL)
 
 		q := logoutURL.Query()
 		q.Add("id_token_hint", idToken)

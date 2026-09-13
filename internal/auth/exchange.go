@@ -443,13 +443,48 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 		return TokenSet{}, fmt.Errorf("subject_token has no subject")
 	}
 
+	// Only a genuine FAT may be exchanged. Gatekeep the INPUT rather than
+	// attenuate the output, so a legitimate function access token still receives
+	// the intended fresh re-resolution for the target (the target function's own
+	// entitlement checks stay authoritative), while a deliberately-narrowed
+	// credential can never be re-inflated to the subject's full authority:
+	//   - A bounded-use capability (kdx_cap, minted by mint_token / the REST
+	//     /-/capabilities/mint surface) is attenuated + single-use by design;
+	//     exchanging it would strip both bounds.
+	//   - A host-audience token (a browser session, or a token deliberately
+	//     minted WITHOUT the entitlements scope) is not a FAT; its `aud` is the
+	//     host, not a function. The docstring above has always assumed a FAT's
+	//     `aud` is a function -- this enforces it.
+	// See kdex-tech/host-manager#206 quad (DI-1 / SEC-1).
+	if marker, _ := claims[CapUsesClaim].(bool); marker {
+		return TokenSet{}, fmt.Errorf("subject_token is a bounded-use capability and cannot be exchanged")
+	}
+	// A genuine FAT carries exactly ONE audience -- the target function, never the
+	// host. Gate positively and fail CLOSED: reject an absent/empty, multi-valued,
+	// or host-valued `aud`, and refuse the exchange outright if this host has no
+	// configured audience to compare against (a degenerate misconfiguration, not a
+	// licence to skip the check). See the #206 quad re-review (RR-3).
+	auds, _ := claims.GetAudience()
+	if e.config.Audience == "" {
+		return TokenSet{}, fmt.Errorf("%w: token exchange requires a configured host audience", ErrServerError)
+	}
+	if len(auds) != 1 || auds[0] == e.config.Audience {
+		return TokenSet{}, fmt.Errorf("subject_token is not a function access token")
+	}
+
 	// The calling function is the subject_token's audience (the FAT aud).
 	actorAud := ""
-	if auds, aerr := claims.GetAudience(); aerr == nil && len(auds) > 0 {
+	if len(auds) > 0 {
 		actorAud = auds[0]
 	}
 
-	roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(sub)
+	// Resolve the SAME grants a normal FAT mint carries -- static
+	// role roles/entitlements PLUS the data-driven backend Lookup claims -- so a
+	// chained B-to-B call is not under-granted relative to a direct call. Signing
+	// through the host ClaimMappings mapper (below) then folds a backend/mapper
+	// grant into entitlements exactly as the proxy FAT and refresh mints do.
+	// See kdex-tech/host-manager#206 quad (DI-2).
+	roles, ents, backend, rerr := e.subjectSigningContext(sub)
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
 	}
@@ -460,7 +495,7 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 		e.config.Issuer,
 		&e.config.ActivePair.Private,
 		e.config.ActivePair.KeyId,
-		nil,
+		e.config.ClaimMapper,
 	)
 	if err != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to build signer for %s: %v", ErrServerError, targetAudience, err)
@@ -474,6 +509,10 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	if actorAud != "" {
 		signingContext["act"] = map[string]any{"sub": actorAud}
 	}
+	// Fold in the data-driven backend claims (guarded: skips reservedMintClaims,
+	// never overwrites an existing key); the signer's Project then runs the
+	// ClaimMappings mapper over the enriched context.
+	mergeBackendClaims(signingContext, backend)
 
 	accessToken, err := signer.Sign(signingContext)
 	if err != nil {
@@ -1642,6 +1681,16 @@ func (e *Exchanger) subjectSigningContext(subject string) (roles, entitlements [
 var reservedMintClaims = map[string]struct{}{
 	"scope": {}, "scp": {}, "sub": {}, "grant_type": {}, "auth_method": {}, "idp": {},
 	"iat": {}, "exp": {}, "jti": {}, "iss": {}, "aud": {}, "nbf": {},
+	// `act` is the RFC 8693 delegation-actor claim, set authoritatively by the
+	// token-exchange mint. Reserving it stops a data-driven backend Lookup response
+	// (the attacker-influenceable path, e.g. via JIT provisioning) from stamping a
+	// delegation actor onto a token, since mergeBackendClaims skips reserved claims.
+	// NOTE: this does NOT constrain a host ClaimMappings rule -- sign.Signer.Project
+	// applies the mapper output last and does not consult reservedMintClaims (the
+	// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
+	// the mapper output against reserved claims in Project is tracked separately.
+	// See the #206 quad (SEC-2) and its re-review (RR-2).
+	"act": {},
 }
 
 // mergeBackendClaims folds a subject's data-driven backend claims into the
