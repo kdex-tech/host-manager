@@ -69,6 +69,19 @@ func (d *EventDispatcher) selecting(e EventType, enforcing bool) []*httpEventHoo
 	return out
 }
 
+// HasEnforcingLogin reports whether any configured hook is an enforcing gate for
+// the login event. It is the trigger for the #206 post-gate enrichment: only a
+// deployment that actually runs an enforcing login gate can provision a subject
+// during login, so this keeps the enrichment (and its extra backend resolve) off
+// the mint path for every other deployment. Nil-safe (a nil dispatcher enforces
+// nothing).
+func (d *EventDispatcher) HasEnforcingLogin() bool {
+	if d == nil {
+		return false
+	}
+	return len(d.selecting(EventLogin, true)) > 0
+}
+
 // GateLogin runs the enforcing login hooks in name order and denies on the first
 // ok=false (or, per failure-mode, a transport error). Nil-safe.
 func (d *EventDispatcher) GateLogin(ctx context.Context, p EventPayload) error {

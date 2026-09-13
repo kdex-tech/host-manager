@@ -656,6 +656,12 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		return TokenSet{Subject: sub}, grantFailuref("login denied: %v", gerr)
 	}
 
+	// The enforcing gate may have JIT-provisioned this subject; re-resolve its
+	// live backend claims so the first token reflects that, not only a later
+	// refresh. No-op unless an enforcing login hook is configured -- this path
+	// otherwise never resolves. See kdex-tech/host-manager#206.
+	e.enrichAfterGate(signingContext, sub)
+
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
 		return TokenSet{}, err
@@ -1041,6 +1047,14 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		})
 		return TokenSet{Subject: username}, grantFailuref("login denied: %v", gerr)
 	}
+
+	// The enforcing gate may have JIT-provisioned this subject; re-resolve its
+	// live backend claims so the first token reflects that, not only a later
+	// refresh. FindInternal above already merged the pre-gate Lookup claims, and
+	// mergeBackendClaims never overwrites an existing key, so this only ADDS
+	// grants that came into existence during the gate. No-op unless an enforcing
+	// login hook is configured. See kdex-tech/host-manager#206.
+	e.enrichAfterGate(signingContext, username)
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
@@ -1645,6 +1659,31 @@ func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
 			signingContext[k] = v
 		}
 	}
+}
+
+// enrichAfterGate re-resolves a subject's live backend claims AFTER a passing
+// enforcing login gate and merges them into the signing context, so a subject the
+// gate just provisioned (JIT) is reflected in the FIRST minted token rather than
+// only after a later refresh (kdex-tech/host-manager#206). It is a no-op unless an
+// enforcing login hook is configured (HasEnforcingLogin): only such a deployment
+// can provision during login, so every other mint keeps its pre-#206 backend-call
+// profile untouched -- notably ExchangeToken, which otherwise never resolves.
+//
+// The merge reuses mergeBackendClaims (skips reservedMintClaims, never overwrites
+// an existing claim), so a backend response can neither rebind identity nor bypass
+// the internal role resolver; the subsequent SignScoped -> Project runs the host
+// ClaimMappings over the enriched context, folding a provisioned custom claim into
+// entitlements exactly as subjectSigningContext does for the refresh/authcode
+// mints. ResolveSubjectClaims is the cached, fail-to-role-only resolve, so a Lookup
+// outage degrades to the pre-gate grants (fewer, never more) rather than failing a
+// login the gate already allowed. First-time provisioning (the issue's case) is
+// unaffected by the 60s cache; re-provisioning an existing subject within that
+// window lags to the next refresh, matching existing resolve semantics.
+func (e *Exchanger) enrichAfterGate(signingContext jwt.MapClaims, subject string) {
+	if e == nil || subject == "" || !e.eventDispatcher.HasEnforcingLogin() {
+		return
+	}
+	mergeBackendClaims(signingContext, e.ResolveSubjectClaims(subject))
 }
 
 // applyScopeFilter computes the granted OAuth scope set for a mint from the

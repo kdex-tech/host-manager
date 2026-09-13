@@ -197,6 +197,23 @@ Read **only** for **enforcing `login`**:
   only delivery (a 2xx status that decodes) is tracked, and failures are
   logged, never surfaced to the caller.
 
+#### JIT provisioning during the gate
+
+An enforcing `login` hook may **provision the subject** (create its
+grants/memberships in the backing store) before returning `ok: true`. Such a
+grant is reflected in the **first** minted token, not only after a later
+refresh: once the gate passes, the login path re-resolves the subject's live
+backend claims (the `resolve-url` Lookup → `claimMappings` → `entitlements`, the
+same enrichment the refresh path applies) and mints from the enriched context.
+This applies to both the password (`LoginLocal`) and OIDC-callback
+(`ExchangeToken`) login paths. The re-resolve runs **only** when an enforcing
+`login` hook is configured, so deployments without one are unaffected. The hook
+does **not** return grants in its response — provisioning is delivered through
+the backing store the Lookup already reads, keeping the `{ ok, reason }`
+contract above unchanged. (First-time provisioning is reflected immediately;
+re-provisioning an already-resolved subject within the resolve cache window
+lags to the next refresh.)
+
 ### Advisory vs. enforcing, and failure modes
 
 - **Advisory** hooks fire in a background goroutine, best-effort, bounded by
