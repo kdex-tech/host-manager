@@ -8,9 +8,15 @@ import (
 	"strconv"
 	"strings"
 
+	openapi "github.com/getkin/kin-openapi/openapi3"
+
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 )
+
+// oauthRegisterPath is the RFC 7591 registration endpoint, advertised as
+// `registration_endpoint` in the authorization-server metadata.
+const oauthRegisterPath = "/-/oauth/register"
 
 const (
 	schemeHTTP             = "http"
@@ -64,7 +70,7 @@ type registerRequest struct {
 	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 }
 
-func (hh *HostHandler) registerHandler(mux *http.ServeMux, _ map[string]ko.PathInfo) {
+func (hh *HostHandler) registerHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	if hh.authConfig == nil || !hh.authConfig.DCR.Enabled || hh.authConfig.DCRStore == nil {
 		return // DCR off: endpoint absent → 404, anti-enum preserved
 	}
@@ -76,7 +82,137 @@ func (hh *HostHandler) registerHandler(mux *http.ServeMux, _ map[string]ko.PathI
 			hh.registerLimiter = newRegisterLimiter(hh.authConfig.DCR.MaxClients)
 		}
 	})
-	mux.HandleFunc("POST /-/oauth/register", hh.oauthRegisterHandler)
+	mux.HandleFunc("POST "+oauthRegisterPath, hh.oauthRegisterHandler)
+
+	// Documented from INSIDE the DCR guard, deliberately. The endpoint only
+	// exists when DCR is enabled, and its absence is load-bearing (see the
+	// early return above), so publishing it unconditionally would describe a
+	// path that 404s and undo the anti-enumeration property. Clients discover
+	// it via `registration_endpoint` in the AS metadata either way; this is for
+	// the OpenAPI document, which every other /-/ system endpoint appears in.
+	hh.registerPath(oauthRegisterPath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: oauthRegisterPath,
+			Paths: map[string]ko.PathItem{
+				oauthRegisterPath: {
+					Description: "OAuth2 Dynamic Client Registration (RFC 7591). Unauthenticated and rate limited.",
+					Post: &openapi.Operation{
+						Description: "POST client metadata to register a new public OAuth2 client. " +
+							"The server forces token_endpoint_auth_method=none, response_types=[\"code\"] and PKCE, " +
+							"and narrows grant_types to the redirect-based pair; redirect_uris are filtered to the " +
+							"schemes this host allows rather than rejected wholesale (RFC 7591 §3.2.1).",
+						OperationID: "oauth-register-post",
+						RequestBody: &openapi.RequestBodyRef{
+							Value: &openapi.RequestBody{
+								Content: openapi.Content{
+									"application/json": &openapi.MediaType{
+										Schema: &openapi.SchemaRef{
+											Value: &openapi.Schema{
+												Properties: openapi.Schemas{
+													"redirect_uris":              stringArraySchema("Redirect URIs to register. Entries whose scheme this host does not allow are dropped; a request with no allowed entry is rejected."),
+													"grant_types":                stringArraySchema("Requested grants. Filtered to authorization_code and refresh_token."),
+													"response_types":             stringArraySchema("Requested response types. Forced to [\"code\"]."),
+													"scope":                      stringSchema("Space-delimited scopes. Stored as the client's ALLOWED scope set, so it caps what the client may later request; omit it to leave the client unrestricted."),
+													"client_name":                stringSchema("Human-readable client name."),
+													"token_endpoint_auth_method": stringSchema("Requested auth method. Forced to \"none\" — DCR clients are always public."),
+												},
+												Required: []string{"redirect_uris"},
+												Type:     &openapi.Types{openapi.TypeObject},
+											},
+										},
+									},
+								},
+								Description: "RFC 7591 client metadata",
+							},
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithName("201", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									&openapi.Schema{
+										Properties: openapi.Schemas{
+											"client_id":                  stringSchema("The issued client identifier."),
+											"redirect_uris":              stringArraySchema("The redirect URIs actually registered — the allowed subset of those requested."),
+											"grant_types":                stringArraySchema("The grants actually granted."),
+											"response_types":             stringArraySchema("Always [\"code\"]."),
+											"scope":                      stringSchema("The registered scope, if any."),
+											"client_name":                stringSchema("The registered client name, if any."),
+											"token_endpoint_auth_method": stringSchema("Always \"none\"."),
+											"created_at": {
+												Value: &openapi.Schema{
+													Description: "Unix seconds at which the registration was issued.",
+													Type:        &openapi.Types{openapi.TypeInteger},
+												},
+											},
+										},
+										Type: &openapi.Types{openapi.TypeObject},
+									},
+									[]string{"application/json"},
+								),
+								Description: new("The registered client. No client_secret is issued — DCR clients are public."),
+							}),
+							// RFC 7591 §3.2.2 error shape, not the host's generic
+							// problem responses, so the referenced components are
+							// deliberately not reused here.
+							openapi.WithName("400", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									registrationErrorSchema(),
+									[]string{"application/json"},
+								),
+								Description: new("invalid_redirect_uri when no requested redirect_uri uses an allowed scheme, or invalid_client_metadata for a malformed body."),
+							}),
+							openapi.WithName("429", &openapi.Response{
+								Content: openapi.NewContentWithSchema(
+									registrationErrorSchema(),
+									[]string{"application/json"},
+								),
+								Description: new("temporarily_unavailable: the per-IP or global registration rate limit was exceeded. Carries Retry-After."),
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: "#/components/responses/InternalServerError",
+							}),
+						),
+						Summary: "Register an OAuth2 client",
+						Tags:    []string{"system", "oauth2", "auth"},
+					},
+					Summary: "Dynamic Client Registration",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+}
+
+func stringSchema(description string) *openapi.SchemaRef {
+	return &openapi.SchemaRef{
+		Value: &openapi.Schema{
+			Description: description,
+			Type:        &openapi.Types{openapi.TypeString},
+		},
+	}
+}
+
+func stringArraySchema(description string) *openapi.SchemaRef {
+	return &openapi.SchemaRef{
+		Value: &openapi.Schema{
+			Description: description,
+			Items: &openapi.SchemaRef{
+				Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}},
+			},
+			Type: &openapi.Types{openapi.TypeArray},
+		},
+	}
+}
+
+// registrationErrorSchema is the RFC 7591 §3.2.2 registration error body that
+// writeRegisterError emits.
+func registrationErrorSchema() *openapi.Schema {
+	return &openapi.Schema{
+		Properties: openapi.Schemas{
+			"error":             stringSchema("RFC 7591 error code."),
+			"error_description": stringSchema("Human-readable detail."),
+		},
+		Type: &openapi.Types{openapi.TypeObject},
+	}
 }
 
 func (hh *HostHandler) oauthRegisterHandler(w http.ResponseWriter, r *http.Request) {

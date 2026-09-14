@@ -476,7 +476,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 		issuer := hh.serverAddress(r)
 		regEndpoint := ""
 		if hh.authConfig != nil && hh.authConfig.DCR.Enabled {
-			regEndpoint = issuer + "/-/oauth/register"
+			regEndpoint = issuer + oauthRegisterPath
 		}
 		auth.DiscoveryHandler(issuer, regEndpoint)(w, r)
 	})
@@ -522,7 +522,7 @@ func (hh *HostHandler) discoveryHandler(mux *http.ServeMux, registeredPaths map[
 		issuer := hh.serverAddress(r)
 		regEndpoint := ""
 		if hh.authConfig != nil && hh.authConfig.DCR.Enabled {
-			regEndpoint = issuer + "/-/oauth/register"
+			regEndpoint = issuer + oauthRegisterPath
 		}
 		auth.DiscoveryHandler(issuer, regEndpoint)(w, r)
 	})
