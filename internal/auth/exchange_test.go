@@ -960,11 +960,36 @@ func TokenHandler(cfg Config) http.HandlerFunc {
 
 		// 4. Generate the ID Token (using your SignToken function)
 		// We usually include 'aud' (client_id) and 'sub' (user id)
-		idToken, err := cfg.Signer.Sign(jwt.MapClaims{
-			"sub":   code,
-			"email": "email@foo.bar",
-			"aud":   clientID,
-		})
+		var idToken string
+		var err error
+		if rest, ok := strings.CutPrefix(code, "rbc:"); ok {
+			// Synthetic escape hatch for RoleBindingClaim tests: every other
+			// code in this file doubles as the id_token's `sub`, which leaves
+			// no way to assert a claim (e.g. email) that differs from sub, or
+			// to carry `email_verified` at all -- Sign's Project() step
+			// whitelists a fixed claim set that does not include it. A
+			// `rbc:<sub>|<email>|<verified>` code is parsed out here and
+			// signed via SignProjected, which signs exactly the claims given
+			// instead of projecting through that whitelist.
+			parts := strings.SplitN(rest, "|", 3)
+			if len(parts) != 3 {
+				http.Error(w, "malformed rbc: code, want rbc:<sub>|<email>|<verified>", http.StatusBadRequest)
+				return
+			}
+			idToken, err = cfg.Signer.SignProjected(jwt.MapClaims{
+				"sub":            parts[0],
+				"email":          parts[1],
+				"email_verified": parts[2] == "true",
+				"iss":            cfg.OIDC.ProviderURL,
+				"aud":            []string{clientID},
+			})
+		} else {
+			idToken, err = cfg.Signer.Sign(jwt.MapClaims{
+				"sub":   code,
+				"email": "email@foo.bar",
+				"aud":   clientID,
+			})
+		}
 		if err != nil {
 			http.Error(w, "failed to sign token", http.StatusInternalServerError)
 			return

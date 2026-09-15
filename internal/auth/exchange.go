@@ -660,7 +660,13 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// already produced. See kdex-tech/host-manager#189.
 	idpClaims := idpClaimSnapshot(signingContext)
 
-	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(sub)
+	// Role/entitlement resolution keys on the configured binding key, not
+	// necessarily `sub`: RoleBindingClaim lets a KDexRoleBinding name a
+	// human-authorable claim (e.g. email) instead of the IdP's opaque
+	// subject. Identity (idpClaims, GateLogin, enrichAfterGate, and the
+	// signed token below) still keys on `sub` unconditionally.
+	bindingKey := resolveBindingKey(signingContext, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(bindingKey)
 	if err != nil {
 		return TokenSet{}, err
 	}
