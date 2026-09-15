@@ -332,6 +332,81 @@ func TestRedeemRefreshToken_EndsSessionWhenIdPRevokesTheGrant(t *testing.T) {
 			"marking it ErrServerError would tell the client to retry a dead session")
 }
 
+// TestRefreshEmailRoleBinding pins the RoleBindingClaim feature through the
+// refresh path (Task 6). The original login (ExchangeToken) resolves roles
+// against the email-keyed KDexRoleBinding because the OIDC login path already
+// computes bindingKey from the verified id_token's claims; the refresh path
+// re-mints via mintTokensFromSubject, which replays the login-time IDPClaims
+// snapshot (RefreshTokenClaims.IDPClaims) rather than re-verifying an
+// id_token. Task 6 makes mintTokensFromSubject compute the SAME binding key
+// from that replayed snapshot, so the rotated access token still carries the
+// email-keyed role rather than silently falling back to sub.
+//
+// Reuses the T5 harness: newRoleBindingScopeProvider (a real roles.go
+// scopeProvider backed by one KDexRole/KDexRoleBinding keyed on email) and
+// the "rbc:<sub>|<email>|<verified>" mock-token code convention
+// (exchange_rolebindingclaim_test.go), which mints a synthetic id_token via
+// SignProjected carrying a distinct sub/email plus email_verified.
+func TestRefreshEmailRoleBinding(t *testing.T) {
+	const (
+		opaqueSub = "104187opaque"
+		email     = "alice@acme.io"
+	)
+
+	ctx := context.Background()
+	ih := &IH{}
+	server := MockRunningServer(ih)
+	defer server.Close()
+
+	cacheManager, err := cache.NewCacheManager("", "rbc-refresh-test", new(1*time.Hour))
+	require.NoError(t, err)
+
+	cfg, err := NewConfigBuilder().WithAuthClientLoader(
+		func() (map[string]AuthClient, error) { return map[string]AuthClient{}, nil },
+	).WithKeyLoader(
+		func() (*keys.KeyPairs, error) { return keys.GenerateECDSAKeyPair(), nil },
+	).WithOIDCClientConfigLoader(
+		func() (*OIDCClientConfig, error) {
+			return &OIDCClientConfig{ClientID: "foo", ClientSecret: "bar"}, nil
+		},
+	).WithAudience("foo").WithIssuer(server.URL).WithDevMode(true).WithCacheManager(
+		cacheManager,
+	).Build(
+		&v1alpha1.Auth{
+			OIDCProvider: &v1alpha1.OIDCProvider{
+				OIDCProviderURL: server.URL,
+				// The feature under test: bind roles on `email`, not `sub`.
+				RoleBindingClaim: "email",
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	ih.Handler = MockOIDCProvider(*cfg)
+
+	sp := newRoleBindingScopeProvider(t, email)
+	ex, err := NewExchanger(ctx, *cfg, cacheManager, sp, nil)
+	require.NoError(t, err)
+
+	oidcTokens, err := ex.ExchangeCode(ctx, "rbc:"+opaqueSub+"|"+email+"|true")
+	require.NoError(t, err)
+
+	ts, err := ex.ExchangeToken(ctx, oidcTokens)
+	require.NoError(t, err)
+	require.Contains(t, accessTokenRoles(t, ts.AccessToken), "acme-admin",
+		"precondition: the login must resolve the email-keyed role")
+	require.NotEmpty(t, ts.RefreshToken, "precondition: a refresh token must be minted")
+
+	refreshed, err := ex.RedeemRefreshToken(ctx, ts.RefreshToken, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, accessTokenRoles(t, refreshed.AccessToken), "acme-admin",
+		"a rotated session must still resolve the email-keyed KDexRoleBinding, not "+
+			"silently fall back to the opaque sub")
+	assert.Equal(t, opaqueSub, accessTokenSubject(t, refreshed.AccessToken),
+		"identity must remain the opaque IdP sub across rotation")
+}
+
 // TestRedeemRefreshToken_RejectsARefreshedTokenForAnotherSubject guards the
 // case where the IdP answers successfully but names someone else. Every
 // downstream check -- roles, entitlements, audit -- keys on `sub`, so

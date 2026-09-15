@@ -484,7 +484,11 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// through the host ClaimMappings mapper (below) then folds a backend/mapper
 	// grant into entitlements exactly as the proxy FAT and refresh mints do.
 	// See kdex-tech/host-manager#206 quad (DI-2).
-	roles, ents, backend, rerr := e.subjectSigningContext(sub)
+	// bindingKey == sub here (not a RoleBindingClaim resolution): the
+	// subject_token being exchanged carries only the FAT's own claims, none of
+	// which are the login-time IdP claims RoleBindingClaim keys off of, so this
+	// call keeps its pre-RoleBindingClaim behavior unchanged.
+	roles, ents, backend, rerr := e.subjectSigningContext(sub, sub)
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
 	}
@@ -1663,14 +1667,22 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 // used by the non-password subject mints (authorization_code, refresh_token):
 // the static KDexRole-derived roles/entitlements PLUS the fresh data-driven
 // backend claims that only the credential backend knows.
+//
+// Roles/entitlements resolve on bindingKey -- not necessarily subject --
+// because RoleBindingClaim lets a KDexRoleBinding name a human-authorable
+// claim (e.g. email) instead of the IdP's opaque sub, exactly as the OIDC
+// login path (ExchangeToken) already resolves them. Backend claims always
+// resolve on subject: identity (and the credential backend's own Lookup key)
+// never moves off sub.
+//
 // Folding the backend claims into the PRIMARY mint — upstream of every
 // attenuation point — is what lets an OAuth/MCP access token (and everything
 // attenuated from it: FAT, mint_token, scope down-scope) carry per-subject
 // grants. Password login (LoginLocal) receives the same set for free from
 // FindInternal's credential Lookup, so it does not use this. A nil/failed
 // resolve degrades to role-only (never more). See kdex-tech/host-manager#140.
-func (e *Exchanger) subjectSigningContext(subject string) (roles, entitlements []string, backend jwt.MapClaims, err error) {
-	roles, entitlements, err = e.sp.FindInternalRolesAndEntitlements(subject)
+func (e *Exchanger) subjectSigningContext(subject, bindingKey string) (roles, entitlements []string, backend jwt.MapClaims, err error) {
+	roles, entitlements, err = e.sp.FindInternalRolesAndEntitlements(bindingKey)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1795,7 +1807,12 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
 	}
 
-	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject)
+	// bindingKey == claims.Subject: an INTENTIONAL placeholder, not yet the
+	// real RoleBindingClaim resolution for this path. The authorization-code
+	// mint has no replayed IdP claim set to key off of the way
+	// mintTokensFromSubject's refresh path does; wiring the real binding key
+	// here is Task 7. No behavior change in this task.
+	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, claims.Subject)
 	if err != nil {
 		// The subject is already known/vouched (decrypted from our own
 		// auth code); this is a role-resolver failure, not anything the
@@ -1879,7 +1896,15 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		return TokenSet{Subject: subject}, nil, fmt.Errorf(format, args...)
 	}
 
-	roles, entitlements, backend, err := e.subjectSigningContext(subject)
+	// Role/entitlement resolution keys on the configured binding key, computed
+	// from the replayed idpClaims snapshot exactly as the OIDC login path
+	// (ExchangeToken) computes it from the verified id_token -- so a session
+	// bound to an email-keyed KDexRoleBinding at login keeps that role across
+	// every refresh instead of silently falling back to sub. idpClaims is nil
+	// for every non-OIDC grant, for which resolveBindingKey degrades to
+	// subject (its historical behavior). See kdex-tech/host-manager#189.
+	bindingKey := resolveBindingKey(idpClaims, subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	roles, entitlements, backend, err := e.subjectSigningContext(subject, bindingKey)
 	if err != nil {
 		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
 	}
