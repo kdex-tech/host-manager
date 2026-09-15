@@ -315,7 +315,7 @@ func (o *OAuth2) clientCredentialsGrant(w http.ResponseWriter, r *http.Request, 
 }
 
 func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
-	var clientId, clientSecret, code, codeVerifier, grantType, password, redirectURI, scope, username string
+	var clientId, clientSecret, code, codeVerifier, grantType, password, redirectURI, resource, scope, username string
 	var ts TokenSet
 	var err error
 
@@ -334,6 +334,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 			"id_token_issued", ts.IDToken != "",
 			"password_present", password != "",
 			"redirect_uri", redirectURI,
+			"resource", resource,
 			"scope", scope,
 			"subject", ts.Subject,
 			"username", username)
@@ -419,7 +420,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	codeVerifier = r.FormValue("code_verifier")
 	scope = r.FormValue("scope")
-	resource := r.FormValue("resource")
+	resource = r.FormValue("resource")
 
 	if len(client.AllowedGrantTypes) > 0 && !slices.Contains(client.AllowedGrantTypes, grantType) {
 		err = fmt.Errorf("grant_type %s not allowed for this client", grantType)

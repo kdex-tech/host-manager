@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -78,9 +79,16 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 		if allowedResourcesStr == "" {
 			allowedResourcesStr = string(secret.Data["allowed-resources"])
 		}
+		// Spec: "space/comma-separated" -- split on either, dropping empty
+		// elements (and thus any surrounding whitespace around commas) so
+		// a value like "/db/v1, /other/v1" doesn't silently produce a
+		// leading-space element that never matches the exact allowlist
+		// check in clientCredentialsGrant.
 		allowedResources := []string{}
 		if allowedResourcesStr != "" {
-			allowedResources = strings.Split(allowedResourcesStr, ",")
+			allowedResources = strings.FieldsFunc(allowedResourcesStr, func(r rune) bool {
+				return r == ',' || unicode.IsSpace(r)
+			})
 		}
 
 		description := string(secret.Data["description"])

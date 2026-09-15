@@ -1044,9 +1044,11 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 // instead of the host: the SAME authenticated client identity + re-resolved
 // authority (buildClientSigningContext), addressed to targetAudience so a
 // confidential client can call a peer function without an RFC 8693 exchange.
-// The caller (token handler) has already verified the resource is permitted
-// for this client and resolved targetAudience from ExchangeTargets/
-// AllowedResources. No `act` -- the client is itself the subject.
+// The caller (token handler) has already checked the resource against the
+// client's AllowedResources gate and resolved targetAudience solely from
+// ExchangeTargets[resource] -- AllowedResources authorizes the request, it
+// plays no part in resolving the audience. No `act` -- the client is itself
+// the subject.
 func (e *Exchanger) LoginClientResource(ctx context.Context, clientID, clientSecret, scope, targetAudience string) (TokenSet, error) {
 	signingContext, grantedScopeStr, err := e.buildClientSigningContext(clientID, clientSecret, scope)
 	if err != nil {

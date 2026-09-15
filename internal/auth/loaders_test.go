@@ -125,18 +125,37 @@ func TestAuthClientLoaderAllowsPublicHTTPSWithoutPKCE(t *testing.T) {
 // indicator allowlist: a confidential client's allowed-resources Secret key
 // loads into AuthClient.AllowedResources, and its absence yields an empty
 // (never nil-panicking) slice rather than an error.
+//
+// The spec describes allowed-resources as "space/comma-separated", so a
+// comma+space value must split into trimmed elements (no leading spaces
+// that would silently fail the exact allowlist match in
+// clientCredentialsGrant), and a purely space-separated value must split
+// too.
 func TestAuthClientLoaderParsesAllowedResources(t *testing.T) {
 	secrets := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
 		"client_id":           "eum-blobsqlite",
 		"client_secret":       "s3cret",
 		"allowed-grant-types": "client_credentials",
-		"allowed-resources":   "/db/v1,https://host.example/db/v1",
+		"allowed-resources":   "/db/v1, https://host.example/db/v1",
 	})}
 	clients, err := AuthClientLoader(secrets)
 	require.NoError(t, err)
 	c, ok := clients["eum-blobsqlite"]
 	require.True(t, ok)
 	assert.Equal(t, []string{"/db/v1", "https://host.example/db/v1"}, c.AllowedResources)
+
+	// Space-separated (no commas) must also split.
+	secretsSpace := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_id":           "eum-blobsqlite-space",
+		"client_secret":       "s3cret",
+		"allowed-grant-types": "client_credentials",
+		"allowed-resources":   "/db/v1 https://host.example/db/v1",
+	})}
+	clientsSpace, err := AuthClientLoader(secretsSpace)
+	require.NoError(t, err)
+	cSpace, ok := clientsSpace["eum-blobsqlite-space"]
+	require.True(t, ok)
+	assert.Equal(t, []string{"/db/v1", "https://host.example/db/v1"}, cSpace.AllowedResources)
 
 	// Absent -> empty (not nil-panic).
 	secrets2 := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
