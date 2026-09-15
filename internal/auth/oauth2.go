@@ -433,7 +433,17 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 			writeOAuthError(w, http.StatusBadRequest, errCodeUnauthorizedClient, "client_credentials is not supported for public clients")
 			return
 		}
-		ts, err = o.AuthExchanger.LoginClient(r.Context(), clientId, clientSecret, scope)
+		if resource != "" {
+			targetAudience, isTarget := o.ExchangeTargets[resource]
+			if !isTarget || !slices.Contains(client.AllowedResources, resource) {
+				err = fmt.Errorf("resource %q not permitted for client %q", resource, clientId)
+				writeOAuthError(w, http.StatusBadRequest, errCodeInvalidTarget, "requested resource is not permitted for this client")
+				return
+			}
+			ts, err = o.AuthExchanger.LoginClientResource(r.Context(), clientId, clientSecret, scope, targetAudience)
+		} else {
+			ts, err = o.AuthExchanger.LoginClient(r.Context(), clientId, clientSecret, scope)
+		}
 	case "password":
 		username = r.FormValue("username")
 		password = r.FormValue("password")
