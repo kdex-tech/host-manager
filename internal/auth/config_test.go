@@ -1196,3 +1196,46 @@ func TestApplyMintTokenPolicy_URLDelivery(t *testing.T) {
 	applyMintTokenPolicy(off, &kdexv1alpha1.MintToken{Enabled: true})
 	g.Expect(off.MintTokenURLDelivery).To(BeFalse())
 }
+
+// buildConfigForOIDC builds a real Config through ConfigBuilder.Build for an
+// Auth wrapping the given OIDCProvider. It reuses newTestConfigBuilder (see
+// config_dcr_test.go) for the loaders applyOIDC doesn't care about, and
+// overrides WithOIDCClientConfigLoader with a valid (non-nil) client config —
+// newTestConfigBuilder's own loader returns (nil, nil), which is fine for
+// tests that never set OIDCProvider but would nil-deref inside applyOIDC once
+// OIDCProviderURL is set. Modeled on the "OIDC - constructor, secret defined,
+// valid key" case in TestNewConfig above.
+func buildConfigForOIDC(t *testing.T, provider *kdexv1alpha1.OIDCProvider) *Config {
+	t.Helper()
+	cb := newTestConfigBuilder(t).WithOIDCClientConfigLoader(
+		func() (*OIDCClientConfig, error) {
+			return &OIDCClientConfig{
+				ClientID:     "bar",
+				ClientSecret: "foo",
+			}, nil
+		},
+	)
+
+	cfg, err := cb.Build(&kdexv1alpha1.Auth{OIDCProvider: provider})
+	require.NoError(t, err)
+	return cfg
+}
+
+func TestApplyOIDCRoleBindingClaimDefaults(t *testing.T) {
+	// roleBindingClaim unset -> "sub"; requireEmailVerified unset -> true.
+	cfg := buildConfigForOIDC(t, &kdexv1alpha1.OIDCProvider{
+		OIDCProviderURL: "https://accounts.google.com",
+	})
+	assert.Equal(t, "sub", cfg.OIDC.RoleBindingClaim)
+	assert.True(t, cfg.OIDC.RequireEmailVerified)
+
+	// explicit values honored.
+	no := false
+	cfg2 := buildConfigForOIDC(t, &kdexv1alpha1.OIDCProvider{
+		OIDCProviderURL:      "https://accounts.google.com",
+		RoleBindingClaim:     "email",
+		RequireEmailVerified: &no,
+	})
+	assert.Equal(t, "email", cfg2.OIDC.RoleBindingClaim)
+	assert.False(t, cfg2.OIDC.RequireEmailVerified)
+}

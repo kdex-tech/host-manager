@@ -62,14 +62,16 @@ type Config struct {
 	KeyPairs              *keys.KeyPairs
 	MaxSessionAge         time.Duration
 	OIDC                  struct {
-		BlockKey     string
-		ClientID     string
-		ClientSecret string
-		IDTokenStore idtoken.IDTokenStore
-		Name         string
-		ProviderURL  string
-		RedirectURL  string
-		Scopes       []string
+		BlockKey             string
+		ClientID             string
+		ClientSecret         string
+		IDTokenStore         idtoken.IDTokenStore
+		Name                 string
+		ProviderURL          string
+		RedirectURL          string
+		Scopes               []string
+		RoleBindingClaim     string
+		RequireEmailVerified bool
 	}
 	DCR      DCRConfig
 	DCRStore *dcr.Store
@@ -499,6 +501,16 @@ func (cb *ConfigBuilder) applyOIDC(cfg *Config, auth *kdexv1alpha1.Auth) error {
 	// "https://host//-/oauth/callback" is a different URI that fails the match.
 	cfg.OIDC.RedirectURL = strings.TrimSuffix(cb.Issuer, "/") + OAuthCallbackPath
 	cfg.OIDC.Scopes = auth.OIDCProvider.Scopes
+
+	// Default an empty roleBindingClaim to "sub" defensively (belt-and-suspenders
+	// with the CRD default) so resolution never keys on an empty claim name.
+	cfg.OIDC.RoleBindingClaim = auth.OIDCProvider.RoleBindingClaim
+	if cfg.OIDC.RoleBindingClaim == "" {
+		cfg.OIDC.RoleBindingClaim = "sub"
+	}
+	// Unset (nil) resolves to the SECURE default: require email_verified.
+	cfg.OIDC.RequireEmailVerified = auth.OIDCProvider.RequireEmailVerified == nil ||
+		*auth.OIDCProvider.RequireEmailVerified
 
 	if cfg.OIDC.Name == "" {
 		providerURL, err := url.Parse(cfg.OIDC.ProviderURL)

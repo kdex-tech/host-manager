@@ -111,14 +111,16 @@ func TestHostHandler_AuthorizeHandler(t *testing.T) {
 			cfg := &Config{
 				Clients: tt.clients,
 				OIDC: struct {
-					BlockKey     string
-					ClientID     string
-					ClientSecret string
-					IDTokenStore idtoken.IDTokenStore
-					Name         string
-					ProviderURL  string
-					RedirectURL  string
-					Scopes       []string
+					BlockKey             string
+					ClientID             string
+					ClientSecret         string
+					IDTokenStore         idtoken.IDTokenStore
+					Name                 string
+					ProviderURL          string
+					RedirectURL          string
+					Scopes               []string
+					RoleBindingClaim     string
+					RequireEmailVerified bool
 				}{
 					BlockKey: "01234567890123456789012345678901", // 32 bytes
 				},
@@ -215,14 +217,16 @@ func TestAuthorizeHandler_DoesNotLogAuthorizationCode(t *testing.T) {
 			},
 		},
 		OIDC: struct {
-			BlockKey     string
-			ClientID     string
-			ClientSecret string
-			IDTokenStore idtoken.IDTokenStore
-			Name         string
-			ProviderURL  string
-			RedirectURL  string
-			Scopes       []string
+			BlockKey             string
+			ClientID             string
+			ClientSecret         string
+			IDTokenStore         idtoken.IDTokenStore
+			Name                 string
+			ProviderURL          string
+			RedirectURL          string
+			Scopes               []string
+			RoleBindingClaim     string
+			RequireEmailVerified bool
 		}{
 			BlockKey: "01234567890123456789012345678901", // 32 bytes
 		},
