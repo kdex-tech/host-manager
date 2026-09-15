@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -184,11 +185,20 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Generate Authorization Code
+	//
+	// IDPClaims snapshots the session's authContext claims (the login-time IdP
+	// assertions, e.g. email/email_verified) so the code-redemption mint can
+	// resolve the RoleBindingClaim binding key without a fresh IdP round-trip
+	// -- mirroring what the refresh path replays. authCtx is `AuthContext`
+	// (defined as `type AuthContext jwt.MapClaims`, context.go), which has no
+	// Claims() accessor, so it is converted to jwt.MapClaims directly. See
+	// kdex-tech/host-manager#189.
 	claims := AuthorizationCodeClaims{
 		AuthMethod:          AuthMethodOAuth2,
 		ClientID:            clientId,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
+		IDPClaims:           idpClaimSnapshot(jwt.MapClaims(authCtx)),
 		RedirectURI:         redirectURI,
 		Resource:            resource,
 		Scope:               scope,

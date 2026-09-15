@@ -484,10 +484,12 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// through the host ClaimMappings mapper (below) then folds a backend/mapper
 	// grant into entitlements exactly as the proxy FAT and refresh mints do.
 	// See kdex-tech/host-manager#206 quad (DI-2).
-	// bindingKey == sub here (not a RoleBindingClaim resolution): the
-	// subject_token being exchanged carries only the FAT's own claims, none of
-	// which are the login-time IdP claims RoleBindingClaim keys off of, so this
-	// call keeps its pre-RoleBindingClaim behavior unchanged.
+	// bindingKey == sub here (not a RoleBindingClaim resolution): this is a
+	// DELIBERATE scope limit, not a claim-availability gap -- a FAT can carry
+	// `email`. RoleBindingClaim v1 is scoped to login/refresh/auth-code (the
+	// paths that replay a login-time IdP-claims snapshot); token-exchange
+	// keeps resolving roles by `sub` regardless, so this call stays (sub, sub)
+	// and its behavior is unchanged.
 	roles, ents, backend, rerr := e.subjectSigningContext(sub, sub)
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
@@ -1597,6 +1599,12 @@ type AuthorizationCodeClaims struct {
 	CodeChallenge       string     `json:"challenge,omitempty"`
 	CodeChallengeMethod string     `json:"challenge_method,omitempty"`
 	Exp                 int64      `json:"exp"`
+	// IDPClaims is the non-reserved claim snapshot the IdP asserted at login,
+	// mirroring RefreshTokenClaims.IDPClaims. It is carried so the code-redemption
+	// mint can compute the role-binding key (e.g. email) the same way the login and
+	// refresh paths do, without a fresh IdP round-trip. omitempty keeps codes for
+	// non-OIDC grants unchanged.
+	IDPClaims jwt.MapClaims `json:"idpc,omitempty"`
 	// JTI is the random per-code identifier used to enforce single-use
 	// semantics. Set on mint, looked up + deleted on redeem. See
 	// kdex-tech/host-manager#65.
@@ -1807,12 +1815,18 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		return TokenSet{Subject: claims.Subject}, fmt.Errorf(format, args...)
 	}
 
-	// bindingKey == claims.Subject: an INTENTIONAL placeholder, not yet the
-	// real RoleBindingClaim resolution for this path. The authorization-code
-	// mint has no replayed IdP claim set to key off of the way
-	// mintTokensFromSubject's refresh path does; wiring the real binding key
-	// here is Task 7. No behavior change in this task.
-	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, claims.Subject)
+	// Role/entitlement resolution keys on the configured binding key, computed
+	// from the IdP-claims snapshot the /-/authorize handler stored in the auth
+	// code (claims.IDPClaims) exactly as the OIDC login path (ExchangeToken)
+	// computes it from the verified id_token, and exactly as
+	// mintTokensFromSubject's refresh path computes it from its own replayed
+	// snapshot -- so a session bound to an email-keyed KDexRoleBinding at
+	// login keeps that role across the authorization-code redemption too.
+	// claims.IDPClaims is nil for non-OIDC grants, for which resolveBindingKey
+	// degrades to claims.Subject (its historical behavior). See
+	// kdex-tech/host-manager#189.
+	bindingKey := resolveBindingKey(claims.IDPClaims, claims.Subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bindingKey)
 	if err != nil {
 		// The subject is already known/vouched (decrypted from our own
 		// auth code); this is a role-resolver failure, not anything the

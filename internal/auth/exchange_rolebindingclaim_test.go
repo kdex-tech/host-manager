@@ -12,12 +12,17 @@ package auth
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -258,4 +263,90 @@ func TestExchangeTokenEmailRoleBinding_UnverifiedEmailFallsBackToSub(t *testing.
 		"an unverified email must not bind roles; resolution falls back to sub, "+
 			"which the fixture's KDexRoleBinding does not name")
 	assert.Equal(t, opaqueSub, accessTokenSubject(t, ts.AccessToken))
+}
+
+// TestAuthCodeEmailRoleBinding pins Task 7: the authorization-code mint must
+// resolve the role-binding key from the IdP-claims snapshot carried inside the
+// auth code (AuthorizationCodeClaims.IDPClaims), the same way the OIDC login
+// (ExchangeToken) and refresh (mintTokensFromSubject) paths already do.
+//
+// This is a genuine round trip: CreateAuthorizationCode encrypts the claims
+// (including IDPClaims) into a JWE, and RedeemAuthorizationCode decrypts it
+// and calls mintTokensFromCode -- exercising the `idpc` JSON tag along the
+// way. Before Task 7, mintTokensFromCode resolved roles/entitlements on
+// claims.Subject (the opaque sub), so the email-keyed KDexRoleBinding here
+// could never match and the test fails with no "acme-admin" role on the
+// minted token.
+func TestAuthCodeEmailRoleBinding(t *testing.T) {
+	const (
+		opaqueSub   = "104187opaque"
+		email       = "alice@acme.io"
+		clientID    = "app"
+		redirectURI = "https://app.example.com/cb"
+	)
+
+	ctx := context.Background()
+
+	// Real signer so mintTokensFromCode can complete on redemption, mirroring
+	// newReplayTestExchanger (exchange_authcode_replay_test.go).
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+	signer, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", nil)
+	require.NoError(t, err)
+
+	cfg := Config{
+		Issuer:     "test-iss",
+		Audience:   "test-aud",
+		Signer:     *signer,
+		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		Clients: map[string]AuthClient{
+			clientID: {
+				ClientID:     clientID,
+				RedirectURIs: []string{redirectURI},
+			},
+		},
+	}
+	cfg.OIDC.BlockKey = "0123456789abcdef0123456789abcdef"
+	// The feature under test: bind roles on `email`, not `sub`, exactly as
+	// applyOIDC would configure from KDexHost.Spec.Auth.OIDCProvider.
+	cfg.OIDC.RoleBindingClaim = "email"
+	cfg.OIDC.RequireEmailVerified = true
+
+	cm, err := cache.NewCacheManager("", "auth-code-rbc-test", nil)
+	require.NoError(t, err)
+
+	sp := newRoleBindingScopeProvider(t, email)
+	ex, err := NewExchanger(ctx, cfg, cm, sp, nil)
+	require.NoError(t, err)
+
+	// IDPClaims mirrors what the /-/authorize handler snapshots from the
+	// session's authContext (idpClaimSnapshot(jwt.MapClaims(authCtx))): the
+	// non-reserved claims asserted at login, including email/email_verified.
+	code, err := ex.CreateAuthorizationCode(ctx, AuthorizationCodeClaims{
+		AuthMethod:  AuthMethodOAuth2,
+		ClientID:    clientID,
+		RedirectURI: redirectURI,
+		Subject:     opaqueSub,
+		Exp:         time.Now().Add(time.Minute).Unix(),
+		// "roles" must be requested: SignScoped strips the `roles` claim
+		// unless the granted scope includes it (sign.go), independent of
+		// role-binding resolution.
+		Scope: "openid roles",
+		IDPClaims: jwt.MapClaims{
+			"email":          email,
+			"email_verified": true,
+		},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, code)
+
+	ts, err := ex.RedeemAuthorizationCode(ctx, code, clientID, redirectURI, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, accessTokenRoles(t, ts.AccessToken), "acme-admin",
+		"the email-keyed KDexRoleBinding must resolve a role for this auth-code redemption")
+	assert.Equal(t, opaqueSub, accessTokenSubject(t, ts.AccessToken),
+		"identity must remain the opaque IdP sub -- only role resolution keys on email")
+	assert.Equal(t, opaqueSub, ts.Subject, "TokenSet.Subject must also remain the opaque sub")
 }
