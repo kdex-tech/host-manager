@@ -890,34 +890,56 @@ func (e *Exchanger) createRefreshToken(ctx context.Context, claims RefreshTokenC
 	return tokenID, nil
 }
 
-func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, scope string) (TokenSet, error) {
+// clientSigningContextFailure wraps a buildClientSigningContext error with
+// whether clientID had already been vouched (client looked up + secret
+// matched) at the point of failure. This is exactly the #158 distinction
+// LoginClient's callers need: a vouched-but-then-rejected client (bad scope,
+// resolver failure, sign failure) is reported as the TokenSet's Subject; an
+// unvouched one (deployment/config not ready, unknown client_id, wrong
+// secret) is not, because an unauthenticated caller can assert any
+// client_id and an audit log that cannot tell an asserted identity from a
+// verified one is worse than one that stays silent. Error/Unwrap delegate to
+// the wrapped error so its message and errors.Is(..., ErrServerError) chain
+// are unaffected by this wrapper -- callers unwrap it and return the
+// original error, never this type, to callers of LoginClient/
+// LoginClientResource.
+type clientSigningContextFailure struct {
+	err     error
+	vouched bool
+}
+
+func (f *clientSigningContextFailure) Error() string { return f.err.Error() }
+func (f *clientSigningContextFailure) Unwrap() error { return f.err }
+
+// buildClientSigningContext authenticates the client and builds the signing
+// context (sub/azp/scope/roles/entitlements) shared by the host-audience
+// client_credentials mint (LoginClient) and the resource-audience mint
+// (LoginClientResource). It does NOT sign.
+func (e *Exchanger) buildClientSigningContext(clientID, clientSecret, scope string) (jwt.MapClaims, string, error) {
 	if e == nil {
 		// Deployment/config facts, not anything the client presented. See
 		// kdex-tech/host-manager#168 review round 2.
-		return TokenSet{}, fmt.Errorf("%w: auth not configured", ErrServerError)
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("%w: auth not configured", ErrServerError)}
 	}
 
 	if !e.config.IsM2MEnabled() {
-		return TokenSet{}, fmt.Errorf("%w: M2M auth not configured", ErrServerError)
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("%w: M2M auth not configured", ErrServerError)}
 	}
 
 	client, ok := e.GetClient(clientID)
 	if !ok {
-		return TokenSet{}, fmt.Errorf("invalid client_id")
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("invalid client_id")}
 	}
 
 	if client.ClientSecret != clientSecret {
-		return TokenSet{}, fmt.Errorf("invalid client_secret")
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("invalid client_secret")}
 	}
 
 	// The client has now authenticated, so clientID is a vouched subject --
-	// this grant's subject IS the client (see `sub` below). Deliberately not
-	// set on the two rejections above: an unauthenticated caller can assert
-	// any client_id, and an audit log that cannot distinguish an asserted
-	// identity from a verified one is worse than one that stays silent.
-	// See kdex-tech/host-manager#158.
-	failed := func(format string, args ...any) (TokenSet, error) {
-		return TokenSet{Subject: clientID}, fmt.Errorf(format, args...)
+	// every failure returned from here on carries vouched: true. See
+	// kdex-tech/host-manager#158.
+	failed := func(format string, args ...any) (jwt.MapClaims, string, error) {
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf(format, args...), vouched: true}
 	}
 
 	signingContext := jwt.MapClaims{
@@ -969,12 +991,74 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 		}
 	}
 
+	return signingContext, grantedScopeStr, nil
+}
+
+// clientTokenSetForContextFailure translates a buildClientSigningContext
+// error into the TokenSet/error pair LoginClient and LoginClientResource
+// each return, applying the #158 vouched-subject rule uniformly to both.
+func clientTokenSetForContextFailure(clientID string, err error) (TokenSet, error) {
+	var scf *clientSigningContextFailure
+	if errors.As(err, &scf) {
+		if scf.vouched {
+			return TokenSet{Subject: clientID}, scf.err
+		}
+		return TokenSet{}, scf.err
+	}
+	// Defensive: buildClientSigningContext always wraps its errors in
+	// clientSigningContextFailure; this branch should be unreachable.
+	return TokenSet{}, err
+}
+
+func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, scope string) (TokenSet, error) {
+	signingContext, grantedScopeStr, err := e.buildClientSigningContext(clientID, clientSecret, scope)
+	if err != nil {
+		return clientTokenSetForContextFailure(clientID, err)
+	}
+
 	accessToken, err := e.config.Signer.Sign(signingContext)
 	if err != nil {
-		return failed("%w: failed to sign access token: %v", ErrServerError, err)
+		return TokenSet{Subject: clientID}, fmt.Errorf("%w: failed to sign access token: %v", ErrServerError, err)
 	}
 
 	// client_credentials does not issue refresh tokens (M2M flows re-authenticate directly).
+	return TokenSet{
+		AccessToken: accessToken,
+		Scope:       grantedScopeStr,
+		Subject:     clientID,
+	}, nil
+}
+
+// LoginClientResource is LoginClient signed for a peer resource's audience
+// instead of the host: the SAME authenticated client identity + re-resolved
+// authority (buildClientSigningContext), addressed to targetAudience so a
+// confidential client can call a peer function without an RFC 8693 exchange.
+// The caller (token handler) has already verified the resource is permitted
+// for this client and resolved targetAudience from ExchangeTargets/
+// AllowedResources. No `act` -- the client is itself the subject.
+func (e *Exchanger) LoginClientResource(ctx context.Context, clientID, clientSecret, scope, targetAudience string) (TokenSet, error) {
+	signingContext, grantedScopeStr, err := e.buildClientSigningContext(clientID, clientSecret, scope)
+	if err != nil {
+		return clientTokenSetForContextFailure(clientID, err)
+	}
+
+	signer, err := sign.NewSigner(
+		targetAudience,
+		e.config.TokenTTL,
+		e.config.Issuer,
+		&e.config.ActivePair.Private,
+		e.config.ActivePair.KeyId,
+		e.config.ClaimMapper,
+	)
+	if err != nil {
+		return TokenSet{Subject: clientID}, fmt.Errorf("%w: failed to build signer for %s: %v", ErrServerError, targetAudience, err)
+	}
+
+	accessToken, err := signer.Sign(signingContext)
+	if err != nil {
+		return TokenSet{Subject: clientID}, fmt.Errorf("%w: failed to sign resource token: %v", ErrServerError, err)
+	}
+
 	return TokenSet{
 		AccessToken: accessToken,
 		Scope:       grantedScopeStr,

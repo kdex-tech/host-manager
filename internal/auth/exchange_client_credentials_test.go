@@ -16,6 +16,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,9 +62,19 @@ func newClientCredsExchanger(t *testing.T, allowedScopes []string, idp InternalI
 		Audience:   "test-aud",
 		Signer:     *signer,
 		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		// TokenTTL feeds sign.NewSigner for any per-call signer built off this
+		// config (e.g. LoginClientResource's resource-audience signer); the
+		// host-audience Signer above is pre-built and does not consult it.
+		TokenTTL: time.Hour,
 		Clients: map[string]AuthClient{
 			"sim-launcher": {
 				ClientID:          "sim-launcher",
+				ClientSecret:      "s3cret",
+				AllowedGrantTypes: []string{"client_credentials"},
+				AllowedScopes:     allowedScopes,
+			},
+			"eum-blobsqlite": {
+				ClientID:          "eum-blobsqlite",
 				ClientSecret:      "s3cret",
 				AllowedGrantTypes: []string{"client_credentials"},
 				AllowedScopes:     allowedScopes,
@@ -76,6 +88,46 @@ func newClientCredsExchanger(t *testing.T, allowedScopes []string, idp InternalI
 	ex, err := NewExchanger(context.Background(), cfg, cm, idp, nil)
 	require.NoError(t, err)
 	return ex
+}
+
+// claimString returns a string claim from a decoded (unverified) token.
+func claimString(t *testing.T, token, claim string) string {
+	t.Helper()
+	claims := decodeUnverified(t, token)
+	v, _ := claims[claim].(string)
+	return v
+}
+
+// audOf returns the `aud` claim as a []string regardless of whether the JWT
+// library round-trips it as a JSON array of strings ([]any under
+// jwt.MapClaims) or (per RFC 7519 §4.1.3) a bare string.
+func audOf(t *testing.T, token string) []string {
+	t.Helper()
+	claims := decodeUnverified(t, token)
+	switch aud := claims["aud"].(type) {
+	case []any:
+		out := make([]string, 0, len(aud))
+		for _, a := range aud {
+			s, _ := a.(string)
+			out = append(out, s)
+		}
+		return out
+	case string:
+		return []string{aud}
+	default:
+		return nil
+	}
+}
+
+// claimJSON returns a claim re-marshaled to JSON so two claims (e.g. `roles`,
+// `entitlements`) can be compared for deep equality regardless of the exact
+// dynamic type ParseUnverified produced for each.
+func claimJSON(t *testing.T, token, claim string) string {
+	t.Helper()
+	claims := decodeUnverified(t, token)
+	b, err := json.Marshal(claims[claim])
+	require.NoError(t, err)
+	return string(b)
 }
 
 // TestLoginClient_IncludesResolvedEntitlements pins the fix for
@@ -173,4 +225,35 @@ func TestAllGrantTypes_CarryEntitlements(t *testing.T) {
 		require.NoError(t, err)
 		assertEntitlements(t, "refresh_token", ts.AccessToken)
 	})
+}
+
+// TestLoginClientResource_MintsTargetAudienceWithSameAuthority pins the new
+// client_credentials resource-audience mint: a confidential client that
+// already authenticates for a host-audience token via LoginClient can obtain
+// the SAME subject/authority signed for a peer resource's audience instead,
+// with no RFC 8693 exchange round trip.
+func TestLoginClientResource_MintsTargetAudienceWithSameAuthority(t *testing.T) {
+	g := NewWithT(t)
+	idp := clientCredsStubIdentityProvider{
+		roles: []string{"sim-runner"},
+		ents:  []string{"functions:vector_stores:write"},
+	}
+	e := newClientCredsExchanger(t, nil, idp)
+	const target = "https://host.example/db/v1" // any non-host audience string
+
+	host, err := e.LoginClient(context.Background(), "eum-blobsqlite", "s3cret", "")
+	g.Expect(err).ToNot(HaveOccurred())
+	res, err := e.LoginClientResource(context.Background(), "eum-blobsqlite", "s3cret", "", target)
+	g.Expect(err).ToNot(HaveOccurred())
+
+	// Same subject + authority, different audience.
+	g.Expect(claimString(t, res.AccessToken, "sub")).To(Equal("eum-blobsqlite"))
+	g.Expect(audOf(t, res.AccessToken)).To(ConsistOf(target))
+	g.Expect(audOf(t, host.AccessToken)).ToNot(ConsistOf(target)) // host token is host-aud
+	g.Expect(claimJSON(t, res.AccessToken, "entitlements")).To(Equal(claimJSON(t, host.AccessToken, "entitlements")))
+	g.Expect(claimJSON(t, res.AccessToken, "roles")).To(Equal(claimJSON(t, host.AccessToken, "roles")))
+
+	// Bad secret still rejected on the resource path.
+	_, err = e.LoginClientResource(context.Background(), "eum-blobsqlite", "wrong", "", target)
+	g.Expect(err).To(HaveOccurred())
 }
