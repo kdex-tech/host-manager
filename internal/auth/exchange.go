@@ -459,6 +459,17 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	if marker, _ := claims[CapUsesClaim].(bool); marker {
 		return TokenSet{}, fmt.Errorf("subject_token is a bounded-use capability and cannot be exchanged")
 	}
+	// A client_credentials-minted token (including a resource-audience token
+	// from the client_credentials + `resource` path) is a from-scratch M2M
+	// credential gated by the client's allowed-resources allowlist, NOT a
+	// delegable FAT. The clientless exchange path does not consult that
+	// allowlist, so allowing such a token as a subject_token would let a client
+	// pivot from one allowlisted resource to any registered ExchangeTarget.
+	// Only the client_credentials mint stamps grant_type; genuine proxy FATs and
+	// exchanged tokens carry none (it is a reservedMintClaim). Reject it.
+	if gt, _ := claims["grant_type"].(string); gt == "client_credentials" {
+		return TokenSet{}, fmt.Errorf("subject_token minted via client_credentials is not exchangeable")
+	}
 	// A genuine FAT carries exactly ONE audience -- the target function, never the
 	// host. Gate positively and fail CLOSED: reject an absent/empty, multi-valued,
 	// or host-valued `aud`, and refuse the exchange outright if this host has no
