@@ -16,6 +16,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -346,6 +349,150 @@ func TestAuthCodeEmailRoleBinding(t *testing.T) {
 
 	assert.Contains(t, accessTokenRoles(t, ts.AccessToken), "acme-admin",
 		"the email-keyed KDexRoleBinding must resolve a role for this auth-code redemption")
+	assert.Equal(t, opaqueSub, accessTokenSubject(t, ts.AccessToken),
+		"identity must remain the opaque IdP sub -- only role resolution keys on email")
+	assert.Equal(t, opaqueSub, ts.Subject, "TokenSet.Subject must also remain the opaque sub")
+}
+
+// TestAuthorizeAndRedeem_EmailRoleBinding_SurvivesSessionProjection is the
+// Task 8 regression: TestAuthCodeEmailRoleBinding above proves mintTokensFromCode
+// resolves roles correctly GIVEN a populated AuthorizationCodeClaims.IDPClaims,
+// but it hand-builds that IDPClaims map with email_verified already present --
+// it never exercises how IDPClaims is actually produced in production.
+//
+// In production (oauth2.go AuthorizeHandler), IDPClaims is a snapshot of the
+// SESSION token's claims (idpClaimSnapshot(jwt.MapClaims(authCtx))), and that
+// session token was itself minted by a real login via SignScoped, which runs
+// sign.Signer.Project. Project's custom-claim whitelist historically allow-
+// listed "email" but not "email_verified", so the session token -- and thus
+// the auth code's IDPClaims snapshot taken from it -- NEVER carried
+// email_verified. Under the default secure config (RequireEmailVerified unset
+// => true), resolveBindingKey then always fell back to `sub`, silently
+// under-granting the email-keyed role on every authorization-code redemption
+// (OAuth2/MCP/PKCE clients), even though the OIDC-login and refresh paths
+// (which resolve the binding key from the RAW, pre-projection id_token claims)
+// granted it correctly.
+//
+// This test drives the REAL production path end-to-end instead of hand-
+// building IDPClaims:
+//  1. ExchangeToken performs a real OIDC login (via the "rbc:" mock-IdP escape
+//     hatch) and mints the SESSION access token exactly as production does
+//     (SignScoped -> sign.Project/confineByScope).
+//  2. That session token is decoded, exactly as the auth middleware would, to
+//     build the request's AuthContext.
+//  3. The REAL AuthorizeHandler (not a hand-built AuthorizationCodeClaims)
+//     snapshots that AuthContext into the auth code's IDPClaims.
+//  4. RedeemAuthorizationCode mints the final access token.
+//
+// Before the sign.go fix (email_verified added to Project's whitelist and to
+// confineByScope's email-scope family), this test FAILS: the redeemed token
+// carries no "acme-admin" role because email_verified never survived the
+// session token's projection into the auth code's IDPClaims snapshot.
+func TestAuthorizeAndRedeem_EmailRoleBinding_SurvivesSessionProjection(t *testing.T) {
+	const (
+		opaqueSub   = "104187opaque"
+		email       = "alice@acme.io"
+		clientID    = "app"
+		redirectURI = "https://app.example.com/cb"
+	)
+
+	ctx := context.Background()
+	ih := &IH{}
+	server := MockRunningServer(ih)
+	defer server.Close()
+
+	cacheManager, err := cache.NewCacheManager("", "rbc-authorize-roundtrip-test", new(1*time.Hour))
+	require.NoError(t, err)
+
+	cfg, err := NewConfigBuilder().WithAuthClientLoader(
+		func() (map[string]AuthClient, error) {
+			return map[string]AuthClient{
+				clientID: {ClientID: clientID, RedirectURIs: []string{redirectURI}},
+			}, nil
+		},
+	).WithKeyLoader(
+		func() (*keys.KeyPairs, error) { return keys.GenerateECDSAKeyPair(), nil },
+	).WithOIDCClientConfigLoader(
+		func() (*OIDCClientConfig, error) {
+			return &OIDCClientConfig{ClientID: "foo", ClientSecret: "bar"}, nil
+		},
+	).WithAudience("foo").WithIssuer(server.URL).WithDevMode(true).WithCacheManager(
+		cacheManager,
+	).Build(
+		&v1alpha1.Auth{
+			OIDCProvider: &v1alpha1.OIDCProvider{
+				OIDCProviderURL: server.URL,
+				// The feature under test: bind roles on `email`, not `sub`.
+				// RequireEmailVerified is left nil/unset, which config.go
+				// resolves to the secure DEFAULT (true) -- the exact config
+				// under which the defect silently under-granted the role.
+				RoleBindingClaim: "email",
+			},
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, "email", cfg.OIDC.RoleBindingClaim)
+	require.True(t, cfg.OIDC.RequireEmailVerified, "precondition: exercising the DEFAULT secure config")
+
+	ih.Handler = MockOIDCProvider(*cfg)
+
+	sp := newRoleBindingScopeProvider(t, email)
+	ex, err := NewExchanger(ctx, *cfg, cacheManager, sp, nil)
+	require.NoError(t, err)
+
+	// Step 1: a REAL OIDC login mints the session access token exactly as
+	// production does -- ExchangeToken -> SignScoped -> sign.Project /
+	// confineByScope. Role resolution inside ExchangeToken itself reads the
+	// RAW (pre-projection) id_token claims, so this step alone would already
+	// grant the role; the defect is downstream, in what the MINTED token
+	// carries forward.
+	oidcTokens, err := ex.ExchangeCode(ctx, "rbc:"+opaqueSub+"|"+email+"|true")
+	require.NoError(t, err)
+	sessionTS, err := ex.ExchangeToken(ctx, oidcTokens)
+	require.NoError(t, err)
+
+	// Step 2: decode the session token the way the auth middleware would, to
+	// build the AuthContext the real AuthorizeHandler reads.
+	sessionClaims := jwt.MapClaims{}
+	_, _, err = jwt.NewParser(jwt.WithoutClaimsValidation()).ParseUnverified(sessionTS.AccessToken, sessionClaims)
+	require.NoError(t, err)
+
+	// Step 3: drive the REAL /-/authorize handler -- no hand-built
+	// AuthorizationCodeClaims anywhere in this test.
+	o := &OAuth2{AuthConfig: cfg, AuthExchanger: ex}
+
+	u, _ := url.Parse("/-/oauth/authorize")
+	q := u.Query()
+	q.Set("client_id", clientID)
+	q.Set("response_type", "code")
+	q.Set("redirect_uri", redirectURI)
+	// "roles" must be requested: SignScoped strips the `roles` claim unless
+	// the granted scope includes it, independent of role-binding resolution.
+	q.Set("scope", "openid roles")
+	u.RawQuery = q.Encode()
+
+	req := httptest.NewRequest("GET", u.String(), nil)
+	req = req.WithContext(SetAuthContext(req.Context(), AuthContext(sessionClaims)))
+
+	w := httptest.NewRecorder()
+	o.AuthorizeHandler(w, req)
+
+	resp := w.Result()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	loc, err := resp.Location()
+	require.NoError(t, err)
+	code := loc.Query().Get("code")
+	require.NotEmpty(t, code, "a real authorization code should have been minted")
+
+	// Step 4: redeem the code exactly as the token endpoint does.
+	ts, err := ex.RedeemAuthorizationCode(ctx, code, clientID, redirectURI, "")
+	require.NoError(t, err)
+
+	assert.Contains(t, accessTokenRoles(t, ts.AccessToken), "acme-admin",
+		"the email-keyed KDexRoleBinding must resolve a role on the auth-code path under "+
+			"the DEFAULT secure config (RequireEmailVerified unset => true); this requires "+
+			"email_verified to survive the session token's projection so the auth code's "+
+			"IDPClaims snapshot carries it")
 	assert.Equal(t, opaqueSub, accessTokenSubject(t, ts.AccessToken),
 		"identity must remain the opaque IdP sub -- only role resolution keys on email")
 	assert.Equal(t, opaqueSub, ts.Subject, "TokenSet.Subject must also remain the opaque sub")

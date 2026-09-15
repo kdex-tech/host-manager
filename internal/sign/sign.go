@@ -171,7 +171,19 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// "scp" carries the static scope of a PASETO API token bridged into the
 	// authContext by the proxy so the FAT preserves it alongside the
 	// structured entitlements. See kdex-tech/host-manager#103.
-	for _, claim := range []string{"email", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
+	//
+	// "email_verified" rides alongside "email" (standard OIDC): without it, a
+	// SESSION token minted via SignScoped never carries email_verified, so
+	// anything built FROM that session token later -- notably the
+	// authorization-code mint's IDPClaims snapshot (oauth2.go
+	// AuthorizeHandler) -- can never see it either. Under the RoleBindingClaim
+	// feature's default secure config (RequireEmailVerified unset => true),
+	// that silently forced every auth-code redemption's binding-key
+	// resolution to fall back to `sub`, under-granting email-keyed roles for
+	// OAuth2/MCP/PKCE clients even though OIDC login/refresh (which resolve
+	// the binding key from the raw, pre-projection id_token) granted them
+	// correctly. See kdex-tech/host-manager#189 and the Task 8 fix.
+	for _, claim := range []string{"email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val
 		}
@@ -345,7 +357,10 @@ func (s *Signer) SignScoped(signingContext jwt.MapClaims, grantedScopes []string
 func confineByScope(projected jwt.MapClaims, grantedScopes []string) {
 	granted := func(scope string) bool { return slices.Contains(grantedScopes, scope) }
 	if !granted("email") {
+		// email_verified rides with email: it is meaningless (and a leak of
+		// login-time IdP state) on a token whose email scope was not granted.
 		delete(projected, "email")
+		delete(projected, "email_verified")
 	}
 	if !granted("profile") {
 		for _, claim := range profileClaims {
