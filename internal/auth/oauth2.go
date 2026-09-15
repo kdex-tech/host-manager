@@ -289,6 +289,31 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, kdexhttp.SafeReturnPath(state), http.StatusSeeOther)
 }
 
+// clientCredentialsGrant handles the client_credentials case: it rejects public
+// clients, and when a `resource` is requested, gates it against the client's
+// AllowedResources and the host's ExchangeTargets before minting a
+// resource-audience token (else host-audience). It writes the OAuth error and
+// returns handled=true when it has already responded.
+func (o *OAuth2) clientCredentialsGrant(w http.ResponseWriter, r *http.Request, client AuthClient, clientId, clientSecret, scope, resource string) (ts TokenSet, handled bool, err error) {
+	if client.Public {
+		err = fmt.Errorf("client_credentials grant_type is not supported for public clients")
+		writeOAuthError(w, http.StatusBadRequest, errCodeUnauthorizedClient, "client_credentials is not supported for public clients")
+		return ts, true, err
+	}
+	if resource != "" {
+		targetAudience, isTarget := o.ExchangeTargets[resource]
+		if !isTarget || !slices.Contains(client.AllowedResources, resource) {
+			err = fmt.Errorf("resource %q not permitted for client %q", resource, clientId)
+			writeOAuthError(w, http.StatusBadRequest, errCodeInvalidTarget, "requested resource is not permitted for this client")
+			return ts, true, err
+		}
+		ts, err = o.AuthExchanger.LoginClientResource(r.Context(), clientId, clientSecret, scope, targetAudience)
+		return ts, false, err
+	}
+	ts, err = o.AuthExchanger.LoginClient(r.Context(), clientId, clientSecret, scope)
+	return ts, false, err
+}
+
 func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	var clientId, clientSecret, code, codeVerifier, grantType, password, redirectURI, scope, username string
 	var ts TokenSet
@@ -428,21 +453,10 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		ts, err = o.AuthExchanger.RedeemAuthorizationCode(r.Context(), code, clientId, redirectURI, codeVerifier)
 	case "client_credentials":
-		if client.Public {
-			err = fmt.Errorf("client_credentials grant_type is not supported for public clients")
-			writeOAuthError(w, http.StatusBadRequest, errCodeUnauthorizedClient, "client_credentials is not supported for public clients")
+		var handled bool
+		ts, handled, err = o.clientCredentialsGrant(w, r, client, clientId, clientSecret, scope, resource)
+		if handled {
 			return
-		}
-		if resource != "" {
-			targetAudience, isTarget := o.ExchangeTargets[resource]
-			if !isTarget || !slices.Contains(client.AllowedResources, resource) {
-				err = fmt.Errorf("resource %q not permitted for client %q", resource, clientId)
-				writeOAuthError(w, http.StatusBadRequest, errCodeInvalidTarget, "requested resource is not permitted for this client")
-				return
-			}
-			ts, err = o.AuthExchanger.LoginClientResource(r.Context(), clientId, clientSecret, scope, targetAudience)
-		} else {
-			ts, err = o.AuthExchanger.LoginClient(r.Context(), clientId, clientSecret, scope)
 		}
 	case "password":
 		username = r.FormValue("username")
