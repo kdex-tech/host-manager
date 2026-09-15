@@ -466,13 +466,13 @@ func TestMintCapabilityToken_URLDelivery(t *testing.T) {
 		MintTokenRequest{
 			Entitlements: []string{"functions:/api/v1/files:read"},
 			Delivery:     "url",
-			Uses:         5, // must be forced to 1
+			Uses:         5, // honored (<= MintTokenUsesCap), not forced to 1
 			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
 		},
 		"https://dev.example")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.Token).To(BeEmpty())
-	g.Expect(res.UsesRemaining).To(Equal(1))
+	g.Expect(res.UsesRemaining).To(Equal(5))
 	g.Expect(res.URL).To(HavePrefix("https://dev.example/-/transfer/"))
 
 	// The handle resolves to a stored record with the bound target.
@@ -482,6 +482,50 @@ func TestMintCapabilityToken_URLDelivery(t *testing.T) {
 	g.Expect(rec.Sub).To(Equal("alice"))
 	g.Expect(rec.Target.Path).To(Equal("/api/v1/files/abc/content"))
 	g.Expect(rec.Entitlements).To(Equal([]string{"functions:/api/v1/files:read"}))
+}
+
+// A URL-delivered capability honors the requested `uses` budget (clamped to
+// MintTokenUsesCap) exactly like a bearer token — it is not hard-forced to
+// single-use. Redemptions succeed until the budget is exhausted.
+func TestMintCapabilityToken_URLDelivery_HonorsUses(t *testing.T) {
+	g := NewWithT(t)
+	ttl := time.Minute
+	mgr, _ := cache.NewCacheManager("", "", &ttl)
+
+	// Stub the bound target so a redemption re-dispatches somewhere.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr, Mux: mux}
+
+	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+		[]string{"functions:/api/v1/files:read"},
+		MintTokenRequest{
+			Entitlements: []string{"functions:/api/v1/files:read"},
+			Delivery:     "url",
+			Uses:         3,
+			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
+		},
+		"https://dev.example")
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(res.UsesRemaining).To(Equal(3), "URL delivery must honor the requested uses budget, not force single-use")
+
+	handle := strings.TrimPrefix(res.URL, "https://dev.example/-/transfer/")
+	redeem := func() int {
+		req := httptest.NewRequest("GET", "/-/transfer/"+handle, nil)
+		req.SetPathValue("handle", handle)
+		rw := httptest.NewRecorder()
+		hh.TransferGet(rw, req)
+		return rw.Code
+	}
+
+	// Three redemptions succeed against the same handle; the fourth is spent.
+	g.Expect(redeem()).To(Equal(http.StatusOK))
+	g.Expect(redeem()).To(Equal(http.StatusOK))
+	g.Expect(redeem()).To(Equal(http.StatusOK))
+	g.Expect(redeem()).To(Equal(http.StatusGone), "budget must be exhausted after 3 uses")
 }
 
 func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {

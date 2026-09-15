@@ -116,7 +116,7 @@ func (hh *HostHandler) transferHandler(mux *http.ServeMux, registeredPaths map[s
 			BasePath: transferPath,
 			Paths: map[string]ko.PathItem{
 				transferPath: {
-					Description: "Redeems a single-use capability URL minted with delivery \"url\".",
+					Description: "Redeems a bounded-use capability URL minted with delivery \"url\" (honors the mint's `uses` budget, default 1).",
 					Get: &openapi.Operation{
 						Description: "GET to redeem the capability and receive the bound target's response. " +
 							"Send NO credentials: the handle is the credential, and an Authorization header is " +
@@ -186,8 +186,8 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 		gone()
 		return
 	}
-	// Snapshot the mux and confirm we can actually serve BEFORE spending the
-	// single use — otherwise a transiently-nil mux would burn an
+	// Snapshot the mux and confirm we can actually serve BEFORE spending a
+	// use — otherwise a transiently-nil mux would burn a use from an
 	// otherwise-valid link and then 410. All non-serve preconditions
 	// (record, method, cache, mux) are checked ahead of the decrement.
 	hh.mu.RLock()

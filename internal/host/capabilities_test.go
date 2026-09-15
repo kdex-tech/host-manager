@@ -200,7 +200,7 @@ func TestCapabilityMintHandler_URLDelivery(t *testing.T) {
 		mintReq(t, MintTokenRequest{
 			Entitlements: []string{"functions:/api/v1/files:read"},
 			Delivery:     "url",
-			Uses:         5, // url delivery forces 1
+			Uses:         5, // honored (<= MintTokenUsesCap), not forced to 1
 			Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
 		}))
 
@@ -211,7 +211,7 @@ func TestCapabilityMintHandler_URLDelivery(t *testing.T) {
 	g.Expect(json.Unmarshal(rw.Body.Bytes(), &res)).To(Succeed())
 	g.Expect(res.URL).To(ContainSubstring("/-/transfer/"))
 	g.Expect(res.Token).To(BeEmpty())
-	g.Expect(res.UsesRemaining).To(Equal(1))
+	g.Expect(res.UsesRemaining).To(Equal(5))
 	g.Expect(res.Entitlements).To(Equal([]string{"functions:/api/v1/files:read"}))
 }
 

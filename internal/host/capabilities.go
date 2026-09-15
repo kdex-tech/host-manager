@@ -49,7 +49,8 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 	// itself: a capability is bounded BELOW the key by construction — its
 	// entitlements are attenuated from the caller's own, its lifetime is clamped
 	// to MintTokenCapabilityTTLCap (this REST surface's own ceiling, which falls
-	// back to MintTokenTTLCap when unset), and url delivery is single-use. Only a
+	// back to MintTokenTTLCap when unset), and url delivery honors `uses` (default
+	// 1) like bearer. Only a
 	// HOST-audience key is accepted; a function-bound key stays anonymous.
 	mux.Handle("POST "+capabilitiesMintPath,
 		hh.authConfig.WithAPITokenIdentity(hh.authExchanger)(
@@ -65,10 +66,10 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 					Post: &openapi.Operation{
 						Description: "POST to mint a capability. Every requested entitlement must already be held by " +
 							"the caller — the mint attenuates, never escalates. delivery \"bearer\" (the default) " +
-							"returns a token to send as Authorization: Bearer. delivery \"url\" returns a single-use, " +
+							"returns a token to send as Authorization: Bearer. delivery \"url\" returns a bounded-use, " +
 							"credential-less /-/transfer/<handle> link performing exactly the bound target, and " +
 							"requires that the host enables urlDelivery. ttl and uses are clamped by host policy; " +
-							"url delivery is always single-use, and a destructive verb forces uses=1 and the shortest ttl.",
+							"url delivery honors `uses` (default 1) like bearer, and a destructive verb forces uses=1 and the shortest ttl.",
 						OperationID: "capability-mint-post",
 						RequestBody: &openapi.RequestBodyRef{
 							Value: &openapi.RequestBody{
