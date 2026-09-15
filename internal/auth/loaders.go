@@ -74,6 +74,15 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 			allowedScopes = strings.Split(allowedScopesStr, ",")
 		}
 
+		allowedResourcesStr := string(secret.Data["allowed_resources"])
+		if allowedResourcesStr == "" {
+			allowedResourcesStr = string(secret.Data["allowed-resources"])
+		}
+		allowedResources := []string{}
+		if allowedResourcesStr != "" {
+			allowedResources = strings.Split(allowedResourcesStr, ",")
+		}
+
 		description := string(secret.Data["description"])
 		name := string(secret.Data["name"])
 
@@ -104,6 +113,7 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 		client := AuthClient{
 			AllowedGrantTypes: allowedGrantTypes,
 			AllowedScopes:     allowedScopes,
+			AllowedResources:  allowedResources,
 			ClientID:          clientID,
 			ClientSecret:      clientSecret,
 			Description:       description,

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -117,4 +119,30 @@ func TestAuthClientLoaderAllowsPublicHTTPSWithoutPKCE(t *testing.T) {
 	if _, err := AuthClientLoader(secrets); err != nil {
 		t.Fatalf("https public client without PKCE must load: %v", err)
 	}
+}
+
+// TestAuthClientLoaderParsesAllowedResources pins the RFC 8707 resource
+// indicator allowlist: a confidential client's allowed-resources Secret key
+// loads into AuthClient.AllowedResources, and its absence yields an empty
+// (never nil-panicking) slice rather than an error.
+func TestAuthClientLoaderParsesAllowedResources(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_id":           "eum-blobsqlite",
+		"client_secret":       "s3cret",
+		"allowed-grant-types": "client_credentials",
+		"allowed-resources":   "/db/v1,https://host.example/db/v1",
+	})}
+	clients, err := AuthClientLoader(secrets)
+	require.NoError(t, err)
+	c, ok := clients["eum-blobsqlite"]
+	require.True(t, ok)
+	assert.Equal(t, []string{"/db/v1", "https://host.example/db/v1"}, c.AllowedResources)
+
+	// Absent -> empty (not nil-panic).
+	secrets2 := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_id": "x", "client_secret": "y", "allowed-grant-types": "client_credentials",
+	})}
+	clients2, err := AuthClientLoader(secrets2)
+	require.NoError(t, err)
+	assert.Empty(t, clients2["x"].AllowedResources)
 }

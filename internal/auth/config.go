@@ -41,6 +41,7 @@ type DCRConfig struct {
 type AuthClient struct {
 	AllowedGrantTypes []string
 	AllowedScopes     []string
+	AllowedResources  []string
 	ClientID          string
 	ClientSecret      string
 	Description       string
