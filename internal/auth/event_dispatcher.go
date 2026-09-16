@@ -14,6 +14,11 @@ import (
 // denies the login (ok=false, or a fail-closed transport failure).
 var ErrLoginHookDenied = errors.New("login denied by event hook")
 
+// eventDispatcherLoggerName is attached (via WithName) to the logger of every
+// dispatcher, so all auth event-hook log lines share one filterable name
+// regardless of which controller owns the dispatcher.
+const eventDispatcherLoggerName = "auth-event-hook"
+
 // EventDispatcher owns the parsed hooks for one host and emits lifecycle events.
 // A nil *EventDispatcher is valid: every method is a no-op (GateLogin allows).
 type EventDispatcher struct {
@@ -24,7 +29,7 @@ type EventDispatcher struct {
 
 func NewEventDispatcher(host string, hooks []*httpEventHook, log logr.Logger) *EventDispatcher {
 	sortHooksByName(hooks)
-	return &EventDispatcher{host: host, hooks: hooks, log: log}
+	return &EventDispatcher{host: host, hooks: hooks, log: log.WithName(eventDispatcherLoggerName)}
 }
 
 // NewEventDispatcherFromSecrets filters secrets down to the active
@@ -53,6 +58,36 @@ func NewEventDispatcherFromSecrets(host string, secrets []corev1.Secret, log log
 // neither the request's cancellation nor a slow hook can hang or abort work.
 func bgTimeout(h *httpEventHook) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), h.timeout)
+}
+
+// eventKV builds the contextual key/value pairs shared by every event-hook log
+// line: the event plus the identity/session context that says whose lifecycle
+// event this is (event, host, subject, auth_method a.k.a. provider, client_id,
+// scope, session_id). Bulky/sensitive fields (claims, roles, entitlements) are
+// deliberately excluded, and empty fields are dropped so a line carries only the
+// context the event actually has. `extra` appends call-site pairs (hook, reason).
+func eventKV(p EventPayload, extra ...any) []any {
+	kv := make([]any, 0, 14+len(extra))
+	kv = append(kv, "event", string(p.Event))
+	if p.Host != "" {
+		kv = append(kv, "host", p.Host)
+	}
+	if p.Subject != "" {
+		kv = append(kv, "subject", p.Subject)
+	}
+	if p.AuthMethod != "" {
+		kv = append(kv, "auth_method", p.AuthMethod)
+	}
+	if p.ClientID != "" {
+		kv = append(kv, "client_id", p.ClientID)
+	}
+	if p.Scope != "" {
+		kv = append(kv, "scope", p.Scope)
+	}
+	if p.SessionID != "" {
+		kv = append(kv, "session_id", p.SessionID)
+	}
+	return append(kv, extra...)
 }
 
 func (d *EventDispatcher) selecting(e EventType, enforcing bool) []*httpEventHook {
@@ -97,19 +132,22 @@ func (d *EventDispatcher) GateLogin(ctx context.Context, p EventPayload) error {
 		if err != nil {
 			// login default is fail-closed; only an explicit fail-open allows.
 			if h.failureMode == FailOpen {
-				d.log.Error(err, "enforcing login hook errored; failing open", "hook", h.name)
+				d.log.Error(err, "enforcing login hook errored; failing open", eventKV(p, "hook", h.name)...)
 				continue
 			}
-			d.log.Error(err, "enforcing login hook errored; failing closed", "hook", h.name)
+			d.log.Error(err, "enforcing login hook errored; failing closed", eventKV(p, "hook", h.name)...)
 			return fmt.Errorf("%w: %s", ErrLoginHookDenied, "hook unavailable")
 		}
 		if !ok {
 			if reason == "" {
 				reason = "denied"
 			}
+			d.log.V(2).Info("enforcing login hook denied login", eventKV(p, "hook", h.name, "reason", reason)...)
 			return fmt.Errorf("%w: %s", ErrLoginHookDenied, reason)
 		}
+		d.log.V(2).Info("enforcing login hook allowed login", eventKV(p, "hook", h.name)...)
 	}
+	d.log.V(2).Info("all enforcing login hooks passed", eventKV(p)...)
 	return nil
 }
 
@@ -119,8 +157,10 @@ func (d *EventDispatcher) fireAsync(p EventPayload, hooks []*httpEventHook) {
 			cctx, cancel := bgTimeout(h)
 			defer cancel()
 			if _, _, err := h.call(cctx, p); err != nil {
-				d.log.Error(err, "async event hook failed", "hook", h.name, "event", string(p.Event))
+				d.log.Error(err, "async event hook failed", eventKV(p, "hook", h.name)...)
+				return
 			}
+			d.log.V(2).Info("async event hook fired", eventKV(p, "hook", h.name)...)
 		}()
 	}
 }
@@ -174,7 +214,9 @@ func (d *EventDispatcher) Logout(ctx context.Context, p EventPayload) {
 	for _, h := range d.selecting(EventLogout, true) {
 		cctx, cancel := bgTimeout(h)
 		if _, _, err := h.call(cctx, p); err != nil {
-			d.log.Error(err, "enforcing logout barrier failed; proceeding with logout", "hook", h.name)
+			d.log.Error(err, "enforcing logout barrier failed; proceeding with logout", eventKV(p, "hook", h.name)...)
+		} else {
+			d.log.V(2).Info("enforcing logout barrier passed", eventKV(p, "hook", h.name)...)
 		}
 		cancel()
 	}
