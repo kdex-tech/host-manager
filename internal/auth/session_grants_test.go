@@ -154,6 +154,109 @@ func newCountingGrantTestSetup(t *testing.T, delay time.Duration) (*Config, *Exc
 	return cfg, ex, p
 }
 
+// TestRefreshSessionGrantsResolvesRoleBindingClaim proves kdex-tech/host-manager#215:
+// the #203 browser-session grant refresh must resolve roles on the SAME binding key
+// the login used (RoleBindingClaim, e.g. email), NOT the bare sub. Before the fix it
+// re-resolved on ac.GetSubject() (the opaque IdP sub), so an email-keyed
+// KDexRoleBinding that login/refresh/auth-code correctly granted was silently
+// reverted on the first post-login cookie request -- /-/state and page authz then
+// showed only the sub-matched wildcard roles. Identity still stays the sub.
+//
+// Uses a REAL scopeProvider (newRoleBindingScopeProvider) whose only binding names
+// the EMAIL, and a nil-mapper signer so the assertion is on `roles` alone without a
+// vs_entitlements CEL dependency.
+func TestRefreshSessionGrantsResolvesRoleBindingClaim(t *testing.T) {
+	const (
+		opaqueSub = "104187opaque"
+		email     = "alice@acme.io"
+	)
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+	signer, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", nil)
+	require.NoError(t, err)
+	cfg := &Config{
+		Issuer:     "test-iss",
+		Audience:   "test-aud",
+		CookieName: "auth_token",
+		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		Signer:     *signer,
+	}
+	// The feature: bind roles on the verified email, exactly as the login path does.
+	cfg.OIDC.RoleBindingClaim = "email"
+	cfg.OIDC.RequireEmailVerified = true
+
+	cm, err := cache.NewCacheManager("", "grant-rbc-215", nil)
+	require.NoError(t, err)
+	sp := newRoleBindingScopeProvider(t, email) // sole binding: Subject == email -> "acme-admin"
+	ex, err := NewExchanger(context.Background(), *cfg, cm, sp, nil)
+	require.NoError(t, err)
+
+	// A frozen OIDC session token's claims: identity is the opaque sub, but it
+	// carries the verified email exactly as SignScoped/Project minted it at login.
+	ac := AuthContext{
+		"sub":            opaqueSub,
+		"email":          email,
+		"email_verified": true,
+		"idp":            "oidc",
+		"scope":          "openid email roles entitlements",
+		"roles":          []any{},
+		"entitlements":   []any{},
+	}
+	cfg.refreshSessionGrants(context.Background(), ac, ex)
+
+	require.Contains(t, ac["roles"], "acme-admin",
+		"session-grant refresh must resolve roles on the email binding key, not the opaque sub")
+	require.Equal(t, opaqueSub, ac["sub"], "identity must remain the opaque IdP sub")
+}
+
+// TestRefreshSessionGrantsRoleBindingClaimUnverifiedFallsBackToSub is the negative
+// half: with RequireEmailVerified true, a session whose email_verified is false must
+// NOT bind roles via email -- resolution falls back to sub, which the fixture binding
+// does not name, so no role is resolved (#215).
+func TestRefreshSessionGrantsRoleBindingClaimUnverifiedFallsBackToSub(t *testing.T) {
+	const (
+		opaqueSub = "104187opaque"
+		email     = "alice@acme.io"
+	)
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+	signer, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", nil)
+	require.NoError(t, err)
+	cfg := &Config{
+		Issuer:     "test-iss",
+		Audience:   "test-aud",
+		CookieName: "auth_token",
+		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		Signer:     *signer,
+	}
+	cfg.OIDC.RoleBindingClaim = "email"
+	cfg.OIDC.RequireEmailVerified = true
+
+	cm, err := cache.NewCacheManager("", "grant-rbc-215-unverified", nil)
+	require.NoError(t, err)
+	sp := newRoleBindingScopeProvider(t, email)
+	ex, err := NewExchanger(context.Background(), *cfg, cm, sp, nil)
+	require.NoError(t, err)
+
+	ac := AuthContext{
+		"sub":            opaqueSub,
+		"email":          email,
+		"email_verified": false, // unverified -> must fall back to sub
+		"idp":            "oidc",
+		"scope":          "openid email roles entitlements",
+		"roles":          []any{},
+		"entitlements":   []any{},
+	}
+	cfg.refreshSessionGrants(context.Background(), ac, ex)
+
+	require.NotContains(t, ac["roles"], "acme-admin",
+		"an unverified email must not inherit email-keyed roles on the session refresh")
+}
+
 func TestRefreshSessionGrantsSeesMembershipChanges(t *testing.T) {
 	cfg, ex, p, _ := newGrantTestSetup(t)
 	ctx := context.Background()

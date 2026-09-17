@@ -127,8 +127,21 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	// per "<generation>|<subject>" so a parallel fan-out of requests from one
 	// subject (e.g. right after a generation bump) collapses to a single live
 	// resolve; each caller still overlays onto its own ac/scope below.
+	// Role/entitlement resolution keys on the configured binding key (e.g. email),
+	// recomputed from the frozen session token's OWN claims -- exactly as the OIDC
+	// login/refresh/auth-code mints resolve it from their IdP-claims snapshot -- so a
+	// membership grant on an email-keyed KDexRoleBinding survives this per-request
+	// refresh instead of being reverted to the sub-matched set. `ac` carries the
+	// email/email_verified/idp the mint copied through (sign.Signer.Project), and a
+	// non-OIDC cookie session (no such claim) degrades to sub, resolveBindingKey's
+	// historical behavior. Identity (the cache key, the backend Lookup below, and the
+	// signed sub) stays on `subject` unconditionally. See kdex-tech/host-manager#215.
+	bindingKey := resolveBindingKey(jwt.MapClaims(ac), subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	bindingKeyLog.V(2).Info("role-binding key resolved (session-grant refresh)",
+		bindingKeyLogKV(jwt.MapClaims(ac), subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+
 	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
-		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(subject)
+		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bindingKey)
 		if rerr != nil {
 			return nil, rerr // fail open — leave ac as the frozen token carried it
 		}
