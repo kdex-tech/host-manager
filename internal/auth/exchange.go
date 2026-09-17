@@ -683,6 +683,8 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// subject. Identity (idpClaims, GateLogin, enrichAfterGate, and the
 	// signed token below) still keys on `sub` unconditionally.
 	bindingKey := resolveBindingKey(signingContext, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	bindingKeyLog.V(2).Info("role-binding key resolved (oidc login)",
+		bindingKeyLogKV(signingContext, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
 	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(bindingKey)
 	if err != nil {
 		return TokenSet{}, err
@@ -723,6 +725,16 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// refresh. No-op unless an enforcing login hook is configured -- this path
 	// otherwise never resolves. See kdex-tech/host-manager#206.
 	e.enrichAfterGate(signingContext, sub)
+
+	// #215 ask (2): distinguish an id_token that never carried `email` from one
+	// where an enforcing login hook supplied it only AFTER the gate. Binding
+	// resolution (above) runs BEFORE this enrichment, so if the line above logged
+	// claim_present=false while this logs email_present=true, an email-keyed
+	// KDexRoleBinding cannot match at login even though /-/state later shows email.
+	emailAfterEnrich, _ := signingContext["email"].(string)
+	bindingKeyLog.V(2).Info("post-gate claim enrichment (oidc login)",
+		"email_present", emailAfterEnrich != "",
+		"email_verified_truthy", emailVerifiedTruthy(signingContext))
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
@@ -1923,6 +1935,8 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	// degrades to claims.Subject (its historical behavior). See
 	// kdex-tech/host-manager#189.
 	bindingKey := resolveBindingKey(claims.IDPClaims, claims.Subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	bindingKeyLog.V(2).Info("role-binding key resolved (auth-code redeem)",
+		bindingKeyLogKV(claims.IDPClaims, claims.Subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
 	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bindingKey)
 	if err != nil {
 		// The subject is already known/vouched (decrypted from our own
@@ -2015,6 +2029,8 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	// for every non-OIDC grant, for which resolveBindingKey degrades to
 	// subject (its historical behavior). See kdex-tech/host-manager#189.
 	bindingKey := resolveBindingKey(idpClaims, subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	bindingKeyLog.V(2).Info("role-binding key resolved (refresh)",
+		bindingKeyLogKV(idpClaims, subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
 	roles, entitlements, backend, err := e.subjectSigningContext(subject, bindingKey)
 	if err != nil {
 		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
