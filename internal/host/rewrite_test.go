@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -287,4 +288,36 @@ func TestRewrite_DispatchesIntoRegisteredSnapshotNotLiveMux(t *testing.T) {
 	rr := doRequest(t, mux, "GET", "/bots/")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "hello", rr.Body.String())
+}
+
+func TestRewrite_OpenAPIDescribesAlias(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	target := textPageForTest(t, "robots", "/robots.txt", "txt", "hello")
+	hh.registerRendersForTest(t, nil, target,
+		aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")}))
+
+	found := 0
+	for _, info := range hh.registeredPaths {
+		for p, item := range info.API.Paths {
+			if item.Get == nil || !strings.HasPrefix(item.Get.OperationID, "bots") {
+				continue
+			}
+			found++
+			assert.Contains(t, item.Get.Summary, "Alias of KDexPage/robots", p)
+			resp := item.Get.Responses.Status(http.StatusOK)
+			require.NotNil(t, resp, p)
+			assert.Nil(t, resp.Value.Content, "%s: an alias must not claim text/html", p)
+		}
+	}
+	assert.GreaterOrEqual(t, found, 2, "bare + /fr routes documented")
+	ids := collectOperationIDs(t, hh)
+	assert.Len(t, ids, len(uniqueStrings(ids)), "operationIds stay unique")
+}
+
+func uniqueStrings(in []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(in))
+	for _, s := range in {
+		m[s] = struct{}{}
+	}
+	return m
 }

@@ -174,12 +174,26 @@ func (hh *HostHandler) addHandlerAndRegister(
 			Tags:     []string{n, "page"},
 		}
 
+		if rw := pr.ph.Page.Rewrite; rw != nil {
+			alias := fmt.Sprintf("Alias of %s/%s%s", rw.TargetRef.Kind, rw.TargetRef.Name, langSuffix)
+			op.Summary = alias
+			op.Description = alias
+			op.Responses.Set("200", &openapi.ResponseRef{
+				Value: &openapi.Response{Description: new("Response of the target " + rw.TargetRef.Kind + "/" + rw.TargetRef.Name)},
+			})
+		}
+
+		itemDesc := fmt.Sprintf("HTML page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix)
+		if pr.ph.Page.Rewrite != nil {
+			itemDesc = op.Description
+		}
+
 		hh.registerPath(p, ko.PathInfo{
 			API: ko.OpenAPI{
 				BasePath: p,
 				Paths: map[string]ko.PathItem{
 					p: {
-						Description: fmt.Sprintf("HTML page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
+						Description: itemDesc,
 						Get:         op,
 						Summary:     fmt.Sprintf("Page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix),
 					},
