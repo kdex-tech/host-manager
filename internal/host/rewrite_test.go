@@ -144,9 +144,11 @@ func TestRewrite_RefusesEncodedTraversal(t *testing.T) {
 	alias := aliasPH("u", "/u", "/u/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots"), Path: "{rest}"})
 	mux := hh.registerRendersForTest(t, nil, target, alias)
 
-	// End to end: ServeMux cleans a decoded "/u/a/../../secret" and
-	// redirects BEFORE any handler runs, so the target is never served.
+	// End to end: ServeMux matches on the ESCAPED path, so %2F is not a
+	// separator to it and nothing is cleaned; {rest...} receives the decoded
+	// "a/../../secret" and the handler's safety check refuses it with 400.
 	rr := doRequest(t, mux, "GET", "/u/a%2F..%2F..%2Fsecret")
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "Review Focus #1")
 	assert.NotEqual(t, "hello", rr.Body.String(), "Review Focus #1: traversal must never reach the target")
 
 	// The handler's own guard, for values the mux does not clean (defence in
@@ -320,4 +322,134 @@ func uniqueStrings(in []string) map[string]struct{} {
 		m[s] = struct{}{}
 	}
 	return m
+}
+
+// rootTargetWithSystemRoutes registers a root HTML target plus stand-ins for
+// the /-/ and /.well-known/ system routes rebuildMuxSnapshot registers.
+func rootTargetWithSystemRoutes(t *testing.T, hh *HostHandler, alias page.PageHandler) *http.ServeMux {
+	t.Helper()
+	root := page.PageHandler{Name: "root", MainTemplate: "<html></html>", Page: &kdexv1alpha1.KDexPageSpec{Label: "root", Paths: kdexv1alpha1.Paths{BasePath: "/"}}}
+	mux := hh.registerRendersForTest(t, nil, root, alias)
+	mux.HandleFunc("GET /-/userinfo", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("userinfo")) })
+	mux.HandleFunc("GET /.well-known/x", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("well-known")) })
+	return mux
+}
+
+// A single-segment wildcard value holding a decoded %2F must not span
+// segments into a system route (final review I1, verified repro).
+func TestRewrite_SingleSegmentValueCannotReachSystemRoutes(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := rootTargetWithSystemRoutes(t, hh,
+		aliasPH("m", "/m", "/m/{id}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("root"), Path: "{id}"}))
+
+	for _, p := range []string{"/m/-%2Fuserinfo", "/m/.well-known%2Fx"} {
+		rr := doRequest(t, mux, "GET", p)
+		assert.Equal(t, http.StatusNotFound, rr.Code, p)
+		assert.NotContains(t, rr.Body.String(), "userinfo", p)
+		assert.NotContains(t, rr.Body.String(), "well-known", p)
+	}
+}
+
+// Even a multi-segment wildcard, which may legitimately span segments, never
+// dispatches to a system path: those are never rewrite targets (spec §Out
+// of scope; final review I1).
+func TestRewrite_MultiSegmentValueCannotReachSystemRoutes(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := rootTargetWithSystemRoutes(t, hh,
+		aliasPH("m", "/m", "/m/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("root"), Path: "{rest}"}))
+
+	for _, p := range []string{"/m/-/userinfo", "/m/.well-known/x", "/m/-%2Fuserinfo"} {
+		rr := doRequest(t, mux, "GET", p)
+		assert.Equal(t, http.StatusNotFound, rr.Code, p)
+		assert.NotContains(t, rr.Body.String(), "userinfo", p)
+		assert.NotContains(t, rr.Body.String(), "well-known", p)
+	}
+}
+
+// The canonical target is percent-encoded into the Link header, so a
+// request value cannot close the <...> and inject a second link (final
+// review I2, verified repro).
+func TestRewrite_CanonicalLinkHeaderIsEscaped(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.host.Routing.Domains = []string{"example.com"}
+	hh.scheme = "https"
+	mux := hh.registerRendersForTest(t, []kdexv1alpha1.KDexFunction{
+		{ObjectMeta: metav1ObjectMeta("dl"), Spec: kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/api/downloads"}}, Status: kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady}},
+	}, aliasPH("u", "/u", "/u/{rest...}", kdexv1alpha1.RewriteSpec{
+		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "dl"},
+		Path:      "{rest}",
+		Canonical: true,
+	}))
+	mux.HandleFunc("/api/downloads/", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+
+	rr := doRequest(t, mux, "GET", `/u/x%3E;%20rel=%22nofollow%22,%20%3Chttps:evil.example`)
+	link := rr.Header().Get("Link")
+	require.Len(t, rr.Header().Values("Link"), 1)
+	assert.Equal(t, 1, strings.Count(link, "<"), link)
+	assert.Equal(t, 1, strings.Count(link, ">"), link)
+	assert.Equal(t, 1, strings.Count(link, `rel="`), link)
+	assert.Equal(t, 1, strings.Count(link, `rel="canonical"`), link)
+	assert.True(t, strings.HasSuffix(link, `>; rel="canonical"`), link)
+	uri := link[strings.Index(link, "<")+1 : strings.Index(link, ">")]
+	assert.Contains(t, uri, "%3E", link)
+	assert.NotContains(t, uri, `"`, link)
+	assert.NotContains(t, uri, " ", link)
+	assert.True(t, strings.HasPrefix(uri, "https://example.com/api/downloads/x"), link)
+}
+
+// {rest...} copied verbatim from patternPath into rewrite.path substitutes
+// like {rest} (final review I3).
+func TestRewrite_MultiSegmentSpellingInPathSubstitutes(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := hh.registerRendersForTest(t, []kdexv1alpha1.KDexFunction{
+		{ObjectMeta: metav1ObjectMeta("dl"), Spec: kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/api/downloads"}}, Status: kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady}},
+	}, aliasPH("d", "/d", "/d/{rest...}", kdexv1alpha1.RewriteSpec{
+		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "dl"},
+		Path:      "{rest...}",
+	}))
+	mux.HandleFunc("/api/downloads/", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(r.URL.Path)) })
+
+	rr := doRequest(t, mux, "GET", "/d/a/b")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "/api/downloads/a/b", rr.Body.String())
+}
+
+// A slashless request whose target would trailing-slash redirect is sent to
+// the ALIAS's slash form, never to the target URL (final review I4 / R5).
+func TestRewrite_TrailingSlashRedirectStaysOnAlias(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	target := textPageForTest(t, "docs-v3", "/docs/v3", "txt", "v3 page")
+	target.Page.PatternPath = "/docs/v3/{page}/"
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("latest", "/docs/latest", "/docs/latest/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs-v3"), Path: "{rest}"}))
+
+	// Precondition: the target itself answers the slashless path with a
+	// trailing-slash redirect.
+	direct := doRequest(t, mux, "GET", "/docs/v3/guide")
+	require.Equal(t, "/docs/v3/guide/", direct.Header().Get("Location"))
+
+	rr := doRequest(t, mux, "GET", "/docs/latest/guide?x=1")
+	assert.Equal(t, direct.Code, rr.Code, "same status ServeMux uses")
+	assert.Equal(t, "/docs/latest/guide/?x=1", rr.Header().Get("Location"))
+	assert.NotContains(t, rr.Header().Get("Location"), "/docs/v3")
+
+	rr = doRequest(t, mux, "GET", "/docs/latest/guide/")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "v3 page", rr.Body.String())
+}
+
+// The bare alias route of a page whose required placeholder is absent is a
+// missing segment: 404, not 400 (final review M1).
+func TestRewrite_EmptyRequiredPlaceholderIs404(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	target := textPageForTest(t, "profile", "/profile", "txt", "profile")
+	target.Page.PatternPath = "/profile/{user}/"
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("u", "/u", "/u/{user}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("profile"), Path: "{user}/"}))
+
+	rr := doRequest(t, mux, "GET", "/u/")
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	rr = doRequest(t, mux, "GET", "/u/bob")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "profile", rr.Body.String())
 }

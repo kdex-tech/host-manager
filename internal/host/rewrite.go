@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"reflect"
 	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -93,24 +95,102 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			return
 		}
 
-		target, err := rewrite.Target(pr.rewrite.basePath, pr.rewrite.exact, rw.Path, r.PathValue)
-		if err != nil {
-			if !errors.Is(err, rewrite.ErrUnsafe) {
-				hh.log.Error(err, "rewrite target build failed", "page", ph.Name)
-			}
+		target, err := rewrite.Target(pr.rewrite.basePath, pr.rewrite.exact, rw.Path, ph.Page.PatternPath, r.PathValue)
+		switch {
+		case errors.Is(err, rewrite.ErrNotFound):
+			hh.serveError(w, r, http.StatusNotFound, "not found")
+			return
+		case errors.Is(err, rewrite.ErrUnsafe):
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		case err != nil:
+			hh.log.Error(err, "rewrite target build failed", "page", ph.Name)
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
 		if pr.rewrite.localized && lang.String() != defaultLang {
 			target = "/" + lang.String() + target
 		}
-		if rw.Canonical && base != "" {
-			w.Header().Set("Link", "<"+base+target+`>; rel="canonical"`)
+		// System routes (/-/, /.well-known/, favicon) are never rewrite
+		// targets: a multi-segment value could otherwise alias a KDexPage
+		// onto the host's own auth and discovery endpoints.
+		if isSystemPath(target) {
+			hh.serveError(w, r, http.StatusNotFound, "not found")
+			return
 		}
 
 		r2 := r.Clone(context.WithValue(r.Context(), rewriteMarkerKey{}, true))
 		r2.URL.Path = target
 		r2.URL.RawPath = ""
+
+		// A slashless target the mux would answer with a trailing-slash
+		// redirect must not send the browser to the TARGET URL: send it to
+		// the alias's own slash form instead, which dispatches here again.
+		if code, ok := slashRedirect(mux, r2); ok {
+			http.Redirect(w, r, aliasSlashURL(r.URL), code)
+			return
+		}
+
+		if rw.Canonical && base != "" {
+			// EscapedPath, not the raw target: a request value holding '>'
+			// or '"' would otherwise close the URI and inject a second link.
+			w.Header().Set("Link", "<"+base+(&url.URL{Path: target}).EscapedPath()+`>; rel="canonical"`)
+		}
+
 		mux.ServeHTTP(w, r2)
 	}
 }
+
+// redirectHandlerType is the concrete type http.RedirectHandler returns, the
+// type ServeMux.Handler uses for its own trailing-slash redirect. Taken from
+// the exported constructor rather than named, so it tracks the stdlib.
+var redirectHandlerType = reflect.TypeOf(http.RedirectHandler("/", http.StatusTemporaryRedirect))
+
+// slashRedirect reports whether mux would answer r with a trailing-slash
+// redirect (to r.URL.Path+"/"), and with which status code.
+//
+// ServeMux.Handler exposes that decision only as its returned handler: for a
+// slash redirect it is a RedirectHandler and the pattern is the one matching
+// the slash form, which is indistinguishable by pattern alone from a subtree
+// pattern serving r directly. So the handler's type is compared against
+// RedirectHandler's, and the redirect handler (side-effect free: it only
+// writes a Location header and a short body) is run into a header-only
+// recorder to read the code and Location it would send. Only a Location of
+// exactly r.URL.Path+"/" counts: any other redirect is left to the mux.
+func slashRedirect(mux *http.ServeMux, r *http.Request) (int, bool) {
+	if strings.HasSuffix(r.URL.Path, "/") {
+		return 0, false
+	}
+	h, _ := mux.Handler(r)
+	if reflect.TypeOf(h) != redirectHandlerType {
+		return 0, false
+	}
+	rec := &headerRecorder{header: http.Header{}}
+	h.ServeHTTP(rec, r)
+	loc, err := url.Parse(rec.header.Get("Location"))
+	if err != nil || loc.Path != r.URL.Path+"/" {
+		return 0, false
+	}
+	return rec.code, true
+}
+
+// aliasSlashURL is the request's own path with a trailing slash, query
+// kept, escaped as the client sent it.
+func aliasSlashURL(u *url.URL) string {
+	s := u.EscapedPath() + "/"
+	if u.RawQuery != "" {
+		s += "?" + u.RawQuery
+	}
+	return s
+}
+
+// headerRecorder captures a handler's status and headers and discards its
+// body. It is only ever handed a RedirectHandler.
+type headerRecorder struct {
+	header http.Header
+	code   int
+}
+
+func (h *headerRecorder) Header() http.Header         { return h.header }
+func (h *headerRecorder) Write(b []byte) (int, error) { return len(b), nil }
+func (h *headerRecorder) WriteHeader(code int)        { h.code = code }

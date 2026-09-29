@@ -40,7 +40,7 @@ func TestTarget(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := Target(c.base, c.exact, c.tmpl, vals(c.v))
+			got, err := Target(c.base, c.exact, c.tmpl, "/x/{rest...}/{user}/{id}", vals(c.v))
 			require.NoError(t, err)
 			assert.Equal(t, c.want, got)
 		})
@@ -56,10 +56,53 @@ func TestTarget_RefusesUnsafeSubstitutions(t *testing.T) {
 		"leading slash":    "/abs", // would create "//" at the seam
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Target("/docs/v3", "/docs/v3/", "{rest}", vals(map[string]string{"rest": v}))
+			_, err := Target("/docs/v3", "/docs/v3/", "{rest}", "/d/{rest...}", vals(map[string]string{"rest": v}))
 			assert.ErrorIs(t, err, ErrUnsafe)
 		})
 	}
-	_, err := Target("/profile", "/profile/", "a/{x}/b", vals(map[string]string{"x": ""}))
-	assert.ErrorIs(t, err, ErrUnsafe, "an empty mid-path value produces '//'")
+}
+
+// A {name...} copied from patternPath into rewrite.path is the same
+// placeholder as {name}, never literal text (final review I3).
+func TestPlaceholders_AcceptMultiSegmentSuffix(t *testing.T) {
+	assert.Equal(t, []string{"rest"}, Placeholders("{rest...}"))
+	assert.Equal(t, []string{"user", "rest"}, Placeholders("u/{user}/x/{rest...}"))
+	assert.Empty(t, UnknownPlaceholders("{rest...}", "/d/{rest...}"))
+	assert.Equal(t, []string{"id"}, UnknownPlaceholders("{id...}", "/d/{rest...}"))
+
+	got, err := Target("/docs/v3", "/docs/v3/", "{rest...}", "/d/{rest...}", vals(map[string]string{"rest": "a/b"}))
+	require.NoError(t, err)
+	assert.Equal(t, "/docs/v3/a/b", got)
+}
+
+// A single-segment {name} wildcard never spans segments: its value can hold
+// a '/' only via a decoded %2F, which must not reach another route of the
+// target (final review I1).
+func TestTarget_SingleSegmentValueWithSlashIsNotFound(t *testing.T) {
+	_, err := Target("/", "/", "{id}", "/m/{id}", vals(map[string]string{"id": "-/userinfo"}))
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = Target("/", "/", "{id}", "/m/{id}", vals(map[string]string{"id": ".well-known/x"}))
+	assert.ErrorIs(t, err, ErrNotFound)
+	// Even when rewrite.path spells it {id...}: multi-ness is patternPath's.
+	_, err = Target("/", "/", "{id...}", "/m/{id}", vals(map[string]string{"id": "a/b"}))
+	assert.ErrorIs(t, err, ErrNotFound)
+	// A multi-segment wildcard may span segments.
+	got, err := Target("/", "/", "{rest}", "/m/{rest...}", vals(map[string]string{"rest": "a/b"}))
+	require.NoError(t, err)
+	assert.Equal(t, "/a/b", got)
+	// Traversal in a single-segment value is still unsafe (400), not 404.
+	_, err = Target("/p", "/p/", "{id}", "/m/{id}", vals(map[string]string{"id": ".."}))
+	assert.ErrorIs(t, err, ErrUnsafe)
+}
+
+// An empty value that leaves '//' is a missing segment, not a malformed one
+// (final review M1): 404, while '..', '.', and a value that itself holds '//'
+// or a leading '/' stay ErrUnsafe.
+func TestTarget_EmptyValueLeavingDoubleSlashIsNotFound(t *testing.T) {
+	_, err := Target("/profile", "/profile/", "{user}/", "/u/{user}", vals(map[string]string{"user": ""}))
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = Target("/profile", "/profile/", "a/{x}/b", "/u/{x}", vals(map[string]string{"x": ""}))
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = Target("/d", "/d/", "{x}/{rest}", "/u/{x}/{rest...}", vals(map[string]string{"x": "", "rest": "a//b"}))
+	assert.ErrorIs(t, err, ErrUnsafe, "an empty value never masks a genuinely unsafe one")
 }

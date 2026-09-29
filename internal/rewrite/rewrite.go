@@ -15,16 +15,23 @@ import (
 // this guards the request-supplied values substituted into it.
 var ErrUnsafe = errors.New("rewrite: substituted path is unsafe")
 
-var (
-	placeholderRE = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-	// wildcardRE matches net/http ServeMux wildcards: {name} and {name...}.
-	// {$} has no name and is deliberately not matched.
-	wildcardRE = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)(?:\.\.\.)?\}`)
-)
+// ErrNotFound reports request values that name no target route: a
+// single-segment {name} value holding a '/' (a decoded %2F, which must not
+// let one wildcard span segments of the target), or an empty value that
+// leaves '//' (a missing segment, not a malformed one). It is a 404, not a
+// 400.
+var ErrNotFound = errors.New("rewrite: path values name no target route")
 
-// Placeholders returns the {name} placeholders in a rewrite path template, in order.
+// wildcardRE matches net/http ServeMux wildcards, {name} and {name...}. The
+// same syntax is accepted in rewrite.path, where {name...} is just {name}:
+// authors copy wildcards from patternPath verbatim. {$} has no name and is
+// deliberately not matched.
+var wildcardRE = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)(\.\.\.)?\}`)
+
+// Placeholders returns the bare names of the {name} / {name...} placeholders
+// in a rewrite path template, in order.
 func Placeholders(tmpl string) []string {
-	matches := placeholderRE.FindAllStringSubmatch(tmpl, -1)
+	matches := wildcardRE.FindAllStringSubmatch(tmpl, -1)
 	names := make([]string, 0, len(matches))
 	for _, m := range matches {
 		names = append(names, m[1])
@@ -35,11 +42,7 @@ func Placeholders(tmpl string) []string {
 // UnknownPlaceholders returns the placeholders in tmpl that are not wildcard
 // names in patternPath -- they could never be substituted at request time.
 func UnknownPlaceholders(tmpl, patternPath string) []string {
-	matches := wildcardRE.FindAllStringSubmatch(patternPath, -1)
-	known := make([]string, 0, len(matches))
-	for _, m := range matches {
-		known = append(known, m[1])
-	}
+	known := Placeholders(patternPath)
 	placeholders := Placeholders(tmpl)
 	unknown := make([]string, 0, len(placeholders))
 	for _, name := range placeholders {
@@ -50,22 +53,61 @@ func UnknownPlaceholders(tmpl, patternPath string) []string {
 	return unknown
 }
 
+// multiSegment reports whether name is a {name...} wildcard in patternPath:
+// only those values may span segments. Whether rewrite.path spells it
+// {name} or {name...} is irrelevant; patternPath decides what matched.
+func multiSegment(patternPath, name string) bool {
+	for _, m := range wildcardRE.FindAllStringSubmatch(patternPath, -1) {
+		if m[1] == name {
+			return m[2] != ""
+		}
+	}
+	return false
+}
+
 // Target builds the path a rewrite dispatches to. An empty tmpl returns exact,
 // the target's registered form, so the mux never answers with a slash redirect
-// that would expose the target URL. Otherwise each {name} is replaced by
-// value(name) and the result is joined to basePath with exactly one '/'.
-func Target(basePath, exact, tmpl string, value func(string) string) (string, error) {
+// that would expose the target URL. Otherwise each {name} (or {name...}) is
+// replaced by value(name) and the result is joined to basePath with exactly
+// one '/'. patternPath is the alias page's own pattern: it says which names
+// are multi-segment wildcards.
+//
+// It returns ErrUnsafe (400) when a value would introduce '//' or a '.'/'..'
+// segment, and ErrNotFound (404) when a single-segment value holds a '/' or
+// when the only '//' comes from an empty value.
+func Target(basePath, exact, tmpl, patternPath string, value func(string) string) (string, error) {
 	if tmpl == "" {
 		return exact, nil
 	}
-	// Strip only the AUTHOR's leading '/', before substitution: a leading '/'
-	// produced by a substituted value must survive so safe() sees the '//'.
-	suffix := placeholderRE.ReplaceAllStringFunc(strings.TrimPrefix(tmpl, "/"), func(m string) string {
-		return value(m[1 : len(m)-1])
-	})
-	p := strings.TrimSuffix(basePath, "/") + "/" + suffix
+	spans := false
+	build := func(fillEmpty bool) string {
+		// Strip only the AUTHOR's leading '/', before substitution: a leading
+		// '/' produced by a substituted value must survive so safe() sees the
+		// '//'.
+		suffix := wildcardRE.ReplaceAllStringFunc(strings.TrimPrefix(tmpl, "/"), func(m string) string {
+			name := strings.TrimSuffix(m[1:len(m)-1], "...")
+			v := value(name)
+			if strings.Contains(v, "/") && !multiSegment(patternPath, name) {
+				spans = true
+			}
+			if v == "" && fillEmpty {
+				// Any non-empty, slash-free segment: used only to ask
+				// whether the empty values are the sole cause of a '//'.
+				return "x"
+			}
+			return v
+		})
+		return strings.TrimSuffix(basePath, "/") + "/" + suffix
+	}
+	p := build(false)
 	if !safe(p) {
+		if safe(build(true)) {
+			return "", ErrNotFound
+		}
 		return "", ErrUnsafe
+	}
+	if spans {
+		return "", ErrNotFound
 	}
 	return p, nil
 }
