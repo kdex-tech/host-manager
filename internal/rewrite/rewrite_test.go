@@ -31,11 +31,11 @@ func TestTarget(t *testing.T) {
 		v                       map[string]string
 		want                    string
 	}{
-		{"empty path uses exact form", "/docs/v3", "/docs/v3/", "", nil, "/docs/v3/"},
-		{"one slash at the seam", "/docs/v3", "/docs/v3/", "{rest}", map[string]string{"rest": "a/b"}, "/docs/v3/a/b"},
+		{"empty path uses exact form", "/docs/v3", "/docs/v3", "", nil, "/docs/v3"},
+		{"one slash at the seam", "/docs/v3", "/docs/v3", "{rest}", map[string]string{"rest": "a/b"}, "/docs/v3/a/b"},
 		{"base trailing slash collapsed", "/docs/v3/", "/docs/v3/", "/{rest}", map[string]string{"rest": "a"}, "/docs/v3/a"},
-		{"author trailing slash kept", "/profile", "/profile/", "{user}/", map[string]string{"user": "bob"}, "/profile/bob/"},
-		{"empty rest value", "/docs/v3", "/docs/v3/", "{rest}", map[string]string{"rest": ""}, "/docs/v3/"},
+		{"author trailing slash kept", "/profile", "/profile", "{user}/", map[string]string{"user": "bob"}, "/profile/bob/"},
+		{"empty rest value", "/docs/v3", "/docs/v3", "{rest}", map[string]string{"rest": ""}, "/docs/v3/"},
 		{"function target", "/api/downloads", "/api/downloads", "{id}", map[string]string{"id": "42"}, "/api/downloads/42"},
 	}
 	for _, c := range cases {
@@ -56,7 +56,7 @@ func TestTarget_RefusesUnsafeSubstitutions(t *testing.T) {
 		"leading slash":    "/abs", // would create "//" at the seam
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Target("/docs/v3", "/docs/v3/", "{rest}", "/d/{rest...}", vals(map[string]string{"rest": v}))
+			_, err := Target("/docs/v3", "/docs/v3", "{rest}", "/d/{rest...}", vals(map[string]string{"rest": v}))
 			assert.ErrorIs(t, err, ErrUnsafe)
 		})
 	}
@@ -70,7 +70,7 @@ func TestPlaceholders_AcceptMultiSegmentSuffix(t *testing.T) {
 	assert.Empty(t, UnknownPlaceholders("{rest...}", "/d/{rest...}"))
 	assert.Equal(t, []string{"id"}, UnknownPlaceholders("{id...}", "/d/{rest...}"))
 
-	got, err := Target("/docs/v3", "/docs/v3/", "{rest...}", "/d/{rest...}", vals(map[string]string{"rest": "a/b"}))
+	got, err := Target("/docs/v3", "/docs/v3", "{rest...}", "/d/{rest...}", vals(map[string]string{"rest": "a/b"}))
 	require.NoError(t, err)
 	assert.Equal(t, "/docs/v3/a/b", got)
 }
@@ -99,9 +99,9 @@ func TestTarget_SingleSegmentValueWithSlashIsNotFound(t *testing.T) {
 // (final review M1): 404, while '..', '.', and a value that itself holds '//'
 // or a leading '/' stay ErrUnsafe.
 func TestTarget_EmptyValueLeavingDoubleSlashIsNotFound(t *testing.T) {
-	_, err := Target("/profile", "/profile/", "{user}/", "/u/{user}", vals(map[string]string{"user": ""}))
+	_, err := Target("/profile", "/profile", "{user}/", "/u/{user}", vals(map[string]string{"user": ""}))
 	assert.ErrorIs(t, err, ErrNotFound)
-	_, err = Target("/profile", "/profile/", "a/{x}/b", "/u/{x}", vals(map[string]string{"x": ""}))
+	_, err = Target("/profile", "/profile", "a/{x}/b", "/u/{x}", vals(map[string]string{"x": ""}))
 	assert.ErrorIs(t, err, ErrNotFound)
 	_, err = Target("/d", "/d/", "{x}/{rest}", "/u/{x}/{rest...}", vals(map[string]string{"x": "", "rest": "a//b"}))
 	assert.ErrorIs(t, err, ErrUnsafe, "an empty value never masks a genuinely unsafe one")

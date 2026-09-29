@@ -1,6 +1,6 @@
 # KDexPage rewrite mode — design
 
-- **Issue:** kdex-tech/host-manager#217 (folds in #201)
+- **Issue:** kdex-tech/host-manager#217 (folds in #201); routing adapted to #220 (exact page paths)
 - **Date:** 2026-09-29
 - **Repos:** kdex-crds (schema), kdex-host-manager (reconcile + serving), kdex-nexus-manager (crds bump + release only), kdex-main-site (docs)
 
@@ -96,7 +96,7 @@ A target that exists but is not Ready yet (typically a KDexFunction still buildi
 
 ### Registration (`addHandlerAndRegister`)
 
-Rewrite pages go through the same per-language registration loop as HTML pages. Route-collision ownership (`routes.claim`), `localized`, the non-default `/<lang>/…` routes and the default-language 301 therefore all apply unchanged. Paths register like HTML pages: `toFinalPath(basePath)` plus `patternPath`.
+Rewrite pages go through the same per-language registration loop as HTML pages. Route-collision ownership (`routes.claim`), `localized`, the non-default `/<lang>/…` routes and the default-language 301 therefore all apply unchanged. Paths register like HTML pages: `toFinalPath(basePath)` plus `patternPath`. Since #220 that is the exact `basePath` (`GET /bots`, not `/bots/`), with `{$}` only for a slash-terminated `basePath` such as `/`, and the legacy slash form (`GET /bots/`) registered as a 301 to the bare path. A request to that legacy form of an alias is answered by the alias page's own 301, before any rewrite runs.
 
 When the routes are rebuilt (`rebuildMuxSnapshot`), each rewrite page's target is looked up in the same in-memory state the rebuild already holds:
 - **KDexPage target:** its current `basePath` and `localized` flag, from the rendered page set.
@@ -110,10 +110,11 @@ For each request:
 
 1. **Own gate.** Run the rewrite page's `security` check, with the same checker, fault handling (500 on a check that fails to run) and denial classification as the page gate. The gate block in `pageHandlerFunc` is extracted into a shared helper (`pageGateLocked`) that both handlers call, rather than copied. The gate snapshot runs in a closure that takes `hh.mu.RLock` with a deferred `RUnlock` (so a panic in the gate cannot leave the lock held; the #26/#51 bug class), and the same closure reads the canonical base and default language. The lock is released before anything is dispatched.
 2. **Build the target path.** Substitute each `{name}` in `rewrite.path` with `r.PathValue(name)`; `{name...}` in `rewrite.path` is the same placeholder (authors copy it from `patternPath`). Only a value of a `{name...}` wildcard in `patternPath` may span segments: a single-segment `{name}` value holding `/` (a decoded `%2F`) is 404. A substituted value that would introduce a `..` segment or `//` is refused with 400, except that a `//` caused only by an empty value (a missing segment, e.g. the bare alias route of a page whose `rewrite.path` is `{user}/`) is 404. `path.Clean` is **not** applied to the author's template (CEL already constrains it), only to the substitution check. Then join:
-   - **Empty `path`:** dispatch to the target's *registered* form, so the mux never answers with a slash redirect, which would expose the target URL. That is `toFinalPath(basePath)` (trailing slash) for an HTML page target, the exact `basePath` for a text page target, and `basePath` for a function target.
+   - **Empty `path`:** dispatch to the target's exact `basePath`, for page targets (HTML and text alike) and function targets. Since #220 a page registers at that exact path (a slash-terminated `basePath` such as `/` or `/docs/` at that same string, via `{$}`), so the dispatch lands on the target's own route rather than on a redirect that would expose the target URL.
    - **Non-empty `path`:** `strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(path, "/")`, exactly one slash at the seam. The author's trailing slash (or lack of one) is kept as written, because it decides which of the target's routes matches.
 3. **Language.** For a KDexPage target whose `localized` is true, a request registered under a non-default `/<lang>` prefix goes to `/<lang>` + target path. Every other case, including the default language and every function target, goes to the bare target path. A final target that is a system path (`/-/`, `/.well-known/`, `/favicon.ico`; `isSystemPath`) is 404: system routes are never targets.
-   **Slash redirect.** If the mux would answer the slashless target with its trailing-slash redirect (probed with `mux.Handler`), the client is redirected, with the mux's own status code, to the **alias** path + `/` (query kept) instead, so the browser never sees the target URL.
+   **Never the legacy slash redirect.** For a page target with a legacy slash route (#220: an HTML page whose `basePath` does not end in `/`), a computed target equal to that page's exact path + `/`, after any language prefix (e.g. `path: "{rest}"` with an empty `rest`), is dispatched to the exact path instead. Otherwise the target's legacy 301 would send the client to the target URL. Function targets are left as built: their `basePath` and `basePath/` are distinct proxied routes.
+   **ServeMux slash redirects are followed internally.** If the mux would answer the slashless target with its own trailing-slash redirect, because an authored pattern is slash-terminated (e.g. target `patternPath: /profile/{user}/`), the handler dispatches the slash form (`target + "/"`) internally. The client never sees a redirect: the browser stays on the alias, never learns the target URL, and is never bounced back to an alias URL it already requested. (An earlier revision redirected the client to the alias's slash form; with an alias `patternPath: /u/{user}/` and `path: "{user}"` that redirected `GET /u/bob/` to itself forever.) The redirect is detected with `mux.Handler`, by comparing the returned handler's type with `http.RedirectHandler`'s; ServeMux's path-cleaning redirect cannot fire because the target is already clean. The system-path check applies to this final path.
 4. **Canonical.** If `canonical: true`, set `Link: <absolute target URL>; rel="canonical"` before dispatching. The target path is percent-encoded (`url.URL.EscapedPath`), so a request value cannot close the `<…>` and inject another link. The absolute URL is built from the host's configured scheme and first routing domain (`issuerAddressLocked()`: `hh.scheme` + `Routing.Domains[0]`), never from the request's Host header, so a caller cannot inject its own canonical host. If no base can be derived, no `Link` header is emitted.
 5. **Loop guard.** If the request context already carries the rewrite marker, answer **508 Loop Detected**. Otherwise add the marker. Reconcile already prevents this case; the guard is a safety net for the time between a target changing mode and the next reconcile.
 6. **Dispatch.** Clone the request (`r.Clone`), set `URL.Path` and `URL.RawPath`, keep `URL.RawQuery`, and call `ServeHTTP` on the **mux snapshot captured when the handler was built**, never `hh.Mux`. Authentication and `DesignMiddleware` have already run in the outer wrappers, so dispatching to the inner mux does not repeat them. The target's own handler, and so its own gate, runs as usual.
@@ -151,11 +152,13 @@ This is a CRD serialization change (a new field, amended validation messages), s
 - **host-manager controller:** each Degraded reason (`RewriteTargetIsRewrite`, `RewriteTargetInternal`, `RewriteTargetOtherHost`, `RewriteUnknownPlaceholder`, target missing); re-reconcile when the target is created, changes mode, or is deleted.
 - **host-manager handler:**
   - page and function targets both serve the target's body;
-  - an empty `path` to an HTML page target returns 200 from the target, with no 301/307;
+  - an empty `path` to an HTML page target returns 200 from the target's exact route, with no 301/307; an empty trailing value never lands on the target's legacy slash 301;
+  - a target the mux only serves in slash form is dispatched there internally: 200, no `Location`, and no self-redirect for a slash-terminated alias pattern;
+  - the alias's own legacy slash form (`/bots/`) is the alias page's 301 to `/bots`;
   - query string preserved;
   - placeholder substitution, and a `..`/`//` value is refused with 400;
   - own gate denies before dispatch, and the target's gate denies after it (rewrite page public, target gated);
-  - language: `/fr/alias/` goes to `/fr/target/` for a localized page target, the default language goes to the bare path, a function target is never prefixed;
+  - language: `/fr/alias` goes to `/fr/target` for a localized page target, the default language goes to the bare path, a function target is never prefixed;
   - `canonical: true` emits the `Link` header, the default emits none;
   - the loop marker gives 508;
   - no target in the snapshot gives 404;

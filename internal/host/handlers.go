@@ -74,6 +74,14 @@ func defaultLangRedirectHandler(langPrefix string) http.HandlerFunc {
 	}
 }
 
+// hasLegacySlashRoute reports whether a page at basePath also registers its
+// legacy slash form (/pricing/) as a 301 to the bare path (#220). HTML pages
+// only: text pages (robots.txt) never had a meaningful slash form, and a
+// slash-terminated basePath is already its own slash form.
+func hasLegacySlashRoute(basePath string, spec *kdexv1alpha1.KDexPageSpec) bool {
+	return !strings.HasSuffix(basePath, "/") && (spec == nil || spec.MimeType == "")
+}
+
 // legacySlashRedirectHandler returns a handler that 301-redirects the legacy
 // slash form of a page (e.g. "/pricing/", "/fr/pricing/", "/en/pricing/") to
 // canonicalPath, the bare canonical path captured at registration
@@ -111,11 +119,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// HTML and text pages register identically at their exact path;
 	// toFinalPath only anchors slash-terminated basePaths (e.g. "/").
 	regPath := toFinalPath(basePath)
-	// Legacy slash form (/pricing/) -> 301 to the bare path. HTML pages
-	// only: text pages (robots.txt) never had a meaningful slash form, and a
-	// slash-terminated basePath is already its own slash form.
-	legacySlash := !strings.HasSuffix(basePath, "/") &&
-		(pr.ph.Page == nil || pr.ph.Page.MimeType == "")
+	legacySlash := hasLegacySlashRoute(basePath, pr.ph.Page)
 	label := pr.ph.Label()
 
 	// regFunc registers OpenAPI docs for one concrete route. lang is the

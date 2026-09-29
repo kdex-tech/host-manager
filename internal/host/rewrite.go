@@ -16,13 +16,18 @@ import (
 
 // rewriteTarget is a rewrite page's target as resolved for one mux snapshot
 // (#217). basePath is the target's declared basePath; exact is the path its
-// routes are registered at, used when rewrite.path is empty so the mux never
-// slash-redirects to the target; localized is true only for a KDexPage target
-// that registers per-language routes.
+// base route answers at, used when rewrite.path is empty. Since #220 that is
+// the basePath itself for every target kind: an HTML or text page registers
+// at its exact basePath, and a slash-terminated basePath (/, /docs/) at that
+// same string via {$}. localized is true only for a KDexPage target that
+// registers per-language routes; legacySlash is true only for a KDexPage
+// target that also registers its legacy slash form (exact+"/") as a 301 to
+// exact, a route a rewrite must never dispatch into.
 type rewriteTarget struct {
-	basePath  string
-	exact     string
-	localized bool
+	basePath    string
+	exact       string
+	localized   bool
+	legacySlash bool
 }
 
 // rewriteMarkerKey marks a request already re-dispatched by a rewrite, so a
@@ -45,11 +50,12 @@ func resolveRewriteTarget(
 			return rewriteTarget{}, false
 		}
 		bp := ph.Page.BasePath
-		exact := bp
-		if ph.Page.MimeType == "" && !strings.HasSuffix(bp, "/") {
-			exact = bp + "/"
-		}
-		return rewriteTarget{basePath: bp, exact: exact, localized: isLocalized(ph.Page.Localized)}, true
+		return rewriteTarget{
+			basePath:    bp,
+			exact:       bp,
+			localized:   isLocalized(ph.Page.Localized),
+			legacySlash: hasLegacySlashRoute(bp, ph.Page),
+		}, true
 	case "KDexFunction":
 		for _, f := range functions {
 			if f.Name == ref.Name && !f.Spec.Internal && f.Status.State == kdexv1alpha1.KDexFunctionStateReady {
@@ -108,26 +114,38 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
+		exact := pr.rewrite.exact
 		if pr.rewrite.localized && lang.String() != defaultLang {
 			target = "/" + lang.String() + target
+			exact = "/" + lang.String() + exact
 		}
-		// System routes (/-/, /.well-known/, favicon) are never rewrite
-		// targets: a multi-segment value could otherwise alias a KDexPage
-		// onto the host's own auth and discovery endpoints.
-		if isSystemPath(target) {
-			hh.serveError(w, r, http.StatusNotFound, "not found")
-			return
+		// Never dispatch into the target's legacy slash redirect (#220): an
+		// empty trailing value builds exact+"/", whose 301 would send the
+		// client to the TARGET URL. The exact route serves the same page.
+		if pr.rewrite.legacySlash && target == exact+"/" {
+			target = exact
 		}
 
 		r2 := r.Clone(context.WithValue(r.Context(), rewriteMarkerKey{}, true))
 		r2.URL.Path = target
 		r2.URL.RawPath = ""
 
-		// A slashless target the mux would answer with a trailing-slash
-		// redirect must not send the browser to the TARGET URL: send it to
-		// the alias's own slash form instead, which dispatches here again.
-		if code, ok := slashRedirect(mux, r2); ok {
-			http.Redirect(w, r, aliasSlashURL(r.URL), code)
+		// A slashless target the mux would answer with its own trailing-slash
+		// redirect (an authored pattern like /profile/{user}/) is followed
+		// here, internally: the client never sees a redirect, so it neither
+		// learns the target URL nor gets bounced back to an alias URL it
+		// already requested.
+		if slashRedirect(mux, r2) {
+			target += "/"
+			r2.URL.Path = target
+		}
+
+		// System routes (/-/, /.well-known/, favicon) are never rewrite
+		// targets: a multi-segment value could otherwise alias a KDexPage
+		// onto the host's own auth and discovery endpoints. Checked on the
+		// final dispatch path.
+		if isSystemPath(target) {
+			hh.serveError(w, r, http.StatusNotFound, "not found")
 			return
 		}
 
@@ -146,51 +164,22 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 // the exported constructor rather than named, so it tracks the stdlib.
 var redirectHandlerType = reflect.TypeOf(http.RedirectHandler("/", http.StatusTemporaryRedirect))
 
-// slashRedirect reports whether mux would answer r with a trailing-slash
-// redirect (to r.URL.Path+"/"), and with which status code.
+// slashRedirect reports whether mux would answer r with ServeMux's own
+// trailing-slash redirect (to r.URL.Path+"/").
 //
 // ServeMux.Handler exposes that decision only as its returned handler: for a
 // slash redirect it is a RedirectHandler and the pattern is the one matching
 // the slash form, which is indistinguishable by pattern alone from a subtree
 // pattern serving r directly. So the handler's type is compared against
-// RedirectHandler's, and the redirect handler (side-effect free: it only
-// writes a Location header and a short body) is run into a header-only
-// recorder to read the code and Location it would send. Only a Location of
-// exactly r.URL.Path+"/" counts: any other redirect is left to the mux.
-func slashRedirect(mux *http.ServeMux, r *http.Request) (int, bool) {
+// RedirectHandler's. ServeMux's only other RedirectHandler, the path-cleaning
+// one, cannot fire here: rewrite.Target refuses any '//' or '.'/'..' segment
+// (and an empty path yields the CRD-validated basePath), so the target is
+// already clean. No page or function route is registered as a
+// RedirectHandler (legacy and language redirects are HandlerFuncs).
+func slashRedirect(mux *http.ServeMux, r *http.Request) bool {
 	if strings.HasSuffix(r.URL.Path, "/") {
-		return 0, false
+		return false
 	}
 	h, _ := mux.Handler(r)
-	if reflect.TypeOf(h) != redirectHandlerType {
-		return 0, false
-	}
-	rec := &headerRecorder{header: http.Header{}}
-	h.ServeHTTP(rec, r)
-	loc, err := url.Parse(rec.header.Get("Location"))
-	if err != nil || loc.Path != r.URL.Path+"/" {
-		return 0, false
-	}
-	return rec.code, true
+	return reflect.TypeOf(h) == redirectHandlerType
 }
-
-// aliasSlashURL is the request's own path with a trailing slash, query
-// kept, escaped as the client sent it.
-func aliasSlashURL(u *url.URL) string {
-	s := u.EscapedPath() + "/"
-	if u.RawQuery != "" {
-		s += "?" + u.RawQuery
-	}
-	return s
-}
-
-// headerRecorder captures a handler's status and headers and discards its
-// body. It is only ever handed a RedirectHandler.
-type headerRecorder struct {
-	header http.Header
-	code   int
-}
-
-func (h *headerRecorder) Header() http.Header         { return h.header }
-func (h *headerRecorder) Write(b []byte) (int, error) { return len(b), nil }
-func (h *headerRecorder) WriteHeader(code int)        { h.code = code }

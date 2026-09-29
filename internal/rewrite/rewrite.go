@@ -66,8 +66,9 @@ func multiSegment(patternPath, name string) bool {
 }
 
 // Target builds the path a rewrite dispatches to. An empty tmpl returns exact,
-// the target's registered form, so the mux never answers with a slash redirect
-// that would expose the target URL. Otherwise each {name} (or {name...}) is
+// the path the target's base route answers at (its basePath since #220), so
+// the dispatch lands on that route rather than on a redirect that would
+// expose the target URL. Otherwise each {name} (or {name...}) is
 // replaced by value(name) and the result is joined to basePath with exactly
 // one '/'. patternPath is the alias page's own pattern: it says which names
 // are multi-segment wildcards.

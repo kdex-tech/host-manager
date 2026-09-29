@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,11 +60,12 @@ func (hh *HostHandler) registerRendersForTest(t *testing.T, fns []kdexv1alpha1.K
 
 func TestResolveRewriteTarget(t *testing.T) {
 	html := page.PageHandler{Name: "docs", Page: &kdexv1alpha1.KDexPageSpec{Paths: kdexv1alpha1.Paths{BasePath: "/docs/v3"}}}
+	dir := page.PageHandler{Name: "dir", Page: &kdexv1alpha1.KDexPageSpec{Paths: kdexv1alpha1.Paths{BasePath: "/guides/"}}}
 	text := page.PageHandler{Name: "robots", Page: &kdexv1alpha1.KDexPageSpec{Paths: kdexv1alpha1.Paths{BasePath: "/robots.txt"}, MimeType: "txt"}}
 	f := false
 	unloc := page.PageHandler{Name: "unloc", Page: &kdexv1alpha1.KDexPageSpec{Paths: kdexv1alpha1.Paths{BasePath: "/u"}, Localized: &f}}
 	hop := aliasPH("hop", "/hop", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs")})
-	pages := map[string]page.PageHandler{"docs": html, "robots": text, "unloc": unloc, "hop": hop}
+	pages := map[string]page.PageHandler{"docs": html, "dir": dir, "robots": text, "unloc": unloc, "hop": hop}
 	fns := []kdexv1alpha1.KDexFunction{
 		{ObjectMeta: metav1ObjectMeta("dl"), Spec: kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/api/downloads"}}, Status: kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady}},
 		{ObjectMeta: metav1ObjectMeta("cold"), Spec: kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/api/cold"}}},
@@ -72,11 +74,18 @@ func TestResolveRewriteTarget(t *testing.T) {
 
 	got, ok := resolveRewriteTarget(pageRef("docs"), pages, fns)
 	require.True(t, ok)
-	assert.Equal(t, rewriteTarget{basePath: "/docs/v3", exact: "/docs/v3/", localized: true}, got, "HTML target's registered form has the trailing slash")
+	assert.Equal(t, rewriteTarget{basePath: "/docs/v3", exact: "/docs/v3", localized: true, legacySlash: true}, got,
+		"HTML target registers at its exact basePath (#220), with a legacy slash redirect")
+
+	got, ok = resolveRewriteTarget(pageRef("dir"), pages, fns)
+	require.True(t, ok)
+	assert.Equal(t, rewriteTarget{basePath: "/guides/", exact: "/guides/", localized: true}, got,
+		"a slash-terminated basePath is registered at that same string via {$}, with no legacy slash redirect")
 
 	got, ok = resolveRewriteTarget(pageRef("robots"), pages, fns)
 	require.True(t, ok)
-	assert.Equal(t, "/robots.txt", got.exact, "text target registers at its exact basePath")
+	assert.Equal(t, rewriteTarget{basePath: "/robots.txt", exact: "/robots.txt", localized: true}, got,
+		"text target registers at its exact basePath, with no legacy slash redirect")
 
 	got, ok = resolveRewriteTarget(pageRef("unloc"), pages, fns)
 	require.True(t, ok)
@@ -102,22 +111,61 @@ func TestRewrite_ServesTextPageTargetWithoutRedirect(t *testing.T) {
 	alias := aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")})
 	mux := hh.registerRendersForTest(t, nil, target, alias)
 
-	rr := doRequest(t, mux, "GET", "/bots/")
+	rr := doRequest(t, mux, "GET", "/bots")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "hello", rr.Body.String())
 	assert.Empty(t, rr.Header().Get("Location"))
 	assert.Empty(t, rr.Header().Get("Link"), "canonical is opt-in")
+
+	// The alias page's own legacy slash form (#220) 301s to the alias's bare
+	// path -- never to the target -- before any rewrite runs.
+	rr = doRequest(t, mux, "GET", "/bots/?x=1")
+	assert.Equal(t, http.StatusMovedPermanently, rr.Code)
+	assert.Equal(t, "/bots?x=1", rr.Header().Get("Location"))
+	assert.NotEqual(t, "hello", rr.Body.String())
 }
 
-func TestRewrite_HTMLTargetDispatchesToRegisteredForm(t *testing.T) {
+func TestRewrite_HTMLTargetDispatchesToExactPath(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en"})
-	target := page.PageHandler{Name: "docs", MainTemplate: "<html></html>", Page: &kdexv1alpha1.KDexPageSpec{Label: "docs", Paths: kdexv1alpha1.Paths{BasePath: "/docs/v3"}}}
-	mux := hh.registerRendersForTest(t, nil, target)
+	target := page.PageHandler{Name: "docs", MainTemplate: "<html><body>docs v3</body></html>", Page: &kdexv1alpha1.KDexPageSpec{Label: "docs", Paths: kdexv1alpha1.Paths{BasePath: "/docs/v3"}}}
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("latest", "/docs/latest", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs")}))
 	tgt, ok := resolveRewriteTarget(pageRef("docs"), map[string]page.PageHandler{"docs": target}, nil)
 	require.True(t, ok)
-	// The empty-path dispatch lands on the page's own {$} route, not on a
-	// slash-redirect that would expose the target URL.
-	assertMatches(t, mux, "GET", tgt.exact, "GET /docs/v3/{$}")
+	// The empty-path dispatch lands on the page's own exact route (#220),
+	// not on its legacy slash redirect, which would expose the target URL.
+	assertMatches(t, mux, "GET", tgt.exact, "GET /docs/v3")
+
+	rr := doRequest(t, mux, "GET", "/docs/latest")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), "docs v3")
+	assert.Empty(t, rr.Header().Get("Location"))
+}
+
+// An empty value substituted at the end of rewrite.path would build the
+// target's legacy slash form (/p/), whose 301 would send the client to the
+// TARGET URL: the dispatch goes to the exact path instead, per language.
+func TestRewrite_EmptyValueNeverDispatchesIntoLegacySlashRedirect(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	target := page.PageHandler{Name: "p", MainTemplate: "<html><body>target p</body></html>", Page: &kdexv1alpha1.KDexPageSpec{Label: "p", Paths: kdexv1alpha1.Paths{BasePath: "/p"}}}
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("a", "/a", "/a/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("p"), Path: "{rest}"}))
+
+	// Precondition: the target's own slash form is its legacy 301.
+	direct := doRequest(t, mux, "GET", "/p/")
+	require.Equal(t, http.StatusMovedPermanently, direct.Code)
+
+	for _, path := range []string{"/a", "/fr/a"} {
+		rr := doRequest(t, mux, "GET", path)
+		assert.Equal(t, http.StatusOK, rr.Code, path)
+		assert.Contains(t, rr.Body.String(), "target p", path)
+		assert.Empty(t, rr.Header().Get("Location"), path)
+	}
+
+	// A non-empty value still reaches the pattern-less target's subpath as
+	// before (no route: 404), untouched by the collapse.
+	rr := doRequest(t, mux, "GET", "/a/x")
+	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
 func TestRewrite_SubstitutesParamsAndKeepsRawQuery(t *testing.T) {
@@ -169,9 +217,9 @@ func TestRewrite_LocalizedPageTargetKeepsLanguagePrefix(t *testing.T) {
 	mux := hh.registerRendersForTest(t, nil, target,
 		aliasPH("a", "/a", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("about")}))
 
-	// /fr/a/ must dispatch to /fr/about.txt (registered for the localized
+	// /fr/a must dispatch to /fr/about.txt (registered for the localized
 	// text target), not to the bare /about.txt.
-	rr := doRequest(t, mux, "GET", "/fr/a/")
+	rr := doRequest(t, mux, "GET", "/fr/a")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "about", rr.Body.String())
 	assert.Equal(t, "fr", rr.Header().Get("Content-Language"), "served by the /fr route, not the bare default-language one")
@@ -186,7 +234,7 @@ func TestRewrite_CanonicalLinkHeader(t *testing.T) {
 	mux := hh.registerRendersForTest(t, nil, target,
 		aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots"), Canonical: true}))
 
-	rr := doRequest(t, mux, "GET", "/bots/")
+	rr := doRequest(t, mux, "GET", "/bots")
 	assert.Equal(t, `<https://example.com/robots.txt>; rel="canonical"`, rr.Header().Get("Link"))
 }
 
@@ -194,8 +242,8 @@ func TestRewrite_MissingTargetIs404(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en"})
 	mux := hh.registerRendersForTest(t, nil,
 		aliasPH("orphan", "/orphan", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("gone")}))
-	assertMatches(t, mux, "GET", "/orphan/", "GET /orphan/{$}")
-	rr := doRequest(t, mux, "GET", "/orphan/")
+	assertMatches(t, mux, "GET", "/orphan", "GET /orphan")
+	rr := doRequest(t, mux, "GET", "/orphan")
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 
@@ -205,7 +253,7 @@ func TestRewrite_SecondHopIs508(t *testing.T) {
 	alias := aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")})
 	mux := hh.registerRendersForTest(t, nil, target, alias)
 
-	req := httptest.NewRequest("GET", "/bots/", nil)
+	req := httptest.NewRequest("GET", "/bots", nil)
 	req = req.WithContext(context.WithValue(req.Context(), rewriteMarkerKey{}, true))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -229,13 +277,13 @@ func TestRewrite_AliasGateAndTargetGateBothApply(t *testing.T) {
 	hh.authChecker = denyPath("/keys.txt")
 	mux := hh.registerRendersForTest(t, nil, target, alias)
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, anonReq("GET", "/k/", "application/json"))
+	mux.ServeHTTP(w, anonReq("GET", "/k", "application/json"))
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 
 	// Alias gated: denied before any dispatch.
 	hh.authChecker = denyPath("/k")
 	w = httptest.NewRecorder()
-	mux.ServeHTTP(w, anonReq("GET", "/k/", "application/json"))
+	mux.ServeHTTP(w, anonReq("GET", "/k", "application/json"))
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
@@ -264,7 +312,7 @@ func TestRewrite_NoDeadlockUnderConcurrentWriter(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for range 2000 {
-			doRequest(t, mux, "GET", "/bots/")
+			doRequest(t, mux, "GET", "/bots")
 		}
 		close(done)
 	}()
@@ -287,7 +335,7 @@ func TestRewrite_DispatchesIntoRegisteredSnapshotNotLiveMux(t *testing.T) {
 		aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")}))
 	hh.Mux = http.NewServeMux() // a reconcile swapped in a different snapshot
 
-	rr := doRequest(t, mux, "GET", "/bots/")
+	rr := doRequest(t, mux, "GET", "/bots")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "hello", rr.Body.String())
 }
@@ -414,8 +462,9 @@ func TestRewrite_MultiSegmentSpellingInPathSubstitutes(t *testing.T) {
 	assert.Equal(t, "/api/downloads/a/b", rr.Body.String())
 }
 
-// A slashless request whose target would trailing-slash redirect is sent to
-// the ALIAS's slash form, never to the target URL (final review I4 / R5).
+// A slashless request whose target ServeMux would trailing-slash redirect is
+// dispatched internally to the slash form: the client never sees a redirect
+// and the browser stays on the alias (final review I4 / R5; #220).
 func TestRewrite_TrailingSlashRedirectStaysOnAlias(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en"})
 	target := textPageForTest(t, "docs-v3", "/docs/v3", "txt", "v3 page")
@@ -429,9 +478,9 @@ func TestRewrite_TrailingSlashRedirectStaysOnAlias(t *testing.T) {
 	require.Equal(t, "/docs/v3/guide/", direct.Header().Get("Location"))
 
 	rr := doRequest(t, mux, "GET", "/docs/latest/guide?x=1")
-	assert.Equal(t, direct.Code, rr.Code, "same status ServeMux uses")
-	assert.Equal(t, "/docs/latest/guide/?x=1", rr.Header().Get("Location"))
-	assert.NotContains(t, rr.Header().Get("Location"), "/docs/v3")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "v3 page", rr.Body.String())
+	assert.Empty(t, rr.Header().Get("Location"))
 
 	rr = doRequest(t, mux, "GET", "/docs/latest/guide/")
 	assert.Equal(t, http.StatusOK, rr.Code)
@@ -447,9 +496,59 @@ func TestRewrite_EmptyRequiredPlaceholderIs404(t *testing.T) {
 	mux := hh.registerRendersForTest(t, nil, target,
 		aliasPH("u", "/u", "/u/{user}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("profile"), Path: "{user}/"}))
 
-	rr := doRequest(t, mux, "GET", "/u/")
+	rr := doRequest(t, mux, "GET", "/u")
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 	rr = doRequest(t, mux, "GET", "/u/bob")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "profile", rr.Body.String())
+}
+
+// An alias whose own pattern is slash-terminated, rewriting to a target the
+// mux only serves in slash form, must not redirect the client to the alias
+// URL it already requested (the I4 fix's self-redirect: GET /u/bob/ -> 307
+// /u/bob/ forever). A real client that follows redirects must terminate on
+// the target's body.
+func TestRewrite_SlashFormAliasDoesNotSelfRedirect(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	target := textPageForTest(t, "profile", "/profile", "txt", "profile")
+	target.Page.PatternPath = "/profile/{user}/"
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("u", "/u", "/u/{user}/", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("profile"), Path: "{user}"}))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	redirects := 0
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			redirects = len(via)
+			if redirects >= 10 {
+				return http.ErrUseLastResponse // bounded even if a loop returns
+			}
+			return nil
+		},
+	}
+	resp, err := client.Get(srv.URL + "/u/bob/")
+	require.NoError(t, err, "must terminate, not redirect to itself")
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "profile", string(body))
+	assert.Zero(t, redirects, "the client never sees a redirect")
+}
+
+// A slashless alias onto a target registered only in slash form reaches it
+// (formerly a redirect to an alias slash form no route served).
+func TestRewrite_SlashlessAliasReachesSlashOnlyTarget(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	target := textPageForTest(t, "profile", "/profile", "txt", "profile")
+	target.Page.PatternPath = "/profile/{user}/"
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("u", "/u", "/u/{user}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("profile"), Path: "{user}"}))
+
+	rr := doRequest(t, mux, "GET", "/u/bob")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "profile", rr.Body.String())
+	assert.Empty(t, rr.Header().Get("Location"))
 }
