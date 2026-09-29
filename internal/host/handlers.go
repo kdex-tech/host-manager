@@ -55,18 +55,18 @@ func isLocalized(b *bool) bool {
 }
 
 // defaultLangRedirectHandler returns a handler that 301-redirects a request
-// under the default language's own literal prefix (e.g. "/en/pricing/") to
-// the canonical bare path ("/pricing/"), by trimming langPrefix -- the
+// under the default language's own literal prefix (e.g. "/en/pricing") to
+// the canonical bare path ("/pricing"), by trimming langPrefix -- the
 // "/<default>" prefix itself (e.g. "/en") -- once from the front of
 // r.URL.Path. Trimming the known prefix, rather than string-replacing the
-// language code, keeps a segment like "/en/enterprise/" from being mangled
-// into something other than "/enterprise/".
+// language code, keeps a segment like "/en/enterprise" from being mangled
+// into something other than "/enterprise".
 func defaultLangRedirectHandler(langPrefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		target := strings.TrimPrefix(r.URL.Path, langPrefix)
 		// A canonicalizing 301 must not drop the caller's query string (e.g.
-		// GET /en/pricing/?tab=x should land on /pricing/?tab=x, not
-		// /pricing/) -- precedent: TestPageHandlerFunc_LoginReturnPreservesQueryString.
+		// GET /en/pricing?tab=x should land on /pricing?tab=x, not
+		// /pricing) -- precedent: TestPageHandlerFunc_LoginReturnPreservesQueryString.
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
@@ -76,14 +76,15 @@ func defaultLangRedirectHandler(langPrefix string) http.HandlerFunc {
 
 // legacySlashRedirectHandler returns a handler that 301-redirects the legacy
 // slash form of a page (e.g. "/pricing/", "/fr/pricing/", "/en/pricing/") to
-// the bare canonical path ("/pricing", "/fr/pricing", "/pricing"). langPrefix
-// is the literal prefix to drop ("" for the bare route, "/en" for the default
-// language's own prefix so it lands on the canonical path in one hop). The
-// target is built by trimming the known prefix and the single trailing
-// slash, never by string-replacing language codes. The query string is kept.
-func legacySlashRedirectHandler(langPrefix string) http.HandlerFunc {
+// canonicalPath, the bare canonical path captured at registration
+// ("/pricing", "/fr/pricing", "/pricing"; the default-language prefix's slash
+// form targets the bare path in one hop). The Location is deliberately NOT
+// derived from r.URL.Path, so a request re-dispatched with a different path
+// (e.g. by a rewrite) still lands on the registered canonical URL. The query
+// string is kept.
+func legacySlashRedirectHandler(canonicalPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		target := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, langPrefix), "/")
+		target := canonicalPath
 		if r.URL.RawQuery != "" {
 			target += "?" + r.URL.RawQuery
 		}
@@ -278,7 +279,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			}
 			if legacySlash {
 				// Compatibility redirect: deliberately no OpenAPI entry (regFunc).
-				registerIfNew("GET "+regPath+"/{$}", legacySlashRedirectHandler(""))
+				registerIfNew("GET "+regPath+"/{$}", legacySlashRedirectHandler(regPath))
 			}
 			if patternPath != "" {
 				if registerIfNew("GET "+patternPath, handler) {
@@ -298,7 +299,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 				regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 			}
 			if legacySlash {
-				registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(defaultPrefix))
+				registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(regPath))
 			}
 			if patternPath != "" {
 				prefixedPatternPath := defaultPrefix + patternPath
@@ -318,7 +319,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 		}
 		if legacySlash {
-			registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(""))
+			registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(prefixedFinalPath))
 		}
 		if patternPath != "" {
 			prefixedPatternPath := "/" + lang.String() + patternPath

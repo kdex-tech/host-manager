@@ -68,8 +68,8 @@ func TestRouteRegistry_ClaimAndCollisionRecording(t *testing.T) {
 // homeAndFrPages returns two independently-authored PageHandlers that
 // reproduce the exact collision class from the bug report: with "en"
 // (default) + "fr" supported, the home page (basePath "/") registers its
-// French route as "GET /fr/{$}", and a page at basePath "/fr" wants that
-// exact pattern for its own bare (default-language) route.
+// French route as "GET /fr/{$}", and a page at basePath "/fr" serves at
+// "GET /fr" but its legacy slash redirect wants that same "GET /fr/{$}".
 func homeAndFrPages() (page.PageHandler, page.PageHandler) {
 	home := page.PageHandler{
 		Name:         "home",
@@ -279,5 +279,6 @@ func TestRouteCollision_SingleLanguageHost_NeverCollides(t *testing.T) {
 
 	require.Empty(t, routes.collisions)
 	assertMatches(t, mux, "GET", "/", "GET /{$}")
+	assertMatches(t, mux, "GET", "/fr", "GET /fr")
 	assertMatches(t, mux, "GET", "/fr/", "GET /fr/{$}")
 }

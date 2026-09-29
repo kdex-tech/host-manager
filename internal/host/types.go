@@ -139,10 +139,10 @@ type HostHandler struct {
 // old "/{l10n}" wildcard with one literal route per supported language means
 // a page whose basePath equals "/<lang>" (or "/<lang>/...") produces the
 // SAME pattern as another, independently-authored page's own language-
-// prefixed (or bare, for text-mime pages) route. E.g. with "en" (default)
-// and "fr" supported, the home page (basePath "/") registers "GET /fr/{$}"
-// as its French route, and a page at basePath "/fr" wants that exact
-// pattern for its own bare route.
+// prefixed route. E.g. with "en" (default) and "fr" supported, the home page
+// (basePath "/") registers "GET /fr/{$}" as its French route, and a page at
+// basePath "/fr" registers its bare route at "GET /fr" but its legacy slash
+// redirect at that same "GET /fr/{$}" pattern, which collides.
 //
 // The winner is whichever page registration-time ordering (basePath-sorted,
 // see rebuildMuxSnapshot) processes first; the loser's route is refused

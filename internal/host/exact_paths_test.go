@@ -12,6 +12,7 @@ package host
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/kdex-tech/host-manager/internal/page"
@@ -83,7 +84,7 @@ func TestExactPaths_RootPage(t *testing.T) {
 	assertMatches(t, mux, "GET", "/", "GET /{$}")
 	assertMatches(t, mux, "GET", "/fr/", "GET /fr/{$}")
 	// slash-terminated basePath: no legacy redirect routes at all.
-	assertNoPattern(t, mux, "GET //{$}")
+	assertNotMatched(t, mux, "GET", "/nope")
 }
 
 func TestExactPaths_AuthoredTrailingSlashBasePath(t *testing.T) {
@@ -158,4 +159,16 @@ func htmlPageForTest(name, basePath string) page.PageHandler {
 		MainTemplate: "<html><body>" + name + "</body></html>",
 		Page:         &kdexv1alpha1.KDexPageSpec{Label: name, Paths: kdexv1alpha1.Paths{BasePath: basePath}},
 	}
+}
+
+// The legacy redirect's Location comes from the canonical path captured at
+// registration, never from r.URL.Path (a rewrite may re-dispatch a request
+// with a different path).
+func TestLegacySlashRedirectHandler_UsesCapturedCanonicalPath(t *testing.T) {
+	h := legacySlashRedirectHandler("/pricing")
+	req := httptest.NewRequest("GET", "/something/else/?a=1", nil)
+	rr := httptest.NewRecorder()
+	h(rr, req)
+	require.Equal(t, http.StatusMovedPermanently, rr.Code)
+	require.Equal(t, "/pricing?a=1", rr.Header().Get("Location"))
 }
