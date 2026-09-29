@@ -1184,11 +1184,18 @@ func (hh *HostHandler) serverAddress(r *http.Request) string {
 	return fmt.Sprintf("%s://%s", hh.scheme, r.Host)
 }
 
+// toFinalPath returns the ServeMux pattern path for a page basePath.
+//
+// A basePath ending in "/" gets the "{$}" anchor appended: a ServeMux pattern
+// ending in "/" (notably "/") is a subtree catch-all, so without the anchor
+// the home page would answer every unknown URL (the bug 53a08f0 fixed). A
+// basePath with no trailing slash is returned unchanged: in Go 1.22+ such a
+// pattern is already an exact match, so no anchor (and no 307 to a slash
+// form) is needed (#220).
 func toFinalPath(path string) string {
-	if !strings.HasSuffix(path, "/") {
-		path = path + "/"
+	if strings.HasSuffix(path, "/") {
+		return path + "{$}"
 	}
-	path = path + "{$}"
 	return path
 }
 

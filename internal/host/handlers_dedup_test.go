@@ -99,9 +99,9 @@ func TestAddHandlerAndRegister_DuplicateRouteSkipsCleanly(t *testing.T) {
 	// Inspect the mux directly to confirm each page's basePath resolves to
 	// the page-specific finalPath rather than a more-general fallback.
 	want := map[string]string{
-		"/":             "GET /{$}",
-		"/app/":         "GET /app/{$}",
-		"/invitations/": "GET /invitations/{$}",
+		"/":            "GET /{$}",
+		"/app":         "GET /app",
+		"/invitations": "GET /invitations",
 	}
 	for probe, expected := range want {
 		req := httptest.NewRequest("GET", probe, nil)

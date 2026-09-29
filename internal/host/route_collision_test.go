@@ -250,12 +250,12 @@ func TestRouteCollision_NoCollision_MultiPageMultiLanguage_Regression(t *testing
 
 	mux := hh.Mux
 	want := map[string]string{
-		"/":                "GET /{$}",
-		"/app/":            "GET /app/{$}",
-		"/invitations/":    "GET /invitations/{$}",
-		"/fr/":             "GET /fr/{$}",
-		"/fr/app/":         "GET /fr/app/{$}",
-		"/fr/invitations/": "GET /fr/invitations/{$}",
+		"/":               "GET /{$}",
+		"/app":            "GET /app",
+		"/invitations":    "GET /invitations",
+		"/fr/":            "GET /fr/{$}",
+		"/fr/app":         "GET /fr/app",
+		"/fr/invitations": "GET /fr/invitations",
 	}
 	for probe, expected := range want {
 		assertMatches(t, mux, "GET", probe, expected)

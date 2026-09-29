@@ -48,7 +48,7 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	hh.authChecker = &mockAuthChecker{}
 
 	// 1. Initial Request
-	req := httptest.NewRequest("GET", "/test/", nil)
+	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
 	hh.Mux.ServeHTTP(w, req)
 
@@ -70,14 +70,14 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	// 2. Test 304 logic
 
 	// 3. Conditional Request (If-None-Match)
-	req3 := httptest.NewRequest("GET", "/test/", nil)
+	req3 := httptest.NewRequest("GET", "/test", nil)
 	req3.Header.Set("If-None-Match", etag)
 	w3 := httptest.NewRecorder()
 	hh.ServeHTTP(w3, req3)
 	assert.Equal(t, http.StatusNotModified, w3.Code)
 
 	// 4. Conditional Request (If-Modified-Since)
-	req4 := httptest.NewRequest("GET", "/test/", nil)
+	req4 := httptest.NewRequest("GET", "/test", nil)
 	req4.Header.Set("If-Modified-Since", lastModified)
 	w4 := httptest.NewRecorder()
 	hh.ServeHTTP(w4, req4)

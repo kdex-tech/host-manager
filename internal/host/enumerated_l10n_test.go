@@ -170,24 +170,24 @@ func TestEnumeratedPrefixes_RegisterPerLanguage(t *testing.T) {
 	hh.registerPageForTest(t, "pricing", "/pricing")
 	mux := hh.currentMux(t)
 
-	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}")       // bare = default
-	assertMatches(t, mux, "GET", "/fr/pricing/", "GET /fr/pricing/{$}") // non-default prefix
-	assertNoPattern(t, mux, "GET /{l10n}/pricing/{$}")                  // wildcard gone
+	assertMatches(t, mux, "GET", "/pricing", "GET /pricing")       // bare = default
+	assertMatches(t, mux, "GET", "/fr/pricing", "GET /fr/pricing") // non-default prefix
+	assertNoPattern(t, mux, "GET /{l10n}/pricing")                 // wildcard gone
 	// unknown root falls through — no page/wildcard swallows it
 	assertNotMatched(t, mux, "GET", "/robots.txt")
 }
 
 // TestDefaultLanguagePrefixRedirectsToBare is the RED/GREEN pin for task
 // 2.2: requesting a page under the default language's own literal prefix
-// (e.g. /en/pricing/ when en is the default) must 301 to the canonical bare
-// path (/pricing/) rather than 404 (Task 2.1 left the prefix unregistered)
+// (e.g. /en/pricing when en is the default) must 301 to the canonical bare
+// path (/pricing) rather than 404 (Task 2.1 left the prefix unregistered)
 // or serving a duplicate copy under two URLs.
 func TestDefaultLanguagePrefixRedirectsToBare(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
 	hh.registerPageForTest(t, "pricing", "/pricing")
-	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/") // en == default
+	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing") // en == default
 	require.Equal(t, http.StatusMovedPermanently, rr.Code)
-	require.Equal(t, "/pricing/", rr.Header().Get("Location"))
+	require.Equal(t, "/pricing", rr.Header().Get("Location"))
 }
 
 // TestDefaultLanguageCanonicalization_BareRouteRegisters is the RED/GREEN pin
@@ -205,7 +205,7 @@ func TestDefaultLanguageCanonicalization_BareRouteRegisters(t *testing.T) {
 	hh.registerPageForTest(t, "pricing", "/pricing")
 	mux := hh.currentMux(t)
 
-	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}")
+	assertMatches(t, mux, "GET", "/pricing", "GET /pricing")
 }
 
 // TestUnknownRootIs404NeverBadRequest is the end-to-end guard for #137/#177:
@@ -234,9 +234,11 @@ func TestLocalizedFalse_BareOnly(t *testing.T) {
 	hh.registerPageForTest(t, "pricing", "/pricing", withLocalizedFalse())
 	mux := hh.currentMux(t)
 
-	assertMatches(t, mux, "GET", "/pricing/", "GET /pricing/{$}") // bare still registers
-	assertNoPattern(t, mux, "GET /fr/pricing/{$}")                // no non-default localized twin
-	assertNoPattern(t, mux, "GET /en/pricing/{$}")                // no default-language redirect either
+	assertMatches(t, mux, "GET", "/pricing", "GET /pricing") // bare still registers
+	assertNoPattern(t, mux, "GET /fr/pricing")               // no non-default localized twin
+	assertNoPattern(t, mux, "GET /en/pricing")               // no default-language redirect either
+	assertNoPattern(t, mux, "GET /fr/pricing/{$}")
+	assertNoPattern(t, mux, "GET /en/pricing/{$}")
 }
 
 // collectOperationIDs walks every OpenAPI GET operation registerPageForTest
@@ -286,13 +288,13 @@ func TestOpenAPIOperationIDsAreUnique_AcrossLanguages(t *testing.T) {
 // for fix M1: the default-language 301 (task 2.2) must carry the request's
 // query string through to the canonicalized Location, the same way
 // TestPageHandlerFunc_LoginReturnPreservesQueryString requires of the login
-// redirect. GET /en/pricing/?tab=x must 301 to /pricing/?tab=x, not drop the
+// redirect. GET /en/pricing?tab=x must 301 to /pricing?tab=x, not drop the
 // query string.
 func TestDefaultLanguagePrefixRedirectPreservesQueryString(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
 	hh.registerPageForTest(t, "pricing", "/pricing")
 
-	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing/?tab=x")
+	rr := doRequest(t, hh.currentMux(t), "GET", "/en/pricing?tab=x")
 	require.Equal(t, http.StatusMovedPermanently, rr.Code)
-	require.Equal(t, "/pricing/?tab=x", rr.Header().Get("Location"))
+	require.Equal(t, "/pricing?tab=x", rr.Header().Get("Location"))
 }
