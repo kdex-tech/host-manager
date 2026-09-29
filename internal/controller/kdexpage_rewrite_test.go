@@ -124,6 +124,32 @@ var _ = Describe("KDexPage rewrite-mode reconcile", func() {
 		Eventually(degradedReason("bad-ph"), 10*time.Second).Should(Equal("RewriteUnknownPlaceholder"))
 	})
 
+	It("is Degraded(RewriteTargetOtherHost) when the target belongs to another host", func() {
+		other := htmlPage("elsewhere", "/elsewhere")
+		other.Spec.HostRef = corev1.LocalObjectReference{Name: "other-host"}
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		Expect(k8sClient.Create(ctx, aliasPage("to-other",
+			kdexv1alpha1.KDexObjectReference{Kind: "KDexPage", Name: "elsewhere"}, "", ""))).To(Succeed())
+		Eventually(degradedReason("to-other"), 10*time.Second).Should(Equal("RewriteTargetOtherHost"))
+	})
+
+	It("is Degraded(RewriteTargetOtherHost) when the target function belongs to another host", func() {
+		fn := &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "other-fn", Namespace: namespace},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: "other-host"},
+				API: kdexv1alpha1.API{
+					BasePath: "/api/other",
+					Paths:    map[string]kdexv1alpha1.PathItem{"/api/other/test": {}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, fn)).To(Succeed())
+		Expect(k8sClient.Create(ctx, aliasPage("to-other-fn",
+			kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "other-fn"}, "", ""))).To(Succeed())
+		Eventually(degradedReason("to-other-fn"), 10*time.Second).Should(Equal("RewriteTargetOtherHost"))
+	})
+
 	It("re-reconciles when the target switches into rewrite mode", func() {
 		seedArchetype()
 		Expect(k8sClient.Create(ctx, htmlPage("real2", "/real2"))).To(Succeed())

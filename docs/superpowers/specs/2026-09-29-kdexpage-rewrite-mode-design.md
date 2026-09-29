@@ -20,7 +20,7 @@ The primary use is **alias / vanity URLs**, for example:
 - An author declares a rewrite page with a typed reference to a page or function, plus an optional path template. Requests to the rewrite page's routes return the target's response.
 - Both authorization gates apply: the rewrite page's own `security`, then the target's. A rewrite never bypasses a target's requirements.
 - A target that moves (its `basePath` changes) does not break the rewrite.
-- These are surfaced as `Degraded` at reconcile, not discovered at request time: a missing target, a target that is itself a rewrite, an internal function, or an unknown path placeholder.
+- These are surfaced as `Degraded` at reconcile, not discovered at request time: a missing target, a target that is itself a rewrite, an internal function, a target bound to another KDexHost, or an unknown path placeholder.
 - No request can deadlock on `hh.mu`, including while `SetHost` runs at the same time.
 
 ## Operating modes after this change
@@ -86,7 +86,8 @@ A rewrite page skips the archetype, header, footer, navigation and script-librar
 3. Sets `Degraded` with a distinct reason when:
    - the target is a KDexPage that is itself in rewrite mode (reason `RewriteTargetIsRewrite`; one hop only);
    - the target is a KDexFunction with `spec.internal: true` (reason `RewriteTargetInternal`; internal functions are never on the host mux);
-   - `rewrite.path` contains a `{name}` that is not a wildcard name in this page's `patternPath` (reason `RewriteUnknownPlaceholder`).
+   - the target KDexPage or KDexFunction has a `spec.hostRef.name` different from the rewrite page's (reason `RewriteTargetOtherHost`; another host's routes are never on this host's mux, so the alias could only ever 404);
+   - `rewrite.path` contains a `{name}` (or `{name...}`) that is not a wildcard name in this page's `patternPath` (reason `RewriteUnknownPlaceholder`).
 4. Otherwise it proceeds as for other pages, handing the page to the host handler.
 
 A target that exists but is not Ready yet (typically a KDexFunction still building) marks the rewrite page `Degraded` with the resolver's generic "referenced … is not ready" condition and requeues, exactly like every other page reference (`ResolveKDexObjectReference`). The static problems above are checked first, so they are never hidden behind readiness.
@@ -108,11 +109,12 @@ The resulting target base path is bound into the rewrite handler for that snapsh
 For each request:
 
 1. **Own gate.** Run the rewrite page's `security` check, with the same checker, fault handling (500 on a check that fails to run) and denial classification as the page gate. The gate block in `pageHandlerFunc` is extracted into a shared helper (`pageGateLocked`) that both handlers call, rather than copied. The gate snapshot runs in a closure that takes `hh.mu.RLock` with a deferred `RUnlock` (so a panic in the gate cannot leave the lock held; the #26/#51 bug class), and the same closure reads the canonical base and default language. The lock is released before anything is dispatched.
-2. **Build the target path.** Substitute each `{name}` in `rewrite.path` with `r.PathValue(name)`. A `{rest...}` value may span segments. A substituted value that would introduce a `..` segment or `//` is refused with 400. `path.Clean` is **not** applied to the author's template (CEL already constrains it), only to the substitution check. Then join:
+2. **Build the target path.** Substitute each `{name}` in `rewrite.path` with `r.PathValue(name)`; `{name...}` in `rewrite.path` is the same placeholder (authors copy it from `patternPath`). Only a value of a `{name...}` wildcard in `patternPath` may span segments: a single-segment `{name}` value holding `/` (a decoded `%2F`) is 404. A substituted value that would introduce a `..` segment or `//` is refused with 400, except that a `//` caused only by an empty value (a missing segment, e.g. the bare alias route of a page whose `rewrite.path` is `{user}/`) is 404. `path.Clean` is **not** applied to the author's template (CEL already constrains it), only to the substitution check. Then join:
    - **Empty `path`:** dispatch to the target's *registered* form, so the mux never answers with a slash redirect, which would expose the target URL. That is `toFinalPath(basePath)` (trailing slash) for an HTML page target, the exact `basePath` for a text page target, and `basePath` for a function target.
    - **Non-empty `path`:** `strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(path, "/")`, exactly one slash at the seam. The author's trailing slash (or lack of one) is kept as written, because it decides which of the target's routes matches.
-3. **Language.** For a KDexPage target whose `localized` is true, a request registered under a non-default `/<lang>` prefix goes to `/<lang>` + target path. Every other case, including the default language and every function target, goes to the bare target path.
-4. **Canonical.** If `canonical: true`, set `Link: <absolute target URL>; rel="canonical"` before dispatching. The absolute URL is built from the host's configured scheme and first routing domain (`issuerAddressLocked()`: `hh.scheme` + `Routing.Domains[0]`), never from the request's Host header, so a caller cannot inject its own canonical host. If no base can be derived, no `Link` header is emitted.
+3. **Language.** For a KDexPage target whose `localized` is true, a request registered under a non-default `/<lang>` prefix goes to `/<lang>` + target path. Every other case, including the default language and every function target, goes to the bare target path. A final target that is a system path (`/-/`, `/.well-known/`, `/favicon.ico`; `isSystemPath`) is 404: system routes are never targets.
+   **Slash redirect.** If the mux would answer the slashless target with its trailing-slash redirect (probed with `mux.Handler`), the client is redirected, with the mux's own status code, to the **alias** path + `/` (query kept) instead, so the browser never sees the target URL.
+4. **Canonical.** If `canonical: true`, set `Link: <absolute target URL>; rel="canonical"` before dispatching. The target path is percent-encoded (`url.URL.EscapedPath`), so a request value cannot close the `<…>` and inject another link. The absolute URL is built from the host's configured scheme and first routing domain (`issuerAddressLocked()`: `hh.scheme` + `Routing.Domains[0]`), never from the request's Host header, so a caller cannot inject its own canonical host. If no base can be derived, no `Link` header is emitted.
 5. **Loop guard.** If the request context already carries the rewrite marker, answer **508 Loop Detected**. Otherwise add the marker. Reconcile already prevents this case; the guard is a safety net for the time between a target changing mode and the next reconcile.
 6. **Dispatch.** Clone the request (`r.Clone`), set `URL.Path` and `URL.RawPath`, keep `URL.RawQuery`, and call `ServeHTTP` on the **mux snapshot captured when the handler was built**, never `hh.Mux`. Authentication and `DesignMiddleware` have already run in the outer wrappers, so dispatching to the inner mux does not repeat them. The target's own handler, and so its own gate, runs as usual.
 
@@ -146,7 +148,7 @@ This is a CRD serialization change (a new field, amended validation messages), s
   - each mode rule accepts and rejects the intended combinations, including rewrite with each forbidden content field, and text with `patternPath`;
   - the `rewrite.path` pattern and CEL (`//`, `..`, `:`/`?`/`#`);
   - `targetRef.kind` values outside {KDexPage, KDexFunction} are rejected.
-- **host-manager controller:** each Degraded reason (`RewriteTargetIsRewrite`, `RewriteTargetInternal`, `RewriteUnknownPlaceholder`, target missing); re-reconcile when the target is created, changes mode, or is deleted.
+- **host-manager controller:** each Degraded reason (`RewriteTargetIsRewrite`, `RewriteTargetInternal`, `RewriteTargetOtherHost`, `RewriteUnknownPlaceholder`, target missing); re-reconcile when the target is created, changes mode, or is deleted.
 - **host-manager handler:**
   - page and function targets both serve the target's body;
   - an empty `path` to an HTML page target returns 200 from the target, with no 301/307;

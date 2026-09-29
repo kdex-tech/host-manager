@@ -19,6 +19,7 @@ import (
 const (
 	rewriteTargetIsRewriteReason    kdexv1alpha1.ConditionReason = "RewriteTargetIsRewrite"
 	rewriteTargetInternalReason     kdexv1alpha1.ConditionReason = "RewriteTargetInternal"
+	rewriteTargetOtherHostReason    kdexv1alpha1.ConditionReason = "RewriteTargetOtherHost"
 	rewriteUnknownPlaceholderReason kdexv1alpha1.ConditionReason = "RewriteUnknownPlaceholder"
 )
 
@@ -45,7 +46,7 @@ func (r *KDexPageReconciler) reconcileRewrite(ctx context.Context, page *kdexv1a
 	// will not clear when the target becomes Ready, so it must not hide behind
 	// the resolver's generic "not ready" Degraded.
 	if targetObj != nil {
-		if reason, msg := rewriteTargetProblem(targetObj); reason != "" {
+		if reason, msg := rewriteTargetProblem(page, targetObj); reason != "" {
 			setRewriteDegraded(page, reason, msg)
 			return ctrl.Result{}, nil
 		}
@@ -84,15 +85,25 @@ func (r *KDexPageReconciler) reconcileRewrite(ctx context.Context, page *kdexv1a
 }
 
 // rewriteTargetProblem reports a static reason the resolved target can never
-// serve as a rewrite target, or "" when it can.
-func rewriteTargetProblem(obj client.Object) (kdexv1alpha1.ConditionReason, string) {
+// serve as a rewrite target for page, or "" when it can. A target bound to
+// another KDexHost is never on this host's mux, so it would only ever 404.
+func rewriteTargetProblem(page *kdexv1alpha1.KDexPage, obj client.Object) (kdexv1alpha1.ConditionReason, string) {
+	host := page.Spec.HostRef.Name
 	switch t := obj.(type) {
 	case *kdexv1alpha1.KDexPage:
+		if t.Spec.HostRef.Name != host {
+			return rewriteTargetOtherHostReason, fmt.Sprintf(
+				"rewrite target KDexPage %s belongs to host %q, not %q", t.Name, t.Spec.HostRef.Name, host)
+		}
 		if t.Spec.Rewrite != nil {
 			return rewriteTargetIsRewriteReason, fmt.Sprintf(
 				"rewrite target KDexPage %s is itself a rewrite page; only one hop is allowed", t.Name)
 		}
 	case *kdexv1alpha1.KDexFunction:
+		if t.Spec.HostRef.Name != host {
+			return rewriteTargetOtherHostReason, fmt.Sprintf(
+				"rewrite target KDexFunction %s belongs to host %q, not %q", t.Name, t.Spec.HostRef.Name, host)
+		}
 		if t.Spec.Internal {
 			return rewriteTargetInternalReason, fmt.Sprintf(
 				"rewrite target KDexFunction %s is internal and is not served by the host", t.Name)
