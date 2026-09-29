@@ -149,6 +149,10 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		"Reconciling",
 	)
 
+	if page.Spec.Rewrite != nil {
+		return r.reconcileRewrite(ctx, &page)
+	}
+
 	backendRefs := []kdexv1alpha1.KDexObjectReference{}
 	defaultBackendServerImage := r.Configuration.BackendDefault.ServerImage
 	packageRefs := []kdexv1alpha1.PackageReference{}
@@ -605,6 +609,14 @@ func (r *KDexPageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&kdexv1alpha1.KDexClusterScriptLibrary{},
 			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.ScriptLibraryRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
+		Watches(
+			&kdexv1alpha1.KDexPage{},
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.Rewrite.TargetRef}"),
+			builder.WithPredicates(referencedResourcePredicate)).
+		Watches(
+			&kdexv1alpha1.KDexFunction{},
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexPageList{}, "{.Spec.Rewrite.TargetRef}"),
 			builder.WithPredicates(referencedResourcePredicate)).
 		WithEventFilter(enabledFilter).
 		WithOptions(
