@@ -271,7 +271,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// Localized:false registers only the bare default-language route below,
 	// unconditionally, on every pass through the loop.
 	for _, lang := range translations.Languages() {
-		handler := hh.pageHandlerFunc(pr.ph, translations, lang)
+		var handler http.HandlerFunc = hh.pageHandlerFunc(pr.ph, translations, lang)
+		if pr.ph.Page != nil && pr.ph.Page.Rewrite != nil {
+			handler = hh.rewriteHandlerFunc(pr, lang, mux)
+		}
 
 		if lang.String() == hh.defaultLanguage {
 			if registerIfNew("GET "+regPath, handler) {

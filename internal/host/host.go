@@ -521,6 +521,20 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		renderedPages[basePath] = pageRender{ph: ph}
 	}
 
+	// Resolve each rewrite page's target against THIS snapshot's pages and
+	// functions (#217), so a target that moved, vanished, or changed mode is
+	// reflected on the very rebuild that observed it.
+	pagesByName := make(map[string]page.PageHandler, len(pageHandlers))
+	for _, ph := range pageHandlers {
+		pagesByName[ph.Name] = ph
+	}
+	for bp, pr := range renderedPages {
+		if pr.ph.Page != nil && pr.ph.Page.Rewrite != nil {
+			pr.rewrite, pr.rewriteFound = resolveRewriteTarget(pr.ph.Page.Rewrite.TargetRef, pagesByName, hh.functions)
+			renderedPages[bp] = pr
+		}
+	}
+
 	functionHandlers := []functionHandler{}
 	actualHandlers := map[string]*KDexFunctionHandler{}
 	// reverseProxyHandler dereferences hh.authConfig.ActivePair to construct

@@ -329,4 +329,8 @@ func (h *KDexFunctionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 type pageRender struct {
 	ph page.PageHandler
+	// rewrite / rewriteFound carry a rewrite-mode page's target as resolved
+	// for this snapshot (#217); zero for every other page.
+	rewrite      rewriteTarget
+	rewriteFound bool
 }
