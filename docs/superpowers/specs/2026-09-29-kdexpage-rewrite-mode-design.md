@@ -55,7 +55,7 @@ type RewriteSpec struct {
     // Empty means the target's own registered route (see §3).
     // +kubebuilder:validation:MaxLength=512
     // +kubebuilder:validation:Pattern=`^[^:?#]*$`
-    // +kubebuilder:validation:XValidation:rule="!self.contains('//') && !self.split('/').exists(s, s == '..')",message="rewrite.path must not contain '//' or '..' segments"
+    // +kubebuilder:validation:XValidation:rule="!self.contains('//') && !self.matches('(^|/)[.][.]?(/|$)')",message="rewrite.path must not contain '//', '.' or '..' segments"
     // +kubebuilder:validation:Optional
     Path string `json:"path,omitempty" protobuf:"bytes,2,opt,name=path"`
 
@@ -89,7 +89,7 @@ A rewrite page skips the archetype, header, footer, navigation and script-librar
    - `rewrite.path` contains a `{name}` that is not a wildcard name in this page's `patternPath` (reason `RewriteUnknownPlaceholder`).
 4. Otherwise it proceeds as for other pages, handing the page to the host handler.
 
-A target function that exists but is not Ready is **not** a page-level Degraded condition. The route answers 404 until the function is Ready (see §3). That matches how function routes themselves appear and disappear.
+A target that exists but is not Ready yet (typically a KDexFunction still building) marks the rewrite page `Degraded` with the resolver's generic "referenced … is not ready" condition and requeues, exactly like every other page reference (`ResolveKDexObjectReference`). The static problems above are checked first, so they are never hidden behind readiness.
 
 ## 3. Serving (host-manager `internal/host`)
 
@@ -107,16 +107,16 @@ The resulting target base path is bound into the rewrite handler for that snapsh
 
 For each request:
 
-1. **Own gate.** Run the rewrite page's `security` check, with the same checker, fault handling (500 on a check that fails to run) and denial classification as the page gate. The gate block in `pageHandlerFunc` is extracted into a shared helper that both handlers call, rather than copied.
+1. **Own gate.** Run the rewrite page's `security` check, with the same checker, fault handling (500 on a check that fails to run) and denial classification as the page gate. The gate block in `pageHandlerFunc` is extracted into a shared helper (`pageGateLocked`) that both handlers call, rather than copied. The gate snapshot runs in a closure that takes `hh.mu.RLock` with a deferred `RUnlock` (so a panic in the gate cannot leave the lock held; the #26/#51 bug class), and the same closure reads the canonical base and default language. The lock is released before anything is dispatched.
 2. **Build the target path.** Substitute each `{name}` in `rewrite.path` with `r.PathValue(name)`. A `{rest...}` value may span segments. A substituted value that would introduce a `..` segment or `//` is refused with 400. `path.Clean` is **not** applied to the author's template (CEL already constrains it), only to the substitution check. Then join:
    - **Empty `path`:** dispatch to the target's *registered* form, so the mux never answers with a slash redirect, which would expose the target URL. That is `toFinalPath(basePath)` (trailing slash) for an HTML page target, the exact `basePath` for a text page target, and `basePath` for a function target.
    - **Non-empty `path`:** `strings.TrimSuffix(basePath, "/") + "/" + strings.TrimPrefix(path, "/")`, exactly one slash at the seam. The author's trailing slash (or lack of one) is kept as written, because it decides which of the target's routes matches.
 3. **Language.** For a KDexPage target whose `localized` is true, a request registered under a non-default `/<lang>` prefix goes to `/<lang>` + target path. Every other case, including the default language and every function target, goes to the bare target path.
-4. **Canonical.** If `canonical: true`, set `Link: <scheme://host + target path>; rel="canonical"` before dispatching. The host comes from the request, the same way other absolute URLs in this package are derived.
+4. **Canonical.** If `canonical: true`, set `Link: <absolute target URL>; rel="canonical"` before dispatching. The absolute URL is built from the host's configured scheme and first routing domain (`issuerAddressLocked()`: `hh.scheme` + `Routing.Domains[0]`), never from the request's Host header, so a caller cannot inject its own canonical host. If no base can be derived, no `Link` header is emitted.
 5. **Loop guard.** If the request context already carries the rewrite marker, answer **508 Loop Detected**. Otherwise add the marker. Reconcile already prevents this case; the guard is a safety net for the time between a target changing mode and the next reconcile.
 6. **Dispatch.** Clone the request (`r.Clone`), set `URL.Path` and `URL.RawPath`, keep `URL.RawQuery`, and call `ServeHTTP` on the **mux snapshot captured when the handler was built**, never `hh.Mux`. Authentication and `DesignMiddleware` have already run in the outer wrappers, so dispatching to the inner mux does not repeat them. The target's own handler, and so its own gate, runs as usual.
 
-**Locking (hard requirement).** `rewriteHandler` never acquires `hh.mu`. `pageHandlerFunc` holds `hh.mu.RLock()` for the whole request. A handler that held it while dispatching into a page handler would take the RWMutex read lock twice, and that deadlocks once a writer (`SetHost` under `Lock`) queues between the two. Anything the handler needs (target base path, security requirements, language) is captured when the routes are built. The shared gate helper therefore must not take `hh.mu` itself: the page handler calls it while already holding the lock, and the rewrite handler calls it holding none. If the helper needs `hh` state, it takes a snapshot argument.
+**Locking (hard requirement).** `rewriteHandler` never holds `hh.mu` **across the dispatch**: it runs the alias page's gate (`pageGateLocked`, which needs the lock) under `hh.mu.RLock` (deferred `RUnlock` in a closure), releases it, and only then dispatches. `pageHandlerFunc` holds `hh.mu.RLock()` for the whole request. A handler that held it while dispatching into a page handler would take the RWMutex read lock twice, and that deadlocks once a writer (`SetHost` under `Lock`) queues between the two. Anything else the handler needs (the resolved target base path, localization) is captured when the routes are built. The shared gate helper (`pageGateLocked`) requires its caller to hold the read lock; it never acquires it.
 
 **Methods.** Only `GET` routes are registered, like every page. Non-GET requests to a rewrite path get the mux's usual 405/404.
 
