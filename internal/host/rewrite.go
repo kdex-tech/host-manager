@@ -64,7 +64,9 @@ func resolveRewriteTarget(
 // hh.Mux, which a reconcile may have swapped since.
 //
 // LOCKING: the gate and the canonical base read hh state under hh.mu.RLock,
-// and the lock is released BEFORE dispatch. The target's pageHandlerFunc takes
+// and the lock is released BEFORE dispatch (via a deferred unlock in a
+// closure, so a panic inside the gate cannot leave hh.mu read-locked and wedge
+// every later writer; #26/#51). The target's pageHandlerFunc takes
 // hh.mu.RLock itself; holding it across the dispatch would read-lock twice on
 // one goroutine, which deadlocks as soon as a SetHost writer queues between
 // the two acquisitions.
@@ -77,15 +79,16 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			return
 		}
 		if !pr.rewriteFound {
+			hh.log.V(1).Info("rewrite target not resolvable; serving 404", "page", ph.Name, "targetKind", rw.TargetRef.Kind, "targetName", rw.TargetRef.Name)
 			hh.serveError(w, r, http.StatusNotFound, "not found")
 			return
 		}
 
-		hh.mu.RLock()
-		allowed := hh.pageGateLocked(w, r, ph, lang)
-		base := hh.issuerAddressLocked()
-		defaultLang := hh.defaultLanguage
-		hh.mu.RUnlock()
+		allowed, base, defaultLang := func() (bool, string, string) {
+			hh.mu.RLock()
+			defer hh.mu.RUnlock()
+			return hh.pageGateLocked(w, r, ph, lang), hh.issuerAddressLocked(), hh.defaultLanguage
+		}()
 		if !allowed {
 			return
 		}

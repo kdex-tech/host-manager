@@ -171,6 +171,7 @@ func TestRewrite_LocalizedPageTargetKeepsLanguagePrefix(t *testing.T) {
 	rr := doRequest(t, mux, "GET", "/fr/a/")
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "about", rr.Body.String())
+	assert.Equal(t, "fr", rr.Header().Get("Content-Language"), "served by the /fr route, not the bare default-language one")
 	assertMatches(t, mux, "GET", "/fr/about.txt", "GET /fr/about.txt")
 }
 
@@ -190,6 +191,7 @@ func TestRewrite_MissingTargetIs404(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en"})
 	mux := hh.registerRendersForTest(t, nil,
 		aliasPH("orphan", "/orphan", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("gone")}))
+	assertMatches(t, mux, "GET", "/orphan/", "GET /orphan/{$}")
 	rr := doRequest(t, mux, "GET", "/orphan/")
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
@@ -274,3 +276,15 @@ func TestRewrite_NoDeadlockUnderConcurrentWriter(t *testing.T) {
 }
 
 func metav1ObjectMeta(name string) metav1.ObjectMeta { return metav1.ObjectMeta{Name: name} }
+
+func TestRewrite_DispatchesIntoRegisteredSnapshotNotLiveMux(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	target := textPageForTest(t, "robots", "/robots.txt", "txt", "hello")
+	mux := hh.registerRendersForTest(t, nil, target,
+		aliasPH("bots", "/bots", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")}))
+	hh.Mux = http.NewServeMux() // a reconcile swapped in a different snapshot
+
+	rr := doRequest(t, mux, "GET", "/bots/")
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "hello", rr.Body.String())
+}
