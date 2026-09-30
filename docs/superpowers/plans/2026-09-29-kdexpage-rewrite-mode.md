@@ -14,7 +14,7 @@
 
 **Spec:** `kdex-host-manager/docs/superpowers/specs/2026-09-29-kdexpage-rewrite-mode-design.md` (host-manager#217, folds in #201). Read it before starting.
 
-> **Superseded by #220 (exact page paths).** The Task 4 and Task 7 snippets below predate #220 and show the old slash forms: an HTML target's `exact` as `basePath + "/"`, `GET /docs/v3/{$}`, and alias requests like `/bots/`. After #220, pages register at their exact `basePath`, `exact` is the `basePath` for every target, a rewrite never dispatches into a target's legacy slash 301, and ServeMux trailing-slash redirects are followed internally rather than sent to the client. The spec §3 is authoritative.
+> **Superseded by #220 (exact page paths).** The Task 4 and Task 7 snippets below predate #220 and show the old slash forms: an HTML target's `exact` as `basePath + "/"`, `GET /docs/v3/{$}`, and alias requests like `/bots/`. After #220, pages register at their exact `basePath`, `exact` is the `basePath` for every target, and a rewrite follows every redirect route its target path lands on (any page's legacy slash 301, the default-language 301, ServeMux's trailing-slash redirect) internally, bounded at 3 hops, rather than sending it to the client. The spec §3 is authoritative.
 
 ## Global Constraints
 

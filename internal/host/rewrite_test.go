@@ -74,18 +74,18 @@ func TestResolveRewriteTarget(t *testing.T) {
 
 	got, ok := resolveRewriteTarget(pageRef("docs"), pages, fns)
 	require.True(t, ok)
-	assert.Equal(t, rewriteTarget{basePath: "/docs/v3", exact: "/docs/v3", localized: true, legacySlash: true}, got,
-		"HTML target registers at its exact basePath (#220), with a legacy slash redirect")
+	assert.Equal(t, rewriteTarget{basePath: "/docs/v3", exact: "/docs/v3", localized: true}, got,
+		"HTML target registers at its exact basePath (#220)")
 
 	got, ok = resolveRewriteTarget(pageRef("dir"), pages, fns)
 	require.True(t, ok)
 	assert.Equal(t, rewriteTarget{basePath: "/guides/", exact: "/guides/", localized: true}, got,
-		"a slash-terminated basePath is registered at that same string via {$}, with no legacy slash redirect")
+		"a slash-terminated basePath is registered at that same string via {$}")
 
 	got, ok = resolveRewriteTarget(pageRef("robots"), pages, fns)
 	require.True(t, ok)
 	assert.Equal(t, rewriteTarget{basePath: "/robots.txt", exact: "/robots.txt", localized: true}, got,
-		"text target registers at its exact basePath, with no legacy slash redirect")
+		"text target registers at its exact basePath")
 
 	got, ok = resolveRewriteTarget(pageRef("unloc"), pages, fns)
 	require.True(t, ok)
@@ -551,4 +551,89 @@ func TestRewrite_SlashlessAliasReachesSlashOnlyTarget(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "profile", rr.Body.String())
 	assert.Empty(t, rr.Header().Get("Location"))
+}
+
+// A rewrite must never dispatch into ANY page's internal redirect route --
+// here a sibling page's #220 legacy slash 301 -- since its Location names a
+// target URL. The redirect is followed internally, and the canonical Link
+// names the final path (R15).
+func TestRewrite_FollowsSiblingLegacySlashRedirectInternally(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	hh.host.Routing.Domains = []string{"example.com"}
+	hh.scheme = "https"
+	mux := hh.registerRendersForTest(t, nil,
+		htmlPageForTest("docs", "/docs/v3"),
+		htmlPageForTest("guide", "/docs/v3/guide"),
+		aliasPH("latest", "/docs/latest", "/docs/latest/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs"), Path: "{rest}", Canonical: true}))
+
+	// Precondition: the sibling's own legacy slash form is a 301.
+	require.Equal(t, http.StatusMovedPermanently, doRequest(t, mux, "GET", "/docs/v3/guide/").Code)
+
+	for path, canonical := range map[string]string{
+		"/docs/latest/guide/":    "https://example.com/docs/v3/guide",
+		"/fr/docs/latest/guide/": "https://example.com/fr/docs/v3/guide",
+	} {
+		rr := doRequest(t, mux, "GET", path)
+		assert.Equal(t, http.StatusOK, rr.Code, path)
+		assert.Contains(t, rr.Body.String(), "guide", path)
+		assert.Empty(t, rr.Header().Get("Location"), path)
+		assert.Equal(t, "<"+canonical+`>; rel="canonical"`, rr.Header().Get("Link"), path)
+	}
+}
+
+// A root target reaches every page, so the value can land on any page's
+// legacy slash 301, on the default language's 301, or on a chain of those and
+// ServeMux's own slash redirect: all are followed internally (R15).
+func TestRewrite_RootTargetFollowsInternalRedirects(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en", "fr"})
+	profile := textPageForTest(t, "profile", "/profile", "txt", "profile")
+	profile.Page.PatternPath = "/profile/{user}/"
+	mux := hh.registerRendersForTest(t, nil,
+		htmlPageForTest("root", "/"),
+		htmlPageForTest("about", "/about"),
+		profile,
+		aliasPH("m", "/m", "/m/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("root"), Path: "{rest}"}))
+
+	for path, body := range map[string]string{
+		"/m/about":           "about",   // no redirect at all
+		"/m/about/":          "about",   // about's legacy slash 301
+		"/m/en/about":        "about",   // the default-language 301
+		"/m/en/about/":       "about",   // the default-language prefix's legacy slash 301
+		"/m/en/profile/bob":  "profile", // ServeMux slash redirect, then the default-language 301
+		"/m/en/profile/bob/": "profile", // the default-language 301 on the pattern route
+	} {
+		rr := doRequest(t, mux, "GET", path)
+		assert.Equal(t, http.StatusOK, rr.Code, path)
+		assert.Contains(t, rr.Body.String(), body, path)
+		assert.Empty(t, rr.Header().Get("Location"), path)
+	}
+}
+
+// Following internal redirects is bounded: a chain of up to
+// maxRewriteRedirectHops is followed, a longer chain or a cycle is 508 Loop
+// Detected (like the second-hop guard), and no Location reaches the client.
+func TestRewrite_InternalRedirectChainIsBounded(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := hh.registerRendersForTest(t, nil,
+		htmlPageForTest("root", "/"),
+		htmlPageForTest("about", "/about"),
+		aliasPH("m", "/m", "/m/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("root"), Path: "{rest}"}))
+	// Hand-built topologies no page registration produces today.
+	mux.Handle("GET /h0", legacySlashRedirect{canonical: "/h1"})
+	mux.Handle("GET /h1", legacySlashRedirect{canonical: "/h2"})
+	mux.Handle("GET /h2", legacySlashRedirect{canonical: "/h3"})
+	mux.Handle("GET /h3", legacySlashRedirect{canonical: "/about"})
+	mux.Handle("GET /c1", legacySlashRedirect{canonical: "/c2"})
+	mux.Handle("GET /c2", legacySlashRedirect{canonical: "/c1"})
+	mux.Handle("GET /self", defaultLangRedirect{prefix: "/x"}) // trims nothing: redirects to itself
+
+	rr := doRequest(t, mux, "GET", "/m/h1") // 3 hops
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), "about")
+
+	for _, path := range []string{"/m/h0", "/m/c1", "/m/self"} {
+		rr := doRequest(t, mux, "GET", path)
+		assert.Equal(t, http.StatusLoopDetected, rr.Code, path)
+		assert.Empty(t, rr.Header().Get("Location"), path)
+	}
 }

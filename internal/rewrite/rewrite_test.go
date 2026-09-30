@@ -91,7 +91,7 @@ func TestTarget_SingleSegmentValueWithSlashIsNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/a/b", got)
 	// Traversal in a single-segment value is still unsafe (400), not 404.
-	_, err = Target("/p", "/p/", "{id}", "/m/{id}", vals(map[string]string{"id": ".."}))
+	_, err = Target("/p", "/p", "{id}", "/m/{id}", vals(map[string]string{"id": ".."}))
 	assert.ErrorIs(t, err, ErrUnsafe)
 }
 
@@ -103,6 +103,6 @@ func TestTarget_EmptyValueLeavingDoubleSlashIsNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 	_, err = Target("/profile", "/profile", "a/{x}/b", "/u/{x}", vals(map[string]string{"x": ""}))
 	assert.ErrorIs(t, err, ErrNotFound)
-	_, err = Target("/d", "/d/", "{x}/{rest}", "/u/{x}/{rest...}", vals(map[string]string{"x": "", "rest": "a//b"}))
+	_, err = Target("/d", "/d", "{x}/{rest}", "/u/{x}/{rest...}", vals(map[string]string{"x": "", "rest": "a//b"}))
 	assert.ErrorIs(t, err, ErrUnsafe, "an empty value never masks a genuinely unsafe one")
 }

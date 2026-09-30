@@ -54,50 +54,70 @@ func isLocalized(b *bool) bool {
 	return b == nil || *b
 }
 
-// defaultLangRedirectHandler returns a handler that 301-redirects a request
-// under the default language's own literal prefix (e.g. "/en/pricing") to
-// the canonical bare path ("/pricing"), by trimming langPrefix -- the
-// "/<default>" prefix itself (e.g. "/en") -- once from the front of
-// r.URL.Path. Trimming the known prefix, rather than string-replacing the
-// language code, keeps a segment like "/en/enterprise" from being mangled
-// into something other than "/enterprise".
-func defaultLangRedirectHandler(langPrefix string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		target := strings.TrimPrefix(r.URL.Path, langPrefix)
-		// A canonicalizing 301 must not drop the caller's query string (e.g.
-		// GET /en/pricing?tab=x should land on /pricing?tab=x, not
-		// /pricing) -- precedent: TestPageHandlerFunc_LoginReturnPreservesQueryString.
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, target, http.StatusMovedPermanently)
+// internalRedirect is a page route whose only job is to redirect to another
+// path on this host: the #220 legacy slash form and the default-language
+// prefix. redirectPath returns the path (no query) the route would redirect
+// r to. A rewrite follows these routes internally instead of dispatching into
+// them, so their Location -- which names the TARGET's URL -- never reaches
+// the client (#217).
+type internalRedirect interface {
+	http.Handler
+	redirectPath(r *http.Request) string
+}
+
+var (
+	_ internalRedirect = defaultLangRedirect{}
+	_ internalRedirect = legacySlashRedirect{}
+)
+
+// permanentRedirect 301-redirects to path, keeping the caller's query string:
+// a canonicalizing 301 must not drop it (e.g. GET /en/pricing?tab=x should
+// land on /pricing?tab=x, not /pricing) -- precedent:
+// TestPageHandlerFunc_LoginReturnPreservesQueryString.
+func permanentRedirect(w http.ResponseWriter, r *http.Request, path string) {
+	if r.URL.RawQuery != "" {
+		path += "?" + r.URL.RawQuery
 	}
+	http.Redirect(w, r, path, http.StatusMovedPermanently)
 }
 
-// hasLegacySlashRoute reports whether a page at basePath also registers its
-// legacy slash form (/pricing/) as a 301 to the bare path (#220). HTML pages
-// only: text pages (robots.txt) never had a meaningful slash form, and a
-// slash-terminated basePath is already its own slash form.
-func hasLegacySlashRoute(basePath string, spec *kdexv1alpha1.KDexPageSpec) bool {
-	return !strings.HasSuffix(basePath, "/") && (spec == nil || spec.MimeType == "")
+// defaultLangRedirect 301-redirects a request under the default language's
+// own literal prefix (e.g. "/en/pricing") to the canonical bare path
+// ("/pricing"), by trimming prefix -- the "/<default>" prefix itself (e.g.
+// "/en") -- once from the front of r.URL.Path. Trimming the known prefix,
+// rather than string-replacing the language code, keeps a segment like
+// "/en/enterprise" from being mangled into something other than
+// "/enterprise".
+type defaultLangRedirect struct{ prefix string }
+
+func (h defaultLangRedirect) redirectPath(r *http.Request) string {
+	return strings.TrimPrefix(r.URL.Path, h.prefix)
 }
 
-// legacySlashRedirectHandler returns a handler that 301-redirects the legacy
-// slash form of a page (e.g. "/pricing/", "/fr/pricing/", "/en/pricing/") to
-// canonicalPath, the bare canonical path captured at registration
-// ("/pricing", "/fr/pricing", "/pricing"; the default-language prefix's slash
-// form targets the bare path in one hop). The Location is deliberately NOT
-// derived from r.URL.Path, so a request re-dispatched with a different path
-// (e.g. by a rewrite) still lands on the registered canonical URL. The query
-// string is kept.
+func (h defaultLangRedirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	permanentRedirect(w, r, h.redirectPath(r))
+}
+
+// legacySlashRedirect 301-redirects the legacy slash form of a page (e.g.
+// "/pricing/", "/fr/pricing/", "/en/pricing/") to canonical, the bare
+// canonical path captured at registration ("/pricing", "/fr/pricing",
+// "/pricing"; the default-language prefix's slash form targets the bare path
+// in one hop). The Location is deliberately NOT derived from r.URL.Path, so a
+// request re-dispatched with a different path (e.g. by a rewrite) still lands
+// on the registered canonical URL. The query string is kept.
+type legacySlashRedirect struct{ canonical string }
+
+func (h legacySlashRedirect) redirectPath(*http.Request) string { return h.canonical }
+
+func (h legacySlashRedirect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	permanentRedirect(w, r, h.canonical)
+}
+
+// legacySlashRedirectHandler is legacySlashRedirect as a plain function, for
+// direct invocation. Routes register the legacySlashRedirect value itself, so
+// that a rewrite can recognize it as an internalRedirect.
 func legacySlashRedirectHandler(canonicalPath string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		target := canonicalPath
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, target, http.StatusMovedPermanently)
-	}
+	return legacySlashRedirect{canonical: canonicalPath}.ServeHTTP
 }
 
 func (hh *HostHandler) addHandlerAndRegister(
@@ -119,7 +139,11 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// HTML and text pages register identically at their exact path;
 	// toFinalPath only anchors slash-terminated basePaths (e.g. "/").
 	regPath := toFinalPath(basePath)
-	legacySlash := hasLegacySlashRoute(basePath, pr.ph.Page)
+	// Legacy slash form (/pricing/) -> 301 to the bare path. HTML pages
+	// only: text pages (robots.txt) never had a meaningful slash form, and a
+	// slash-terminated basePath is already its own slash form.
+	legacySlash := !strings.HasSuffix(basePath, "/") &&
+		(pr.ph.Page == nil || pr.ph.Page.MimeType == "")
 	label := pr.ph.Label()
 
 	// regFunc registers OpenAPI docs for one concrete route. lang is the
@@ -226,10 +250,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 	//     colliding page's route is refused -- never silently served, never
 	//     silently dropped without a record -- logged at Error and recorded
 	//     on routes for the reconciler to surface as a Degraded condition.
-	registerIfNew := func(pattern string, handler http.HandlerFunc) bool {
+	registerIfNew := func(pattern string, handler http.Handler) bool {
 		if !patternRegistered(mux, pattern) {
 			routes.claim(pattern, owner)
-			mux.HandleFunc(pattern, handler)
+			mux.Handle(pattern, handler)
 			return true
 		}
 
@@ -279,7 +303,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// no prefix; every other supported language gets its own concrete
 	// "/<lang>" + regPath route. The default language additionally gets
 	// its own literal prefix, but registered as a 301 redirect to the
-	// canonical bare path (see defaultLangRedirectHandler) rather than a
+	// canonical bare path (see defaultLangRedirect) rather than a
 	// second copy of the page, so /en/pricing canonicalizes to /pricing
 	// instead of existing under two indexable URLs.
 	//
@@ -300,7 +324,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			}
 			if legacySlash {
 				// Compatibility redirect: deliberately no OpenAPI entry (regFunc).
-				registerIfNew("GET "+regPath+"/{$}", legacySlashRedirectHandler(regPath))
+				registerIfNew("GET "+regPath+"/{$}", legacySlashRedirect{canonical: regPath})
 			}
 			if patternPath != "" {
 				if registerIfNew("GET "+patternPath, handler) {
@@ -313,14 +337,14 @@ func (hh *HostHandler) addHandlerAndRegister(
 			}
 
 			defaultPrefix := "/" + lang.String()
-			redirectHandler := defaultLangRedirectHandler(defaultPrefix)
+			redirectHandler := defaultLangRedirect{prefix: defaultPrefix}
 
 			prefixedFinalPath := defaultPrefix + regPath
 			if registerIfNew("GET "+prefixedFinalPath, redirectHandler) {
 				regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 			}
 			if legacySlash {
-				registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(regPath))
+				registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirect{canonical: regPath})
 			}
 			if patternPath != "" {
 				prefixedPatternPath := defaultPrefix + patternPath
@@ -340,7 +364,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 			regFunc(prefixedFinalPath, pr.ph.Name, label, false, lang.String())
 		}
 		if legacySlash {
-			registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirectHandler(prefixedFinalPath))
+			registerIfNew("GET "+prefixedFinalPath+"/{$}", legacySlashRedirect{canonical: prefixedFinalPath})
 		}
 		if patternPath != "" {
 			prefixedPatternPath := "/" + lang.String() + patternPath
