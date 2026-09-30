@@ -252,8 +252,13 @@ func (hh *HostHandler) addHandlerAndRegister(
 	//     on routes for the reconciler to surface as a Degraded condition.
 	registerIfNew := func(pattern string, handler http.Handler) bool {
 		if !patternRegistered(mux, pattern) {
-			routes.claim(pattern, owner)
+			// Claim only once mux.Handle succeeded: a pattern ServeMux
+			// refuses (invalid, or a non-exact conflict) panics to the
+			// recover below and is NOT registered, so a claim left behind
+			// would be a phantom -- named as the winner by, or even
+			// panicking, routeRegistry.conflictWith.
 			mux.Handle(pattern, handler)
+			routes.claim(pattern, owner)
 			return true
 		}
 

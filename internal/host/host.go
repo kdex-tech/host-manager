@@ -485,17 +485,17 @@ func (rr *routeRegistry) conflictWith(pattern string) (string, routeOwner, bool)
 }
 
 // muxPatternsConflict reports whether ServeMux refuses to register b once a
-// is registered.
-func muxPatternsConflict(a, b string) (conflict bool) {
+// is registered. It never panics: an a that ServeMux cannot register at all
+// (e.g. a patternPath with a duplicate wildcard; nothing validates
+// patternPath) conflicts with nothing, and only b's refusal is a conflict.
+// A panic here would escape rebuildMuxSnapshot -- the stale-mux failure
+// registerFunctionRoutes exists to prevent.
+func muxPatternsConflict(a, b string) bool {
 	scratch := http.NewServeMux()
-	scratch.Handle(a, http.NotFoundHandler())
-	defer func() {
-		if recover() != nil {
-			conflict = true
-		}
-	}()
-	scratch.Handle(b, http.NotFoundHandler())
-	return false
+	if handleRecovered(scratch, a, http.NotFoundHandler()) != nil {
+		return false
+	}
+	return handleRecovered(scratch, b, http.NotFoundHandler()) != nil
 }
 
 // registerFunctionRoutes registers a function's exact path and its prefix

@@ -815,3 +815,19 @@ func TestRewriteWriter_PreservesErrorWriterInterfaces(t *testing.T) {
 	assert.Equal(t, `Bearer realm="x"`, ew.preserved["Www-Authenticate"])
 	assert.Same(t, ew, GetErrorResponseWriter(rw))
 }
+
+// With auth disabled everything is public (applyCachingHeadersWithSeed's
+// rule), so even an alias carrying requirements leaves the target's public
+// caching untouched.
+func TestRewrite_GatedAliasOnAuthDisabledHostKeepsTargetCaching(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	require.False(t, hh.IsAuthEnabled())
+	target := textPageForTest(t, "robots", "/robots.txt", "txt", "hello")
+	alias := aliasPH("k", "/k", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")})
+	alias.Page.Security = bearerSecurity
+	mux := hh.registerRendersForTest(t, nil, target, alias)
+
+	rr := doRequest(t, mux, "GET", "/k")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "public, max-age=3600, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+}

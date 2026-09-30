@@ -174,3 +174,85 @@ func TestRebuildMux_FunctionConflictWithPageDoesNotPanic(t *testing.T) {
 		assert.Equal(t, "GET /x/{path...}", c.ConflictingPattern)
 	}
 }
+
+// muxPatternsConflict must never panic itself: a tracked pattern ServeMux
+// cannot even parse (a patternPath with a duplicate wildcard; nothing
+// validates patternPath) conflicts with nothing.
+func TestMuxPatternsConflict_InvalidFirstPatternIsNoConflict(t *testing.T) {
+	var conflict bool
+	require.NotPanics(t, func() { conflict = muxPatternsConflict("GET /a/{p}/{p}", "/x/v1") })
+	assert.False(t, conflict)
+	assert.True(t, muxPatternsConflict("GET /x/{path...}", "/x/v1"))
+}
+
+// A page whose patternPath is invalid for ServeMux must not leave a claim
+// behind: the conflict scan run when a function is refused would probe it
+// and panic out of the rebuild -- the very stale-mux failure Fix A prevents.
+func TestRebuildMux_InvalidPagePatternDoesNotPanicFunctionConflictScan(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "upstream")
+	}))
+	t.Cleanup(upstream.Close)
+
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.host.Routing.Domains = []string{"example.com"}
+	hh.scheme = "https"
+	hh.authConfig = challengeFixtureAuthConfig(t)
+
+	invalid := textPageForTest(t, "invalid", "/a", "txt", "a")
+	invalid.Page.PatternPath = "/a/{p}/{p}"
+	catchAll := textPageForTest(t, "catchall", "/x", "txt", "page")
+	catchAll.Page.PatternPath = "/x/{path...}"
+	hh.Pages.Set(invalid)
+	hh.Pages.Set(catchAll)
+	hh.functions = []kdexv1alpha1.KDexFunction{
+		readyFunction("api", "/x/v1", upstream.URL),
+		readyFunction("other", "/y", upstream.URL),
+	}
+
+	require.NotPanics(t, hh.RebuildMux)
+
+	mux := hh.Mux
+	assert.Equal(t, "a", doRequest(t, mux, "GET", "/a").Body.String())
+	assert.Equal(t, "page", doRequest(t, mux, "GET", "/x/v1/items").Body.String())
+	assert.Equal(t, "upstream", doRequest(t, mux, "GET", "/y/z").Body.String())
+
+	collisions := hh.RouteCollisions()
+	require.Len(t, collisions, 2, "%+v", collisions)
+	for _, c := range collisions {
+		assert.Equal(t, "KDexFunction/api", c.LoserName)
+		assert.Equal(t, "catchall", c.WinnerName)
+		assert.Equal(t, "GET /x/{path...}", c.ConflictingPattern)
+	}
+}
+
+// A page pattern that lost a non-exact ServeMux conflict (recovered per page)
+// is not registered, so it must not stay claimed: otherwise the function
+// conflict scan names that phantom as the winner instead of the route that
+// really serves.
+func TestRegisterFunctionRoutes_LostPagePatternIsNotAPhantomWinner(t *testing.T) {
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	mux := http.NewServeMux()
+	routes := newRouteRegistry()
+
+	b := textPageForTest(t, "b-page", "/pb", "txt", "b")
+	b.Page.PatternPath = "/x/{b}"
+	a := textPageForTest(t, "a-page", "/pa", "txt", "a")
+	a.Page.PatternPath = "/x/{a}" // same requests as GET /x/{b}: ServeMux refuses it
+	all := textPageForTest(t, "catchall", "/x", "txt", "page")
+	all.Page.PatternPath = "/x/{path...}"
+
+	require.NoError(t, hh.addHandlerAndRegister(mux, pageRender{ph: b}, hh.registeredPaths, &hh.Translations, routes))
+	require.Error(t, hh.addHandlerAndRegister(mux, pageRender{ph: a}, hh.registeredPaths, &hh.Translations, routes))
+	require.NoError(t, hh.addHandlerAndRegister(mux, pageRender{ph: all}, hh.registeredPaths, &hh.Translations, routes))
+
+	_, phantom := routes.claimedBy("GET /x/{a}")
+	assert.False(t, phantom, "a refused page pattern must not stay claimed")
+
+	hh.registerFunctionRoutes(mux, functionHandler{name: "api", basePath: "/x/v1", handler: stubHandler("fn")}, routes)
+	require.NotEmpty(t, routes.collisions)
+	c := routes.collisions[0]
+	assert.Equal(t, "/x/v1", c.Pattern)
+	assert.Equal(t, "GET /x/{b}", c.ConflictingPattern)
+	assert.Equal(t, "b-page", c.WinnerName)
+}
