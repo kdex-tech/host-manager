@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -375,10 +376,11 @@ type rebuildSnapshot struct {
 	// hh.functionHandlers with the empty map) from the not-ready case
 	// (don't touch hh.functionHandlers at all).
 	hasFunctionHandlers bool
-	// routeCollisions is this build's page-vs-page route collisions (see
-	// RouteCollision). Always assigned (possibly nil/empty) on every
-	// successful build, so a rebuild that no longer collides clears a
-	// previously-recorded collision instead of leaving it stale.
+	// routeCollisions is this build's route collisions, page-vs-page and
+	// refused function routes (see RouteCollision). Always assigned
+	// (possibly nil/empty) on every successful build, so a rebuild that no
+	// longer collides clears a previously-recorded collision instead of
+	// leaving it stale.
 	routeCollisions []RouteCollision
 }
 
@@ -450,6 +452,98 @@ func (rr *routeRegistry) recordCollision(pattern string, winner routeOwner, lose
 		LoserName:      loser.name,
 		LoserBasePath:  loser.basePath,
 	})
+}
+
+// recordConflict records a refused registration of pattern (by loser) that
+// ServeMux reported as conflicting with conflictingPattern, owned by winner.
+// Both are zero when the conflicting route is not tracked by rr.
+func (rr *routeRegistry) recordConflict(pattern, conflictingPattern string, winner, loser routeOwner) {
+	rr.collisions = append(rr.collisions, RouteCollision{
+		Pattern:            pattern,
+		ConflictingPattern: conflictingPattern,
+		WinnerName:         winner.name,
+		WinnerBasePath:     winner.basePath,
+		LoserName:          loser.name,
+		LoserBasePath:      loser.basePath,
+	})
+}
+
+// conflictWith finds the tracked pattern that pattern conflicts with in
+// ServeMux's sense, which is not exact equality, so the owners map cannot be
+// indexed by pattern. Each candidate is tried against pattern on a scratch
+// ServeMux, in sorted order so the answer is deterministic. It runs only
+// after a registration was refused, so the scan is off the hot path. ok is
+// false when no tracked pattern conflicts: the route in the way is a built-in
+// system route (muxWithDefaultsLocked), which rr does not track.
+func (rr *routeRegistry) conflictWith(pattern string) (string, routeOwner, bool) {
+	for _, candidate := range slices.Sorted(maps.Keys(rr.owners)) {
+		if muxPatternsConflict(candidate, pattern) {
+			return candidate, rr.owners[candidate], true
+		}
+	}
+	return "", routeOwner{}, false
+}
+
+// muxPatternsConflict reports whether ServeMux refuses to register b once a
+// is registered.
+func muxPatternsConflict(a, b string) (conflict bool) {
+	scratch := http.NewServeMux()
+	scratch.Handle(a, http.NotFoundHandler())
+	defer func() {
+		if recover() != nil {
+			conflict = true
+		}
+	}()
+	scratch.Handle(b, http.NotFoundHandler())
+	return false
+}
+
+// registerFunctionRoutes registers a function's exact path and its prefix
+// path (with trailing slash, so every sub-path is proxied).
+//
+// Function routes are not method-scoped, so ServeMux panics when one
+// conflicts with a page route (any-method "/x/v1/" vs "GET /x/{path...}":
+// neither is more specific). Unguarded, that panic escaped rebuildMuxSnapshot
+// and RebuildMux never swapped in a new mux, so the host served a stale
+// snapshot and every later rebuild panicked again. Each pattern is instead
+// registered on its own, and a conflicting one is refused -- logged at Error
+// and recorded on routes for the Degraded/RouteCollision condition -- while
+// the function's other pattern still registers. Pages register first, so
+// they keep the route, exactly as before.
+//
+// ServeMux checks for a conflict before it mutates anything, so a recovered
+// registration leaves mux unchanged.
+func (hh *HostHandler) registerFunctionRoutes(mux *http.ServeMux, fh functionHandler, routes *routeRegistry) {
+	owner := routeOwner{name: FunctionRouteOwnerPrefix + fh.name, basePath: fh.basePath}
+	patterns := []string{fh.basePath}
+	if !strings.HasSuffix(fh.basePath, "/") {
+		patterns = append(patterns, fh.basePath+"/")
+	}
+	for _, pattern := range patterns {
+		if err := handleRecovered(mux, pattern, fh.handler); err != nil {
+			conflictingPattern, winner, known := routes.conflictWith(pattern)
+			routes.recordConflict(pattern, conflictingPattern, winner, owner)
+			hh.log.Error(err,
+				"route conflict: refusing to register function's route because it conflicts with an existing route",
+				"function", fh.name, "basePath", fh.basePath, "pattern", pattern,
+				"conflictingPattern", conflictingPattern, "conflictingOwner", winner.name,
+				"conflictingOwnerKnown", known,
+			)
+			continue
+		}
+		routes.claim(pattern, owner)
+	}
+}
+
+// handleRecovered is mux.Handle, returning its panic as an error.
+func handleRecovered(mux *http.ServeMux, pattern string, handler http.Handler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
+	mux.Handle(pattern, handler)
+	return nil
 }
 
 // rebuildMuxSnapshot performs all reads and assembles the new mux under a
@@ -567,6 +661,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 			}
 			actualHandlers[f.Spec.API.BasePath] = fh
 			functionHandlers = append(functionHandlers, functionHandler{
+				name:     f.Name,
 				basePath: f.Spec.API.BasePath,
 				handler:  fh,
 			})
@@ -596,12 +691,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		}
 	}
 	for _, fh := range functionHandlers {
-		// Register both the exact path and the prefix path (with trailing slash)
-		// to ensure all sub-paths are proxied correctly.
-		mux.Handle(fh.basePath, fh.handler)
-		if !strings.HasSuffix(fh.basePath, "/") {
-			mux.Handle(fh.basePath+"/", fh.handler)
-		}
+		hh.registerFunctionRoutes(mux, fh, routes)
 	}
 
 	return rebuildSnapshot{

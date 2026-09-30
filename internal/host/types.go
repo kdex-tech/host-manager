@@ -131,6 +131,10 @@ type HostHandler struct {
 	utilityPages         map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler
 }
 
+// FunctionRouteOwnerPrefix prefixes a KDexFunction's name when it is a
+// RouteCollision's WinnerName or LoserName, telling it apart from a page.
+const FunctionRouteOwnerPrefix = "KDexFunction/"
+
 // RouteCollision records a page registration refused during the most recent
 // RebuildMux because a DIFFERENT, earlier-claimed page already owns the
 // literal "METHOD /path" ServeMux pattern it wanted.
@@ -148,20 +152,36 @@ type HostHandler struct {
 // see rebuildMuxSnapshot) processes first; the loser's route is refused
 // outright rather than silently served or silently dropped -- see
 // RouteCollisions.
+//
+// A KDexFunction route is refused the same way (see registerFunctionRoutes):
+// functions register after every page, so a function pattern that ServeMux
+// reports as conflicting with an already-registered route loses. ServeMux
+// conflicts are not exact-pattern equality (e.g. "/x/v1/" conflicts with
+// "GET /x/{path...}"), so such a collision also carries ConflictingPattern.
+// Function owners are named FunctionRouteOwnerPrefix + the function's name.
 type RouteCollision struct {
-	// Pattern is the "METHOD /path" ServeMux pattern both pages wanted.
+	// Pattern is the ServeMux pattern whose registration was refused: the
+	// "METHOD /path" pattern both pages wanted, or the function's pattern.
 	Pattern string
-	// WinnerName / WinnerBasePath identify the page that keeps the route.
+	// ConflictingPattern is the already-registered pattern a refused
+	// function pattern conflicts with, when the build tracked it. Empty for a
+	// page-vs-page collision (the pattern is Pattern itself) and when the
+	// conflicting route is untracked (a built-in system route), in which case
+	// WinnerName is empty too.
+	ConflictingPattern string
+	// WinnerName / WinnerBasePath identify the page (or function) that keeps
+	// the route.
 	WinnerName     string
 	WinnerBasePath string
-	// LoserName / LoserBasePath identify the page whose registration for
-	// Pattern was refused.
+	// LoserName / LoserBasePath identify the page (or function) whose
+	// registration for Pattern was refused.
 	LoserName     string
 	LoserBasePath string
 }
 
-// RouteCollisions returns the page-vs-page route collisions detected by the
-// most recent RebuildMux. Empty when none were found. Callers (e.g. the
+// RouteCollisions returns the route collisions (page-vs-page, and refused
+// KDexFunction routes) detected by the most recent RebuildMux. Empty when
+// none were found. Callers (e.g. the
 // KDexInternalHost reconciler) use this to surface a Degraded status
 // condition -- registration itself never silently serves or drops a
 // colliding route without recording it here.
@@ -273,6 +293,9 @@ func (t *Translations) Languages() []language.Tag {
 }
 
 type functionHandler struct {
+	// name is the KDexFunction's name, carried into a RouteCollision (as
+	// "KDexFunction/<name>") when one of its routes is refused.
+	name     string
 	basePath string
 	handler  http.Handler
 }

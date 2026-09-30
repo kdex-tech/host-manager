@@ -2036,7 +2036,8 @@ func objectStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
 }
 
 // routeCollisionConditionReason is the Degraded condition's Reason when
-// setRouteCollisionCondition finds a page-vs-page route collision.
+// setRouteCollisionCondition finds a route collision: page-vs-page, or a
+// refused KDexFunction route.
 // ConditionReason has no fixed enum in the CRD schema (see kdex-crds's
 // conditions.go: it is a bare string type checked only against the
 // Kubernetes API convention regex on Reason), so this is a controller-local
@@ -2045,7 +2046,7 @@ func objectStatusEqual(a, b *kdexv1alpha1.KDexObjectStatus) bool {
 const routeCollisionConditionReason kdexv1alpha1.ConditionReason = "RouteCollision"
 
 // setRouteCollisionCondition surfaces the HostHandler's most recently
-// detected page-vs-page route collisions (host.RouteCollision -- collected
+// detected route collisions (host.RouteCollision -- collected
 // during rebuildMuxSnapshot, see internal/host/host.go and handlers.go) as
 // the KDexInternalHost's Degraded condition, so an operator sees the
 // authoring conflict without having to go find the Error-level host-manager
@@ -2083,18 +2084,35 @@ func (r *KDexInternalHostReconciler) setRouteCollisionCondition(internalHost *kd
 }
 
 // formatRouteCollisions renders collisions as a single Degraded-condition
-// message naming every colliding pattern and the two pages fighting over it.
+// message naming every refused pattern, the route it lost to, and the page or
+// function whose registration was refused.
 func formatRouteCollisions(collisions []host.RouteCollision) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d route collision(s) detected; each loser page is unreachable at its colliding pattern: ", len(collisions))
+	fmt.Fprintf(&b, "%d route collision(s) detected; each refused route is unreachable for its loser: ", len(collisions))
 	for i, c := range collisions {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		fmt.Fprintf(&b, "%s claimed by page %q (basePath %q), refused for page %q (basePath %q)",
-			c.Pattern, c.WinnerName, c.WinnerBasePath, c.LoserName, c.LoserBasePath)
+		switch {
+		case c.WinnerName == "":
+			fmt.Fprintf(&b, "%s conflicts with an existing route", c.Pattern)
+		case c.ConflictingPattern != "":
+			fmt.Fprintf(&b, "%s conflicts with %s claimed by %s", c.Pattern, c.ConflictingPattern, routeOwnerLabel(c.WinnerName, c.WinnerBasePath))
+		default:
+			fmt.Fprintf(&b, "%s claimed by %s", c.Pattern, routeOwnerLabel(c.WinnerName, c.WinnerBasePath))
+		}
+		fmt.Fprintf(&b, ", refused for %s", routeOwnerLabel(c.LoserName, c.LoserBasePath))
 	}
 	return b.String()
+}
+
+// routeOwnerLabel renders a RouteCollision owner as `page "x" (basePath "/x")`
+// or, for a KDexFunction owner, `function "x" (basePath "/x")`.
+func routeOwnerLabel(name, basePath string) string {
+	if fn, ok := strings.CutPrefix(name, host.FunctionRouteOwnerPrefix); ok {
+		return fmt.Sprintf("function %q (basePath %q)", fn, basePath)
+	}
+	return fmt.Sprintf("page %q (basePath %q)", name, basePath)
 }
 
 func (r *KDexInternalHostReconciler) returnDegraged(internalHost *kdexv1alpha1.KDexInternalHost, err error) error {
