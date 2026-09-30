@@ -229,6 +229,16 @@ lags to the next refresh.)
   login with a generic reason) — only an explicit `failure-mode:
   fail-open` on that hook's Secret allows the login through when the hook is
   unreachable.
+- **Subject-Secret logins are exempt from enforcing `login` hooks.** A
+  subject authenticated by a `kdex.dev/secret-type: subject` Secret (a
+  KDexSubject, e.g. a break-glass admin) is a static, operator-authored
+  account: enforcing `login` hooks are not called for it, regardless of
+  `failure-mode`, and neither is the post-gate re-resolve (there is no gate to
+  have provisioned anything). This keeps break-glass login working while the
+  user manager behind a fail-closed hook is down. The exemption is logged at
+  default verbosity (`login exempt from enforcing login hooks`, logger
+  `auth-event-hook`); advisory `login` and `login-failed` hooks still fire.
+  Subjects from every other source (`http-lookup-auth`, LDAP) remain gated.
 - **Enforcing `logout`** hooks run as sequential *barriers*, each bounded by
   its own `timeout-ms`, but **never refuse the logout** — a failure (or an
   `ok: false` response) is logged and logout proceeds regardless of

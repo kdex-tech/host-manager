@@ -747,3 +747,40 @@ func TestSecretLookup_FindInternal_BcryptHappyPaths(t *testing.T) {
 		assert.Error(t, ferr)
 	})
 }
+
+// TestScopeProvider_FindInternalWithSource_ReportsVouchingLookup pins the
+// provenance LoginLocal keys the break-glass hook exemption on: the source is
+// the Type() of the lookup that vouched, so a subject Secret reports
+// LookupTypeSecret and a subject resolved further down the chain does not.
+// See kdex-tech/host-manager#226.
+func TestScopeProvider_FindInternalWithSource_ReportsVouchingLookup(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok": true, "claims": {"sub": "alice"}}`))
+	}))
+	defer srv.Close()
+	httpLookup, err := NewHTTPLookup(makeHTTPLookupSecret(t, srv.URL, "1000", make([]byte, 32)))
+	assert.NoError(t, err)
+
+	sp := &scopeProvider{lookups: []Lookup{
+		NewSecretLookup(kdexv1alpha1.Secrets{{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "break-glass",
+				Annotations: map[string]string{"kdex.dev/secret-type": "subject"},
+			},
+			Data: map[string][]byte{"sub": []byte("break-glass"), "password": []byte("pw")},
+		}}),
+		httpLookup,
+	}}
+
+	_, source, err := sp.FindInternalWithSource("break-glass", "pw")
+	assert.NoError(t, err)
+	assert.Equal(t, LookupTypeSecret, source)
+
+	_, source, err = sp.FindInternalWithSource("alice", "pw")
+	assert.NoError(t, err)
+	assert.Equal(t, HTTP, source)
+
+	_, source, err = sp.FindInternalWithSource("break-glass", "wrong")
+	assert.Error(t, err)
+	assert.Empty(t, source, "a rejected credential vouches for nothing")
+}

@@ -7,6 +7,7 @@ const (
 	GRANT_TYPE_TOKEN_EXCHANGE     = "urn:ietf:params:oauth:grant-type:token-exchange"
 	HTTP                          = "http"
 	HTTPS                         = "https"
+	LookupTypeSecret              = "secret"
 	PKCE_METHOD_S256              = "S256"
 	TRUE                          = "true"
 )

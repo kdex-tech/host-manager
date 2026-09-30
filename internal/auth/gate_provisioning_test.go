@@ -312,3 +312,30 @@ func TestExchangeToken_EnforcingGateProvisioningReflectedInFirstToken(t *testing
 	g.Expect(entitlementsOf(t, ts.AccessToken)).To(ContainElement(jitGrant),
 		"the OIDC callback's first token must reflect gate-time provisioning (#206)")
 }
+
+// secretSourcedProvisioningProvider is a provisioningProvider whose subjects
+// are vouched for by a subject Secret. See kdex-tech/host-manager#226.
+type secretSourcedProvisioningProvider struct{ *provisioningProvider }
+
+func (p secretSourcedProvisioningProvider) FindInternalWithSource(subject, password string) (jwt.MapClaims, string, error) {
+	claims, err := p.FindInternal(subject, password)
+	if err != nil {
+		return nil, "", err
+	}
+	return claims, LookupTypeSecret, nil
+}
+
+// TestLoginLocal_SecretSubjectSkipsPostGateEnrichment pins #226's second half:
+// a subject-Secret login skips the gate, so there is no gate-time provisioning
+// to pick up -- and no backend resolve, which matters because the backend is
+// typically the very service that is down when break-glass is needed.
+func TestLoginLocal_SecretSubjectSkipsPostGateEnrichment(t *testing.T) {
+	g := NewWithT(t)
+	p := &provisioningProvider{}
+	ex := newGateEnrichExchanger(t, provisioningHook(t, p, "enforcing"), secretSourcedProvisioningProvider{p})
+
+	_, err := ex.LoginLocal(context.Background(), "alice", "pw", "", "client", AuthMethodLocal)
+	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(p.provisioned.Load()).To(BeFalse(), "the enforcing hook must not be called")
+	g.Expect(p.resolveCalls.Load()).To(BeZero(), "no gate => no post-gate resolve")
+}

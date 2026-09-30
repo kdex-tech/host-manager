@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -224,4 +225,32 @@ func TestNewEventDispatcherFromSecrets_NoMatchesReturnsUsableDispatcher(t *testi
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(d).ToNot(BeNil())
 	g.Expect(d.hooks).To(BeEmpty())
+}
+
+// TestNoteGateExempt_LogsAtDefaultVerbosityOnlyWhenGated pins #226's audit
+// line: a login that bypassed an enforcing login hook is logged at V(0), and
+// nothing is logged when there was no enforcing hook to bypass.
+func TestNoteGateExempt_LogsAtDefaultVerbosityOnlyWhenGated(t *testing.T) {
+	g := NewWithT(t)
+	var lines []string
+	log := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 0})
+	p := EventPayload{Event: EventLogin, Subject: "break-glass", AuthMethod: "local"}
+
+	NewEventDispatcher("h", []*httpEventHook{
+		hookTo(t, "a", "http://127.0.0.1:1", "login", "advisory", nil),
+	}, log).NoteGateExempt(p, "subject Secret")
+	g.Expect(lines).To(BeEmpty(), "no enforcing login hook => nothing was bypassed")
+
+	NewEventDispatcher("h", []*httpEventHook{
+		hookTo(t, "a", "http://127.0.0.1:1", "login", "enforcing", nil),
+	}, log).NoteGateExempt(p, "subject Secret")
+	g.Expect(lines).To(HaveLen(1))
+	g.Expect(lines[0]).To(And(
+		ContainSubstring(`"subject"="break-glass"`),
+		ContainSubstring(`"exemption"="subject Secret"`),
+		ContainSubstring(`"host"="h"`),
+	))
+
+	var nild *EventDispatcher
+	nild.NoteGateExempt(p, "subject Secret") // nil-safe
 }

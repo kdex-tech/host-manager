@@ -151,6 +151,18 @@ func (d *EventDispatcher) GateLogin(ctx context.Context, p EventPayload) error {
 	return nil
 }
 
+// NoteGateExempt records a login that bypassed the enforcing login hooks
+// (`why` names the exemption) at default verbosity: a break-glass login is an
+// audit event. Silent when no enforcing login hook is configured, since there
+// was no gate to bypass. Nil-safe. See kdex-tech/host-manager#226.
+func (d *EventDispatcher) NoteGateExempt(p EventPayload, why string) {
+	if !d.HasEnforcingLogin() {
+		return
+	}
+	p.Host = d.host
+	d.log.Info("login exempt from enforcing login hooks", eventKV(p, "exemption", why)...)
+}
+
 func (d *EventDispatcher) fireAsync(p EventPayload, hooks []*httpEventHook) {
 	for _, h := range hooks {
 		go func() {

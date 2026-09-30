@@ -134,7 +134,17 @@ func NewRoleProvider(
 }
 
 func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapClaims, error) {
+	identity, _, err := rp.FindInternalWithSource(subject, password)
+	return identity, err
+}
+
+// FindInternalWithSource is FindInternal that also reports WHICH lookup vouched
+// for the credential: its Type() (LookupTypeSecret, "ldap", HTTP). The source is
+// empty whenever err is non-nil. LoginLocal keys the break-glass exemption from
+// enforcing login hooks on it. See kdex-tech/host-manager#226.
+func (rp *scopeProvider) FindInternalWithSource(subject string, password string) (jwt.MapClaims, string, error) {
 	var localIdentity jwt.MapClaims
+	var source string
 	for _, lookup := range rp.lookups {
 		if ok, identity, err := lookup.FindInternal(subject, password); err != nil {
 			// An unreachable backend is OUR failure, and the token endpoint
@@ -143,7 +153,7 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 			// about the presented grant, and marking it would turn every
 			// wrong password into a 500.
 			if errors.Is(err, ErrLookupUnavailable) {
-				return nil, fmt.Errorf("%w: credential lookup %q unavailable: %w", ErrServerError, lookup.Type(), err)
+				return nil, "", fmt.Errorf("%w: credential lookup %q unavailable: %w", ErrServerError, lookup.Type(), err)
 			}
 			// Either way the chain STOPS here. A lookup that answered about
 			// this subject is authoritative: one identity may not live in two
@@ -151,9 +161,10 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 			// backends authenticate against whichever one accepts the
 			// password. An outage stops it too — we cannot know whether this
 			// backend would have accepted the credential.
-			return nil, err
+			return nil, "", err
 		} else if ok {
 			localIdentity = identity
+			source = lookup.Type()
 			break
 		}
 	}
@@ -164,7 +175,7 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 	lookupLog.V(2).Info("login lookup resolved", "subject", subject, "claims", localIdentity)
 
 	if localIdentity == nil {
-		return nil, fmt.Errorf("invalid credentials '%s'", subject)
+		return nil, "", fmt.Errorf("invalid credentials '%s'", subject)
 	}
 
 	subjectForRoles := subject
@@ -180,12 +191,12 @@ func (rp *scopeProvider) FindInternal(subject string, password string) (jwt.MapC
 		// — so this marking is carried without a test on purpose: if that ever
 		// starts returning an error, it must not be reported to the caller as
 		// a bad credential. See kdex-tech/host-manager#171.
-		return nil, fmt.Errorf("%w: failed to resolve scopes: %w", ErrServerError, err)
+		return nil, "", fmt.Errorf("%w: failed to resolve scopes: %w", ErrServerError, err)
 	}
 	localIdentity["roles"] = roles
 	localIdentity["entitlements"] = entitlements
 
-	return localIdentity, nil
+	return localIdentity, source, nil
 }
 
 func (rp *scopeProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
@@ -551,7 +562,7 @@ func (sl *secretLookup) FindInternal(subject string, password string) (bool, jwt
 	return false, nil, nil
 }
 func (sl *secretLookup) Type() string {
-	return "secret"
+	return LookupTypeSecret
 }
 
 // ResolveClaims: the Secret-backed subject store supplies no data-driven

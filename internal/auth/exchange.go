@@ -1098,7 +1098,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		return TokenSet{}, fmt.Errorf("%w: local auth not configured", ErrServerError)
 	}
 
-	signingContext, err := e.sp.FindInternal(username, password)
+	signingContext, source, err := e.findInternalWithSource(username, password)
 	if err != nil {
 		// Credentials did not resolve, so there is no vouched subject to
 		// report. The handler still logs `username`, which is the only
@@ -1189,32 +1189,46 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	grantedScopes := applyScopeFilter(signingContext, scope, defaultSessionScopes)
 	grantedScopeStr := strings.Join(grantedScopes, " ")
 
-	// Enforcing login hooks get a say before anything is minted. A deny here
-	// is a client-visible refusal of THIS login attempt -- not a failure of
-	// our own infrastructure -- so it is reported as ErrGrantFailure (via
-	// grantFailuref), which oauthErrorForRedemption maps to RFC 6749 5.2's
-	// 400 invalid_grant with the message echoed verbatim. ErrServerError
-	// would be wrong here: it maps to 500 server_error, which tells a
-	// rejected client to retry instead of that the login was refused. See
-	// oautherr.go's ErrServerError/ErrGrantFailure doc comments; there is no
-	// third sentinel (an "ErrAccessDenied" does not exist in this codebase).
-	if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
-		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
-			Event:      EventLoginFailed,
-			Subject:    username,
-			AuthMethod: string(authMethod),
-			Reason:     gerr.Error(),
-		})
-		return TokenSet{Subject: username}, grantFailuref("login denied: %v", gerr)
-	}
+	// A subject Secret (KDexSubject) is a static, operator-authored account --
+	// typically the break-glass admin -- and is exempt from enforcing login
+	// hooks. The hook usually fronts a user manager that does not know it,
+	// and the login has to keep working exactly when that user manager is
+	// down, whatever the hook's failure-mode. It adds no control over these
+	// subjects either: whoever can author a subject Secret can author the
+	// hook Secret too. See kdex-tech/host-manager#226.
+	if source == LookupTypeSecret {
+		e.eventDispatcher.NoteGateExempt(loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)), "subject Secret")
+	} else {
+		// Enforcing login hooks get a say before anything is minted. A deny
+		// here is a client-visible refusal of THIS login attempt -- not a
+		// failure of our own infrastructure -- so it is reported as
+		// ErrGrantFailure (via grantFailuref), which oauthErrorForRedemption
+		// maps to RFC 6749 5.2's 400 invalid_grant with the message echoed
+		// verbatim. ErrServerError would be wrong here: it maps to 500
+		// server_error, which tells a rejected client to retry instead of that
+		// the login was refused. See oautherr.go's ErrServerError/
+		// ErrGrantFailure doc comments; there is no third sentinel (an
+		// "ErrAccessDenied" does not exist in this codebase).
+		if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
+			e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+				Event:      EventLoginFailed,
+				Subject:    username,
+				AuthMethod: string(authMethod),
+				Reason:     gerr.Error(),
+			})
+			return TokenSet{Subject: username}, grantFailuref("login denied: %v", gerr)
+		}
 
-	// The enforcing gate may have JIT-provisioned this subject; re-resolve its
-	// live backend claims so the first token reflects that, not only a later
-	// refresh. FindInternal above already merged the pre-gate Lookup claims, and
-	// mergeBackendClaims never overwrites an existing key, so this only ADDS
-	// grants that came into existence during the gate. No-op unless an enforcing
-	// login hook is configured. See kdex-tech/host-manager#206.
-	e.enrichAfterGate(signingContext, username)
+		// The enforcing gate may have JIT-provisioned this subject; re-resolve
+		// its live backend claims so the first token reflects that, not only a
+		// later refresh. FindInternal above already merged the pre-gate Lookup
+		// claims, and mergeBackendClaims never overwrites an existing key, so
+		// this only ADDS grants that came into existence during the gate.
+		// No-op unless an enforcing login hook is configured. Skipped with the
+		// gate: no gate, no gate-time provisioning to pick up. See
+		// kdex-tech/host-manager#206.
+		e.enrichAfterGate(signingContext, username)
+	}
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
 	if err != nil {
@@ -1843,6 +1857,23 @@ func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
 			signingContext[k] = v
 		}
 	}
+}
+
+// sourcedIdentityProvider is the optional capability of reporting which lookup
+// vouched for a credential (scopeProvider.FindInternalWithSource). A provider
+// without it reports no source, which keeps every login it vouches for gated.
+type sourcedIdentityProvider interface {
+	FindInternalWithSource(subject, password string) (jwt.MapClaims, string, error)
+}
+
+// findInternalWithSource resolves a credential through e.sp, and also reports
+// the vouching lookup's type when e.sp can tell. See kdex-tech/host-manager#226.
+func (e *Exchanger) findInternalWithSource(subject, password string) (jwt.MapClaims, string, error) {
+	if sp, ok := e.sp.(sourcedIdentityProvider); ok {
+		return sp.FindInternalWithSource(subject, password)
+	}
+	claims, err := e.sp.FindInternal(subject, password)
+	return claims, "", err
 }
 
 // enrichAfterGate re-resolves a subject's live backend claims AFTER a passing
