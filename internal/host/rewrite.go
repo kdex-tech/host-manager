@@ -1,13 +1,16 @@
 package host
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
 
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/kdex-tech/host-manager/internal/rewrite"
 	"golang.org/x/text/language"
@@ -63,13 +66,13 @@ func resolveRewriteTarget(
 // the request into mux -- the snapshot this handler was registered into, never
 // hh.Mux, which a reconcile may have swapped since.
 //
-// LOCKING: the gate and the canonical base read hh state under hh.mu.RLock,
-// and the lock is released BEFORE dispatch (via a deferred unlock in a
-// closure, so a panic inside the gate cannot leave hh.mu read-locked and wedge
-// every later writer; #26/#51). The target's pageHandlerFunc takes
-// hh.mu.RLock itself; holding it across the dispatch would read-lock twice on
-// one goroutine, which deadlocks as soon as a SetHost writer queues between
-// the two acquisitions.
+// LOCKING: the gate, the canonical base and the alias's privacy read hh state
+// under hh.mu.RLock, and the lock is released BEFORE dispatch (via a deferred
+// unlock in a closure, so a panic inside the gate cannot leave hh.mu
+// read-locked and wedge every later writer; #26/#51). The target's
+// pageHandlerFunc takes hh.mu.RLock itself; holding it across the dispatch
+// would read-lock twice on one goroutine, which deadlocks as soon as a
+// SetHost writer queues between the two acquisitions.
 func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux *http.ServeMux) http.HandlerFunc {
 	ph := pr.ph
 	rw := ph.Page.Rewrite
@@ -84,10 +87,11 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			return
 		}
 
-		allowed, base, defaultLang := func() (bool, string, string) {
+		allowed, base, defaultLang, private := func() (bool, string, string, bool) {
 			hh.mu.RLock()
 			defer hh.mu.RUnlock()
-			return hh.pageGateLocked(w, r, ph, lang), hh.issuerAddressLocked(), hh.defaultLanguage
+			return hh.pageGateLocked(w, r, ph, lang), hh.issuerAddressLocked(), hh.defaultLanguage,
+				hh.isPrivateResponse(hh.pageRequirements(&ph))
 		}()
 		if !allowed {
 			return
@@ -134,14 +138,118 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			return
 		}
 
+		rrw := &rewriteResponseWriter{ResponseWriter: w, private: private}
 		if rw.Canonical && base != "" {
 			// EscapedPath, not the raw target: a request value holding '>'
 			// or '"' would otherwise close the URI and inject a second link.
-			w.Header().Set("Link", "<"+base+(&url.URL{Path: target}).EscapedPath()+`>; rel="canonical"`)
+			rrw.link = "<" + base + (&url.URL{Path: target}).EscapedPath() + `>; rel="canonical"`
 		}
 
-		mux.ServeHTTP(w, r2)
+		mux.ServeHTTP(rrw, r2)
+		// A target that wrote nothing still sends an implicit 200 with its
+		// headers once the handler returns; decide that response too.
+		rrw.decide(http.StatusOK)
 	}
+}
+
+// rewriteResponseWriter carries the ALIAS's decisions onto the response the
+// target produces, applied once, when the final status is known (the first
+// WriteHeader >= 200, Write or Flush):
+//   - a private alias (isPrivateResponse over the alias's own requirements)
+//     forces the response private. The target applies ITS requirements, so a
+//     gated alias in front of a public target -- or a function passing
+//     upstream caching through -- would otherwise answer "public" and let a
+//     shared cache serve the alias URL without running the alias's gate. A
+//     no-store the target set is kept: it is already stricter.
+//   - the canonical Link is set only on a 2xx: the target's 3xx/4xx/5xx (its
+//     gate's 401/403/303, a 404) is not the canonical representation.
+//
+// It keeps what the host's own writers give handlers: Flush and Hijack (and
+// Unwrap, for http.ResponseController), so SSE and streaming through a
+// function target keep working; Push; and auth.HeaderPreserver, so a target's
+// WWW-Authenticate survives the error re-render's header wipe.
+type rewriteResponseWriter struct {
+	http.ResponseWriter
+	private bool
+	link    string
+	decided bool
+}
+
+var (
+	_ http.Flusher         = (*rewriteResponseWriter)(nil)
+	_ http.Hijacker        = (*rewriteResponseWriter)(nil)
+	_ http.Pusher          = (*rewriteResponseWriter)(nil)
+	_ auth.HeaderPreserver = (*rewriteResponseWriter)(nil)
+)
+
+// decide applies the alias's header decisions for final status code, once.
+// A 1xx is not final: more headers, and the real status, are still to come.
+func (w *rewriteResponseWriter) decide(code int) {
+	if w.decided || code < 200 {
+		return
+	}
+	w.decided = true
+	h := w.Header()
+	if w.private && !hasCacheDirective(h, "no-store") {
+		h.Set("Cache-Control", privateCacheControl)
+	}
+	if w.link != "" && code < 300 {
+		h.Set("Link", w.link)
+	}
+}
+
+func (w *rewriteResponseWriter) WriteHeader(code int) {
+	w.decide(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *rewriteResponseWriter) Write(b []byte) (int, error) {
+	w.decide(http.StatusOK)
+	return w.ResponseWriter.Write(b)
+}
+
+// FlushError is what http.ResponseController.Flush calls. A flush before any
+// write commits a 200, so it decides as one.
+func (w *rewriteResponseWriter) FlushError() error {
+	w.decide(http.StatusOK)
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *rewriteResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *rewriteResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *rewriteResponseWriter) Push(target string, opts *http.PushOptions) error {
+	if p, ok := w.ResponseWriter.(http.Pusher); ok {
+		return p.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+func (w *rewriteResponseWriter) PreserveHeader(name, value string) {
+	auth.PreserveHeader(w.ResponseWriter, name, value)
+}
+
+// Unwrap lets http.ResponseController (and GetErrorResponseWriter) reach the
+// underlying writer.
+func (w *rewriteResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// hasCacheDirective reports whether any Cache-Control value in h carries
+// directive (case-insensitive, arguments ignored).
+func hasCacheDirective(h http.Header, directive string) bool {
+	for _, v := range h.Values("Cache-Control") {
+		for d := range strings.SplitSeq(v, ",") {
+			name, _, _ := strings.Cut(strings.TrimSpace(d), "=")
+			if strings.EqualFold(name, directive) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // redirectHandlerType is the concrete type http.RedirectHandler returns, the

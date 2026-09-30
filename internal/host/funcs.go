@@ -60,6 +60,18 @@ func (hh *HostHandler) applyCachingHeadersWithLang(
 	return hh.applyCachingHeadersWithSeed(w, r, requirements, lastModified, language, "")
 }
 
+// privateCacheControl is the Cache-Control of a response only its caller may
+// see: never stored by a shared cache, revalidated before any reuse.
+const privateCacheControl = "private, no-cache, must-revalidate"
+
+// isPrivateResponse reports whether a response governed by requirements is
+// private to its caller: auth is enabled (with auth disabled everything is
+// public) and there is at least one requirement. The rewrite alias's caching
+// (rewriteResponseWriter) applies the same rule as applyCachingHeadersWithSeed.
+func (hh *HostHandler) isPrivateResponse(requirements []kdexv1alpha1.SecurityRequirement) bool {
+	return hh.IsAuthEnabled() && len(requirements) > 0
+}
+
 // applyCachingHeadersWithSeed sets Cache-Control / Vary / Last-Modified /
 // ETag headers and returns true if the response was completed as a 304
 // (no further body should be written).
@@ -91,15 +103,10 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	language string,
 	seed string,
 ) bool {
-	if !hh.IsAuthEnabled() {
-		// If auth is disabled, everything is public
-		requirements = []kdexv1alpha1.SecurityRequirement{}
-	}
-
-	isPrivate := len(requirements) > 0
+	isPrivate := hh.isPrivateResponse(requirements)
 
 	if isPrivate {
-		w.Header().Set("Cache-Control", "private, no-cache, must-revalidate")
+		w.Header().Set("Cache-Control", privateCacheControl)
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
 	}

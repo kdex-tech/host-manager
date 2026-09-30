@@ -637,3 +637,181 @@ func TestRewrite_InternalRedirectChainIsBounded(t *testing.T) {
 		assert.Empty(t, rr.Header().Get("Location"), path)
 	}
 }
+
+// fnAliasMux builds an alias at /a -> the Ready function "fn" at /api/fn, with
+// fnHandler answering the function's routes, on an auth-enabled host whose
+// checker lets every caller through both gates. security arms the ALIAS's
+// own requirements (nil = public alias).
+func fnAliasMux(t *testing.T, canonical bool, security *[]kdexv1alpha1.SecurityRequirement, fnHandler http.HandlerFunc) *http.ServeMux {
+	t.Helper()
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.host.Routing.Domains = []string{"example.com"}
+	hh.scheme = "https"
+	hh.authConfig = &auth.Config{AnonymousEntitlements: []string{"public"}, ActivePair: &keys.KeyPair{}}
+	hh.authChecker = denyPath("/nothing")
+	alias := aliasPH("a", "/a", "", kdexv1alpha1.RewriteSpec{
+		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "fn"},
+		Canonical: canonical,
+	})
+	alias.Page.Security = security
+	if security != nil {
+		alias.ParsedRequirements = &entitlements.ParsedRequirements{}
+	}
+	mux := hh.registerRendersForTest(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", "")}, alias)
+	mux.HandleFunc("/api/fn", fnHandler)
+	return mux
+}
+
+var bearerSecurity = &[]kdexv1alpha1.SecurityRequirement{{"bearer": {}}}
+
+// gatedAliasTextTarget is a gated alias /k in front of the PUBLIC text page
+// /robots.txt, on an auth-enabled host whose checker allows the caller.
+func gatedAliasTextTarget(t *testing.T, aliasSecurity *[]kdexv1alpha1.SecurityRequirement) *http.ServeMux {
+	t.Helper()
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.authConfig = &auth.Config{AnonymousEntitlements: []string{"public"}, ActivePair: &keys.KeyPair{}}
+	hh.authChecker = denyPath("/nothing")
+	target := textPageForTest(t, "robots", "/robots.txt", "txt", "hello")
+	alias := aliasPH("k", "/k", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("robots")})
+	alias.Page.Security = aliasSecurity
+	alias.ParsedRequirements = &entitlements.ParsedRequirements{}
+	return hh.registerRendersForTest(t, nil, target, alias)
+}
+
+// A gated alias in front of a public target must not hand a shared cache a
+// public response: the cache would then serve the alias URL without running
+// the alias's gate.
+func TestRewrite_GatedAliasForcesPrivateCaching(t *testing.T) {
+	mux := gatedAliasTextTarget(t, bearerSecurity)
+	rr := doRequest(t, mux, "GET", "/k")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "hello", rr.Body.String())
+	cc := rr.Result().Header.Get("Cache-Control")
+	assert.Equal(t, "private, no-cache, must-revalidate", cc)
+	assert.NotContains(t, cc, "public")
+}
+
+// A public alias leaves the target's caching untouched.
+func TestRewrite_PublicAliasKeepsTargetCaching(t *testing.T) {
+	mux := gatedAliasTextTarget(t, nil)
+	rr := doRequest(t, mux, "GET", "/k")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "public, max-age=3600, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+}
+
+// A target answering no-store keeps it behind a gated alias: no-store is
+// already stricter than the house private value.
+func TestRewrite_GatedAliasKeepsTargetNoStore(t *testing.T) {
+	mux := fnAliasMux(t, false, bearerSecurity, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte("fresh"))
+	})
+	rr := doRequest(t, mux, "GET", "/a")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "no-store", rr.Result().Header.Get("Cache-Control"))
+}
+
+// A gated alias in front of a function answering public caching (upstream
+// headers pass through) is forced private too.
+func TestRewrite_GatedAliasOverridesFunctionPublicCaching(t *testing.T) {
+	mux := fnAliasMux(t, false, bearerSecurity, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		_, _ = w.Write([]byte("fn"))
+	})
+	rr := doRequest(t, mux, "GET", "/a")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+}
+
+// A target that writes nothing still sends an implicit 200 with its headers
+// once the handler returns: that response is decided too.
+func TestRewrite_GatedAliasDecidesImplicitEmpty200(t *testing.T) {
+	mux := fnAliasMux(t, true, bearerSecurity, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=600")
+	})
+	rr := doRequest(t, mux, "GET", "/a")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.NotEmpty(t, rr.Result().Header.Get("Link"))
+}
+
+// The canonical Link rides only on a 2xx: a 404 or a 401 produced by the
+// target is not the canonical representation of anything.
+func TestRewrite_CanonicalLinkOnlyOn2xx(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusSeeOther, http.StatusInternalServerError} {
+		mux := fnAliasMux(t, true, nil, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		})
+		rr := doRequest(t, mux, "GET", "/a")
+		require.Equal(t, code, rr.Code)
+		assert.Empty(t, rr.Result().Header.Values("Link"), "status %d", code)
+	}
+
+	mux := fnAliasMux(t, true, nil, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	rr := doRequest(t, mux, "GET", "/a")
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, `<https://example.com/api/fn>; rel="canonical"`, rr.Result().Header.Get("Link"))
+}
+
+// The target page's own gate answering 401 behind a canonical alias carries
+// no Link either.
+func TestRewrite_CanonicalLinkAbsentWhenTargetGateDenies(t *testing.T) {
+	target := newPage("keys", "Keys", "/keys.txt")
+	target.Page.MimeType, target.Page.Body = "txt", "secret"
+	alias := aliasPH("k", "/k", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("keys"), Canonical: true})
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.host.Routing.Domains = []string{"example.com"}
+	hh.scheme = "https"
+	hh.authConfig = &auth.Config{AnonymousEntitlements: []string{"public"}, ActivePair: &keys.KeyPair{}}
+	hh.utilityPages[kdexv1alpha1.LoginUtilityPageType] = page.PageHandler{Name: "login"}
+	hh.authChecker = denyPath("/keys.txt")
+	mux := hh.registerRendersForTest(t, nil, target, alias)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, anonReq("GET", "/k", "application/json"))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Empty(t, w.Result().Header.Values("Link"))
+	assert.NotEmpty(t, w.Result().Header.Get("WWW-Authenticate"))
+}
+
+// A streaming (SSE-style) function behind an alias can still flush through
+// http.ResponseController, and the flush commits the alias's decisions.
+func TestRewrite_WriterPassesFlush(t *testing.T) {
+	var flushErr error
+	mux := fnAliasMux(t, true, bearerSecurity, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "public")
+		_, _ = w.Write([]byte("data: 1\n\n"))
+		flushErr = http.NewResponseController(w).Flush()
+	})
+	rr := doRequest(t, mux, "GET", "/a")
+	require.NoError(t, flushErr)
+	assert.True(t, rr.Flushed)
+	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.NotEmpty(t, rr.Result().Header.Get("Link"))
+
+	// Flushing before any write commits a 200 and so decides as a 2xx.
+	mux = fnAliasMux(t, true, nil, func(w http.ResponseWriter, _ *http.Request) {
+		flushErr = http.NewResponseController(w).Flush()
+	})
+	rr = doRequest(t, mux, "GET", "/a")
+	require.NoError(t, flushErr)
+	assert.True(t, rr.Flushed)
+	assert.NotEmpty(t, rr.Result().Header.Get("Link"))
+}
+
+// The rewrite writer keeps the interfaces the host's own error writer gives
+// handlers: header provenance (a target's WWW-Authenticate must survive the
+// error re-render's header wipe) and GetErrorResponseWriter (the proxy's
+// status logging).
+func TestRewriteWriter_PreservesErrorWriterInterfaces(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ew := &errorResponseWriter{ResponseWriter: rec}
+	rw := &rewriteResponseWriter{ResponseWriter: wrappedErrorResponseWriter(ew, rec)}
+
+	auth.PreserveHeader(rw, "WWW-Authenticate", `Bearer realm="x"`)
+	assert.Equal(t, `Bearer realm="x"`, ew.preserved["Www-Authenticate"])
+	assert.Same(t, ew, GetErrorResponseWriter(rw))
+}

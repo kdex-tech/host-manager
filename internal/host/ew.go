@@ -126,12 +126,20 @@ func (w *wrappedWriter) Push(target string, opts *http.PushOptions) error {
 	return w.errorResponseWriter.Push(target, opts)
 }
 
+// GetErrorResponseWriter finds the errorResponseWriter behind w, following
+// Unwrap through writers layered on top of it (e.g. rewriteResponseWriter).
 func GetErrorResponseWriter(w http.ResponseWriter) *errorResponseWriter {
-	if ew, ok := w.(*errorResponseWriter); ok {
-		return ew
-	}
-	if wrapped, ok := w.(*wrappedWriter); ok {
-		return wrapped.errorResponseWriter
+	for w != nil {
+		switch t := w.(type) {
+		case *errorResponseWriter:
+			return t
+		case *wrappedWriter:
+			return t.errorResponseWriter
+		case interface{ Unwrap() http.ResponseWriter }:
+			w = t.Unwrap()
+		default:
+			return nil
+		}
 	}
 	return nil
 }
