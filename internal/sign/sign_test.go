@@ -2,6 +2,7 @@ package sign_test
 
 import (
 	"crypto"
+	"encoding/json"
 	"maps"
 	"testing"
 	"time"
@@ -452,4 +453,58 @@ L51w6mkJ5U6GWpH1eZsXgKm0ZZJKEPsN9wYKe2LXT/WPpa5AwGzo7BLm
 	assert.Equal(t, 1, got["resource:ra:all"], "the grant present in BOTH role and enrichment sets must appear once")
 	assert.Equal(t, 1, got["functions::read"])
 	assert.Equal(t, 1, got["resource:rb:read"])
+}
+
+// TestSigner_SignProjected_RefusesNonExpiringToken pins the mint half of
+// kdex-tech/host-manager#227: the signer refuses exactly the `exp` shapes that a
+// verifier with jwt.WithExpirationRequired rejects -- missing, null,
+// non-numeric, or zero (golang-jwt reads `exp: 0` as absent). A projection can
+// override the default exp, so this is what stops a ClaimMappings rule from
+// minting a token that never expires. An exp in the past stays signable:
+// an already-expired token is harmless, and tests synthesize one with exp=-1.
+func TestSigner_SignProjected_RefusesNonExpiringToken(t *testing.T) {
+	s := testSigner(t)
+	base := jwt.MapClaims{"sub": "user-42", "iss": "iss-test", "aud": []string{"aud-test"}}
+	with := func(exp any) jwt.MapClaims {
+		c := maps.Clone(base)
+		c["exp"] = exp
+		return c
+	}
+
+	for name, projected := range map[string]jwt.MapClaims{
+		"null":             with(nil),
+		"int zero":         with(int64(0)),
+		"float zero":       with(float64(0)),
+		"json.Number zero": with(json.Number("0")),
+		"string":           with("tomorrow"),
+		"bool":             with(true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok, err := s.SignProjected(projected)
+			assert.ErrorIs(t, err, sign.ErrNonExpiringToken)
+			assert.Empty(t, tok)
+		})
+	}
+
+	for name, projected := range map[string]jwt.MapClaims{
+		"default exp":        base,
+		"future int64":       with(time.Now().Add(time.Hour).Unix()),
+		"future json.Number": with(json.Number("4102444800")),
+		"past (exp=-1)":      with(float64(-1)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok, err := s.SignProjected(projected)
+			assert.NoError(t, err)
+			assert.NotEmpty(t, tok)
+		})
+	}
+}
+
+// The real route to a non-expiring token: a host ClaimMappings rule that
+// writes exp. The mapper runs in Project, so Sign must refuse it too.
+func TestSigner_Sign_RefusesClaimMappingThatZeroesExp(t *testing.T) {
+	s := testSignerWithMapper(t, []dmapper.MappingRule{{SourceExpression: "0", TargetPropPath: "exp"}})
+	tok, err := s.Sign(jwt.MapClaims{"sub": "user-42"})
+	assert.ErrorIs(t, err, sign.ErrNonExpiringToken)
+	assert.Empty(t, tok)
 }

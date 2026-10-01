@@ -302,8 +302,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				func(token *jwt.Token) (any, error) {
 					return c.ActivePair.Private.Public(), nil
 				},
-				jwt.WithIssuer(c.Issuer),
-				jwt.WithAudience(audiences...),
+				gateParserOptions(c.Issuer, audiences)...,
 			)
 
 			if (err != nil || !token.Valid) && authSource == COOKIE && c.AutoExtendSession && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
@@ -350,8 +349,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							func(token *jwt.Token) (any, error) {
 								return c.ActivePair.Private.Public(), nil
 							},
-							jwt.WithIssuer(exchanger.config.Issuer),
-							jwt.WithAudience(audiences...),
+							gateParserOptions(exchanger.config.Issuer, audiences)...,
 						)
 						if err == nil && token.Valid {
 							log.Info("Token refreshed after expiry")
@@ -491,8 +489,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 								func(token *jwt.Token) (any, error) {
 									return c.ActivePair.Private.Public(), nil
 								},
-								jwt.WithIssuer(exchanger.config.Issuer),
-								jwt.WithAudience(audiences...),
+								gateParserOptions(exchanger.config.Issuer, audiences)...,
 							)
 							if err == nil && newToken.Valid {
 								log.Info("Token refreshed")
@@ -533,5 +530,18 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			ctx := SetAuthContext(r.Context(), authContext)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}
+}
+
+// gateParserOptions are the validation options for every host-audience JWT the
+// gate accepts. `exp` is required: golang-jwt v5 treats it as optional, and
+// reads `exp: 0` as absent, so without this a host-signed token carrying either
+// shape is an identity that never expires. Every token this host mints carries
+// one (sign.Signer.SignProjected). See kdex-tech/host-manager#227.
+func gateParserOptions(issuer string, audiences []string) []jwt.ParserOption {
+	return []jwt.ParserOption{
+		jwt.WithIssuer(issuer),
+		jwt.WithAudience(audiences...),
+		jwt.WithExpirationRequired(),
 	}
 }

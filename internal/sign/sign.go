@@ -5,9 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"runtime/debug"
 	"slices"
 	"time"
@@ -52,6 +54,15 @@ var signerLog = logf.Log.WithName("signer")
 // token path can reach: internal/auth and internal/auth/apitoken both depend
 // on it, and the dependency cannot run back. One sentinel means an operator
 // grepping for one message finds every site that refused.
+// ErrNonExpiringToken is returned when the final claim set would yield a token
+// that never expires: `exp` missing, null, non-numeric, or zero. golang-jwt
+// reads `exp: 0` as absent, and a verifier without WithExpirationRequired
+// accepts an absent `exp` forever. The signer's default exp can only be lost
+// this way through a projection override -- in practice a host ClaimMappings
+// rule that writes `exp`. A past exp is NOT refused: an already-expired token
+// is harmless. See kdex-tech/host-manager#227.
+var ErrNonExpiringToken = errors.New("refusing to sign a token that never expires: `exp` is missing, null, non-numeric or zero")
+
 var ErrSubjectlessCredential = errors.New(
 	"subject-less credential: the credential source resolved without a `sub` claim")
 
@@ -282,6 +293,14 @@ func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
 	outboundClaims["jti"] = rand.Text()
 	maps.Copy(outboundClaims, projected)
 
+	// The projection had the last word on exp; make sure it still expires.
+	if !expires(outboundClaims["exp"]) {
+		signerLog.Error(ErrNonExpiringToken,
+			"refusing to sign; check the host's claimMappings for a rule that writes `exp`",
+			"exp", outboundClaims["exp"], "issuer", s.issuer, "audience", s.audience)
+		return "", ErrNonExpiringToken
+	}
+
 	var method jwt.SigningMethod
 
 	// Check the public key type to decide the signing algorithm
@@ -379,3 +398,27 @@ func confineByScope(projected jwt.MapClaims, grantedScopes []string) {
 // implementations should subtract a skew from this to ensure a cached
 // token always has meaningful remaining life on hit.
 func (s *Signer) Duration() time.Duration { return s.duration }
+
+// expires reports whether exp is a value a verifier that requires `exp` will
+// read as an expiry: a non-zero number. The signer's own default is an int64
+// (time.Unix); a projected value may be any numeric type a mapper produces, or
+// a json.Number from a JSON round-trip.
+func expires(exp any) bool {
+	switch v := exp.(type) {
+	case int:
+		return v != 0
+	case int32:
+		return v != 0
+	case int64:
+		return v != 0
+	case float32:
+		return v != 0 && !math.IsNaN(float64(v))
+	case float64:
+		return v != 0 && !math.IsNaN(v)
+	case json.Number:
+		f, err := v.Float64()
+		return err == nil && f != 0 && !math.IsNaN(f)
+	default:
+		return false
+	}
+}
