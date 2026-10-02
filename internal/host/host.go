@@ -45,6 +45,15 @@ func (hh *HostHandler) AddOrUpdateTranslation(name string, translation *kdexv1al
 	hh.translationResources[name] = *translation
 }
 
+// SetTranslationOrder records the catalog write order nexus publishes in
+// KDexInternalHost.spec.internalTranslationRefs (lowest precedence first). It
+// does not rebuild: it is set immediately before SetHost, which rebuilds.
+func (hh *HostHandler) SetTranslationOrder(order []string) {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	hh.translationOrder = slices.Clone(order)
+}
+
 func (hh *HostHandler) AddOrUpdateUtilityPage(ph page.PageHandler) {
 	if ph.UtilityPage == nil {
 		return
@@ -561,7 +570,9 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 	defaultLanguageResource := hh.defaultLanguage
 	translationResources := maps.Clone(hh.translationResources)
 
-	newTranslations, err := NewTranslations(defaultLanguageResource, translationResources)
+	translationOrder := slices.Clone(hh.translationOrder)
+
+	newTranslations, err := NewTranslations(defaultLanguageResource, translationResources, translationOrder)
 	if err != nil {
 		hh.log.Error(err, "failed to rebuild translations")
 		return rebuildSnapshot{}, false

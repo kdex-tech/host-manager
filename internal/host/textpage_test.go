@@ -82,7 +82,7 @@ func TestL10nRenderText_TranslatesAndOmitsChrome(t *testing.T) {
 				{Lang: "en", KeysAndValues: map[string]string{"tagline": "the knowledge engine"}},
 			},
 		},
-	})
+	}, nil)
 	require.NoError(t, err)
 	hh.Translations = *translations
 
@@ -110,7 +110,7 @@ func TestL10nRenderText_DoesNotEscapeHTMLSpecialChars(t *testing.T) {
 				{Lang: "en", KeysAndValues: map[string]string{"org": `R&D <core> "x"`}},
 			},
 		},
-	})
+	}, nil)
 	require.NoError(t, err)
 	hh.Translations = *translations
 

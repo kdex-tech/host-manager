@@ -649,6 +649,12 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
+	translationOrder := make([]string, 0, len(internalHost.Spec.InternalTranslationRefs))
+	for _, ref := range internalHost.Spec.InternalTranslationRefs {
+		translationOrder = append(translationOrder, ref.Name)
+	}
+	r.HostHandler.SetTranslationOrder(translationOrder)
+
 	r.HostHandler.SetHost(
 		ctx,
 		&internalHost.Spec.KDexHostSpec,

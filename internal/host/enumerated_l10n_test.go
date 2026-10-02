@@ -63,7 +63,7 @@ func newTestHostHandler(t *testing.T, defaultLang string, langs []string) *HostH
 		}
 	}
 
-	translations, err := NewTranslations(defaultLang, translationResources)
+	translations, err := NewTranslations(defaultLang, translationResources, nil)
 	require.NoError(t, err)
 	hh.Translations = *translations
 

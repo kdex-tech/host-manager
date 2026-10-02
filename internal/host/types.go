@@ -128,6 +128,7 @@ type HostHandler struct {
 	status               *kdexv1alpha1.KDexObjectStatus
 	themeAssets          []kdexv1alpha1.Asset
 	translationResources map[string]kdexv1alpha1.KDexTranslationSpec
+	translationOrder     []string
 	utilityPages         map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler
 }
 
@@ -231,7 +232,7 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 		utilityPages:              map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler{},
 	}
 
-	translations, err := NewTranslations(hh.defaultLanguage, map[string]kdexv1alpha1.KDexTranslationSpec{})
+	translations, err := NewTranslations(hh.defaultLanguage, map[string]kdexv1alpha1.KDexTranslationSpec{}, nil)
 	if err != nil {
 		panic(err)
 	}
