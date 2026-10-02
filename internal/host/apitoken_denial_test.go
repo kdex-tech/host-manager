@@ -67,11 +67,9 @@ func TestApitokenRevokeUnderEntitledGets403WithoutChallenge(t *testing.T) {
 	}
 }
 
-// The mint gate has no dedicated pre-check for an absent auth context (unlike
-// revoke's two anonymous checks) -- it relies on the authChecker denying and
-// denial.Classify itself reading auth.GetAuthContext. Assert that path lands
-// on 401 + challenge, not the old bare 403, by driving apitokenMintHandler
-// directly (this is the only test in the repo that calls it).
+// An anonymous mint lands on 401 + challenge, not a bare 403. Since
+// GHSA-qp3j-f436-pggf the mint gate rejects an absent auth context up front,
+// as revoke does, before the authChecker is consulted.
 func TestApitokenMintAnonymousGets401WithChallenge(t *testing.T) {
 	tm, _ := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), nil)
 	hh := &HostHandler{

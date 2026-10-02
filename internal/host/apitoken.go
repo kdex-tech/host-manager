@@ -20,6 +20,21 @@ import (
 // revoke). These payloads are short metadata-only documents.
 const maxAPITokenRequestBytes = 64 << 10
 
+// The plain apitokens verbs (mint, revoke) act on the CALLER's own tokens.
+// Acting on another subject's tokens takes one of these, scoped to the target
+// subject (apitokens:<sub>:<verb>). They are distinct verbs so that the blanket
+// self-service grant site charts bind to every authenticated subject --
+// {resources: [apitokens], verbs: [mint, revoke]}, no resourceNames -- does not
+// reach them; a role with verbs: [all] still does. GHSA-qp3j-f436-pggf.
+const (
+	// apitokenVerbImpersonate mints a token for another subject. The token
+	// re-resolves THAT subject's roles on every request, so this is
+	// impersonation, not a lesser key-management right.
+	apitokenVerbImpersonate = "impersonate"
+	// apitokenVerbRevokeAny revokes another subject's tokens.
+	apitokenVerbRevokeAny = "revoke-any"
+)
+
 type MintRequest struct {
 	// Action is the action of the tokens to mint (metadata-based revocation).
 	Action string `json:"act"`
@@ -64,8 +79,8 @@ type RevokeResponse struct {
 }
 
 // apitokenRevokeHandler handles token revocation requests.
-// It allows users to revoke their own tokens or for authorized administrators
-// (with the "apitokens:revoke" entitlement) to revoke any token.
+// It allows users to revoke their own tokens, and callers holding
+// apitokens:<target>:revoke-any to revoke another subject's tokens.
 func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
@@ -127,16 +142,19 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	if targetSub != requestingSub {
+		// Keyed on the TARGET subject. It was keyed on requestingSub, so a
+		// grant scoped to the caller's own name -- or the blanket
+		// self-service revoke grant -- revoked anyone's tokens.
 		requirement := kdexv1alpha1.SecurityRequirement{
-			"bearer": []string{"apitokens:revoke"},
+			"bearer": []string{"apitokens:" + apitokenVerbRevokeAny},
 		}
 
 		authorized, err := hh.authChecker.CheckAccess(
 			r.Context(),
 			"apitokens",
-			requestingSub,
+			targetSub,
 			[]kdexv1alpha1.SecurityRequirement{requirement},
-			"revoke",
+			apitokenVerbRevokeAny,
 		)
 		if err != nil || !authorized {
 			// The V(1) is right for the POLICY case: an under-entitled
@@ -146,10 +164,10 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			// 403. Same split the function proxy makes.
 			if err != nil {
 				log.Error(err, "revoke authorization check failed",
-					"subject", requestingSub)
+					"subject", requestingSub, "target", targetSub)
 			} else {
 				log.V(1).Info("revoke denied: caller may not revoke for another subject",
-					"subject", requestingSub)
+					"subject", requestingSub, "target", targetSub)
 			}
 			// Derived once, on the denial path only. This gate runs through
 			// CheckAccess, which parses its own copy internally, so there is
@@ -158,7 +176,7 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 				Outcome: denial.Classify(
 					r.Context(), hh.authChecker,
 					hh.authChecker.GetParsedEntitlements(r.Context()),
-					"apitokens", requestingSub, "revoke"),
+					"apitokens", targetSub, apitokenVerbRevokeAny),
 				// Locked: hh.mu.RLock is held from above.
 				Issuer: hh.issuerAddressLocked(),
 			})
@@ -230,12 +248,31 @@ func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.R
 	}
 }
 
+// apitokenMintHandler mints a stateless API token. A caller holding
+// apitokens:<self>:mint mints for itself; minting for another subject takes
+// apitokens:<sub>:impersonate.
 func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
 	if r.Method != http.MethodPost {
 		log.Error(nil, "Method not allowed")
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// With no authenticated subject there is no "self" to mint for, whatever
+	// anonymousEntitlements grant -- the same two checks revoke makes.
+	ac, ok := auth.GetAuthContext(r.Context())
+	if !ok {
+		log.V(1).Info("no auth context; rejecting")
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
+		return
+	}
+
+	requestingSub, err := ac.GetSubject()
+	if err != nil || requestingSub == "" {
+		log.V(1).Info("no subject in auth context; rejecting")
+		denial.Write(w, r, denial.Opts{Outcome: denial.Unauthenticated, Issuer: hh.issuerAddress()})
 		return
 	}
 
@@ -260,9 +297,12 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 1. Check Entitlement
+	verb := "mint"
+	if subject != requestingSub {
+		verb = apitokenVerbImpersonate
+	}
 	requirement := kdexv1alpha1.SecurityRequirement{
-		"bearer": []string{"apitokens:mint"},
+		"bearer": []string{"apitokens:" + verb},
 	}
 
 	hh.mu.RLock()
@@ -273,15 +313,17 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"apitokens",
 		subject,
 		[]kdexv1alpha1.SecurityRequirement{requirement},
-		"mint",
+		verb,
 	)
 	if err != nil || !authorized {
 		// V(1) for the policy denial (#181), Error for a checker failure --
 		// see the same split in apitokenRevokeHandler above.
 		if err != nil {
-			log.Error(err, "mint authorization check failed", "subject", subject)
+			log.Error(err, "mint authorization check failed",
+				"subject", requestingSub, "target", subject, "verb", verb)
 		} else {
-			log.V(1).Info("mint denied", "subject", subject)
+			log.V(1).Info("mint denied",
+				"subject", requestingSub, "target", subject, "verb", verb)
 		}
 		// Derived once, on the denial path only -- see the same shape in
 		// apitokenRevokeHandler above.
@@ -289,7 +331,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 			Outcome: denial.Classify(
 				r.Context(), hh.authChecker,
 				hh.authChecker.GetParsedEntitlements(r.Context()),
-				"apitokens", subject, "mint"),
+				"apitokens", subject, verb),
 			// Locked: hh.mu.RLock is held from above.
 			Issuer: hh.issuerAddressLocked(),
 		})
@@ -506,9 +548,14 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Ref: ko.RespRefInternalServerError,
 							}),
 						),
+						// Alternatives: mint for yourself, or impersonate
+						// to mint for another subject.
 						Security: &openapi.SecurityRequirements{
 							openapi.SecurityRequirement{
 								"bearer": {"apitokens:mint"},
+							},
+							openapi.SecurityRequirement{
+								"bearer": {"apitokens:" + apitokenVerbImpersonate},
 							},
 						},
 						Summary: "Mint PASETO API Token",
@@ -650,9 +697,14 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 								Ref: ko.RespRefInternalServerError,
 							}),
 						),
+						// Alternatives: revoke your own tokens, or
+						// revoke-any for another subject's.
 						Security: &openapi.SecurityRequirements{
 							openapi.SecurityRequirement{
 								"bearer": {"apitokens:revoke"},
+							},
+							openapi.SecurityRequirement{
+								"bearer": {"apitokens:" + apitokenVerbRevokeAny},
 							},
 						},
 						Summary: "Revoke PASETO API Token",
