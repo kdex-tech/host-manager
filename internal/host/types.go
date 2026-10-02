@@ -279,6 +279,16 @@ func (hh *HostHandler) SetPageDenialMode(m PageDenialMode) *HostHandler {
 type Translations struct {
 	catalog *catalog.Builder
 	keys    []string
+	skipped []SkippedTranslationValue
+}
+
+// SkippedTranslationValue is a translation value NewTranslations left out of
+// the catalog because it does not compile (e.g. "Price: ${").
+type SkippedTranslationValue struct {
+	Translation string
+	Lang        string
+	Key         string
+	Err         error
 }
 
 func (t *Translations) Catalog() *catalog.Builder {
@@ -287,6 +297,12 @@ func (t *Translations) Catalog() *catalog.Builder {
 
 func (t *Translations) Keys() []string {
 	return t.keys
+}
+
+// Skipped returns the values left out of the catalog because they do not
+// compile; each key falls back as if that value were absent.
+func (t *Translations) Skipped() []SkippedTranslationValue {
+	return t.skipped
 }
 
 func (t *Translations) Languages() []language.Tag {

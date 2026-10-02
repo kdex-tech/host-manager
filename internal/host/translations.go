@@ -18,6 +18,9 @@ import (
 // when two translations define the same language and key, the one later in
 // order wins. nexus supplies order (KDexInternalHost.spec.internalTranslationRefs)
 // lowest precedence first: default, self-attached, then host-declared.
+//
+// A value the catalog cannot compile is left out and reported in Skipped();
+// the only error is a failure to register the default language.
 func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha1.KDexTranslationSpec, order []string) (*Translations, error) {
 	// Register defaultLanguage as the catalog's Fallback so that
 	// Languages() returns it first instead of in alphabetical order. Without
@@ -31,13 +34,32 @@ func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha
 		return nil, fmt.Errorf("failed to set default translation %s %s", defaultLanguage, "_")
 	}
 
+	// A value that does not compile (e.g. "Price: ${") is skipped and reported
+	// rather than failing the build: a failed build leaves the host serving a
+	// stale mux, dropping every later page/function/translation change.
+	//
+	// Each value is compiled into a scratch builder first because
+	// catalog.Builder.SetString stores its output even when compilation fails
+	// (x/text message/catalog/dict.go Builder.set; unchanged from the pinned
+	// v0.34.0 through the latest v0.42.0), which would let a bad value
+	// overwrite a lower-precedence good one and register its language.
+	// Neither builder defines macros, so the scratch compile is equivalent.
+	scratch := catalog.NewBuilder()
+	var skipped []SkippedTranslationValue
+
 	seen := map[string]bool{}
 	keys := []string{}
 	for _, name := range translationWriteOrder(translations, order) {
 		for _, tr := range translations[name].Translations {
+			tag := language.Make(tr.Lang)
 			for key, value := range tr.KeysAndValues {
-				if err := catalogBuilder.SetString(language.Make(tr.Lang), key, value); err != nil {
-					return nil, fmt.Errorf("failed to set translation %s %s %s %s", name, tr.Lang, key, value)
+				err := scratch.SetString(tag, key, value)
+				if err == nil {
+					err = catalogBuilder.SetString(tag, key, value)
+				}
+				if err != nil {
+					skipped = append(skipped, SkippedTranslationValue{Translation: name, Lang: tr.Lang, Key: key, Err: err})
+					continue
 				}
 				if !seen[key] {
 					seen[key] = true
@@ -51,6 +73,7 @@ func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha
 	return &Translations{
 		catalog: catalogBuilder,
 		keys:    keys,
+		skipped: skipped,
 	}, nil
 }
 

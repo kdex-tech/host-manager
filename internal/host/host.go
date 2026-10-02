@@ -577,6 +577,10 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		hh.log.Error(err, "failed to rebuild translations")
 		return rebuildSnapshot{}, false
 	}
+	for _, s := range newTranslations.Skipped() {
+		hh.log.Error(s.Err, "skipping translation value that does not compile; the key falls back as if absent",
+			"translation", s.Translation, "lang", s.Lang, "key", s.Key)
+	}
 
 	registeredPaths := map[string]ko.PathInfo{}
 	maps.Copy(registeredPaths, hh.pathsCollectedInReconcile)

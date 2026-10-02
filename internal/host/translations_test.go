@@ -91,3 +91,60 @@ func TestTranslationWriteOrder(t *testing.T) {
 	g.Expect(translationWriteOrder(specs, []string{"listed-1", "ghost", "listed-2", "listed-1"})).
 		To(Equal([]string{"a", "c", "listed-1", "listed-2"}))
 }
+
+// A value the catalog cannot compile (catmsg rejects "Price: ${" and
+// "${x(abc)}") must not fail the whole build: one bad value in a chart-shipped
+// translation would otherwise freeze the host's mux. The bad value is skipped
+// and reported; the good values, in the same and in other translations, build.
+func TestNewTranslations_SkipsValueThatDoesNotCompile(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tr, err := NewTranslations("en", map[string]kdexv1alpha1.KDexTranslationSpec{
+		"web-shop": {Translations: []kdexv1alpha1.Translation{
+			{Lang: "en", KeysAndValues: map[string]string{
+				"good":  "Good",
+				"price": "Price: ${",
+			}},
+			{Lang: "fr", KeysAndValues: map[string]string{"macro": "Use ${x(abc)} here"}},
+		}},
+		"web-site": {Translations: []kdexv1alpha1.Translation{
+			{Lang: "en", KeysAndValues: map[string]string{"other": "Other"}},
+		}},
+	}, []string{"web-shop", "web-site"})
+	g.Expect(err).NotTo(HaveOccurred())
+
+	g.Expect(renderKey(tr, "good")).To(Equal("Good"))
+	g.Expect(renderKey(tr, "other")).To(Equal("Other"))
+	// Absent keys render as the key itself; a skipped value must do the same.
+	g.Expect(renderKey(tr, "price")).To(Equal("price"))
+	g.Expect(tr.Keys()).To(Equal([]string{"good", "other"}), "a skipped key is not a key")
+	g.Expect(tr.Languages()).NotTo(ContainElement(language.French), "a language with only skipped values is not served")
+
+	skipped := tr.Skipped()
+	g.Expect(skipped).To(HaveLen(2))
+	byKey := map[string]SkippedTranslationValue{}
+	for _, s := range skipped {
+		byKey[s.Key] = s
+	}
+	g.Expect(byKey["price"].Translation).To(Equal("web-shop"))
+	g.Expect(byKey["price"].Lang).To(Equal("en"))
+	g.Expect(byKey["price"].Err).To(MatchError(ContainSubstring("missing '}'")))
+	g.Expect(byKey["macro"].Lang).To(Equal("fr"))
+	g.Expect(byKey["macro"].Err).To(HaveOccurred())
+}
+
+// A skipped higher-precedence value must leave the lower-precedence value in
+// place -- the key falls back exactly as if the bad value were absent.
+// (catalog.Builder.SetString stores its output even when compilation fails,
+// so the value must be compiled before it reaches the live builder.)
+func TestNewTranslations_SkippedValueKeepsLowerPrecedenceValue(t *testing.T) {
+	g := NewGomegaWithT(t)
+	tr, err := NewTranslations("en", map[string]kdexv1alpha1.KDexTranslationSpec{
+		"web-kdex-default-translation": brand("default"),
+		"web-shop":                     brand("${x(abc)}"),
+	}, []string{"web-kdex-default-translation", "web-shop"})
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(renderKey(tr, "brand")).To(Equal("default"))
+	g.Expect(tr.Keys()).To(Equal([]string{"brand"}), "set successfully by another translation, so still a key")
+	g.Expect(tr.Skipped()).To(HaveLen(1))
+	g.Expect(tr.Skipped()[0].Translation).To(Equal("web-shop"))
+}
