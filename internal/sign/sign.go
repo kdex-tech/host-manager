@@ -208,7 +208,15 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	}
 
 	if s.mapper != nil {
-		extra, err := s.mapper.Execute(signingContext)
+		// The mapper sees the token being built for the claims Project sets
+		// authoritatively (sub/iss/aud), not the inbound context's values. On
+		// the FAT path the signing context is the caller's host session, so
+		// without this a rule targeting aud would accumulate the HOST audience
+		// into the FAT (dmapper unions list targets by default), making it
+		// replayable against the host. See kdex-tech/host-manager#229.
+		mapperInput := maps.Clone(signingContext)
+		maps.Copy(mapperInput, jwt.MapClaims{"sub": projected["sub"], "iss": projected["iss"], "aud": projected["aud"]})
+		extra, err := s.mapper.Execute(mapperInput)
 		if err != nil {
 			return nil, fmt.Errorf("failed to map claims: %w", err)
 		}
