@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
@@ -65,6 +66,13 @@ const apitokenBridgeHostAudience = "https://api-host.example.com"
 // will accept. The upstream echoes back the inbound Authorization (FAT) and the
 // preserved X-API-TOKEN cookie so the test can inspect what the function sees.
 func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
+	t.Helper()
+	return apitokenBridgeFixtureWith(t, fn, idp, enrichmentClaimMapping(), checker...)
+}
+
+// apitokenBridgeFixtureWith is apitokenBridgeFixture with the host claimMappings
+// supplied by the caller (e.g. an EffectiveAuth composition, or none).
+func apitokenBridgeFixtureWith(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, mappings []dmapper.MappingRule, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
 	t.Helper()
 	logf.SetLogger(logr.Discard())
 
@@ -110,7 +118,7 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 			// The host claimMappings live here (the FAT signer prepends them to
 			// fn.Spec.ClaimMappings); production authors the enrichment rule on the
 			// host. See #138.
-			ClaimMappings: enrichmentClaimMapping(),
+			ClaimMappings: mappings,
 		},
 		authExchanger: ex,
 	}

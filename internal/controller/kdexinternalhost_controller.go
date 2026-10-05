@@ -535,7 +535,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.RefreshGraceWindow,
 	)
 
-	authConfig, err := authConfigBuilder.Build(internalHost.Spec.Auth)
+	// EffectiveAuth composes the host's own auth with the KDexHostExtensions
+	// nexus-manager applied (host claimMappings first, anonymousEntitlements
+	// unioned), so every mapper and the anonymous checker see one set.
+	authConfig, err := authConfigBuilder.Build(internalHost.Spec.EffectiveAuth())
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
