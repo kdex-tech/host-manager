@@ -12,6 +12,12 @@ import (
 // pathParamFromMatch extracts a path parameter's value by re-matching the route
 // pattern against the concrete URI path.
 //
+// uriPath must be the ESCAPED path (r.URL.EscapedPath()): each segment is
+// percent-decoded here, exactly once. r.URL.Path is already decoded, so
+// matching against it decoded %25 a second time -- binding a different
+// instance from the one the backend's r.PathValue addresses -- and split a
+// segment at an encoded slash, leaving the placeholder unbound (#230).
+//
 // It exists because r.PathValue does NOT work at the gate: fh.patternMux is
 // built with empty handlers and consulted via Handler(r), which returns the
 // matched pattern but never populates the request's path values. So the gate
@@ -239,14 +245,14 @@ func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (
 	// itself names the param. A header is NEVER inferred -- host-manager is
 	// generic across every function and must not guess the header spelling of a
 	// backend it does not control.
-	return pathParamFromMatch(pattern, r.URL.Path, key)
+	return pathParamFromMatch(pattern, r.URL.EscapedPath(), key)
 }
 
 func readSource(r *http.Request, pattern string, src bindingSource) (string, bool) {
 	var v string
 	switch src.In {
 	case bindingInPath:
-		pv, ok := pathParamFromMatch(pattern, r.URL.Path, src.Name)
+		pv, ok := pathParamFromMatch(pattern, r.URL.EscapedPath(), src.Name)
 		if !ok {
 			return "", false
 		}

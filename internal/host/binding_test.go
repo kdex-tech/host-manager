@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -102,6 +103,27 @@ func TestResolveBinding(t *testing.T) {
 		r := httptest.NewRequest("GET", "/v1/vector_stores/vs_abc", nil)
 		got := resolveBinding(r, "/v1/vector_stores/{vector_store_id}", nil, []string{"vector_store_id"})
 		assert.Equal(t, "vs_abc", got["vector_store_id"])
+	})
+
+	// Each path segment is decoded exactly once, so the gate binds the
+	// instance the backend's r.PathValue addresses. Go has already decoded
+	// r.URL.Path; matching against it decoded %25 a second time and split a
+	// segment at %2F. See #230.
+	t.Run("path segment decoded exactly once", func(t *testing.T) {
+		const pattern = "/v1/roles/{key}"
+		for _, tc := range []struct{ target, want string }{
+			{"/v1/roles/analysts", "analysts"},
+			{"/v1/roles/a%20b", "a b"},
+			{"/v1/roles/a%2525", "a%25"},
+			{"/v1/roles/a%2Fb", "a/b"},
+		} {
+			implicit := resolveBinding(httptest.NewRequest("PUT", tc.target, nil), pattern, nil, []string{"key"})
+			assert.Equal(t, entitlements.Binding{"key": tc.want}, implicit, "implicit path match for %s", tc.target)
+
+			spec := bindingSpec{"role": {{In: "path", Name: "key"}}}
+			declared := resolveBinding(httptest.NewRequest("PUT", tc.target, nil), pattern, spec, []string{"role"})
+			assert.Equal(t, entitlements.Binding{"role": tc.want}, declared, "declared path source for %s", tc.target)
+		}
 	})
 
 	t.Run("declared header source", func(t *testing.T) {
