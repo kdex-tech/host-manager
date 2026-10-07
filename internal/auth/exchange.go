@@ -576,6 +576,19 @@ func (e *Exchanger) ResolveSubjectClaims(subject string) jwt.MapClaims {
 	return claims
 }
 
+// Roles returns the host's KDexRoles with their compiled entitlements, or nil
+// when the identity provider cannot list roles (or there is no exchanger yet).
+// See kdex-tech/host-manager#231.
+func (e *Exchanger) Roles() []RoleInfo {
+	if e == nil {
+		return nil
+	}
+	if rl, ok := e.sp.(RoleLister); ok {
+		return rl.Roles()
+	}
+	return nil
+}
+
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
 // resource. The PAT's aud is the resource URI (RFC 8707); the subject's
 // entitlements are NOT baked in — the proxy re-resolves them from the

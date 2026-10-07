@@ -64,6 +64,7 @@ type scopeProvider struct {
 	FocalHost           string
 
 	lookups       []Lookup
+	roles         []RoleInfo
 	rolesMap      map[string][]string
 	exactBindings map[string][]string
 	regexBindings []bindingMatcher
@@ -98,6 +99,7 @@ func NewRoleProvider(
 	}
 
 	rc.rolesMap = rc.buildMappingTable(roles)
+	rc.roles = roleInfos(roles, rc.rolesMap)
 
 	bindings, err := rc.collectBindings()
 	if err != nil {
@@ -263,6 +265,46 @@ func (rp *scopeProvider) ResolveClaimsWithError(subject string) (jwt.MapClaims, 
 		}
 	}
 	return merged, nil
+}
+
+// RoleInfo is one of the host's KDexRoles: its rules as stored and exactly the
+// entitlements the compiler emits for them -- the entitlements a bound
+// subject's token carries. See kdex-tech/host-manager#231.
+type RoleInfo struct {
+	Name         string                    `json:"name"`
+	Rules        []kdexv1alpha1.PolicyRule `json:"rules"`
+	Entitlements []string                  `json:"entitlements"`
+}
+
+// RoleLister is the optional capability of an InternalIdentityProvider that can
+// list the host's roles. Only the cluster-backed scopeProvider has it.
+type RoleLister interface {
+	Roles() []RoleInfo
+}
+
+var _ RoleLister = (*scopeProvider)(nil)
+
+// Roles returns the host's KDexRoles, sorted by name, as compiled when this
+// provider was built (each reconcile). The slice is shared: do not mutate it.
+func (rp *scopeProvider) Roles() []RoleInfo {
+	return rp.roles
+}
+
+func roleInfos(roles *kdexv1alpha1.KDexRoleList, table map[string][]string) []RoleInfo {
+	infos := make([]RoleInfo, 0, len(roles.Items))
+	for _, role := range roles.Items {
+		rules := make([]kdexv1alpha1.PolicyRule, len(role.Spec.Rules))
+		for i := range role.Spec.Rules {
+			role.Spec.Rules[i].DeepCopyInto(&rules[i])
+		}
+		infos = append(infos, RoleInfo{
+			Name:         role.Name,
+			Rules:        rules,
+			Entitlements: slices.Clone(table[role.Name]),
+		})
+	}
+	slices.SortFunc(infos, func(a, b RoleInfo) int { return strings.Compare(a.Name, b.Name) })
+	return infos
 }
 
 func (rp *scopeProvider) collectRoles() (*kdexv1alpha1.KDexRoleList, error) {
