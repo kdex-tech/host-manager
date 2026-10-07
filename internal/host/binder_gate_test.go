@@ -210,6 +210,96 @@ func TestGate_UnboundPlaceholder_NoSuppliableSource_Is500(t *testing.T) {
 	assert.False(t, *reached)
 }
 
+// A bound value of "*" or one containing ':' is ErrInvalidBoundValue. The value
+// came from the caller's own request, so it is a client error (400) -- not the
+// error-logged 500 reserved for a CR fault, which any anonymous caller could
+// otherwise drive just by putting "*" in a path.
+func TestGate_InvalidBoundValue_Is400(t *testing.T) {
+	h, reached := binderFixture(t, scopedStoreFn())
+	for _, p := range []string{"/api/v1/vector_stores/*", "/api/v1/vector_stores/a:b"} {
+		for _, held := range [][]string{nil, {"functions:/api/v1/vector_stores:read", "vector_stores::all"}} {
+			code := requestAs(t, h, "GET", p, held, nil)
+			assert.Equal(t, http.StatusBadRequest, code, "%s held=%v", p, held)
+			assert.False(t, *reached)
+		}
+	}
+}
+
+// The gate checks the raw value the backend receives: a holder of vs_alice
+// asking for "vs_alice " addresses a different instance and is denied.
+func TestGate_BoundValueIsNotTrimmed(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-search", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: "/api/v1/search",
+				Paths: map[string]kdexv1alpha1.PathItem{
+					"/api/v1/search": {
+						Get: &runtime.RawExtension{Raw: []byte(`{
+							"operationId": "search",
+							"security": [{"bearer": [
+								"functions:/api/v1/search:read",
+								"vector_stores:{vector_store_id}:read"
+							]}],
+							"x-entitlement-binding": {
+								"vector_store_id": [{"in": "query", "name": "vector_store_id"}]
+							}
+						}`)},
+					},
+				},
+			},
+		},
+	}
+	h, reached := binderFixture(t, fn)
+	held := []string{"functions:/api/v1/search:read", "vector_stores:vs_alice:read"}
+
+	assert.Equal(t, http.StatusOK, requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice", held, nil))
+	*reached = false
+	code := requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice%20", held, nil)
+	assert.NotEqual(t, http.StatusOK, code, "a padded value is a different instance")
+	assert.False(t, *reached)
+}
+
+// A malformed x-entitlement-binding must not fall back to binding the
+// same-named path parameter: the author declared a different source (here a
+// header the backend reads first), so binding the path would authorize one
+// instance while the backend acts on another. The route's placeholders stay
+// unbound and every request is refused as a CR fault.
+func TestGate_MalformedBindingDoesNotFallBackToPath(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-stores", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: "/api/v1/vector_stores",
+				Paths: map[string]kdexv1alpha1.PathItem{
+					"/api/v1/vector_stores/{vector_store_id}": {
+						Get: &runtime.RawExtension{Raw: []byte(`{
+							"operationId": "getStore",
+							"security": [{"bearer": [
+								"functions:/api/v1/vector_stores:read",
+								"vector_stores:{vector_store_id}:read"
+							]}],
+							"x-entitlement-binding": {"vector_store_id": [
+								{"in": "header", "name": "X-Vector-Store-Id"},
+								{"in": "body", "name": "store"}
+							]}
+						}`)},
+					},
+				},
+			},
+		},
+	}
+	h, reached := binderFixture(t, fn)
+	held := []string{"functions:/api/v1/vector_stores:read", "vector_stores:vs_alice:read"}
+
+	code := requestAs(t, h, "GET", "/api/v1/vector_stores/vs_alice", held,
+		map[string]string{"X-Vector-Store-Id": "vs_bob"})
+	assert.Equal(t, http.StatusInternalServerError, code, "a malformed declaration is a CR fault")
+	assert.False(t, *reached, "the path must not stand in for the declared source")
+}
+
 // Additivity: a CR with no {param} must behave exactly as before.
 func TestGate_NoPlaceholderIsUnchanged(t *testing.T) {
 	fn := scopedStoreFn()

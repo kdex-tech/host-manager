@@ -172,13 +172,47 @@ func TestResolveBinding(t *testing.T) {
 		assert.False(t, present, "a declared chain that fails to resolve must not fall back to the path identity match, or a caller-controlled path segment could satisfy a header-declared placeholder")
 	})
 
-	t.Run("blank header is absent, not empty", func(t *testing.T) {
-		r := httptest.NewRequest("POST", "/v1/ingest", nil)
-		r.Header.Set("X-Vector-Store-Id", "   ")
-		spec := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+	t.Run("empty value is absent", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/v1/ingest?vector_store_id=", nil)
+		spec := bindingSpec{"vector_store_id": {{In: "query", Name: "vector_store_id"}}}
 		got := resolveBinding(r, "/v1/ingest", spec, []string{"vector_store_id"})
 		_, present := got["vector_store_id"]
-		assert.False(t, present, "a blank value would be ErrInvalidBoundValue; it must not bind")
+		assert.False(t, present, "an empty value must not bind")
+	})
+
+	// The backend acts on the raw value, so the gate must check the raw
+	// value. Trimming bound "vs1" for "?vector_store_id=%20vs1%20" while the
+	// backend addressed " vs1 " -- a different, look-alike instance.
+	t.Run("values bind raw, never trimmed", func(t *testing.T) {
+		q := httptest.NewRequest("GET", "/v1/search?vector_store_id=%20vs1%20", nil)
+		qs := bindingSpec{"vector_store_id": {{In: "query", Name: "vector_store_id"}}}
+		assert.Equal(t, entitlements.Binding{"vector_store_id": " vs1 "},
+			resolveBinding(q, "/v1/search", qs, []string{"vector_store_id"}))
+
+		p := httptest.NewRequest("PUT", "/v1/roles/%20analysts", nil)
+		ps := bindingSpec{"role": {{In: "path", Name: "key"}}}
+		assert.Equal(t, entitlements.Binding{"role": " analysts"},
+			resolveBinding(p, "/v1/roles/{key}", ps, []string{"role"}))
+
+		h := httptest.NewRequest("POST", "/v1/ingest", nil)
+		h.Header.Set("X-Vector-Store-Id", "vs1\u00a0")
+		hs := bindingSpec{"vector_store_id": {{In: "header", Name: "X-Vector-Store-Id"}}}
+		assert.Equal(t, entitlements.Binding{"vector_store_id": "vs1\u00a0"},
+			resolveBinding(h, "/v1/ingest", hs, []string{"vector_store_id"}))
+	})
+
+	// A whitespace-only value is present to the backend, so it must not fall
+	// through to the next link: the gate would then check a different source
+	// from the one the backend acts on.
+	t.Run("whitespace-only value does not fall through the chain", func(t *testing.T) {
+		r := httptest.NewRequest("GET", "/v1/search?vector_store_id=%20%20", nil)
+		r.Header.Set("X-Vector-Store-Id", "vs_header")
+		spec := bindingSpec{"vector_store_id": {
+			{In: "query", Name: "vector_store_id"},
+			{In: "header", Name: "X-Vector-Store-Id"},
+		}}
+		got := resolveBinding(r, "/v1/search", spec, []string{"vector_store_id"})
+		assert.Equal(t, "  ", got["vector_store_id"])
 	})
 
 	t.Run("resolves only requested keys", func(t *testing.T) {

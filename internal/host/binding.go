@@ -264,7 +264,10 @@ func readSource(r *http.Request, pattern string, src bindingSource) (string, boo
 	default:
 		return "", false
 	}
-	v = strings.TrimSpace(v)
+	// Bind the raw value, never a trimmed one: the backend acts on the raw
+	// value, so trimming checked "vs1" while the backend addressed " vs1 ". Only
+	// an empty value is absent; a whitespace-only one is present to the backend
+	// too, so it binds as-is rather than falling through to the next link.
 	if v == "" {
 		return "", false
 	}

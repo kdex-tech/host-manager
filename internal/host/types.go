@@ -326,7 +326,11 @@ type KDexFunctionHandler struct {
 	// mux-build, not per request. A route with no declaration is absent, and its
 	// placeholders (if any) bind by path identity match.
 	bindingSpecs map[string]bindingSpec
-	patternMux   *http.ServeMux
+	// invalidBindings holds the routes whose x-entitlement-binding is
+	// malformed. Such a route binds nothing: falling back to the same-named
+	// path parameter would bind a source the author did not declare.
+	invalidBindings map[string]struct{}
+	patternMux      *http.ServeMux
 	// acceptsAPIKey is set at handler-build time when at least one operation
 	// on the function's API declares an apiKey* security scheme (apiKeyCookie /
 	// apiKeyHeader / apiKeyQuery). It opts the per-function handler into the

@@ -374,6 +374,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	patternMux := http.NewServeMux()
 	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
 	bindingSpecs := make(map[string]bindingSpec)
+	invalidBindings := make(map[string]struct{})
 
 	// acceptsAPIKey opts this function into the PASETO->authContext bridge when
 	// any operation declares an apiKey* security scheme. Per-function (not
@@ -398,6 +399,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			if spec, err := parseBindingSpec(op.Extensions); err != nil {
 				hh.log.Error(err, "invalid x-entitlement-binding; placeholders on this route will not bind",
 					"function", fn.Name, "route", key)
+				invalidBindings[key] = struct{}{}
 			} else if spec != nil {
 				bindingSpecs[key] = spec
 			}
@@ -422,6 +424,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		Function:           fn,
 		parsedRequirements: parsedRequirements,
 		bindingSpecs:       bindingSpecs,
+		invalidBindings:    invalidBindings,
 		patternMux:         patternMux,
 		acceptsAPIKey:      acceptsAPIKey,
 		issuer:             issuer,
@@ -636,16 +639,36 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// so this is safe to call unconditionally -- no guard needed.
 			spec := fh.bindingSpecs[key]
 			pkeys := placeholderKeys(spec, pattern)
-			binding := resolveBinding(r, pattern, spec, pkeys)
+			// A route whose declaration is malformed binds NOTHING, so its
+			// placeholders stay unbound and fail closed below. Resolving it
+			// without the declaration would fall back to the same-named path
+			// parameter -- a source the author did not declare, while the
+			// backend reads the declared one.
+			_, malformedBinding := fh.invalidBindings[key]
+			var binding entitlements.Binding
+			if !malformedBinding {
+				binding = resolveBinding(r, pattern, spec, pkeys)
+			}
 			boundReqs, bindErr := authChecker.BindRequirements(reqs, binding)
 			if bindErr != nil {
+				// A bound value of "*", or one containing ':', came from the
+				// caller's own request: a client error, not a CR fault. As a
+				// 500 it let any anonymous caller drive error-logged 5xx by
+				// putting "*" in a path.
+				if errors.Is(bindErr, entitlements.ErrInvalidBoundValue) {
+					log.V(1).Info("requirement binding failed: invalid bound value",
+						"function", fn.Name, "route", key)
+					http.Error(w, http.StatusText(http.StatusBadRequest),
+						http.StatusBadRequest)
+					return
+				}
 				// ErrUnboundPlaceholder covers two conditions that answer
 				// differently (#195). A placeholder whose declared source is a
 				// header/query value the caller OMITTED is a client error the
 				// caller can fix by re-sending -- a 400, NOT a 500. Answering
 				// 500 here let an unauthenticated caller drive error-logged 5xx
 				// just by omitting a header (a pre-auth 5xx/log amplifier).
-				if bindFailureIsClientError(spec, binding, pkeys) {
+				if !malformedBinding && bindFailureIsClientError(spec, binding, pkeys) {
 					log.V(1).Info("requirement binding failed: caller omitted a declared source",
 						"function", fn.Name, "route", key)
 					http.Error(w, http.StatusText(http.StatusBadRequest),
