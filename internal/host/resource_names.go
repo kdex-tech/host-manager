@@ -2,11 +2,13 @@ package host
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
@@ -24,11 +26,17 @@ const (
 	// kdexResourceListingExtension declares, on a function's GET operation,
 	// that it lists the instances of a resource the function owns:
 	//   x-kdex-resource-listing: {resource: roles}
-	// The operation takes ?q= (name prefix) and ?cursor=, and answers
-	// {items: [{name, label?}], next?}. See kdex-tech/host-manager#232.
+	// The operation answers {items: [{name, label?}], next?} -- name is the
+	// resourceName used in entitlements, label its human-readable name -- and
+	// takes the same parameters the host serves:
+	//   ?q=      type-ahead: a case-insensitive substring of name OR label
+	//   ?limit=  page size (the host forwards 1..200; never return more)
+	//   ?cursor= the previous page's next, opaque to the host
+	// See kdex-tech/host-manager#232.
 	kdexResourceListingExtension = "x-kdex-resource-listing"
 
-	resourceNamesPageSize = 100
+	resourceNamesDefaultLimit = 50
+	resourceNamesMaxLimit     = 200
 	// maxListingResponseBytes bounds what the host buffers from an owner.
 	maxListingResponseBytes = 1 << 20
 )
@@ -79,10 +87,24 @@ func (hh *HostHandler) resourceNamesHandler(mux *http.ServeMux, registeredPaths 
 		resource := r.PathValue("resource")
 		query := r.URL.Query()
 		q, cursor, verb := query.Get("q"), query.Get("cursor"), query.Get("verb")
+		limit := resourceNamesDefaultLimit
+		if v := query.Get("limit"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > resourceNamesMaxLimit {
+				http.Error(w, fmt.Sprintf("limit must be 1..%d", resourceNamesMaxLimit), http.StatusBadRequest)
+				return
+			}
+			limit = n
+		}
 
 		var result resourceNamesPage
 		if slices.Contains(hostNativeResources, resource) {
-			result = pageOfNames(hh.hostNativeNames(r, resource), q, cursor)
+			page, err := pageOfNames(hh.hostNativeNames(r, resource), q, cursor, limit)
+			if err != nil {
+				http.Error(w, "invalid cursor", http.StatusBadRequest)
+				return
+			}
+			result = page
 		} else {
 			hh.mu.RLock()
 			route, err := listingRoute(hh.registeredPaths, resource)
@@ -96,7 +118,7 @@ func (hh *HostHandler) resourceNamesHandler(mux *http.ServeMux, registeredPaths 
 				http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 				return
 			}
-			page, status, header := dispatchListing(mux, r, route, q, cursor)
+			page, status, header := dispatchListing(mux, r, route, q, cursor, limit)
 			if status != http.StatusOK {
 				// The owner's own gate decided (401/403/...): pass its
 				// verdict through, keeping its challenge.
@@ -145,12 +167,16 @@ func (hh *HostHandler) resourceNamesHandler(mux *http.ServeMux, registeredPaths 
 								Schema: openapi.NewSchemaRef("", openapi.NewStringSchema()),
 							}},
 							&openapi.ParameterRef{Value: &openapi.Parameter{
-								Name: "q", In: "query", Description: "Name prefix.",
+								Name: "q", In: "query", Description: "Type-ahead: a case-insensitive substring of name or label.",
 								Schema: openapi.NewSchemaRef("", openapi.NewStringSchema()),
 							}},
 							&openapi.ParameterRef{Value: &openapi.Parameter{
-								Name: "cursor", In: "query", Description: "The previous page's next.",
+								Name: "cursor", In: "query", Description: "The previous page's next (opaque).",
 								Schema: openapi.NewSchemaRef("", openapi.NewStringSchema()),
+							}},
+							&openapi.ParameterRef{Value: &openapi.Parameter{
+								Name: "limit", In: "query", Description: "Page size, 1..200 (default 50).",
+								Schema: openapi.NewSchemaRef("", openapi.NewIntegerSchema()),
 							}},
 							&openapi.ParameterRef{Value: &openapi.Parameter{
 								Name: "verb", In: "query", Description: "Keep only names grantable for this verb.",
@@ -189,12 +215,12 @@ func (hh *HostHandler) hostNativeNames(r *http.Request, resource string) []resou
 
 	seen := map[string]struct{}{}
 	var out []resourceName
-	add := func(name string) {
+	add := func(name, label string) {
 		if _, dup := seen[name]; name == "" || dup {
 			return
 		}
 		seen[name] = struct{}{}
-		out = append(out, resourceName{Name: name})
+		out = append(out, resourceName{Name: name, Label: label})
 	}
 	switch resource {
 	case "pages":
@@ -205,7 +231,11 @@ func (hh *HostHandler) hostNativeNames(r *http.Request, resource string) []resou
 					continue
 				}
 			}
-			add(ph.BasePath())
+			label := ""
+			if ph.Page != nil {
+				label = ph.Page.Label
+			}
+			add(ph.BasePath(), label)
 		}
 	case "functions":
 		for _, fn := range hh.functions {
@@ -216,30 +246,76 @@ func (hh *HostHandler) hostNativeNames(r *http.Request, resource string) []resou
 				"functions", fn.Spec.API.BasePath, held, none); err != nil || !ok {
 				continue
 			}
-			add(fn.Spec.API.BasePath)
+			add(fn.Spec.API.BasePath, fn.Name)
 		}
 	}
 	return out
 }
 
-// pageOfNames applies the listing contract the host promises for host-native
-// resources: q is a name prefix, cursor means "names after this one", pages of
-// resourceNamesPageSize in name order.
-func pageOfNames(all []resourceName, q, cursor string) resourceNamesPage {
-	slices.SortFunc(all, func(a, b resourceName) int { return strings.Compare(a.Name, b.Name) })
+// pageOfNames applies, for host-native resources, the listing contract an
+// owner also follows: q is a case-insensitive substring of the name OR the
+// label (a type-ahead), items are sorted by label (name when unlabelled) then
+// name, and an opaque cursor resumes after the previous page's last item.
+func pageOfNames(all []resourceName, q, cursor string, limit int) (resourceNamesPage, error) {
+	after, err := decodeNamesCursor(cursor)
+	if err != nil {
+		return resourceNamesPage{}, err
+	}
+	lq := strings.ToLower(q)
 	var items []resourceName
 	for _, n := range all {
-		if !strings.HasPrefix(n.Name, q) || (cursor != "" && n.Name <= cursor) {
+		if lq != "" && !strings.Contains(strings.ToLower(n.Name), lq) && !strings.Contains(strings.ToLower(n.Label), lq) {
+			continue
+		}
+		if after != nil && compareNames(n, *after) <= 0 {
 			continue
 		}
 		items = append(items, n)
 	}
+	slices.SortFunc(items, compareNames)
 	page := resourceNamesPage{Items: items}
-	if len(items) > resourceNamesPageSize {
-		page.Items = items[:resourceNamesPageSize]
-		page.Next = page.Items[len(page.Items)-1].Name
+	if len(items) > limit {
+		page.Items = items[:limit]
+		page.Next = encodeNamesCursor(page.Items[limit-1])
 	}
-	return page
+	return page, nil
+}
+
+// compareNames orders by label (name when unlabelled), case-insensitively,
+// then by name, which is unique.
+func compareNames(a, b resourceName) int {
+	sortKey := func(n resourceName) string {
+		if n.Label != "" {
+			return strings.ToLower(n.Label)
+		}
+		return strings.ToLower(n.Name)
+	}
+	if c := strings.Compare(sortKey(a), sortKey(b)); c != 0 {
+		return c
+	}
+	return strings.Compare(a.Name, b.Name)
+}
+
+// A host cursor is the last item of the previous page, so it resumes correctly
+// even if items were added or removed in between.
+func encodeNamesCursor(last resourceName) string {
+	b, _ := json.Marshal(last)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeNamesCursor(cursor string) (*resourceName, error) {
+	if cursor == "" {
+		return nil, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return nil, err
+	}
+	var last resourceName
+	if err := json.Unmarshal(b, &last); err != nil || last.Name == "" {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	return &last, nil
 }
 
 // listingRoute returns the concrete route of the function operation declaring
@@ -294,12 +370,13 @@ func listingResource(v any) string {
 }
 
 // dispatchListing re-dispatches a clone of r -- the caller's context and
-// credentials -- as GET route?q=&cursor= into mux, the snapshot this handler
+// credentials -- as GET route?q=&cursor=&limit= into mux, the snapshot this handler
 // was registered into (as rewrite mode does), and buffers the answer. It
 // returns the parsed page on a 200 with a well-formed body, nil on a malformed
-// one, and always the owner's status and headers.
-func dispatchListing(mux *http.ServeMux, r *http.Request, route, q, cursor string) (*resourceNamesPage, int, http.Header) {
-	vals := url.Values{}
+// one (an item without a name, or more items than limit), and always the
+// owner's status and headers.
+func dispatchListing(mux *http.ServeMux, r *http.Request, route, q, cursor string, limit int) (*resourceNamesPage, int, http.Header) {
+	vals := url.Values{"limit": {strconv.Itoa(limit)}}
 	if q != "" {
 		vals.Set("q", q)
 	}
@@ -324,7 +401,7 @@ func dispatchListing(mux *http.ServeMux, r *http.Request, route, q, cursor strin
 		return nil, http.StatusOK, buf.header
 	}
 	var page resourceNamesPage
-	if err := json.Unmarshal(buf.body.Bytes(), &page); err != nil {
+	if err := json.Unmarshal(buf.body.Bytes(), &page); err != nil || len(page.Items) > limit {
 		return nil, http.StatusOK, buf.header
 	}
 	for _, item := range page.Items {

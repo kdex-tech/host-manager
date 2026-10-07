@@ -68,19 +68,20 @@ func newNamesFixture(t *testing.T) *namesFixture {
 		ready("secret", "/api/v1/secret", true), // internal: never exposed
 	}
 
-	gated := func(name, basePath string) page.PageHandler {
-		return page.PageHandler{Name: name, Page: &kdexv1alpha1.KDexPageSpec{Paths: kdexv1alpha1.Paths{BasePath: basePath}},
+	gated := func(name, label, basePath string) page.PageHandler {
+		return page.PageHandler{Name: name,
+			Page:               &kdexv1alpha1.KDexPageSpec{Label: label, Paths: kdexv1alpha1.Paths{BasePath: basePath}},
 			ParsedRequirements: &entitlements.ParsedRequirements{}}
 	}
-	hh.Pages.Set(gated("public", "/public"))
-	hh.Pages.Set(gated("gated", "/gated"))
-	hh.Pages.Set(gated("hidden", "/hidden"))
+	hh.Pages.Set(gated("public", "Welcome", "/public"))
+	hh.Pages.Set(gated("gated", "Members Area", "/gated"))
+	hh.Pages.Set(gated("hidden", "Back Office", "/hidden"))
 	// Pages.Set rebuilds the mux, which replaces registeredPaths: set them
 	// afterwards.
 	hh.registeredPaths = map[string]ko.PathInfo{"/api/v1/roles": listingPath("roles")}
 
 	f := &namesFixture{hh: hh, owner: &ownerCall{}, ownerStatus: http.StatusOK,
-		ownerBody: `{"items":[{"name":"analysts","label":"Analysts"},{"name":"engineers"}],"next":"c2"}`}
+		ownerBody: `{"items":[{"name":"analysts","label":"Data Analysts"},{"name":"engineers"}],"next":"c2"}`}
 	f.mux = http.NewServeMux()
 	f.mux.HandleFunc("GET /api/v1/roles", func(w http.ResponseWriter, r *http.Request) {
 		f.owner.hit = true
@@ -123,6 +124,7 @@ func (f *namesFixture) get(t *testing.T, target string, held []string) (int, nam
 	return rr.Code, body
 }
 
+// names returns the items' names (the resourceNames).
 func names(b namesBody) []string {
 	out := []string{}
 	for _, i := range b.Items {
@@ -136,15 +138,16 @@ func names(b namesBody) []string {
 // and cursor.
 func TestResourceNames_OwnedIsDispatchedToTheOwner(t *testing.T) {
 	f := newNamesFixture(t)
-	code, body := f.get(t, "/-/entitlements/resources/roles/names?q=a&cursor=c1&verb=&smuggled=1", []string{"x"})
+	code, body := f.get(t, "/-/entitlements/resources/roles/names?q=a&cursor=c1&limit=2&verb=&smuggled=1", []string{"x"})
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, []string{"analysts", "engineers"}, names(body))
-	assert.Equal(t, "Analysts", body.Items[0].Label)
+	assert.Equal(t, "Data Analysts", body.Items[0].Label)
+	assert.Empty(t, body.Items[1].Label, "label is optional")
 	assert.Equal(t, "c2", body.Next)
 
 	assert.True(t, f.owner.hit)
 	assert.Equal(t, http.MethodGet, f.owner.method)
-	assert.Equal(t, "cursor=c1&q=a", f.owner.rawQuery, "only q and cursor reach the owner")
+	assert.Equal(t, "cursor=c1&limit=2&q=a", f.owner.rawQuery, "only q, cursor and limit reach the owner")
 	assert.Equal(t, "tester", f.owner.sub, "the owner sees the caller, not the host")
 }
 
@@ -202,22 +205,64 @@ func TestResourceNames_AnonymousIsChallenged(t *testing.T) {
 }
 
 // pages are answered by the host: a page is listed when the caller passes its
-// gate (the page gate's own rule), with q as a prefix and cursor as "after".
+// gate (the page gate's own rule), labelled with the page label, sorted by
+// label.
 func TestResourceNames_PagesAreHostNative(t *testing.T) {
 	f := newNamesFixture(t)
 	held := []string{"pages:/gated:read", "pages:/public:read"}
 
 	_, body := f.get(t, "/-/entitlements/resources/pages/names", held)
-	assert.Equal(t, []string{"/gated", "/public"}, names(body), "/hidden is gated and not held")
-
-	_, body = f.get(t, "/-/entitlements/resources/pages/names?q=/g", held)
-	assert.Equal(t, []string{"/gated"}, names(body))
-
-	_, body = f.get(t, "/-/entitlements/resources/pages/names?cursor=/gated", held)
-	assert.Equal(t, []string{"/public"}, names(body))
+	assert.Equal(t, []string{"/gated", "/public"}, names(body), "/hidden is gated and not held; sorted by label")
+	assert.Equal(t, "Members Area", body.Items[0].Label)
+	assert.Equal(t, "Welcome", body.Items[1].Label)
 
 	_, body = f.get(t, "/-/entitlements/resources/pages/names?verb=read", []string{"pages:/gated:read"})
 	assert.Equal(t, []string{"/gated"}, names(body))
+}
+
+// q is a type-ahead: a case-insensitive substring of EITHER the name (the
+// name) or the label.
+func TestResourceNames_TypeAheadMatchesEitherField(t *testing.T) {
+	f := newNamesFixture(t)
+	held := []string{"pages::read"}
+	for q, want := range map[string][]string{
+		"area": {"/gated"},                       // label, mid-word, case-insensitive
+		"BACK": {"/hidden"},                      // label, case-insensitive
+		"/pub": {"/public"},                      // resourceName
+		"e":    {"/hidden", "/gated", "/public"}, // Back Office, Members Area, Welcome
+		"zzz":  {},
+	} {
+		code, body := f.get(t, "/-/entitlements/resources/pages/names?q="+q, held)
+		require.Equal(t, http.StatusOK, code, q)
+		assert.Equal(t, want, names(body), "q=%s", q)
+	}
+}
+
+// Results are paged: limit (default 50, at most 200) bounds a page, and the
+// opaque next cursor resumes after its last item.
+func TestResourceNames_Paging(t *testing.T) {
+	f := newNamesFixture(t)
+	held := []string{"pages::read"}
+
+	_, p1 := f.get(t, "/-/entitlements/resources/pages/names?limit=2", held)
+	assert.Equal(t, []string{"/hidden", "/gated"}, names(p1), "Back Office, Members Area")
+	require.NotEmpty(t, p1.Next)
+
+	_, p2 := f.get(t, "/-/entitlements/resources/pages/names?limit=2&cursor="+p1.Next, held)
+	assert.Equal(t, []string{"/public"}, names(p2))
+	assert.Empty(t, p2.Next, "the last page has no next")
+
+	for _, bad := range []string{"limit=0", "limit=201", "limit=x", "cursor=not-a-cursor"} {
+		code, _ := f.get(t, "/-/entitlements/resources/pages/names?"+bad, held)
+		assert.Equal(t, http.StatusBadRequest, code, bad)
+	}
+}
+
+// An owner must honour limit: more items than asked for is a broken contract.
+func TestResourceNames_OwnerExceedingLimitIsBadGateway(t *testing.T) {
+	f := newNamesFixture(t)
+	code, _ := f.get(t, "/-/entitlements/resources/roles/names?limit=1", []string{"x"})
+	assert.Equal(t, http.StatusBadGateway, code)
 }
 
 // functions are answered by the host: ready, non-internal functions whose
@@ -226,9 +271,10 @@ func TestResourceNames_FunctionsAreHostNative(t *testing.T) {
 	f := newNamesFixture(t)
 	_, body := f.get(t, "/-/entitlements/resources/functions/names", []string{"functions:/api/v1/roles:read"})
 	assert.Equal(t, []string{"/api/v1/roles"}, names(body))
+	assert.Equal(t, "roles", body.Items[0].Label, "a function is labelled with its KDexFunction name")
 
 	_, body = f.get(t, "/-/entitlements/resources/functions/names", []string{"functions::read"})
-	assert.Equal(t, []string{"/api/v1/files", "/api/v1/roles"}, names(body), "internal functions are never listed")
+	assert.Equal(t, []string{"/api/v1/files", "/api/v1/roles"}, names(body), "internal functions are never listed; sorted by label")
 }
 
 // A function cannot claim a host-native resource.
@@ -236,6 +282,6 @@ func TestResourceNames_HostNativeResourcesCannotBeClaimed(t *testing.T) {
 	f := newNamesFixture(t)
 	f.hh.registeredPaths["/api/v1/pages"] = listingPath("pages")
 	_, body := f.get(t, "/-/entitlements/resources/pages/names", []string{"pages::read"})
-	assert.Equal(t, []string{"/gated", "/hidden", "/public"}, names(body))
+	assert.Equal(t, []string{"/hidden", "/gated", "/public"}, names(body))
 	assert.False(t, f.owner.hit)
 }
