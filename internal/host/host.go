@@ -1107,6 +1107,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.openapiHandler(mux, registeredPaths)
 	hh.protectedResourceHandler(mux, registeredPaths)
 	hh.registerHandler(mux, registeredPaths)
+	hh.resourceNamesHandler(mux, registeredPaths)
 	hh.schemaHandler(mux, registeredPaths)
 	hh.snifferHandler(mux, registeredPaths)
 	hh.stateHandler(mux, registeredPaths)
