@@ -115,7 +115,10 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	if isPrivate && hh.IsAuthEnabled() {
 		vary += ", Authorization, Cookie"
 	}
-	w.Header().Set("Vary", vary)
+	// Merge rather than replace: a wrapping handler (gzhttp on /-/openapi)
+	// has already added Vary: Accept-Encoding, and dropping it would let a
+	// cache serve one coding to a client that asked for another.
+	addVary(w.Header(), vary)
 
 	identity := ""
 	if isPrivate && hh.IsAuthEnabled() {
@@ -215,4 +218,21 @@ func filterFromQuery(queryParams url.Values) ko.Filter {
 	}
 
 	return filter
+}
+
+// addVary adds each comma-separated field of vary to the Vary header unless it
+// is already listed (case-insensitively).
+func addVary(h http.Header, vary string) {
+	present := map[string]bool{}
+	for _, v := range h.Values("Vary") {
+		for f := range strings.SplitSeq(v, ",") {
+			present[strings.ToLower(strings.TrimSpace(f))] = true
+		}
+	}
+	for f := range strings.SplitSeq(vary, ",") {
+		if f = strings.TrimSpace(f); f != "" && !present[strings.ToLower(f)] {
+			h.Add("Vary", f)
+			present[strings.ToLower(f)] = true
+		}
+	}
 }

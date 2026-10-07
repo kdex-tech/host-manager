@@ -12,6 +12,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/utils"
+	"github.com/klauspost/compress/gzhttp"
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -1027,7 +1028,10 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 func (hh *HostHandler) openapiHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/-/openapi"
 
-	mux.HandleFunc("GET "+path, hh.OpenAPIGet)
+	// The document is large (hundreds of KB on a real tenant) and was served
+	// uncompressed. gzhttp compresses it for clients that accept gzip or zstd,
+	// and adds Vary: Accept-Encoding.
+	mux.Handle("GET "+path, gzhttp.GzipHandler(http.HandlerFunc(hh.OpenAPIGet)))
 
 	// Register the path itself so it appears in the spec
 	hh.registerPath(path, ko.PathInfo{
