@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path"
 	"slices"
 	"strings"
 	"time"
@@ -199,17 +198,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// the BasePath. For Service-backed functions, the upstream service
 			// is unaware of the BasePath, so we strip it before prepending the
 			// backend's mount path.
-			upstreamPath := preq.In.URL.Path
-			if fn.Spec.Backend != nil {
-				upstreamPath = strings.TrimPrefix(upstreamPath, fn.Spec.API.BasePath)
-				if !strings.HasPrefix(upstreamPath, "/") {
-					upstreamPath = "/" + upstreamPath
-				}
-			}
-			preq.Out.URL.Path = path.Join(target.Path, upstreamPath)
-			if strings.HasSuffix(preq.In.URL.Path, "/") && !strings.HasSuffix(preq.Out.URL.Path, "/") {
-				preq.Out.URL.Path += "/"
-			}
+			escaped := upstreamEscapedPath(preq.In.URL.EscapedPath(), target.EscapedPath(),
+				fn.Spec.API.BasePath, fn.Spec.Backend != nil)
+			// Cannot fail: both parts come from URL.EscapedPath, which only
+			// yields valid escapes.
+			preq.Out.URL.Path, _ = url.PathUnescape(escaped)
+			preq.Out.URL.RawPath = escaped
 
 			// 3. Forward Query Parameters exactly
 			// This copies the encoded query string (e.g., ?user=123&sort=asc)
@@ -473,6 +467,17 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			"path", r.URL.Path,
 			"target", target.String(),
 		)
+
+		// No ".." segment, encoded or not, ever reaches the gate or the
+		// upstream. ServeMux matches on the escaped path, so %2E%2E%2F
+		// arrives inside a single mapped segment; decoded, it climbed out of
+		// the base path and the backend's mount path to any route on the
+		// backend's port (e.g. knowdb's unauthenticated /internal/*). No
+		// resource is legitimately named "..", so refuse it outright.
+		if hasDotDotSegment(r.URL.Path) {
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
 
 		// Snapshot the only hh field this handler reads (authChecker)
 		// under a tight RLock, then release before doing the auth check
@@ -835,4 +840,65 @@ func newProxyTransport(t ProxyTimeouts) *http.Transport {
 		ResponseHeaderTimeout: respHeader,
 		IdleConnTimeout:       idleConn,
 	}
+}
+
+// upstreamEscapedPath returns the ESCAPED path to send upstream: the backend
+// mount path (targetEscaped) followed by the request path, with basePath's
+// segments stripped first when stripBase is set (Service-backed functions).
+//
+// It works on the escaped request path and never cleans it. The gate matched
+// the route and bound its placeholders on r.URL.EscapedPath(), so the upstream
+// must receive exactly those segments. Rebuilding from the decoded path let
+// path.Join collapse a percent-encoded "..", and dropped RawPath so every %2F
+// became a real '/': /v1/roles/%2E%2E%2Fadmin, authorized as the role
+// "../admin", reached the upstream as /v1/admin. For a Service-backed
+// function the gate is the only check, so that was a bypass.
+func upstreamEscapedPath(requestEscaped, targetEscaped, basePath string, stripBase bool) string {
+	rest := requestEscaped
+	if stripBase {
+		rest = trimBasePathSegments(requestEscaped, basePath)
+	}
+	p := strings.TrimSuffix(targetEscaped, "/") + rest
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
+// trimBasePathSegments removes basePath's leading segments from the escaped
+// path p and returns what follows: "" when nothing does, else a path starting
+// with '/'. Segments are compared decoded, so the base path still strips when
+// the request spells it in another encoding (ServeMux matched it decoded). If
+// p does not start with basePath's segments it is returned unchanged.
+func trimBasePathSegments(p, basePath string) string {
+	base := strings.Trim(basePath, "/")
+	if base == "" {
+		return p
+	}
+	want := strings.Split(base, "/")
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	if len(segs) < len(want) {
+		return p
+	}
+	for i, w := range want {
+		if got, err := url.PathUnescape(segs[i]); err != nil || got != w {
+			return p
+		}
+	}
+	if rest := segs[len(want):]; len(rest) > 0 {
+		return "/" + strings.Join(rest, "/")
+	}
+	return ""
+}
+
+// hasDotDotSegment reports whether the DECODED path has a ".." segment. The
+// decoded path is the right one to check: %2F decodes to a separator there,
+// so "a%2F..%2Fb" and "%2E%2E" are both caught.
+func hasDotDotSegment(decodedPath string) bool {
+	for seg := range strings.SplitSeq(decodedPath, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }

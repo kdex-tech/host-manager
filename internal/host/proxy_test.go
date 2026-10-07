@@ -27,14 +27,27 @@ import (
 
 // runProxy starts a capturing upstream HTTP server, points fn.Status.URL at it
 // (preserving the original path component as a backend mount path), invokes
-// the proxy handler, and returns the path the upstream actually saw.
+// the proxy handler, and returns the ESCAPED path the upstream actually saw —
+// the form its router matches on, so a %2F or an encoded ".." stays visible.
 func runProxy(t *testing.T, fn *kdexv1alpha1.KDexFunction, incomingPath string) string {
+	t.Helper()
+	code, capturedPath, _ := serveProxy(t, fn, incomingPath)
+	assert.Equal(t, http.StatusOK, code)
+	return capturedPath
+}
+
+// serveProxy is runProxy without the status assertion: it returns the gate's
+// status code, the ESCAPED path the upstream saw, and whether the upstream was
+// reached at all.
+func serveProxy(t *testing.T, fn *kdexv1alpha1.KDexFunction, incomingPath string) (int, string, bool) {
 	t.Helper()
 	logf.SetLogger(logr.Discard())
 
 	var capturedPath string
+	reached := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
+		capturedPath = r.URL.EscapedPath()
+		reached = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(upstream.Close)
@@ -75,8 +88,7 @@ func runProxy(t *testing.T, fn *kdexv1alpha1.KDexFunction, incomingPath string) 
 	req := httptest.NewRequest("GET", incomingPath, nil)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	assert.Equal(t, http.StatusOK, rr.Code)
-	return capturedPath
+	return rr.Code, capturedPath, reached
 }
 
 func TestProxy_KnativeFunction_PassesPathThrough(t *testing.T) {
@@ -135,6 +147,102 @@ func TestProxy_ServiceBacked_NoBackendPath_DefaultsToRoot(t *testing.T) {
 	// /v1/docs stripped, / from backend defaults -> /find
 	got := runProxy(t, fn, "/v1/docs/find")
 	assert.Equal(t, "/find", got)
+}
+
+// The gate matches and binds the route on the ESCAPED path, so the upstream
+// must receive exactly those segments. Rebuilding the upstream path from the
+// decoded one turned every %2F into a real '/', so the upstream served a
+// different route (or instance) from the one the gate authorized.
+func TestProxy_UpstreamGetsTheEscapedPathTheGateMatched(t *testing.T) {
+	knative := func() *kdexv1alpha1.KDexFunction {
+		return &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-knative", Namespace: "default"},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: "h"},
+				API:     kdexv1alpha1.API{BasePath: "/v1/roles"},
+			},
+			Status: kdexv1alpha1.KDexFunctionStatus{URL: "http://fn-xyz.kdex-knative.svc.cluster.local"},
+		}
+	}
+	service := func() *kdexv1alpha1.KDexFunction {
+		return &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-svc", Namespace: "default"},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: "h"},
+				API:     kdexv1alpha1.API{BasePath: "/v1/roles"},
+				Backend: &kdexv1alpha1.FunctionBackend{
+					Type:    kdexv1alpha1.FunctionBackendTypeService,
+					Service: &kdexv1alpha1.ServiceBackend{Name: "svc", Port: intstr.FromInt(8080), Path: "/api"},
+				},
+			},
+			Status: kdexv1alpha1.KDexFunctionStatus{URL: "http://svc.default.svc.cluster.local:8080/api"},
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		fn   func() *kdexv1alpha1.KDexFunction
+		in   string
+		want string
+	}{
+		{"knative: encoded slash kept", knative, "/v1/roles/a%2Fb", "/v1/roles/a%2Fb"},
+		{"service: encoded slash kept", service, "/v1/roles/a%2Fb", "/api/a%2Fb"},
+		{"service: dots inside a segment are not a dot-segment", service, "/v1/roles/a..b", "/api/a..b"},
+		{"service: double-encoded percent kept", service, "/v1/roles/a%2525", "/api/a%2525"},
+		{"service: trailing slash kept", service, "/v1/roles/find/", "/api/find/"},
+		{"service: base path alone maps to the mount", service, "/v1/roles", "/api"},
+		{"service: base path with slash maps to the mount with slash", service, "/v1/roles/", "/api/"},
+		{"service: base path in another encoding still strips", service, "/v1/%72oles/find", "/api/find"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, runProxy(t, tc.fn(), tc.in))
+		})
+	}
+}
+
+// A ".." segment is refused before anything else, encoded or not. Spelled
+// %2E%2E%2F inside one segment, ServeMux matches it as a single mapped route
+// segment, and the decoded path then climbed out of the function's base path
+// (and its backend's mount path): GET /api/v1/files/%2E%2E%2F%2E%2E%2Finternal
+// reached knowdb's unauthenticated /internal/* through the files route.
+func TestProxy_RefusesDotDotSegments(t *testing.T) {
+	fn := func() *kdexv1alpha1.KDexFunction {
+		return &kdexv1alpha1.KDexFunction{
+			ObjectMeta: metav1.ObjectMeta{Name: "fn-svc", Namespace: "default"},
+			Spec: kdexv1alpha1.KDexFunctionSpec{
+				HostRef: corev1.LocalObjectReference{Name: "h"},
+				API:     kdexv1alpha1.API{BasePath: "/api/v1/files"},
+				Backend: &kdexv1alpha1.FunctionBackend{
+					Type:    kdexv1alpha1.FunctionBackendTypeService,
+					Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080), Path: "/v1/files"},
+				},
+			},
+			Status: kdexv1alpha1.KDexFunctionStatus{URL: "http://knowdb.default.svc.cluster.local:8080/v1/files"},
+		}
+	}
+
+	for _, p := range []string{
+		"/api/v1/files/%2E%2E%2F%2E%2E%2Finternal%2Fvalidate",
+		"/api/v1/files/%2e%2e%2finternal",
+		"/api/v1/files/%2E%2E",
+		"/api/v1/files/..%2Finternal",
+		"/api/v1/files/a%2F..%2Fb",
+		"/api/v1/files/a/%2E%2E/b",
+	} {
+		t.Run(p, func(t *testing.T) {
+			code, _, reached := serveProxy(t, fn(), p)
+			assert.Equal(t, http.StatusBadRequest, code)
+			assert.False(t, reached, "a dot-dot request must never reach the upstream")
+		})
+	}
+
+	for _, p := range []string{"/api/v1/files/a..b", "/api/v1/files/..a", "/api/v1/files/a.."} {
+		t.Run("allowed "+p, func(t *testing.T) {
+			code, _, reached := serveProxy(t, fn(), p)
+			assert.Equal(t, http.StatusOK, code)
+			assert.True(t, reached)
+		})
+	}
 }
 
 func TestNewProxyTransport_ZeroValueAppliesDefaults(t *testing.T) {
