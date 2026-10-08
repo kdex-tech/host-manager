@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -49,10 +50,13 @@ type Exchanger struct {
 	// host sends the IdP -- non-empty only when offline access was requested.
 	// See kdex-tech/host-manager#190.
 	oidcAuthCodeOptions []oauth2.AuthCodeOption
-	oidcProvider        *oidc.Provider
-	oidcVerifier        *oidc.IDTokenVerifier
-	refreshTokenCache   cache.Cache
-	refreshTokenTTL     time.Duration
+	// oidcPrompt is the configured `prompt` every login sends upstream; a
+	// login's requested prompt values are joined to it (AuthCodeURL).
+	oidcPrompt        []string
+	oidcProvider      *oidc.Provider
+	oidcVerifier      *oidc.IDTokenVerifier
+	refreshTokenCache cache.Cache
+	refreshTokenTTL   time.Duration
 	// refreshGraceCache and refreshGraceWindow implement the #169 rotation
 	// grace window: refreshGraceCache is nil (and replayFromGrace/
 	// publishToGrace are no-ops) unless Config.RefreshGraceWindow > 0.
@@ -319,17 +323,16 @@ func NewExchanger(
 		// ignores it and wants access_type=offline instead, so the scope is
 		// carried AND translated. See kdex-tech/host-manager#190.
 		if slices.Contains(scopes, scopeOfflineAccess) {
-			ex.oidcAuthCodeOptions = []oauth2.AuthCodeOption{
-				oauth2.AccessTypeOffline,
-				// Without this Google returns a refresh token only on a
-				// user's FIRST consent for the client, so a re-login after
-				// the token is lost silently yields a session with no
-				// upstream grant -- some sessions re-validated against the
-				// IdP and some not, with nothing to distinguish them. The
-				// cost is a consent screen on every login, which is why the
-				// whole thing is opt-in.
-				oauth2.SetAuthURLParam("prompt", "consent"),
-			}
+			ex.oidcAuthCodeOptions = []oauth2.AuthCodeOption{oauth2.AccessTypeOffline}
+			// Without this Google returns a refresh token only on a user's
+			// FIRST consent for the client, so a re-login after the token is
+			// lost silently yields a session with no upstream grant -- some
+			// sessions re-validated against the IdP and some not, with nothing
+			// to distinguish them. The cost is a consent screen on every
+			// login, which is why the whole thing is opt-in. Kept apart from
+			// oidcAuthCodeOptions so a login's own prompt is joined to it
+			// rather than overwriting it (#233).
+			ex.oidcPrompt = []string{"consent"}
 		}
 	}
 
@@ -601,11 +604,27 @@ func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Du
 	return e.config.TokenManager.MintStatelessKey(resource, subject, "mcp", scope, ttl)
 }
 
-func (e *Exchanger) AuthCodeURL(state string) string {
+// AuthCodeURL is the upstream provider's authorization URL for one browser
+// login: its state, PKCE challenge and nonce, plus any prompt or login_hint
+// the login asked for (#233, #234).
+func (e *Exchanger) AuthCodeURL(req AuthCodeRequest) string {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return ""
 	}
-	return e.oauth2Config.AuthCodeURL(state, e.oidcAuthCodeOptions...)
+	opts := slices.Clone(e.oidcAuthCodeOptions)
+	if req.Verifier != "" {
+		opts = append(opts, oauth2.S256ChallengeOption(req.Verifier))
+	}
+	if req.Nonce != "" {
+		opts = append(opts, oidc.Nonce(req.Nonce))
+	}
+	if prompt := joinPrompt(e.oidcPrompt, req.Prompt); prompt != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", prompt))
+	}
+	if req.LoginHint != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("login_hint", req.LoginHint))
+	}
+	return e.oauth2Config.AuthCodeURL(req.State, opts...)
 }
 
 func (e *Exchanger) EndSessionURL() (string, error) {
@@ -628,12 +647,14 @@ type OIDCExchange struct {
 	UpstreamRefreshToken string
 }
 
-func (e *Exchanger) ExchangeCode(ctx context.Context, code string) (OIDCExchange, error) {
+// ExchangeCode redeems an upstream authorization code. A browser login passes
+// its PKCE verifier as oauth2.VerifierOption.
+func (e *Exchanger) ExchangeCode(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (OIDCExchange, error) {
 	if e == nil || !e.config.IsOIDCEnabled() {
 		return OIDCExchange{}, fmt.Errorf("OIDC is not configured")
 	}
 
-	oauthToken, err := e.oauth2Config.Exchange(ctx, code)
+	oauthToken, err := e.oauth2Config.Exchange(ctx, code, opts...)
 	if err != nil {
 		return OIDCExchange{}, fmt.Errorf("failed to exchange oauth code %w", err)
 	}
@@ -1730,6 +1751,20 @@ func (e *Exchanger) verifyIDToken(ctx context.Context, rawIDToken string) (*oidc
 		return nil, fmt.Errorf("OIDC is not configured")
 	}
 	return e.oidcVerifier.Verify(ctx, rawIDToken)
+}
+
+// CheckIDTokenNonce verifies an upstream ID token and requires it to carry
+// the nonce its login sent, so a token minted for another login cannot finish
+// this one (OIDC Core §3.1.3.7, #234).
+func (e *Exchanger) CheckIDTokenNonce(ctx context.Context, rawIDToken, nonce string) error {
+	idToken, err := e.verifyIDToken(ctx, rawIDToken)
+	if err != nil {
+		return err
+	}
+	if nonce == "" || subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(nonce)) != 1 {
+		return errors.New("id_token nonce does not match the login")
+	}
+	return nil
 }
 
 type OIDCProviderClaims struct {

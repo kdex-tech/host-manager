@@ -122,7 +122,7 @@ func TestNewExchanger(t *testing.T) {
 			sp:   scopeProvider,
 			assertions: func(t *testing.T, got *Exchanger, goterr error) {
 				assert.NotNil(t, got)
-				url := got.AuthCodeURL("foo")
+				url := got.AuthCodeURL(AuthCodeRequest{State: "foo"})
 				assert.Equal(t, "", url)
 			},
 		},
@@ -530,7 +530,7 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				innerHandler.Handler = MockOIDCProvider(*cfg)
 				ex, gotErr := NewExchanger(ctx, *cfg, cacheManager, scopeProvider, nil)
 				assert.Nil(t, gotErr)
-				url := ex.AuthCodeURL("foo")
+				url := ex.AuthCodeURL(AuthCodeRequest{State: "foo"})
 				assert.Contains(t, url, "http://", "client_id=foo", "scope=openid+profile+email", "state=foo")
 			},
 		},
@@ -580,7 +580,7 @@ func TestNewExchanger_OIDC(t *testing.T) {
 				innerHandler.Handler = MockOIDCProvider(*cfg)
 				ex, gotErr := NewExchanger(ctx, *cfg, cacheManager, scopeProvider, nil)
 				assert.Nil(t, gotErr)
-				url := ex.AuthCodeURL("foo")
+				url := ex.AuthCodeURL(AuthCodeRequest{State: "foo"})
 				assert.Contains(t, url, "http://", "client_id=foo", "scope=openid+profile+email+job", "state=foo")
 			},
 		},
@@ -962,7 +962,31 @@ func TokenHandler(cfg Config) http.HandlerFunc {
 		// We usually include 'aud' (client_id) and 'sub' (user id)
 		var idToken string
 		var err error
-		if rest, ok := strings.CutPrefix(code, "rbc:"); ok {
+		if rest, ok := strings.CutPrefix(code, "login:"); ok {
+			// Browser-login escape hatch (kdex-tech/host-manager#234): a
+			// `login:<sub>|<nonce>|<verifier>` code stands in for one the
+			// provider issued to a specific login. The exchange must present
+			// that login's PKCE verifier, and the id_token carries its nonce,
+			// so a test can tell a bound callback from an unbound one.
+			parts := strings.SplitN(rest, "|", 3)
+			if len(parts) != 3 {
+				http.Error(w, "malformed login: code, want login:<sub>|<nonce>|<verifier>", http.StatusBadRequest)
+				return
+			}
+			if r.FormValue("code_verifier") != parts[2] {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"invalid_grant","error_description":"PKCE verification failed"}`))
+				return
+			}
+			idToken, err = cfg.Signer.SignProjected(jwt.MapClaims{
+				"sub":   parts[0],
+				"email": "email@foo.bar",
+				"nonce": parts[1],
+				"iss":   cfg.OIDC.ProviderURL,
+				"aud":   []string{clientID},
+			})
+		} else if rest, ok := strings.CutPrefix(code, "rbc:"); ok {
 			// Synthetic escape hatch for RoleBindingClaim tests: every other
 			// code in this file doubles as the id_token's `sub`, which leaves
 			// no way to assert a claim (e.g. email) that differs from sub, or

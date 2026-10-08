@@ -35,12 +35,8 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 
 	extras := map[string]any{}
 
-	if authCodeURL := hh.authExchanger.AuthCodeURL(returnURL); authCodeURL != "" {
-		extras["oidc"] = map[string]any{
-			"authCodeURL": authCodeURL,
-			"name":        hh.authConfig.OIDC.Name,
-			"provider":    hh.authConfig.OIDC.ProviderURL,
-		}
+	if oidc := hh.loginOIDCExtra(r, returnURL); oidc != nil {
+		extras["oidc"] = oidc
 	}
 
 	rendered := hh.renderUtilityPage(
@@ -63,6 +59,23 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 	_, err = w.Write([]byte(rendered))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// loginOIDCExtra is the login page's `oidc` template data. authCodeURL keeps
+// its name for existing templates, but points at /-/oauth/login, which binds
+// the login to this browser before sending it to the provider (#234); the
+// page itself stays cacheable. prompt and login_hint from an authorize
+// redirect are passed through to the provider (#233).
+func (hh *HostHandler) loginOIDCExtra(r *http.Request, returnURL string) map[string]any {
+	if !hh.authConfig.IsOIDCEnabled() {
+		return nil
+	}
+	q := r.URL.Query()
+	return map[string]any{
+		"authCodeURL": auth.OIDCLoginURL(returnURL, q.Get("prompt"), q.Get("login_hint")),
+		"name":        hh.authConfig.OIDC.Name,
+		"provider":    hh.authConfig.OIDC.ProviderURL,
 	}
 }
 

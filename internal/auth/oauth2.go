@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	"golang.org/x/oauth2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -144,14 +145,39 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Check Authentication
+	// 3. Check Authentication, honouring prompt and login_hint (OIDC Core
+	// §3.1.2.1) so a client can ask WHICH account rather than taking whatever
+	// session the browser holds. See kdex-tech/host-manager#233.
+	prompt := strings.Fields(r.URL.Query().Get("prompt"))
+	loginHint := r.URL.Query().Get("login_hint")
+	if slices.Contains(prompt, "none") && len(prompt) > 1 {
+		err = fmt.Errorf("prompt=none combined with other values")
+		redirectAuthorizeError(w, r, callbackURL, state, "invalid_request")
+		return
+	}
+
 	ctx := r.Context()
 	authCtx, ok := GetAuthContext(ctx)
 	if !ok {
-		// Not logged in -> Redirect to Login
-		// Encode current URL as return URL
-		returnURL := r.URL.String()
-		http.Redirect(w, r, "/-/login?return="+url.QueryEscape(returnURL), http.StatusSeeOther)
+		if slices.Contains(prompt, "none") {
+			err = fmt.Errorf("prompt=none without a session")
+			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
+			return
+		}
+		http.Redirect(w, r, authorizeLoginURL(r, prompt, loginHint), http.StatusSeeOther)
+		return
+	}
+
+	if slices.Contains(prompt, "login") || slices.Contains(prompt, "select_account") ||
+		(loginHint != "" && !sessionMatchesHint(authCtx, loginHint)) {
+		if slices.Contains(prompt, "none") {
+			// prompt=none must never show UI: the session is for another
+			// account than the client asked for, so say so instead.
+			err = fmt.Errorf("prompt=none with a session for another account than login_hint")
+			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
+			return
+		}
+		http.Redirect(w, r, authorizeLoginURL(r, prompt, loginHint), http.StatusSeeOther)
 		return
 	}
 
@@ -222,6 +248,52 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, callbackURL.String(), http.StatusFound)
 }
 
+// authorizeLoginURL sends an authorize request to the login page. prompt and
+// login_hint go on to the login (and from there to the provider) and are
+// removed from the return URL, so coming back to authorize issues a code
+// instead of looping -- even when the user picks another account at the
+// provider than the hint named; the client decides what to do with that.
+func authorizeLoginURL(r *http.Request, prompt []string, loginHint string) string {
+	ret := *r.URL
+	q := ret.Query()
+	q.Del("prompt")
+	q.Del("login_hint")
+	ret.RawQuery = q.Encode()
+
+	v := url.Values{"return": {ret.String()}}
+	if forwarded := slices.DeleteFunc(slices.Clone(prompt), func(p string) bool { return p == "none" }); len(forwarded) > 0 {
+		v.Set("prompt", strings.Join(forwarded, " "))
+	}
+	if loginHint != "" {
+		v.Set("login_hint", loginHint)
+	}
+	return "/-/login?" + v.Encode()
+}
+
+// sessionMatchesHint reports whether a login_hint names the session's account,
+// by email (case-insensitively) or by subject. A local account may carry no
+// email, so the subject is the only name it has.
+func sessionMatchesHint(authCtx AuthContext, loginHint string) bool {
+	if email, _ := authCtx["email"].(string); email != "" && strings.EqualFold(email, loginHint) {
+		return true
+	}
+	sub, _ := authCtx["sub"].(string)
+	return sub != "" && sub == loginHint
+}
+
+// redirectAuthorizeError returns an authorization error to the client's
+// (already validated) redirect_uri, RFC 6749 §4.1.2.1.
+func redirectAuthorizeError(w http.ResponseWriter, r *http.Request, callbackURL *url.URL, state, code string) {
+	u := *callbackURL
+	q := u.Query()
+	q.Set("error", code)
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
 func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
@@ -233,11 +305,28 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tie the code to a login THIS browser started before it is exchanged.
+	// Without this anyone holding a code from their own provider login could
+	// sign a victim's browser in as themselves. See
+	// kdex-tech/host-manager#234.
+	login, err := o.consumeLoginState(w, r, state)
+	if err != nil {
+		log.V(1).Info("refusing an OIDC callback not bound to this browser", "cause", err.Error())
+		http.Error(w, "Login was not started from this browser; please sign in again", http.StatusBadRequest)
+		return
+	}
+
 	// Exchange code for ID Token
-	oidcTokens, err := o.AuthExchanger.ExchangeCode(r.Context(), code)
+	oidcTokens, err := o.AuthExchanger.ExchangeCode(r.Context(), code, oauth2.VerifierOption(login.Verifier))
 	if err != nil {
 		log.Error(err, "failed to exchange oauth code")
 		http.Error(w, "Failed to exchange token", http.StatusUnauthorized)
+		return
+	}
+
+	if err := o.AuthExchanger.CheckIDTokenNonce(r.Context(), oidcTokens.RawIDToken, login.Nonce); err != nil {
+		log.V(1).Info("refusing an OIDC callback whose id_token belongs to another login", "cause", err.Error())
+		http.Error(w, "Login was not started from this browser; please sign in again", http.StatusBadRequest)
 		return
 	}
 
@@ -283,10 +372,9 @@ func (o *OAuth2) OAuthGet(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Validate state/redirect. state is attacker-controlled (it's the
-	// upstream IdP echo of whatever we passed in as our state param), so
-	// constrain it to a same-origin path.
-	http.Redirect(w, r, kdexhttp.SafeReturnPath(state), http.StatusSeeOther)
+	// The return path was sanitized when the login started and has ridden in
+	// the encrypted cookie since; state itself is now an opaque nonce.
+	http.Redirect(w, r, login.Return, http.StatusSeeOther)
 }
 
 // clientCredentialsGrant handles the client_credentials case: it rejects public

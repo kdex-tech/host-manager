@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/http/httptest"
+	"net/url"
 	"slices"
 	"testing"
 	"time"
@@ -188,11 +188,16 @@ func claimNames(t *testing.T, signed string) []string {
 func TestOAuthGet_SetsBothSessionCookies(t *testing.T) {
 	f := newOIDCFixture(t)
 
-	o := &OAuth2{AuthConfig: f.cfg, AuthExchanger: f.ex}
+	o := f.oauth2()
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/-/oauth/callback?code=alice&state=/home", nil)
-	o.OAuthGet(rec, req)
+	// A callback is only accepted for a login this browser started (#234).
+	idp, login := startLogin(t, o, "return=%2Fhome")
+	st, err := f.ex.openLoginState(login.Value)
+	require.NoError(t, err)
+	rec := callback(o, url.Values{
+		"code":  {loginCode("alice", st.Nonce, st.Verifier)},
+		"state": {idp.Query().Get("state")},
+	}.Encode(), login)
 
 	require.Equal(t, http.StatusSeeOther, rec.Code, "the callback must redirect on success")
 
@@ -221,7 +226,7 @@ func TestOAuthGet_SetsBothSessionCookies(t *testing.T) {
 func TestAuthCodeURL_RequestsOfflineAccessWhenScoped(t *testing.T) {
 	f := newOIDCFixture(t, "offline_access")
 
-	got := f.ex.AuthCodeURL("/home")
+	got := f.ex.AuthCodeURL(AuthCodeRequest{State: "/home"})
 
 	assert.Contains(t, got, "access_type=offline",
 		"offline_access in the configured scopes must reach the provider as access_type=offline (#190)")
@@ -237,7 +242,7 @@ func TestAuthCodeURL_RequestsOfflineAccessWhenScoped(t *testing.T) {
 func TestAuthCodeURL_NoOfflineAccessByDefault(t *testing.T) {
 	f := newOIDCFixture(t)
 
-	got := f.ex.AuthCodeURL("/home")
+	got := f.ex.AuthCodeURL(AuthCodeRequest{State: "/home"})
 
 	assert.NotContains(t, got, "access_type=offline")
 	assert.NotContains(t, got, "prompt=consent")

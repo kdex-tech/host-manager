@@ -987,6 +987,42 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 	const path = auth.OAuthCallbackPath
 	mux.HandleFunc("GET "+path, oauth2.OAuthGet)
 
+	// Starts a browser login at the provider, bound to this browser (#234).
+	const loginPath = auth.OAuthLoginPath
+	mux.HandleFunc("GET "+loginPath, oauth2.OAuthLoginGet)
+
+	hh.registerPath(loginPath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: loginPath,
+			Paths: map[string]ko.PathItem{
+				loginPath: {
+					Description: "Starts a browser login at the upstream OIDC provider",
+					Get: &openapi.Operation{
+						Description: "Redirects to the provider with a per-login state, PKCE challenge and nonce, bound to this browser by a cookie the callback requires",
+						OperationID: "oauth-login-get",
+						Parameters: openapi.Parameters{
+							ko.QueryParam("return", "The same-origin path to return to after login"),
+							ko.QueryParam("prompt", "OIDC prompt values to pass to the provider (login, consent, select_account)"),
+							ko.QueryParam("login_hint", "The account to suggest to the provider"),
+						},
+						Responses: openapi.NewResponses(
+							openapi.WithStatus(302, &openapi.ResponseRef{
+								Ref: ko.RespRefFound,
+							}),
+							openapi.WithStatus(500, &openapi.ResponseRef{
+								Ref: ko.RespRefInternalServerError,
+							}),
+						),
+						Summary: "Start an OIDC login",
+						Tags:    []string{"system", "oauth2", "auth"},
+					},
+					Summary: "OIDC login start",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+
 	hh.registerPath(path, ko.PathInfo{
 		API: ko.OpenAPI{
 			BasePath: path,
