@@ -21,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/cel-go/cel"
 	"github.com/kdex-tech/dmapper"
+	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"golang.org/x/oauth2"
@@ -791,12 +792,19 @@ func (e *Exchanger) GetClient(clientID string) (AuthClient, bool) {
 	// Fall back to dynamically-registered clients (RFC 7591).
 	if e.config.DCRStore != nil {
 		if dc, ok, _ := e.config.DCRStore.Get(context.Background(), clientID); ok {
+			// The stored grants are not trusted: a record can predate the
+			// registration-time filter. Nothing left means no client at all,
+			// never an empty (unrestricted) grant list. GHSA-hm9g-w2cw-j7gg.
+			grants := dcr.FilterGrantTypes(dc.GrantTypes)
+			if len(grants) == 0 {
+				return AuthClient{}, false
+			}
 			return AuthClient{
 				ClientID:          dc.ClientID,
 				Public:            true,
 				RequirePKCE:       true,
 				RedirectURIs:      dc.RedirectURIs,
-				AllowedGrantTypes: dc.GrantTypes,
+				AllowedGrantTypes: grants,
 				AllowedScopes:     strings.Fields(dc.Scope),
 				Name:              dc.ClientName,
 			}, true

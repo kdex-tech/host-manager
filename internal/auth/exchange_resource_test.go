@@ -18,6 +18,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +133,82 @@ func TestGetClientFallsBackToDCRStore(t *testing.T) {
 	assert.Contains(t, c.AllowedScopes, "openid")
 	assert.Contains(t, c.AllowedScopes, "email")
 	assert.Equal(t, "Test DCR App", c.Name)
+}
+
+// registerStoredDCRClient writes a DCR record straight into the exchanger's
+// store with the given grants, bypassing /-/oauth/register's filter. It stands
+// in for a record persisted before that filter existed (pre-v0.5.1): the store
+// is Uncycled and refreshes its TTL on every use, so such a record outlives
+// the release that stopped issuing it for as long as someone keeps using it.
+func registerStoredDCRClient(t *testing.T, ex *Exchanger, grants []string) string {
+	t.Helper()
+	c, err := ex.config.DCRStore.Register(context.Background(), dcr.Client{
+		RedirectURIs: []string{"https://example.com/cb"},
+		GrantTypes:   grants,
+	})
+	require.NoError(t, err)
+	return c.ClientID
+}
+
+// A stored DCR record is not trusted for its grants: GetClient re-applies the
+// DCR grant policy on read, so a record holding `password` (or
+// client_credentials) can no longer use them. GHSA-hm9g-w2cw-j7gg.
+func TestGetClientDCRDropsGrantsADCRClientMayNotHold(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClient(t, ex, []string{"password", "refresh_token", "client_credentials"})
+
+	c, ok := ex.GetClient(id)
+	require.True(t, ok)
+	assert.Equal(t, []string{"refresh_token"}, c.AllowedGrantTypes)
+}
+
+// An empty AllowedGrantTypes means "every grant" at the token endpoint, so a
+// stored record with no grant_types must not reach it as empty. It gets the
+// default DCR pair, as a registration that omitted grant_types does.
+func TestGetClientDCRWithNoStoredGrantsGetsTheDefaultPair(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClient(t, ex, nil)
+
+	c, ok := ex.GetClient(id)
+	require.True(t, ok)
+	assert.Equal(t, []string{"authorization_code", "refresh_token"}, c.AllowedGrantTypes)
+}
+
+// A stored record whose grants are all ones a DCR client may not hold has no
+// usable grant left. It is not a client, rather than one with an empty (and so
+// unrestricted) grant list.
+func TestGetClientDCRWithOnlyDisallowedGrantsIsNotAClient(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClient(t, ex, []string{"password"})
+
+	_, ok := ex.GetClient(id)
+	assert.False(t, ok)
+}
+
+// The end-to-end shape of GHSA-hm9g-w2cw-j7gg: a DCR client registered with
+// `password` before registration filtered grants is refused the password
+// grant at /-/oauth/token.
+func TestTokenEndpointRefusesThePasswordGrantToAStoredDCRClient(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClient(t, ex, []string{"password", "refresh_token"})
+	o := &OAuth2{AuthConfig: &ex.config, AuthExchanger: ex}
+
+	form := url.Values{}
+	form.Set("grant_type", "password")
+	form.Set("client_id", id)
+	form.Set("username", "alice")
+	form.Set("password", "pw")
+	req := httptest.NewRequest("POST", "/-/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	o.OAuth2TokenHandler(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errCodeUnauthorizedClient, body["error"])
+	assert.NotContains(t, body, "access_token")
 }
 
 // TestGetClientStaticMapTakesPrecedence verifies that a client present in the

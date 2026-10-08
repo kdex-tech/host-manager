@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -18,31 +17,6 @@ const (
 	schemeConfigLoopback   = "http-loopback"
 	schemeConfigPrivateUse = "private-use"
 )
-
-// dcrSupportedGrantTypes is the complete set a DYNAMICALLY REGISTERED client
-// may hold. It is deliberately narrower than the authorization server's own
-// grant_types_supported: those are available to statically configured clients,
-// which an operator authored and can be held accountable for, whereas a DCR
-// client is anonymous, credential-less and freely re-mintable.
-//
-// Keep this a redirect-based pair. Adding a grant that authenticates without a
-// redirect (password, client_credentials) hands an unauthenticated caller a
-// working credential-testing client. See GHSA-hm9g-w2cw-j7gg.
-var dcrSupportedGrantTypes = []string{"authorization_code", "refresh_token"}
-
-// filterDCRGrantTypes keeps only the requested grants a DCR client may hold,
-// preserving the caller's order and dropping duplicates. Returns an empty slice
-// when nothing requested is supported, which the caller treats as a rejection
-// rather than silently substituting the default set.
-func filterDCRGrantTypes(requested []string) []string {
-	kept := make([]string, 0, len(requested))
-	for _, g := range requested {
-		if slices.Contains(dcrSupportedGrantTypes, g) && !slices.Contains(kept, g) {
-			kept = append(kept, g)
-		}
-	}
-	return kept
-}
 
 // dangerousSchemes are never honored as a freeform literal redirect scheme even
 // when explicitly listed in allowedRedirectSchemes: they are code-execution /
@@ -140,20 +114,19 @@ func (hh *HostHandler) oauthRegisterHandler(w http.ResponseWriter, r *http.Reque
 	// Restricting to the redirect-based pair costs the flow DCR exists for
 	// nothing -- zero-touch MCP-client onboarding uses authorization_code
 	// throughout. See GHSA-hm9g-w2cw-j7gg.
-	grants := slices.Clone(dcrSupportedGrantTypes)
-	if len(req.GrantTypes) > 0 {
-		// Filter rather than fail, matching the redirect_uris handling above
-		// (RFC 7591 §3.2.1 lets the server return adjusted metadata): a client
-		// asking for a supported grant alongside an unsupported one still gets
-		// registered for what it can actually use.
-		grants = filterDCRGrantTypes(req.GrantTypes)
-		if len(grants) == 0 {
-			// Nothing survived. Registering it anyway would hand back a working
-			// client for a grant the caller never asked for, so say no instead.
-			writeRegisterError(w, http.StatusBadRequest, "invalid_client_metadata",
-				"grant_types must include at least one of: "+strings.Join(dcrSupportedGrantTypes, ", "))
-			return
-		}
+	//
+	// Filter rather than fail, matching the redirect_uris handling above
+	// (RFC 7591 §3.2.1 lets the server return adjusted metadata): a client
+	// asking for a supported grant alongside an unsupported one still gets
+	// registered for what it can actually use. Omitting grant_types gets the
+	// default pair.
+	grants := dcr.FilterGrantTypes(req.GrantTypes)
+	if len(grants) == 0 {
+		// Nothing survived. Registering it anyway would hand back a working
+		// client for a grant the caller never asked for, so say no instead.
+		writeRegisterError(w, http.StatusBadRequest, "invalid_client_metadata",
+			"grant_types must include at least one of: "+strings.Join(dcr.SupportedGrantTypes, ", "))
+		return
 	}
 	// maxClients (DCR.MaxClients) is enforced as the GLOBAL limiter's burst
 	// size (see newRegisterLimiter): it bounds registrations admitted per
