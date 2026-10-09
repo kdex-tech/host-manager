@@ -49,7 +49,11 @@ type AuthClient struct {
 	Name              string
 	Public            bool
 	RedirectURIs      []string
-	RequirePKCE       bool
+	// RequireConsent is set only for dynamically registered clients: they are
+	// registered anonymously, so a code is issued to them only after the
+	// user allows the client at that redirect (/-/oauth/consent).
+	RequireConsent bool
+	RequirePKCE    bool
 }
 
 type Config struct {

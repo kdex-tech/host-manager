@@ -253,3 +253,55 @@ func TestAuthorizationCodeCarriesResource(t *testing.T) {
 	assert.Equal(t, wantResource, claims.Resource,
 		"Resource must round-trip through CreateAuthorizationCode")
 }
+
+func registerStoredDCRClientWithRedirects(t *testing.T, ex *Exchanger, redirects []string) string {
+	t.Helper()
+	c, err := ex.config.DCRStore.Register(context.Background(), dcr.Client{
+		RedirectURIs: redirects,
+		GrantTypes:   []string{"authorization_code", "refresh_token"},
+	})
+	require.NoError(t, err)
+	return c.ClientID
+}
+
+func TestGetClientMarksDCRClientsAsRequiringConsent(t *testing.T) {
+	ex, id := newTestExchangerWithDCR(t)
+	c, ok := ex.GetClient(id)
+	require.True(t, ok)
+	assert.True(t, c.RequireConsent)
+
+	ex.config.Clients["static"] = AuthClient{ClientID: "static"}
+	s, ok := ex.GetClient("static")
+	require.True(t, ok)
+	assert.False(t, s.RequireConsent, "operator-configured clients never require consent")
+}
+
+func TestGetClientDropsRedirectsTheCurrentPolicyRefuses(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClientWithRedirects(t, ex, []string{"https://app.example/cb", "cursor://x/cb"})
+	ex.config.DCR.AllowedRedirectSchemes = []string{"https"}
+
+	c, ok := ex.GetClient(id)
+	require.True(t, ok)
+	assert.Equal(t, []string{"https://app.example/cb"}, c.RedirectURIs)
+}
+
+func TestGetClientDeletesADCRClientWithNoAllowedRedirect(t *testing.T) {
+	ex, _ := newTestExchangerWithDCR(t)
+	id := registerStoredDCRClientWithRedirects(t, ex, []string{"cursor://x/cb"})
+	ex.config.DCR.AllowedRedirectSchemes = []string{"https"}
+
+	_, ok := ex.GetClient(id)
+	assert.False(t, ok)
+
+	// deleted, not merely hidden: re-allowing the scheme does not resurrect it
+	ex.config.DCR.AllowedRedirectSchemes = []string{"https", "cursor"}
+	_, ok = ex.GetClient(id)
+	assert.False(t, ok)
+}
+
+func TestGetClientUsesDefaultSchemesWhenNoneConfigured(t *testing.T) {
+	ex, id := newTestExchangerWithDCR(t) // registers https://example.com/cb, no DCR config
+	_, ok := ex.GetClient(id)
+	assert.True(t, ok)
+}

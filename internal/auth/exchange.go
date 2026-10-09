@@ -803,35 +803,57 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 }
 
 func (e *Exchanger) GetClient(clientID string) (AuthClient, bool) {
+	c, ok, _ := e.LookupClient(context.Background(), clientID)
+	return c, ok
+}
+
+// LookupClient is GetClient that reports a store failure, for callers that
+// must tell "no such client" from "cannot tell right now" (the consent POST
+// answers 503 for the latter).
+func (e *Exchanger) LookupClient(ctx context.Context, clientID string) (AuthClient, bool, error) {
 	if e == nil {
-		return AuthClient{}, false
+		return AuthClient{}, false, nil
 	}
-	// Static client map takes precedence.
 	if c, ok := e.config.Clients[clientID]; ok {
-		return c, true
+		return c, true, nil
 	}
-	// Fall back to dynamically-registered clients (RFC 7591).
-	if e.config.DCRStore != nil {
-		if dc, ok, _ := e.config.DCRStore.Get(context.Background(), clientID); ok {
-			// The stored grants are not trusted: a record can predate the
-			// registration-time filter. Nothing left means no client at all,
-			// never an empty (unrestricted) grant list. GHSA-hm9g-w2cw-j7gg.
-			grants := dcr.FilterGrantTypes(dc.GrantTypes)
-			if len(grants) == 0 {
-				return AuthClient{}, false
-			}
-			return AuthClient{
-				ClientID:          dc.ClientID,
-				Public:            true,
-				RequirePKCE:       true,
-				RedirectURIs:      dc.RedirectURIs,
-				AllowedGrantTypes: grants,
-				AllowedScopes:     strings.Fields(dc.Scope),
-				Name:              dc.ClientName,
-			}, true
+	if e.config.DCRStore == nil {
+		return AuthClient{}, false, nil
+	}
+	dc, ok, err := e.config.DCRStore.Get(ctx, clientID)
+	if err != nil || !ok {
+		return AuthClient{}, false, err
+	}
+	// Stored grants and redirects are not trusted: a record can predate the
+	// current policy. Nothing usable left means no client at all, never an
+	// empty (unrestricted) list. See GHSA-hm9g-w2cw-j7gg.
+	grants := dcr.FilterGrantTypes(dc.GrantTypes)
+	schemes := e.config.DCR.AllowedRedirectSchemes
+	if len(schemes) == 0 {
+		schemes = dcr.DefaultRedirectSchemes
+	}
+	redirects := dcr.FilterRedirectURIs(dc.RedirectURIs, schemes)
+	if len(redirects) == 0 {
+		// Delete rather than hide, so relaxing the policy later does not
+		// resurrect the client together with its refresh tokens.
+		if derr := e.config.DCRStore.Delete(ctx, clientID); derr != nil {
+			logf.FromContext(ctx).Error(derr, "dcr: failed to delete a client with no allowed redirect", "clientID", clientID)
 		}
+		return AuthClient{}, false, nil
 	}
-	return AuthClient{}, false
+	if len(grants) == 0 {
+		return AuthClient{}, false, nil
+	}
+	return AuthClient{
+		ClientID:          dc.ClientID,
+		Public:            true,
+		RequireConsent:    true,
+		RequirePKCE:       true,
+		RedirectURIs:      redirects,
+		AllowedGrantTypes: grants,
+		AllowedScopes:     strings.Fields(dc.Scope),
+		Name:              dc.ClientName,
+	}, true, nil
 }
 
 func (e *Exchanger) GetOIDCClientID() string {

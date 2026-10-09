@@ -82,3 +82,10 @@ func (s *Store) Get(ctx context.Context, clientID string) (Client, bool, error) 
 	}
 	return c, true, nil
 }
+
+// Delete removes a client record. Used when a stored client no longer has any
+// redirect the current policy admits, so it cannot come back if the policy is
+// relaxed again.
+func (s *Store) Delete(ctx context.Context, clientID string) error {
+	return s.cache.Delete(ctx, clientID)
+}
