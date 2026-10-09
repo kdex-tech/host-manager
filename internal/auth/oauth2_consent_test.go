@@ -423,3 +423,53 @@ func TestAuthorize_StaticClientsNeverSeeThePage(t *testing.T) {
 	loc, _ := w.Result().Location()
 	assert.NotEmpty(t, loc.Query().Get("code"))
 }
+
+func (f *consentFixture) refreshToken(t *testing.T) string {
+	t.Helper()
+	id, err := f.ex.createRefreshToken(context.Background(), RefreshTokenClaims{
+		Subject:          "alice",
+		ClientID:         f.clientID,
+		ExpiresAt:        time.Now().Add(time.Hour).Unix(),
+		OriginalIssuedAt: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	return id
+}
+
+func TestRedeemRefreshToken_DCRClientWithoutConsentFails(t *testing.T) {
+	f := newConsentFixture(t)
+	id := f.refreshToken(t)
+	_, err := f.ex.RedeemRefreshToken(context.Background(), id, f.clientID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrGrantFailure), "invalid_grant, so the client re-authorizes")
+
+	// A grant failure ends the session: the token is consumed, not restored.
+	_, err = f.ex.RedeemRefreshToken(context.Background(), id, f.clientID)
+	require.Error(t, err)
+}
+
+func TestRedeemRefreshToken_DCRClientWithConsentRotates(t *testing.T) {
+	f := newConsentFixture(t)
+	require.NoError(t, f.ex.config.DCRConsent.Grant(context.Background(), "alice", f.clientID, appRedirect, nil))
+	ts, err := f.ex.RedeemRefreshToken(context.Background(), f.refreshToken(t), f.clientID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ts.RefreshToken)
+}
+
+func TestRedeemRefreshToken_BrowserSessionNeedsNoConsent(t *testing.T) {
+	f := newConsentFixture(t)
+	id, err := f.ex.createRefreshToken(context.Background(), RefreshTokenClaims{
+		Subject: "alice", ClientID: "", ExpiresAt: time.Now().Add(time.Hour).Unix(), OriginalIssuedAt: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	_, err = f.ex.RedeemRefreshToken(context.Background(), id, "")
+	assert.NoError(t, err)
+}
+
+func TestRedeemRefreshToken_ConsentStoreErrorIsAServerError(t *testing.T) {
+	f := newConsentFixture(t)
+	id := f.refreshToken(t)
+	f.ex.config.DCRConsent = dcr.NewConsentStoreFromCache(consentStoreDown{}, time.Hour)
+	_, err := f.ex.RedeemRefreshToken(context.Background(), id, f.clientID)
+	assert.True(t, errors.Is(err, ErrServerError), "a store outage restores the refresh token instead of ending the session")
+}

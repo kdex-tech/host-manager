@@ -1653,6 +1653,30 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return grantFailed("refresh token was not issued to this client")
 	}
 
+	// A dynamically registered client's session cannot outlive the user's
+	// consent: Deny, a future revoke, or the consent expiring ends it at the
+	// next refresh. A store failure is a server error, so the deferred
+	// restore puts the refresh token back instead of logging the user out.
+	if clientID != "" {
+		client, ok, lerr := e.LookupClient(ctx, clientID)
+		if lerr != nil {
+			return failed("%w: client lookup failed: %v", ErrServerError, lerr)
+		}
+		if ok && client.RequireConsent {
+			held := false
+			if e.config.DCRConsent != nil {
+				h, cerr := e.config.DCRConsent.HasClient(ctx, claims.Subject, clientID)
+				if cerr != nil {
+					return failed("%w: consent lookup failed: %v", ErrServerError, cerr)
+				}
+				held = h
+			}
+			if !held {
+				return grantFailed("the user's consent for this client is not held")
+			}
+		}
+	}
+
 	// Re-derive the IdP's view of this user rather than replaying the
 	// login-time snapshot, when the session holds an upstream refresh token
 	// to do it with. This is the only point at which an account disabled,
