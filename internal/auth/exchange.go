@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/cel-go/cel"
 	"github.com/kdex-tech/dmapper"
@@ -1377,8 +1376,8 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		return TokenSet{}, fmt.Errorf("%w: auth not configured", ErrServerError)
 	}
 
-	// 1. Parse JWE
-	object, err := jose.ParseEncrypted(code, []jose.KeyAlgorithm{jose.DIRECT}, []jose.ContentEncryption{jose.A256GCM})
+	// 1. Parse and decrypt the JWE
+	decrypted, err := e.open(sealPurposeAuthCode, code)
 	if err != nil {
 		// The presented code itself is malformed -- that is ABOUT the
 		// grant, not our infrastructure, so it is safe to SAY SO. The
@@ -1390,16 +1389,10 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		// the offending input would leak silently with no test failing.
 		// The cause goes to the operator log instead, which is where the
 		// #168 design puts richer causes. See kdex-tech/host-manager#168.
-		logf.FromContext(ctx).V(1).Info("authorization code failed to parse", "cause", err.Error())
-		return TokenSet{}, grantFailuref("failed to parse auth code")
-	}
-
-	// 2. Derive Key
-	key := sha256.Sum256([]byte(e.config.OIDC.BlockKey))
-
-	// 3. Decrypt
-	decrypted, err := object.Decrypt(key[:])
-	if err != nil {
+		if errors.Is(err, errSealParse) {
+			logf.FromContext(ctx).V(1).Info("authorization code failed to parse", "cause", err.Error())
+			return TokenSet{}, grantFailuref("failed to parse auth code")
+		}
 		// Same reasoning, same treatment: a caller-presented ciphertext
 		// that does not decrypt against our current key is an invalid
 		// grant, but only the fixed description goes on the wire.
@@ -1853,21 +1846,7 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 		}
 	}
 
-	// 2. Derive Key
-	key := sha256.Sum256([]byte(e.config.OIDC.BlockKey))
-
-	// 3. Encrypt
-	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.DIRECT, Key: key[:]}, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create encrypter: %w", err)
-	}
-
-	object, err := encrypter.Encrypt(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to encrypt auth code: %w", err)
-	}
-
-	return object.CompactSerialize()
+	return e.seal(sealPurposeAuthCode, payload)
 }
 
 // mintTokensFromCode mints access + id tokens from the claims carried in an authorization code.

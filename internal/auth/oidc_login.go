@@ -2,9 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"golang.org/x/oauth2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -168,39 +165,12 @@ func (o *OAuth2) consumeLoginState(w http.ResponseWriter, r *http.Request, state
 	return st, nil
 }
 
-func (e *Exchanger) loginStateKey() []byte {
-	key := sha256.Sum256([]byte("oidc-login-state\x00" + e.config.OIDC.BlockKey))
-	return key[:]
-}
-
 func (e *Exchanger) sealLoginState(st loginState) (string, error) {
-	payload, err := json.Marshal(st)
-	if err != nil {
-		return "", err
-	}
-	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{Algorithm: jose.DIRECT, Key: e.loginStateKey()}, nil)
-	if err != nil {
-		return "", err
-	}
-	object, err := encrypter.Encrypt(payload)
-	if err != nil {
-		return "", err
-	}
-	return object.CompactSerialize()
+	return e.sealJSON(sealPurposeLoginState, st)
 }
 
 func (e *Exchanger) openLoginState(sealed string) (loginState, error) {
-	object, err := jose.ParseEncrypted(sealed, []jose.KeyAlgorithm{jose.DIRECT}, []jose.ContentEncryption{jose.A256GCM})
-	if err != nil {
-		return loginState{}, err
-	}
-	payload, err := object.Decrypt(e.loginStateKey())
-	if err != nil {
-		return loginState{}, err
-	}
 	var st loginState
-	if err := json.Unmarshal(payload, &st); err != nil {
-		return loginState{}, err
-	}
-	return st, nil
+	err := e.openJSON(sealPurposeLoginState, sealed, &st)
+	return st, err
 }
