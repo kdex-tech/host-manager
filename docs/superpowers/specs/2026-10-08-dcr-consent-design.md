@@ -66,7 +66,10 @@ response-type checks:
    not a browser session, even from the cookie: an OAuth client's tokens (`auth_method: oauth2`:
    authorization-code access and id tokens, password and client_credentials tokens), a capability,
    and a token with no `auth_method` (fail closed; a session signed before the claim was projected
-   is signed out for DCR clients only, and the user logs in again). (Static clients unchanged.)
+   is signed out for DCR clients only, and the user logs in again). Only this gate reads
+   `auth_method`: authorization decides exactly as before (scope bucketing by `auth_method` in
+   `GetParsedEntitlements` stays off), and a claimMappings rule cannot change it on a FAT either
+   (`EnrichAuthContext`). (Static clients unchanged.)
 3. **`prompt=none` and no covering consent** → `consent_required`, decided **before** `login_hint` is
    evaluated, so an unconsented client cannot use `login_hint` to learn who is signed in.
 4. Then the existing `prompt=login|select_account` / `login_hint` handling (ddba71e).
@@ -91,7 +94,7 @@ Refuse with **403** and no state change unless all hold:
   page, not a same-origin `fetch`, iframe or scripted submit). The comparison is extracted from `login.go` into
   `kdexhttp.SameOrigin(raw, scheme, domains)`; `/-/login` keeps its lenient wrapper, consent uses a
   strict one, passed into `OAuth2` as a func field.
-- **A cookie-sourced session** whose subject equals the sealed request's subject.
+- **A browser session** (the §3 definition: `isBrowserSession`) whose subject equals the sealed request's subject.
 - **The sealed request** opens, names this issuer, and has not expired.
 - **The client still resolves**, still requires consent, and still lists the request's
   `redirect_uri`.
