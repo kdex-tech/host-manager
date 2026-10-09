@@ -31,6 +31,13 @@ import (
 // registration in internal/host reads this same constant.
 const OAuthCallbackPath = "/-/oauth/callback"
 
+// OAuthAuthorizePath and OAuthConsentPath are served by internal/host and
+// referenced from internal/auth (the consent redirect, the consent form).
+const (
+	OAuthAuthorizePath = "/-/oauth/authorize"
+	OAuthConsentPath   = "/-/oauth/consent"
+)
+
 // DCRConfig is the resolved per-host Dynamic Client Registration config.
 type DCRConfig struct {
 	Enabled                bool
