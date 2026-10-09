@@ -484,8 +484,13 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 						Responses: openapi.NewResponses(
 							openapi.WithStatus(302, &openapi.ResponseRef{Ref: ko.RespRefFound}),
 							openapi.WithStatus(303, &openapi.ResponseRef{Ref: ko.RespRefSeeOther}),
-							openapi.WithStatus(403, &openapi.ResponseRef{Ref: ko.RespRefUnauthorized}),
+							openapi.WithStatus(403, &openapi.ResponseRef{Ref: ko.RespRefForbidden}),
 							openapi.WithStatus(500, &openapi.ResponseRef{Ref: ko.RespRefInternalServerError}),
+							openapi.WithStatus(503, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Description: new("The consent store is unavailable; retry after Retry-After."),
+								},
+							}),
 						),
 						Summary: "OAuth2 consent decision",
 						Tags:    []string{"system", "oauth2", "auth"},

@@ -25,6 +25,7 @@ package openapi
 // them appears at 25 call sites.
 const (
 	RespRefBadRequest          = "#/components/responses/BadRequest"
+	RespRefForbidden           = "#/components/responses/Forbidden"
 	RespRefFound               = "#/components/responses/Found"
 	RespRefInternalServerError = "#/components/responses/InternalServerError"
 	RespRefNotFound            = "#/components/responses/NotFound"

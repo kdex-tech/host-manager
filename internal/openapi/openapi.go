@@ -251,6 +251,11 @@ func (b *Builder) buildOpenAPI(
 					Description: new("Bad Request"),
 				},
 			},
+			"Forbidden": &openapi.ResponseRef{
+				Value: &openapi.Response{
+					Description: new("Forbidden"),
+				},
+			},
 			"Found": &openapi.ResponseRef{
 				Value: &openapi.Response{
 					Description: new("Found"),
