@@ -816,7 +816,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 			Description: "OAuth2 authentication using Password, Authorization Code, or Client Credentials Flow",
 			Flows: &openapi.OAuthFlows{
 				AuthorizationCode: &openapi.OAuthFlow{
-					AuthorizationURL: "/-/oauth/authorize",
+					AuthorizationURL: auth.OAuthAuthorizePath,
 					Scopes:           oauthFlowScopes(),
 					TokenURL:         "/-/token",
 				},

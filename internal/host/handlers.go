@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
@@ -383,20 +384,36 @@ func (hh *HostHandler) addHandlerAndRegister(
 	return nil
 }
 
-func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
-	if !hh.IsAuthEnabled() {
-		return
+// newOAuth2 builds the auth.OAuth2 every OAuth route uses, so a hook set for
+// one (consent rendering, the consent origin check) cannot be missed on
+// another. The host's scheme and domains are snapshotted at mux build, like
+// ResourceAudiences, so the request path takes no host lock.
+func (hh *HostHandler) newOAuth2() *auth.OAuth2 {
+	scheme := hh.scheme
+	var domains []string
+	if hh.host != nil {
+		domains = slices.Clone(hh.host.Routing.Domains)
 	}
-
-	oauth2 := &auth.OAuth2{
+	return &auth.OAuth2{
 		AuthConfig:        hh.authConfig,
 		AuthExchanger:     hh.authExchanger,
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
 		ExchangeTargets:   hh.exchangeTargetAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
+		ConsentOriginAllowed: func(r *http.Request) bool {
+			return consentOriginAllowed(r, scheme, domains)
+		},
+	}
+}
+
+func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
+	if !hh.IsAuthEnabled() {
+		return
 	}
 
-	const path = "/-/oauth/authorize"
+	oauth2 := hh.newOAuth2()
+
+	const path = auth.OAuthAuthorizePath
 	// Apply Authentication Middleware
 	handler := hh.authConfig.AddAuthentication(http.HandlerFunc(oauth2.AuthorizeHandler), hh.authExchanger)
 	mux.Handle("GET "+path, handler)
@@ -418,6 +435,21 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 							ko.QueryParam("state", "The state parameter for CSRF protection"),
 						},
 						Responses: openapi.NewResponses(
+							openapi.WithStatus(200, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Content: openapi.Content{
+										"text/html": &openapi.MediaType{
+											Schema: &openapi.SchemaRef{
+												Value: &openapi.Schema{
+													Format: "html",
+													Type:   &openapi.Types{openapi.TypeString},
+												},
+											},
+										},
+									},
+									Description: new("The consent page for a dynamically registered client"),
+								},
+							}),
 							openapi.WithStatus(302, &openapi.ResponseRef{
 								Ref: ko.RespRefFound,
 							}),
@@ -432,6 +464,33 @@ func (hh *HostHandler) authorizeHandler(mux *http.ServeMux, registeredPaths map[
 						Tags:    []string{"system", "oauth2", "auth"},
 					},
 					Summary: "OAuth2 authorization",
+				},
+			},
+		},
+		Type: ko.SystemPathType,
+	}, registeredPaths)
+
+	consentHandler := hh.authConfig.AddAuthentication(http.HandlerFunc(oauth2.ConsentPost), hh.authExchanger)
+	mux.Handle("POST "+auth.OAuthConsentPath, consentHandler)
+	hh.registerPath(auth.OAuthConsentPath, ko.PathInfo{
+		API: ko.OpenAPI{
+			BasePath: auth.OAuthConsentPath,
+			Paths: map[string]ko.PathItem{
+				auth.OAuthConsentPath: {
+					Description: "Records the signed-in user's decision on a consent page",
+					Post: &openapi.Operation{
+						Description: "Allow or deny a dynamically registered client; same-origin browser form posts only",
+						OperationID: "oauth-consent-post",
+						Responses: openapi.NewResponses(
+							openapi.WithStatus(302, &openapi.ResponseRef{Ref: ko.RespRefFound}),
+							openapi.WithStatus(303, &openapi.ResponseRef{Ref: ko.RespRefSeeOther}),
+							openapi.WithStatus(403, &openapi.ResponseRef{Ref: ko.RespRefUnauthorized}),
+							openapi.WithStatus(500, &openapi.ResponseRef{Ref: ko.RespRefInternalServerError}),
+						),
+						Summary: "OAuth2 consent decision",
+						Tags:    []string{"system", "oauth2", "auth"},
+					},
+					Summary: "OAuth2 consent",
 				},
 			},
 		},
@@ -974,13 +1033,7 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 		return
 	}
 
-	oauth2 := &auth.OAuth2{
-		AuthConfig:        hh.authConfig,
-		AuthExchanger:     hh.authExchanger,
-		ResourceAudiences: hh.oauth2ResourceAudiences(),
-		ExchangeTargets:   hh.exchangeTargetAudiences(),
-		AccessTokenTTL:    hh.authConfig.TokenTTL,
-	}
+	oauth2 := hh.newOAuth2()
 	// Shared with the redirect_uri derivation in internal/auth: the provider
 	// compares the registered URI exactly, so the path we serve and the path we
 	// send must be the same string by construction.
@@ -1383,13 +1436,7 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 		return
 	}
 
-	oauth2 := &auth.OAuth2{
-		AuthConfig:        hh.authConfig,
-		AuthExchanger:     hh.authExchanger,
-		ResourceAudiences: hh.oauth2ResourceAudiences(),
-		ExchangeTargets:   hh.exchangeTargetAudiences(),
-		AccessTokenTTL:    hh.authConfig.TokenTTL,
-	}
+	oauth2 := hh.newOAuth2()
 	const path = "/-/token"
 	mux.HandleFunc("POST "+path, oauth2.OAuth2TokenHandler)
 	hh.registerPath(path, ko.PathInfo{

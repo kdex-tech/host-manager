@@ -31,6 +31,7 @@ func TestIsSystemPath(t *testing.T) {
 		"/.well-known/oauth-authorization-server": true,
 		"/-/login":                  true,
 		"/-/logout":                 true,
+		"/-/oauth/consent":          true,
 		"/-/openapi":                true,
 		"/-/navigation/main/en-CA/": true,
 		"/-/translation/en":         true,

@@ -38,7 +38,7 @@ var SupportedScopes = []string{"openid", "email", "profile", "entitlements", "ro
 
 func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFunc {
 	config := OpenIDConfiguration{
-		AuthorizationEndpoint: issuer + "/-/oauth/authorize",
+		AuthorizationEndpoint: issuer + OAuthAuthorizePath,
 		ClaimsSupported: []string{
 			"aud",
 			"birthdate",
