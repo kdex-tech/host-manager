@@ -149,9 +149,10 @@ func TestWithAuthentication_AutoExtend_ExpiredTokenWithValidRefreshContinues(t *
 	req.AddCookie(&http.Cookie{Name: cfg.CookieName + "_refresh", Value: refreshID})
 
 	var nextCalled bool
-	var authedSubject string
+	var authedSubject, authedSource string
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
+		authedSource = AuthSourceFromContext(r.Context())
 		if ac, ok := GetAuthContext(r.Context()); ok {
 			if sub, _ := ac["sub"].(string); sub != "" {
 				authedSubject = sub
@@ -171,6 +172,8 @@ func TestWithAuthentication_AutoExtend_ExpiredTokenWithValidRefreshContinues(t *
 		"middleware MUST NOT redirect on successful refresh (#100)")
 	assert.Equal(t, "alice", authedSubject,
 		"authContext seen by next handler must reflect the refreshed token's sub claim")
+	assert.Equal(t, COOKIE, authedSource,
+		"a session re-minted from the refresh cookie is still a cookie session")
 
 	// Post-fix: the response carries exactly ONE Set-Cookie for auth_token
 	// (the new value) and ZERO Set-Cookies that clear it (Max-Age:-1).
