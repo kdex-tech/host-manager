@@ -81,6 +81,9 @@ type Config struct {
 	}
 	DCR      DCRConfig
 	DCRStore *dcr.Store
+	// DCRConsent remembers which dynamically registered clients each user
+	// allowed. nil when DCR is off; callers treat nil as "never consented".
+	DCRConsent *dcr.ConsentStore
 	// OAuth2ResourceMetadata maps an oauth2-protected resource's basePath to
 	// that resource's RFC 9728 metadata URL. It exists so the 401 this
 	// middleware returns for an invalid bearer can carry the same
@@ -356,6 +359,11 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 			AllowedRedirectSchemes: schemes,
 		}
 		cfg.DCRStore = cb.buildDCRStore(cfg.DCR)
+		if cfg.DCRStore != nil {
+			// One record per subject; sized for many users on the in-memory
+			// (dev) backend. valkey ignores the bound.
+			cfg.DCRConsent = dcr.NewConsentStore(cb.CacheManager, cfg.DCR.ClientTTL, 100_000)
+		}
 	}
 
 	return cfg, nil
