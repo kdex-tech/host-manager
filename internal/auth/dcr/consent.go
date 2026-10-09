@@ -40,7 +40,9 @@ type consentRecord struct {
 // like the client store, #122), with the client TTL, sliding with use.
 //
 // Concurrent updates to one subject's record are last-writer-wins. A lost
-// update only means the user is asked again, so no locking.
+// Grant only means the user is asked again, so no locking. A Revoke is
+// eventually consistent within one cache round trip (cache.Cache has no
+// compare-and-set); touch re-loads before saving so it never resurrects it.
 type ConsentStore struct {
 	cache cache.Cache
 	ttl   time.Duration
@@ -111,7 +113,7 @@ func (s *ConsentStore) Covers(ctx context.Context, subject, clientID, redirectUR
 			return false, nil
 		}
 	}
-	s.touch(ctx, subject, rec, clientID, redirectURI)
+	s.touch(ctx, subject, clientID, redirectURI)
 	return true, nil
 }
 
@@ -123,14 +125,23 @@ func (s *ConsentStore) HasClient(ctx context.Context, subject, clientID string) 
 		return false, err
 	}
 	for redirect := range rec.Clients[clientID] {
-		s.touch(ctx, subject, rec, clientID, redirect)
+		s.touch(ctx, subject, clientID, redirect)
 		return true, nil
 	}
 	return false, nil
 }
 
-func (s *ConsentStore) touch(ctx context.Context, subject string, rec consentRecord, clientID, redirectURI string) {
-	g := rec.Clients[clientID][redirectURI]
+// touch re-loads the record right before saving: writing back the caller's
+// copy could resurrect a grant revoked since that copy was read.
+func (s *ConsentStore) touch(ctx context.Context, subject, clientID, redirectURI string) {
+	rec, err := s.load(ctx, subject)
+	if err != nil {
+		return
+	}
+	g, ok := rec.Clients[clientID][redirectURI]
+	if !ok {
+		return
+	}
 	now := s.now()
 	if now.Sub(time.Unix(g.Touched, 0)) < consentTouchEvery {
 		return
@@ -160,14 +171,14 @@ func (s *ConsentStore) Grant(ctx context.Context, subject, clientID, redirectURI
 		}
 	}
 	if len(merged) > MaxConsentScopes {
-		// Past the cap, keep only what was just allowed (itself capped).
+		// Past the cap, keep the most recent MaxConsentScopes of previous + new.
 		merged = merged[len(merged)-MaxConsentScopes:]
 	}
 	slices.Sort(merged)
 	redirects[redirectURI] = consentGrant{Scopes: merged, Touched: now}
-	evictOldest(redirects, MaxConsentRedirects, func(g consentGrant) int64 { return g.Touched })
+	evictOldest(redirects, MaxConsentRedirects, redirectURI, func(g consentGrant) int64 { return g.Touched })
 	rec.Clients[clientID] = redirects
-	evictOldest(rec.Clients, MaxConsentClients, func(r map[string]consentGrant) int64 {
+	evictOldest(rec.Clients, MaxConsentClients, clientID, func(r map[string]consentGrant) int64 {
 		var newest int64
 		for _, g := range r {
 			newest = max(newest, g.Touched)
@@ -190,11 +201,16 @@ func (s *ConsentStore) Revoke(ctx context.Context, subject, clientID, redirectUR
 	return s.save(ctx, subject, rec)
 }
 
-func evictOldest[V any](m map[string]V, limit int, touched func(V) int64) {
+// evictOldest drops the least recently touched entries down to limit, never
+// the keep entry (just granted; ties on Touched must not evict it).
+func evictOldest[V any](m map[string]V, limit int, keep string, touched func(V) int64) {
 	for len(m) > limit {
 		var oldestKey string
 		oldest := int64(1<<63 - 1)
 		for k, v := range m {
+			if k == keep {
+				continue
+			}
 			if t := touched(v); t < oldest || (t == oldest && k < oldestKey) {
 				oldest, oldestKey = t, k
 			}

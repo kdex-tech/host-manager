@@ -2,7 +2,9 @@ package dcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,4 +119,73 @@ func TestConsentRevokeLastDeletesTheKey(t *testing.T) {
 	_, found, _, err = s.cache.Get(ctx, consentKey("alice"))
 	require.NoError(t, err)
 	assert.False(t, found, "no empty record is stored")
+}
+
+func TestConsentTouchDoesNotResurrectRevoked(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	now := time.Unix(1_000_000, 0)
+	s.now = func() time.Time { return now }
+	require.NoError(t, s.Grant(ctx, "alice", "c1", "https://a.example/cb", nil))
+
+	now = now.Add(25 * time.Hour)
+	require.NoError(t, s.Revoke(ctx, "alice", "c1", "https://a.example/cb"))
+	s.touch(ctx, "alice", "c1", "https://a.example/cb")
+
+	ok, err := s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	_, found, _, err := s.cache.Get(ctx, consentKey("alice"))
+	require.NoError(t, err)
+	assert.False(t, found, "the deleted key is not re-created")
+}
+
+func TestConsentOverlongScopeIsNeverRecorded(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	long := strings.Repeat("x", MaxConsentScopeLen+1)
+	require.NoError(t, s.Grant(ctx, "alice", "c1", "https://a.example/cb", []string{"openid", long}))
+	ok, _ := s.Covers(ctx, "alice", "c1", "https://a.example/cb", []string{long})
+	assert.False(t, ok)
+	ok, _ = s.Covers(ctx, "alice", "c1", "https://a.example/cb", []string{"openid"})
+	assert.True(t, ok)
+}
+
+func TestConsentEvictionKeepsTheJustGranted(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	s.now = func() time.Time { return time.Unix(1_000_000, 0) }
+	last := ""
+	for i := 0; i <= MaxConsentClients; i++ {
+		last = fmt.Sprintf("c%03d", i)
+		require.NoError(t, s.Grant(ctx, "alice", last, "https://a.example/cb", nil))
+	}
+	ok, _ := s.Covers(ctx, "alice", last, "https://a.example/cb", nil)
+	assert.True(t, ok, "last-granted client survives same-second ties")
+
+	for i := 0; i <= MaxConsentRedirects; i++ {
+		last = fmt.Sprintf("https://r%d.example/cb", i)
+		require.NoError(t, s.Grant(ctx, "bob", "c1", last, nil))
+	}
+	ok, _ = s.Covers(ctx, "bob", "c1", last, nil)
+	assert.True(t, ok, "last-granted redirect survives same-second ties")
+}
+
+func TestConsentCorruptRecordReadsAsNotCovered(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	require.NoError(t, s.cache.Set(ctx, consentKey("alice"), "not json"))
+	ok, err := s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+type failingCache struct{ cache.Cache }
+
+func (failingCache) Get(context.Context, string) (string, bool, bool, error) {
+	return "", false, false, errors.New("boom")
+}
+
+func TestConsentCoversPropagatesCacheError(t *testing.T) {
+	s := newConsentStore(t)
+	s.cache = failingCache{s.cache}
+	ok, err := s.Covers(context.Background(), "alice", "c1", "https://a.example/cb", nil)
+	assert.False(t, ok)
+	assert.Error(t, err)
 }
