@@ -63,9 +63,17 @@ func newConsentFixture(t *testing.T) *consentFixture {
 		DCR:        DCRConfig{Enabled: true, ClientTTL: ttl, AllowedRedirectSchemes: []string{"https"}},
 		DCRStore:   store,
 		DCRConsent: consent,
+		// An hour, not the zero default: a zero TTL expires a refresh token
+		// in the second it was minted.
+		RefreshTokenTTL: ttl,
 	}
 	cfg.OIDC.BlockKey = "0123456789abcdef0123456789abcdef"
-	ex, err := NewExchanger(context.Background(), cfg, cm, resourceStubIdentityProvider{}, nil)
+	// Any username logs in as itself, so the tests can mint real sessions.
+	sp := &mockScopeProvider{
+		resolveIdentity:             func(subject, _ string) (jwt.MapClaims, error) { return jwt.MapClaims{"sub": subject}, nil },
+		resolveRolesAndEntitlements: func(string) ([]string, []string, error) { return nil, nil, nil },
+	}
+	ex, err := NewExchanger(context.Background(), cfg, cm, sp, nil)
 	require.NoError(t, err)
 
 	c, err := store.Register(context.Background(), dcr.Client{
@@ -86,9 +94,13 @@ func newConsentFixture(t *testing.T) *consentFixture {
 }
 
 func (f *consentFixture) query(redirect string, extra url.Values) url.Values {
+	return f.queryFor(f.clientID, redirect, extra)
+}
+
+func (f *consentFixture) queryFor(clientID, redirect string, extra url.Values) url.Values {
 	sum := sha256.Sum256([]byte(f.verifier))
 	q := url.Values{
-		"client_id":             {f.clientID},
+		"client_id":             {clientID},
 		"response_type":         {"code"},
 		"redirect_uri":          {redirect},
 		"state":                 {"st"},
@@ -102,7 +114,10 @@ func (f *consentFixture) query(redirect string, extra url.Values) url.Values {
 	return q
 }
 
-var aliceSession = jwt.MapClaims{"sub": "alice", "email": "alice@example.com"}
+// aliceSession is a hand-built local login session, for the unit tests. The
+// security cases are also covered with real minted tokens
+// (TestIsBrowserSession_RealMintedTokens, oauth2_consent_middleware_test.go).
+var aliceSession = jwt.MapClaims{"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodLocal)}
 
 func sessionRequest(method, target string, body *strings.Reader, session jwt.MapClaims, source string) *http.Request {
 	var r *http.Request
@@ -286,8 +301,9 @@ func TestConsentPost_Refusals(t *testing.T) {
 	// An existing, narrower consent: a refused deny must not remove it, and a
 	// refused allow must not widen it to the sealed request's scopes.
 	require.NoError(t, f.ex.config.DCRConsent.Grant(ctx, "alice", f.clientID, appRedirect, []string{"email"}))
-	bob := jwt.MapClaims{"sub": "bob"}
+	bob := jwt.MapClaims{"sub": "bob", "auth_method": string(AuthMethodLocal)}
 	oauth2Session := jwt.MapClaims{"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodOAuth2)}
+	noMethod := jwt.MapClaims{"sub": "alice", "email": "alice@example.com"}
 	capability := jwt.MapClaims{"sub": "alice", "entitlements": []string{"functions:/api/v1/files:read"}, CapUsesClaim: true}
 
 	expired, err := f.ex.sealJSON(sealPurposeConsent, consentRequest{Sub: "alice", Iss: consentIssuer,
@@ -315,6 +331,9 @@ func TestConsentPost_Refusals(t *testing.T) {
 		},
 		"capability token in the cookie": func(d string) *httptest.ResponseRecorder {
 			return f.post(sealed, d, sameOrigin, capability, COOKIE)
+		},
+		"no auth_method in the cookie": func(d string) *httptest.ResponseRecorder {
+			return f.post(sealed, d, sameOrigin, noMethod, COOKIE)
 		},
 		"another subject": func(d string) *httptest.ResponseRecorder {
 			return f.post(sealed, d, sameOrigin, bob, COOKIE)
@@ -406,9 +425,8 @@ func TestAuthorize_CapabilityTokenInTheCookieIsSignedOut(t *testing.T) {
 
 func TestAuthorize_LocalAndOIDCBrowserSessionsKeepWorking(t *testing.T) {
 	for name, session := range map[string]jwt.MapClaims{
-		"local":                   {"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodLocal)},
-		"oidc after refresh":      {"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodOIDC)},
-		"oidc with no method yet": {"sub": "alice", "email": "alice@example.com", "idp": "oidc"},
+		"local": {"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodLocal)},
+		"oidc":  {"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodOIDC), "idp": "oidc"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newConsentFixture(t)
@@ -419,6 +437,24 @@ func TestAuthorize_LocalAndOIDCBrowserSessionsKeepWorking(t *testing.T) {
 			require.NoError(t, err)
 			codeFrom(t, f.authorize(loc.Query(), session, COOKIE))
 		})
+	}
+}
+
+// A browser session is recognised by its signed auth_method, never by its
+// absence: a session without one is signed out for dynamically registered
+// clients.
+func TestAuthorize_SessionWithoutAuthMethodIsSignedOut(t *testing.T) {
+	f := newConsentFixture(t)
+	codeFrom(t, f.allow(t, f.query(appRedirect, nil)))
+
+	for _, session := range []jwt.MapClaims{
+		{"sub": "alice", "email": "alice@example.com"},
+		{"sub": "alice", "email": "alice@example.com", "idp": "oidc"},
+		{"sub": "alice", "email": "alice@example.com", "auth_method": ""},
+	} {
+		w := f.authorize(f.query(appRedirect, nil), session, COOKIE)
+		require.Equal(t, http.StatusSeeOther, w.Code, w.Body.String())
+		assert.True(t, strings.HasPrefix(w.Header().Get("Location"), "/-/login?"))
 	}
 }
 
@@ -566,4 +602,91 @@ func TestDCRClientGetsNoCodeWithoutConsentAtThatRedirect(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, loc.Query().Get("code"), "prompt=none must not release a code")
 	assert.Equal(t, "consent_required", loc.Query().Get("error"))
+}
+
+// verifiedCookieSession verifies a host-signed token as WithAuthentication
+// does and returns it as a session that came from the cookie.
+func verifiedCookieSession(t *testing.T, cfg *Config, token string) (context.Context, AuthContext) {
+	t.Helper()
+	ac := AuthContext{}
+	parsed, err := jwt.ParseWithClaims(token, &ac,
+		func(*jwt.Token) (any, error) { return cfg.ActivePair.Private.Public(), nil },
+		gateParserOptions(cfg.Issuer, []string{cfg.Audience})...)
+	require.NoError(t, err)
+	require.True(t, parsed.Valid)
+	return withAuthSource(context.Background(), COOKIE), ac
+}
+
+// Every token this host mints for alice, as the mint signs it, put in the
+// session cookie. Only her browser sessions may count as one: a token handed
+// to an OAuth client or minted as a capability must not, or whoever holds it
+// can answer a consent page as her.
+func TestIsBrowserSession_RealMintedTokens(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	cfg := &f.ex.config
+	cfg.Clients["svc"] = AuthClient{ClientID: "svc", ClientSecret: "svc-secret"}
+
+	local, err := f.ex.LoginLocal(ctx, "alice", "pw", "", "", AuthMethodLocal)
+	require.NoError(t, err)
+	localRotated, err := f.ex.RedeemRefreshToken(ctx, local.RefreshToken, "")
+	require.NoError(t, err)
+
+	code := codeFrom(t, f.allow(t, f.query(appRedirect, nil)))
+	authCode, err := f.ex.RedeemAuthorizationCode(ctx, code, f.clientID, appRedirect, f.verifier)
+	require.NoError(t, err)
+	require.NotEmpty(t, authCode.IDToken, "openid was granted")
+	authCodeRotated, err := f.ex.RedeemRefreshToken(ctx, authCode.RefreshToken, f.clientID)
+	require.NoError(t, err)
+
+	password, err := f.ex.LoginLocal(ctx, "alice", "pw", "openid email", "svc", AuthMethodOAuth2)
+	require.NoError(t, err)
+	require.NotEmpty(t, password.IDToken, "openid was granted")
+	passwordRotated, err := f.ex.RedeemRefreshToken(ctx, password.RefreshToken, "svc")
+	require.NoError(t, err)
+
+	clientCredentials, err := f.ex.LoginClient(ctx, "svc", "svc-secret", "")
+	require.NoError(t, err)
+
+	capability := f.capabilityCookie(t).Value
+
+	tokens := []struct {
+		name    string
+		token   string
+		browser bool
+	}{
+		{"local login session", local.AccessToken, true},
+		{"rotated local session", localRotated.AccessToken, true},
+		{"authorization_code access token", authCode.AccessToken, false},
+		{"authorization_code id_token", authCode.IDToken, false},
+		{"rotated authorization_code access token", authCodeRotated.AccessToken, false},
+		{"rotated authorization_code id_token", authCodeRotated.IDToken, false},
+		{"password grant access token", password.AccessToken, false},
+		{"password grant id_token", password.IDToken, false},
+		{"rotated password grant access token", passwordRotated.AccessToken, false},
+		{"client_credentials token", clientCredentials.AccessToken, false},
+		{"capability token", capability, false},
+	}
+	for _, tc := range tokens {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotEmpty(t, tc.token)
+			sctx, ac := verifiedCookieSession(t, cfg, tc.token)
+			assert.Equal(t, tc.browser, isBrowserSession(sctx, ac))
+		})
+	}
+
+	t.Run("oidc login sessions", func(t *testing.T) {
+		o := newOIDCFixture(t)
+		upstream, err := o.ex.ExchangeCode(o.ctx, "alice")
+		require.NoError(t, err)
+		login, err := o.ex.ExchangeToken(o.ctx, upstream)
+		require.NoError(t, err)
+		rotated, err := o.ex.RedeemRefreshToken(o.ctx, login.RefreshToken, "")
+		require.NoError(t, err)
+
+		for name, token := range map[string]string{"login": login.AccessToken, "rotated": rotated.AccessToken} {
+			sctx, ac := verifiedCookieSession(t, &o.ex.config, token)
+			assert.True(t, isBrowserSession(sctx, ac), name)
+		}
+	})
 }

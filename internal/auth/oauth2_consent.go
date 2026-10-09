@@ -25,15 +25,16 @@ type consentRequest struct {
 
 // isBrowserSession reports whether the session is a person's browser session,
 // the only kind a dynamically registered client may get a code or a consent
-// from. It must have come from the session cookie, and it must not be a token
-// that whoever holds it can put in the cookie: one minted for an OAuth client
-// (auth_method "oauth2": authorization-code, password and client_credentials
-// tokens), or a capability (CapUsesClaim, mint_token / /-/capabilities/mint),
-// which carries no auth_method at all and is handed to scripts by design. A
-// capability redeemed through consent would also escape its attenuation: the
-// code mints the user's full roles and a refresh token. A deny-list, not an
-// allow-list: an OIDC login session carries no auth_method until its first
-// refresh, and it must keep working.
+// from. It must have come from the session cookie, its signed auth_method must
+// name a browser login ("local" from /-/login, "oidc" from the OIDC callback;
+// cookie rotation keeps either), and it must not be a capability. An
+// allow-list: a token minted for an OAuth client (auth_method "oauth2":
+// authorization-code access and id tokens, password and client_credentials
+// tokens) can be put in the cookie by that client, and a token with no
+// auth_method (one signed before the claim was projected) fails closed. A
+// capability (CapUsesClaim, mint_token / /-/capabilities/mint) is handed to
+// scripts by design; redeemed through consent it would also escape its
+// attenuation, since the code mints the user's full roles and a refresh token.
 func isBrowserSession(ctx context.Context, ac AuthContext) bool {
 	if AuthSourceFromContext(ctx) != COOKIE {
 		return false
@@ -42,7 +43,12 @@ func isBrowserSession(ctx context.Context, ac AuthContext) bool {
 		return false
 	}
 	method, _ := ac["auth_method"].(string)
-	return AuthMethod(method) != AuthMethodOAuth2
+	switch AuthMethod(method) {
+	case AuthMethodLocal, AuthMethodOIDC:
+		return true
+	default:
+		return false
+	}
 }
 
 // consentCovers reports whether stored consent covers this request. Any
