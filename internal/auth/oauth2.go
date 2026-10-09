@@ -248,21 +248,26 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, callbackURL.String(), http.StatusFound)
 }
 
-// authorizeLoginURL sends an authorize request to the login page. prompt and
-// login_hint go on to the login (and from there to the provider) and are
-// removed from the return URL, so coming back to authorize issues a code
-// instead of looping -- even when the user picks another account at the
-// provider than the hint named; the client decides what to do with that.
+// authorizeLoginURL sends an authorize request to the login page. login_hint
+// and the login/select_account prompt values go on to the login (and from
+// there to the provider) and are removed from the return URL, so coming back
+// to authorize issues a code instead of looping -- even when the user picks
+// another account at the provider than the hint named; the client decides
+// what to do with that. consent is kept on the return URL (and never sent
+// upstream) so a `prompt=login consent` request still shows the consent page
+// after login.
 func authorizeLoginURL(r *http.Request, prompt []string, loginHint string) string {
 	ret := *r.URL
-	q := ret.Query()
-	q.Del("prompt")
+	q := withoutPrompt(r.URL.Query(), "login", "select_account", "none")
 	q.Del("login_hint")
 	ret.RawQuery = q.Encode()
 
 	v := url.Values{"return": {ret.String()}}
-	if forwarded := slices.DeleteFunc(slices.Clone(prompt), func(p string) bool { return p == "none" }); len(forwarded) > 0 {
-		v.Set("prompt", strings.Join(forwarded, " "))
+	// Only what the provider can act on goes upstream; consent is ours.
+	if upstream := slices.DeleteFunc(slices.Clone(prompt), func(p string) bool {
+		return p != "login" && p != "select_account"
+	}); len(upstream) > 0 {
+		v.Set("prompt", strings.Join(upstream, " "))
 	}
 	if loginHint != "" {
 		v.Set("login_hint", loginHint)
