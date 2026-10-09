@@ -1657,12 +1657,18 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// consent: Deny, a future revoke, or the consent expiring ends it at the
 	// next refresh. A store failure is a server error, so the deferred
 	// restore puts the refresh token back instead of logging the user out.
+	// A client that no longer resolves (deleted, expired, or dropped by the
+	// redirect policy) ends the session too: whether it needs consent cannot
+	// be known, so the check is never skipped for it.
 	if clientID != "" {
 		client, ok, lerr := e.LookupClient(ctx, clientID)
 		if lerr != nil {
 			return failed("%w: client lookup failed: %v", ErrServerError, lerr)
 		}
-		if ok && client.RequireConsent {
+		if !ok {
+			return grantFailed("client is no longer registered")
+		}
+		if client.RequireConsent {
 			held := false
 			if e.config.DCRConsent != nil {
 				h, cerr := e.config.DCRConsent.HasClient(ctx, claims.Subject, clientID)

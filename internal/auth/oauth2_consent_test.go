@@ -500,6 +500,29 @@ func TestRedeemRefreshToken_DCRClientWithConsentRotates(t *testing.T) {
 	assert.NotEmpty(t, ts.RefreshToken)
 }
 
+// A client that no longer resolves (deleted, expired, or dropped by the
+// redirect policy) cannot be checked for consent, so its refresh fails
+// rather than skipping the check. A static client still resolves.
+func TestRedeemRefreshToken_UnregisteredClientFails(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	require.NoError(t, f.ex.config.DCRConsent.Grant(ctx, "alice", f.clientID, appRedirect, nil))
+	id := f.refreshToken(t)
+	require.NoError(t, f.ex.config.DCRStore.Delete(ctx, f.clientID))
+
+	_, err := f.ex.RedeemRefreshToken(ctx, id, f.clientID)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrGrantFailure), "invalid_grant: %v", err)
+
+	f.ex.config.Clients["static"] = AuthClient{ClientID: "static"}
+	static, err := f.ex.createRefreshToken(ctx, RefreshTokenClaims{
+		Subject: "alice", ClientID: "static", ExpiresAt: time.Now().Add(time.Hour).Unix(), OriginalIssuedAt: time.Now().Unix(),
+	})
+	require.NoError(t, err)
+	_, err = f.ex.RedeemRefreshToken(ctx, static, "static")
+	assert.NoError(t, err, "a static client resolves and needs no consent")
+}
+
 func TestRedeemRefreshToken_BrowserSessionNeedsNoConsent(t *testing.T) {
 	f := newConsentFixture(t)
 	id, err := f.ex.createRefreshToken(context.Background(), RefreshTokenClaims{
