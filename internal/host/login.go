@@ -285,9 +285,21 @@ func (hh *HostHandler) isSameOrigin(raw string) bool {
 // releases an authorization code, so a request that does not PROVE it came
 // from this host's own page is refused. Browsers send Origin on every form
 // POST; "null" (an opaque or no-referrer origin) is not proof.
+//
+// A browser that sends fetch metadata also says HOW the request was made, and
+// a consent decision is only ever the user submitting the page's form in a
+// top-level document: navigate, document, user-activated. That refuses a
+// same-origin fetch(), a form posted into an iframe and a scripted
+// form.submit(), so a script on another page of this origin cannot click
+// Allow either. A browser without fetch metadata keeps the Origin rule alone.
 func consentOriginAllowed(r *http.Request, scheme string, domains []string) bool {
-	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" {
-		return false
+	if s := r.Header.Get("Sec-Fetch-Site"); s != "" {
+		if s != "same-origin" ||
+			r.Header.Get("Sec-Fetch-Mode") != "navigate" ||
+			r.Header.Get("Sec-Fetch-Dest") != "document" ||
+			r.Header.Get("Sec-Fetch-User") != "?1" {
+			return false
+		}
 	}
 	if o := r.Header.Get("Origin"); o != "" {
 		return kdexhttp.SameOrigin(o, scheme, domains)

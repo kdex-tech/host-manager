@@ -88,6 +88,16 @@ func TestLogoutPost_RejectsCrossOrigin(t *testing.T) {
 	}
 }
 
+// withUserNavigation adds the fetch metadata a browser sends when the user
+// submits a form in a top-level page; explicit keys in h win.
+func withUserNavigation(h map[string]string) map[string]string {
+	out := map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-User": "?1"}
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
+}
+
 func TestConsentOriginAllowed(t *testing.T) {
 	domains := []string{"app.example"}
 	mk := func(h map[string]string) *http.Request {
@@ -116,8 +126,27 @@ func TestConsentOriginAllowed(t *testing.T) {
 			"Origin": "null", "Referer": "https://app.example/x"}, false},
 		"cross-site fetch metadata": {map[string]string{
 			"Origin": "https://app.example", "Sec-Fetch-Site": "cross-site"}, false},
-		"same-origin fetch metadata": {map[string]string{
-			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin"}, true},
+		"same-origin fetch metadata": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin"}), true},
+		"same-origin fetch metadata with Referer": {withUserNavigation(map[string]string{
+			"Referer": "https://app.example/-/oauth/authorize", "Sec-Fetch-Site": "same-origin"}), true},
+		"same-origin fetch metadata without mode, dest or user": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin"}, false},
+		"same-origin fetch()": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}), false},
+		"same-origin no-cors fetch()": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "no-cors"}), false},
+		"same-origin form into an iframe": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Dest": "iframe"}), false},
+		"same-origin scripted form.submit()": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, false},
+		"same-origin user activation ?0": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-User": "?0"}), false},
+		"user navigation does not rescue a cross-site request": {withUserNavigation(map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "cross-site"}), false},
+		"user navigation does not rescue a foreign Origin": {withUserNavigation(map[string]string{
+			"Origin": "https://evil.example", "Sec-Fetch-Site": "same-origin"}), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := consentOriginAllowed(mk(tt.headers), "https", domains); got != tt.want {
