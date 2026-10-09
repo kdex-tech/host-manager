@@ -38,8 +38,21 @@ type OAuth2 struct {
 	ExchangeTargets map[string]string
 	// AccessTokenTTL is the lifetime applied to a minted resource PAT.
 	AccessTokenTTL time.Duration
+	// RenderConsent renders the consent page for a dynamically registered
+	// client. nil means RenderBuiltinConsent. The host may set its own
+	// (stage 2: the Consent utility page); it must keep a script-free CSP.
+	RenderConsent func(http.ResponseWriter, *http.Request, ConsentView)
+	// ConsentOriginAllowed decides whether a consent POST provably came from
+	// this host's own page. nil refuses every POST (fail closed).
+	ConsentOriginAllowed func(*http.Request) bool
 }
 
+// AuthorizeHandler serves /-/oauth/authorize. It is one linear sequence of
+// checks whose ORDER is the security property (session source, then consent
+// for prompt=none, then login_hint, then the consent page, then the code), so
+// it is kept in one function rather than split to satisfy gocyclo.
+//
+//nolint:gocyclo
 func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	var clientId, code, codeChallenge, codeChallengeMethod, redirectURI, resource, responseType, scope, state, subject string
 	var callbackURL *url.URL
@@ -158,22 +171,15 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	authCtx, ok := GetAuthContext(ctx)
+	// Codes for dynamically registered clients go only to a browser session.
+	// A bearer token at authorize (a script holding some token for the user)
+	// is treated as signed out, so "the user allowed it" cannot be automated.
+	if ok && authClient.RequireConsent && AuthSourceFromContext(ctx) != COOKIE {
+		ok = false
+	}
 	if !ok {
 		if slices.Contains(prompt, "none") {
 			err = fmt.Errorf("prompt=none without a session")
-			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
-			return
-		}
-		http.Redirect(w, r, authorizeLoginURL(r, prompt, loginHint), http.StatusSeeOther)
-		return
-	}
-
-	if slices.Contains(prompt, "login") || slices.Contains(prompt, "select_account") ||
-		(loginHint != "" && !sessionMatchesHint(authCtx, loginHint)) {
-		if slices.Contains(prompt, "none") {
-			// prompt=none must never show UI: the session is for another
-			// account than the client asked for, so say so instead.
-			err = fmt.Errorf("prompt=none with a session for another account than login_hint")
 			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
 			return
 		}
@@ -207,6 +213,42 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 			"client_id", clientId)
 		err = fmt.Errorf("%w: authorization code", sign.ErrSubjectlessCredential)
 		http.Error(w, "Invalid session", http.StatusInternalServerError)
+		return
+	}
+
+	areq := parseAuthorizeRequest(r.URL.Query())
+	covered := true
+	if authClient.RequireConsent {
+		covered = o.consentCovers(ctx, subject, areq)
+		// Decided before login_hint is looked at, with one answer whatever
+		// the hint, so an unconsented client cannot use prompt=none +
+		// login_hint to learn who is signed in.
+		if !covered && slices.Contains(prompt, "none") {
+			err = fmt.Errorf("prompt=none without consent")
+			redirectAuthorizeError(w, r, callbackURL, state, "consent_required")
+			return
+		}
+	}
+
+	if slices.Contains(prompt, "login") || slices.Contains(prompt, "select_account") ||
+		(loginHint != "" && !sessionMatchesHint(authCtx, loginHint)) {
+		if slices.Contains(prompt, "none") {
+			// prompt=none must never show UI: the session is for another
+			// account than the client asked for, so say so instead.
+			err = fmt.Errorf("prompt=none with a session for another account than login_hint")
+			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
+			return
+		}
+		http.Redirect(w, r, authorizeLoginURL(r, prompt, loginHint), http.StatusSeeOther)
+		return
+	}
+
+	if authClient.RequireConsent && (!covered || slices.Contains(prompt, "consent")) {
+		account, _ := authCtx["email"].(string)
+		if account == "" {
+			account = subject
+		}
+		o.renderConsent(w, r, authClient, subject, account, areq)
 		return
 	}
 
