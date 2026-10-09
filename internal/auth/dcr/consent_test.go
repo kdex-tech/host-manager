@@ -121,22 +121,55 @@ func TestConsentRevokeLastDeletesTheKey(t *testing.T) {
 	assert.False(t, found, "no empty record is stored")
 }
 
+// hookCache runs onFirstGet after the first Get has read its value, so a
+// Revoke can land between a caller's load and its later save.
+type hookCache struct {
+	cache.Cache
+	fired      bool
+	onFirstGet func()
+}
+
+func (h *hookCache) Get(ctx context.Context, key string) (string, bool, bool, error) {
+	val, ok, cur, err := h.Cache.Get(ctx, key)
+	if !h.fired {
+		h.fired = true
+		h.onFirstGet()
+	}
+	return val, ok, cur, err
+}
+
 func TestConsentTouchDoesNotResurrectRevoked(t *testing.T) {
-	s, ctx := newConsentStore(t), context.Background()
-	now := time.Unix(1_000_000, 0)
-	s.now = func() time.Time { return now }
-	require.NoError(t, s.Grant(ctx, "alice", "c1", "https://a.example/cb", nil))
+	const redirect = "https://a.example/cb"
+	for name, read := range map[string]func(s *ConsentStore, ctx context.Context) (bool, error){
+		"Covers": func(s *ConsentStore, ctx context.Context) (bool, error) {
+			return s.Covers(ctx, "alice", "c1", redirect, nil)
+		},
+		"HasClient": func(s *ConsentStore, ctx context.Context) (bool, error) {
+			return s.HasClient(ctx, "alice", "c1")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, ctx := newConsentStore(t), context.Background()
+			now := time.Unix(1_000_000, 0)
+			s.now = func() time.Time { return now }
+			require.NoError(t, s.Grant(ctx, "alice", "c1", redirect, nil))
+			now = now.Add(25 * time.Hour) // the grant is stale, so the read will touch
 
-	now = now.Add(25 * time.Hour)
-	require.NoError(t, s.Revoke(ctx, "alice", "c1", "https://a.example/cb"))
-	s.touch(ctx, "alice", "c1", "https://a.example/cb")
+			h := &hookCache{Cache: s.cache}
+			h.onFirstGet = func() { require.NoError(t, s.Revoke(ctx, "alice", "c1", redirect)) }
+			s.cache = h
 
-	ok, err := s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
-	require.NoError(t, err)
-	assert.False(t, ok)
-	_, found, _, err := s.cache.Get(ctx, consentKey("alice"))
-	require.NoError(t, err)
-	assert.False(t, found, "the deleted key is not re-created")
+			_, err := read(s, ctx) // may be true: it read before the revoke
+			require.NoError(t, err)
+
+			_, found, _, err := h.Cache.Get(ctx, consentKey("alice"))
+			require.NoError(t, err)
+			assert.False(t, found, "the revoked key is not re-created by the touch")
+			ok, err := s.Covers(ctx, "alice", "c1", redirect, nil)
+			require.NoError(t, err)
+			assert.False(t, ok)
+		})
+	}
 }
 
 func TestConsentOverlongScopeIsNeverRecorded(t *testing.T) {
