@@ -23,6 +23,21 @@ type consentRequest struct {
 	Exp   int64  `json:"exp"`
 }
 
+// isBrowserSession reports whether the session is a person's browser session,
+// the only kind a dynamically registered client may get a code or a consent
+// from. It must have come from the session cookie, and it must not be a token
+// minted for an OAuth client (auth_method "oauth2": authorization-code,
+// password and client_credentials tokens), which whoever holds it can put in
+// the cookie. A deny-list, not an allow-list: an OIDC login session carries no
+// auth_method until its first refresh, and it must keep working.
+func isBrowserSession(ctx context.Context, ac AuthContext) bool {
+	if AuthSourceFromContext(ctx) != COOKIE {
+		return false
+	}
+	method, _ := ac["auth_method"].(string)
+	return AuthMethod(method) != AuthMethodOAuth2
+}
+
 // consentCovers reports whether stored consent covers this request. Any
 // store problem means "not covered": the page is shown, never skipped.
 func (o *OAuth2) consentCovers(ctx context.Context, subject string, req authorizeRequest) bool {
@@ -87,7 +102,7 @@ func (o *OAuth2) ConsentPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authCtx, ok := GetAuthContext(ctx)
-	if !ok || AuthSourceFromContext(ctx) != COOKIE {
+	if !ok || !isBrowserSession(ctx, authCtx) {
 		forbidden("no browser session")
 		return
 	}
@@ -140,7 +155,11 @@ func (o *OAuth2) ConsentPost(w http.ResponseWriter, r *http.Request) {
 			unavailable(err)
 			return
 		}
-		callbackURL, _ := url.Parse(req.RedirectURI) // registered, so it parses
+		callbackURL, err := url.Parse(req.RedirectURI)
+		if err != nil {
+			forbidden("registered redirect does not parse")
+			return
+		}
 		redirectAuthorizeError(w, r, callbackURL, req.State, "access_denied")
 		return
 	}

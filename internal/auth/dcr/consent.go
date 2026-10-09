@@ -52,11 +52,13 @@ type ConsentStore struct {
 // NewConsentStore builds the store. maxItems bounds the in-memory backend
 // (one item per subject); valkey ignores it. In-memory mode is for dev only.
 func NewConsentStore(cm cache.CacheManager, ttl time.Duration, maxItems int) *ConsentStore {
-	return &ConsentStore{
-		cache: cm.GetCache("dcr-consent", cache.CacheOptions{TTL: &ttl, Uncycled: true, MaxItems: &maxItems}),
-		ttl:   ttl,
-		now:   time.Now,
-	}
+	return NewConsentStoreFromCache(
+		cm.GetCache("dcr-consent", cache.CacheOptions{TTL: &ttl, Uncycled: true, MaxItems: &maxItems}), ttl)
+}
+
+// NewConsentStoreFromCache builds a ConsentStore over an existing cache.
+func NewConsentStoreFromCache(c cache.Cache, ttl time.Duration) *ConsentStore {
+	return &ConsentStore{cache: c, ttl: ttl, now: time.Now}
 }
 
 func consentKey(subject string) string {
