@@ -527,7 +527,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			}
 
 			// Inject authContext into context
-			ctx := SetAuthContext(r.Context(), authContext)
+			ctx := withAuthSource(SetAuthContext(r.Context(), authContext), authSource)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

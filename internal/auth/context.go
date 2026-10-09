@@ -146,3 +146,22 @@ func (ac AuthContext) parseToStringArray(key string) ([]string, error) {
 
 	return cs, nil
 }
+
+type authSourceKeyType struct{}
+
+var authSourceKey authSourceKeyType
+
+// withAuthSource records where the request's credential came from: COOKIE
+// for the browser session cookie, "header" for an Authorization bearer token.
+// Codes for dynamically registered clients are only issued to a browser
+// session, so the authorization endpoint needs to know which it has.
+func withAuthSource(ctx context.Context, source string) context.Context {
+	return context.WithValue(ctx, authSourceKey, source)
+}
+
+// AuthSourceFromContext reports the credential source recorded by the
+// authentication middleware, or "" when none was.
+func AuthSourceFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(authSourceKey).(string)
+	return s
+}
