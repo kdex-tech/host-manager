@@ -136,11 +136,12 @@ func (o *OAuth2) ConsentPost(w http.ResponseWriter, r *http.Request) {
 		forbidden("sealed request is for another session or has expired")
 		return
 	}
-	q, err := url.ParseQuery(sealed.Query)
-	if err != nil {
-		forbidden("sealed query does not parse")
-		return
-	}
+	// Read exactly as authorize read it (r.URL.Query() drops a malformed pair
+	// and keeps the rest), or a request with a ';' or a bad escape gets the
+	// page but an Allow that can never succeed. The error carries nothing to
+	// act on: the query is our own sealed copy, and every value that matters
+	// is re-checked below and again by authorize.
+	q, _ := url.ParseQuery(sealed.Query)
 	req := parseAuthorizeRequest(q)
 	client, ok, err := o.AuthExchanger.LookupClient(ctx, req.ClientID)
 	if err != nil {

@@ -212,6 +212,27 @@ func TestConsentPost_AllowWithPromptConsentCompletes(t *testing.T) {
 	codeFrom(t, f.authorize(loc.Query(), aliceSession, COOKIE))
 }
 
+// Authorize reads its query with r.URL.Query(), which drops a malformed pair
+// (a ';' separator, a bad escape). The sealed copy must be read the same way,
+// or the page is shown but its Allow can never succeed.
+func TestConsentPost_AllowWithAMalformedQueryPairCompletes(t *testing.T) {
+	for name, junk := range map[string]string{"semicolon": "&utm=a;b", "bad escape": "&utm=%zz"} {
+		t.Run(name, func(t *testing.T) {
+			f := newConsentFixture(t)
+			w := httptest.NewRecorder()
+			target := OAuthAuthorizePath + "?" + f.query(appRedirect, nil).Encode() + junk
+			f.o.AuthorizeHandler(w, sessionRequest("GET", target, nil, aliceSession, COOKIE))
+			sealed := sealedFrom(t, w)
+
+			w = f.post(sealed, "allow", sameOrigin, aliceSession, COOKIE)
+			require.Equal(t, http.StatusSeeOther, w.Code, w.Body.String())
+			loc, err := url.Parse(w.Header().Get("Location"))
+			require.NoError(t, err)
+			codeFrom(t, f.authorize(loc.Query(), aliceSession, COOKIE))
+		})
+	}
+}
+
 func TestAuthorize_PromptConsentForcesThePageWhenConsented(t *testing.T) {
 	f := newConsentFixture(t)
 	codeFrom(t, f.allow(t, f.query(appRedirect, nil)))
