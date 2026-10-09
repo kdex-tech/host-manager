@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -338,7 +339,7 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 		}
 		schemes := dcrSpec.AllowedRedirectSchemes
 		if len(schemes) == 0 {
-			schemes = []string{"https", "http-loopback"}
+			schemes = slices.Clone(dcr.DefaultRedirectSchemes)
 		}
 		maxClients := dcrSpec.MaxClients
 		if maxClients <= 0 {
