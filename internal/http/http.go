@@ -276,6 +276,10 @@ func SameOrigin(raw, scheme string, domains []string) bool {
 	if err != nil || u.Scheme == "" || u.Host == "" || !strings.EqualFold(u.Scheme, scheme) {
 		return false
 	}
+	// Browsers never put userinfo in Origin or Referer; its presence is a forgery.
+	if u.User != nil {
+		return false
+	}
 	host, port := u.Hostname(), u.Port()
 	defaultPort := (scheme == "https" && port == "443") || (scheme == "http" && port == "80")
 	for _, d := range domains {

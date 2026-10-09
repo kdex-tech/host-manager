@@ -406,16 +406,18 @@ func MockServer(setup func(mux *http.ServeMux)) *httptest.Server {
 func TestSameOrigin(t *testing.T) {
 	domains := []string{"app.example", "alt.example:8443"}
 	for raw, want := range map[string]bool{
-		"https://app.example":          true,
-		"https://APP.example/path":     true,
-		"https://app.example:443":      true,
-		"https://alt.example:8443":     true,
-		"https://alt.example":          false, // domain names a port
-		"http://app.example":           false, // scheme
-		"https://evil.example":         false,
-		"null":                         false,
-		"":                             false,
-		"https://app.example.evil.com": false,
+		"https://app.example":              true,
+		"https://APP.example/path":         true,
+		"https://app.example:443":          true,
+		"https://alt.example:8443":         true,
+		"https://alt.example":              false, // domain names a port
+		"http://app.example":               false, // scheme
+		"https://evil.example":             false,
+		"null":                             false,
+		"":                                 false,
+		"https://app.example.evil.com":     false,
+		"https://app.example@evil.example": false, // userinfo
+		"https://evil.example@app.example": false, // userinfo
 	} {
 		if got := SameOrigin(raw, "https", domains); got != want {
 			t.Errorf("SameOrigin(%q) = %v, want %v", raw, got, want)

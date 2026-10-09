@@ -106,6 +106,14 @@ func TestConsentOriginAllowed(t *testing.T) {
 		"no Origin and no Referer": {nil, false},
 		"null Origin":              {map[string]string{"Origin": "null"}, false},
 		"cross-origin Origin":      {map[string]string{"Origin": "https://evil.example"}, false},
+		"same-site fetch metadata": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-site"}, false},
+		"none fetch metadata": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "none"}, false},
+		"foreign Origin outranks same-origin Referer": {map[string]string{
+			"Origin": "https://evil.example", "Referer": "https://app.example/x"}, false},
+		"null Origin outranks same-origin Referer": {map[string]string{
+			"Origin": "null", "Referer": "https://app.example/x"}, false},
 		"cross-site fetch metadata": {map[string]string{
 			"Origin": "https://app.example", "Sec-Fetch-Site": "cross-site"}, false},
 		"same-origin fetch metadata": {map[string]string{
@@ -114,6 +122,30 @@ func TestConsentOriginAllowed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := consentOriginAllowed(mk(tt.headers), "https", domains); got != tt.want {
 				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHostHandler_OriginAllowed_Ports pins that /-/login matches ports strictly:
+// a domain without a port accepts only the scheme's default port, and a domain
+// that names a port requires it.
+func TestHostHandler_OriginAllowed_Ports(t *testing.T) {
+	for _, tt := range []struct {
+		name, domain, origin string
+		want                 bool
+	}{
+		{"non-default port refused", "app.example", "https://app.example:8443", false},
+		{"default port allowed", "app.example", "https://app.example:443", true},
+		{"domain with port matches exactly", "app.example:8443", "https://app.example:8443", true},
+		{"domain with port refuses bare host", "app.example:8443", "https://app.example", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			hh := newTestHostHandlerWithDomain(t, tt.domain)
+			req := httptest.NewRequest(http.MethodPost, "/-/login", nil)
+			req.Header.Set("Origin", tt.origin)
+			if got := hh.originAllowed(req); got != tt.want {
+				t.Fatalf("originAllowed(%q) = %v, want %v", tt.origin, got, tt.want)
 			}
 		})
 	}
