@@ -108,6 +108,60 @@ func TestConsentTouchWritesAtMostDaily(t *testing.T) {
 	assert.Equal(t, now.Unix(), rec.Clients["c1"]["https://a.example/cb"].Touched)
 }
 
+// countingCache counts the store's cache round trips.
+type countingCache struct {
+	cache.Cache
+	gets, sets int
+}
+
+func (c *countingCache) Get(ctx context.Context, key string) (string, bool, bool, error) {
+	c.gets++
+	return c.Cache.Get(ctx, key)
+}
+
+func (c *countingCache) Set(ctx context.Context, key, value string, opts ...cache.SetOption) error {
+	c.sets++
+	return c.Cache.Set(ctx, key, value, opts...)
+}
+
+// Every covered authorize and every DCR refresh reads the record; only a
+// stale grant may cost a second read (the re-load before the save) and a write.
+func TestConsentFreshGrantCostsOneRead(t *testing.T) {
+	const redirect = "https://a.example/cb"
+	for name, read := range map[string]func(s *ConsentStore, ctx context.Context) (bool, error){
+		"Covers": func(s *ConsentStore, ctx context.Context) (bool, error) {
+			return s.Covers(ctx, "alice", "c1", redirect, nil)
+		},
+		"HasClient": func(s *ConsentStore, ctx context.Context) (bool, error) {
+			return s.HasClient(ctx, "alice", "c1")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, ctx := newConsentStore(t), context.Background()
+			now := time.Unix(1_000_000, 0)
+			s.now = func() time.Time { return now }
+			require.NoError(t, s.Grant(ctx, "alice", "c1", redirect, nil))
+			c := &countingCache{Cache: s.cache}
+			s.cache = c
+
+			now = now.Add(time.Hour)
+			ok, err := read(s, ctx)
+			require.NoError(t, err)
+			require.True(t, ok)
+			assert.Equal(t, 1, c.gets, "a fresh grant is not re-loaded")
+			assert.Equal(t, 0, c.sets)
+
+			now = now.Add(25 * time.Hour)
+			c.gets, c.sets = 0, 0
+			ok, err = read(s, ctx)
+			require.NoError(t, err)
+			require.True(t, ok)
+			assert.Equal(t, 2, c.gets, "a stale grant is re-loaded before it is saved")
+			assert.Equal(t, 1, c.sets)
+		})
+	}
+}
+
 func TestConsentRevokeLastDeletesTheKey(t *testing.T) {
 	s, ctx := newConsentStore(t), context.Background()
 	require.NoError(t, s.Grant(ctx, "alice", "c1", "https://a.example/cb", nil))

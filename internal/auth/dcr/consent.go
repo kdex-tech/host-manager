@@ -115,7 +115,7 @@ func (s *ConsentStore) Covers(ctx context.Context, subject, clientID, redirectUR
 			return false, nil
 		}
 	}
-	s.touch(ctx, subject, clientID, redirectURI)
+	s.touchIfStale(ctx, subject, clientID, redirectURI, g)
 	return true, nil
 }
 
@@ -126,11 +126,29 @@ func (s *ConsentStore) HasClient(ctx context.Context, subject, clientID string) 
 	if err != nil {
 		return false, err
 	}
-	for redirect := range rec.Clients[clientID] {
-		s.touch(ctx, subject, clientID, redirect)
-		return true, nil
+	// The most recently touched redirect: if it is fresh, so is the record.
+	var newest string
+	var grant consentGrant
+	found := false
+	for redirect, g := range rec.Clients[clientID] {
+		if !found || g.Touched > grant.Touched || (g.Touched == grant.Touched && redirect < newest) {
+			newest, grant, found = redirect, g, true
+		}
 	}
-	return false, nil
+	if found {
+		s.touchIfStale(ctx, subject, clientID, newest, grant)
+	}
+	return found, nil
+}
+
+// touchIfStale touches a grant the caller just read, unless that read shows
+// it was touched within the day: every covered authorize and every refresh
+// reads the record, and only a stale grant should cost the re-load and write.
+func (s *ConsentStore) touchIfStale(ctx context.Context, subject, clientID, redirectURI string, read consentGrant) {
+	if s.now().Sub(time.Unix(read.Touched, 0)) < consentTouchEvery {
+		return
+	}
+	s.touch(ctx, subject, clientID, redirectURI)
 }
 
 // touch re-loads the record right before saving: writing back the caller's
