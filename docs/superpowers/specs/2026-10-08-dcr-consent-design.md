@@ -59,7 +59,9 @@ response-type checks:
 1. **No session** → as today: `prompt=none` gives `login_required`, otherwise the login redirect.
 2. **A session that did not come from the session cookie** (an `Authorization: Bearer` header) →
    treated as no session. Codes for DCR clients are only issued to a browser session; the middleware
-   records the auth source in the context. (Static clients unchanged.)
+   records the auth source in the context. A cookie carrying a token minted for an OAuth client
+   (`auth_method: oauth2`) or a capability (`kdx_cap`) is not a browser session either. (Static
+   clients unchanged.)
 3. **`prompt=none` and no covering consent** → `consent_required`, decided **before** `login_hint` is
    evaluated, so an unconsented client cannot use `login_hint` to learn who is signed in.
 4. Then the existing `prompt=login|select_account` / `login_hint` handling (ddba71e).
@@ -79,7 +81,9 @@ Refuse with **403** and no state change unless all hold:
 
 - **Same origin, strictly.** `Origin` (else `Referer`) must name one of the host's domains with its
   scheme **and port**; a request with neither header, or `Origin: null`, is refused. Where present,
-  `Sec-Fetch-Site` must be `same-origin`. The comparison is extracted from `login.go` into
+  `Sec-Fetch-Site` must be `same-origin`, together with `Sec-Fetch-Mode: navigate`,
+  `Sec-Fetch-Dest: document` and `Sec-Fetch-User: ?1` (a user submitting the form in a top-level
+  page, not a same-origin `fetch`, iframe or scripted submit). The comparison is extracted from `login.go` into
   `kdexhttp.SameOrigin(raw, scheme, domains)`; `/-/login` keeps its lenient wrapper, consent uses a
   strict one, passed into `OAuth2` as a func field.
 - **A cookie-sourced session** whose subject equals the sealed request's subject.
