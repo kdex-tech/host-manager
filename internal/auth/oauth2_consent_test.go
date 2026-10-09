@@ -473,3 +473,30 @@ func TestRedeemRefreshToken_ConsentStoreErrorIsAServerError(t *testing.T) {
 	_, err := f.ex.RedeemRefreshToken(context.Background(), id, f.clientID)
 	assert.True(t, errors.Is(err, ErrServerError), "a store outage restores the refresh token instead of ending the session")
 }
+
+// A client registered anonymously with two redirects: one a user would trust,
+// one they would not. No code may reach either redirect without the user's
+// Allow, and an Allow for one releases nothing to the other.
+func TestDCRClientGetsNoCodeWithoutConsentAtThatRedirect(t *testing.T) {
+	f := newConsentFixture(t)
+
+	for _, redirect := range []string{appRedirect, otherRedirect} {
+		w := f.authorize(f.query(redirect, nil), aliceSession, COOKIE)
+		assert.Empty(t, w.Header().Get("Location"), redirect)
+		sealedFrom(t, w)
+	}
+
+	assert.NotEmpty(t, codeFrom(t, f.allow(t, f.query(appRedirect, nil))))
+
+	// Consent at appRedirect must not leak to otherRedirect.
+	w := f.authorize(f.query(otherRedirect, nil), aliceSession, COOKIE)
+	assert.Empty(t, w.Header().Get("Location"), "no redirect without consent")
+	sealedFrom(t, w)
+
+	w = f.authorize(f.query(otherRedirect, url.Values{"prompt": {"none"}}), aliceSession, COOKIE)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	loc, err := w.Result().Location()
+	require.NoError(t, err)
+	assert.Empty(t, loc.Query().Get("code"), "prompt=none must not release a code")
+	assert.Equal(t, "consent_required", loc.Query().Get("error"))
+}

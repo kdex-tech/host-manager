@@ -24,8 +24,8 @@ func TestFilterRedirectURIs_RefusesAmbiguousURIs(t *testing.T) {
 		"https://app.example/cb#",              // empty fragment
 		"https:///cb",                          // empty host
 		"https://xn--clude-6ve.ai/cb#",         // fragment again (punycode host itself is fine)
-		"https://clаude.ai/cb",            // non-ASCII host (Cyrillic a)
-		"https://a‮b.example/cb",          // bidi override in host
+		"https://clаude.ai/cb",                 // non-ASCII host (Cyrillic a)
+		"https://a‮b.example/cb",               // bidi override in host
 		"https://app.example/" + strings.Repeat("a", 2100),
 		"",
 	} {
