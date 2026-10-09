@@ -26,12 +26,19 @@ type consentRequest struct {
 // isBrowserSession reports whether the session is a person's browser session,
 // the only kind a dynamically registered client may get a code or a consent
 // from. It must have come from the session cookie, and it must not be a token
-// minted for an OAuth client (auth_method "oauth2": authorization-code,
-// password and client_credentials tokens), which whoever holds it can put in
-// the cookie. A deny-list, not an allow-list: an OIDC login session carries no
-// auth_method until its first refresh, and it must keep working.
+// that whoever holds it can put in the cookie: one minted for an OAuth client
+// (auth_method "oauth2": authorization-code, password and client_credentials
+// tokens), or a capability (CapUsesClaim, mint_token / /-/capabilities/mint),
+// which carries no auth_method at all and is handed to scripts by design. A
+// capability redeemed through consent would also escape its attenuation: the
+// code mints the user's full roles and a refresh token. A deny-list, not an
+// allow-list: an OIDC login session carries no auth_method until its first
+// refresh, and it must keep working.
 func isBrowserSession(ctx context.Context, ac AuthContext) bool {
 	if AuthSourceFromContext(ctx) != COOKIE {
+		return false
+	}
+	if capability, _ := ac[CapUsesClaim].(bool); capability {
 		return false
 	}
 	method, _ := ac["auth_method"].(string)

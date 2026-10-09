@@ -173,8 +173,9 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	authCtx, ok := GetAuthContext(ctx)
 	// Codes for dynamically registered clients go only to a browser session.
 	// A bearer token at authorize (a script holding some token for the user),
-	// or a token minted for an OAuth client, is treated as signed out, so "the
-	// user allowed it" cannot be automated. See isBrowserSession.
+	// or a token minted for an OAuth client or as a capability, is treated as
+	// signed out, so "the user allowed it" cannot be automated. See
+	// isBrowserSession.
 	if ok && authClient.RequireConsent && !isBrowserSession(ctx, authCtx) {
 		ok = false
 	}

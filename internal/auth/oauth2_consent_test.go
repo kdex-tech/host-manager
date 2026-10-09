@@ -267,6 +267,7 @@ func TestConsentPost_Refusals(t *testing.T) {
 	require.NoError(t, f.ex.config.DCRConsent.Grant(ctx, "alice", f.clientID, appRedirect, []string{"email"}))
 	bob := jwt.MapClaims{"sub": "bob"}
 	oauth2Session := jwt.MapClaims{"sub": "alice", "email": "alice@example.com", "auth_method": string(AuthMethodOAuth2)}
+	capability := jwt.MapClaims{"sub": "alice", "entitlements": []string{"functions:/api/v1/files:read"}, CapUsesClaim: true}
 
 	expired, err := f.ex.sealJSON(sealPurposeConsent, consentRequest{Sub: "alice", Iss: consentIssuer,
 		Query: f.query(appRedirect, nil).Encode(), Exp: time.Now().Add(-time.Minute).Unix()})
@@ -290,6 +291,9 @@ func TestConsentPost_Refusals(t *testing.T) {
 		},
 		"oauth2 client token in the cookie": func(d string) *httptest.ResponseRecorder {
 			return f.post(sealed, d, sameOrigin, oauth2Session, COOKIE)
+		},
+		"capability token in the cookie": func(d string) *httptest.ResponseRecorder {
+			return f.post(sealed, d, sameOrigin, capability, COOKIE)
 		},
 		"another subject": func(d string) *httptest.ResponseRecorder {
 			return f.post(sealed, d, sameOrigin, bob, COOKIE)
@@ -358,6 +362,25 @@ func TestAuthorize_OAuth2ClientTokenInTheCookieIsSignedOut(t *testing.T) {
 	w := f.authorize(f.query(appRedirect, nil), session, COOKIE)
 	require.Equal(t, http.StatusSeeOther, w.Code, w.Body.String())
 	assert.True(t, strings.HasPrefix(w.Header().Get("Location"), "/-/login?"))
+}
+
+// A capability token (mint_token) carries no auth_method, so only its
+// CapUsesClaim marker tells it from a browser session. Its holder is a script,
+// not the person, whatever transport carried it.
+func TestAuthorize_CapabilityTokenInTheCookieIsSignedOut(t *testing.T) {
+	f := newConsentFixture(t)
+	codeFrom(t, f.allow(t, f.query(appRedirect, nil)))
+
+	capability := jwt.MapClaims{"sub": "alice", "entitlements": []string{"functions:/api/v1/files:read"}, CapUsesClaim: true}
+	w := f.authorize(f.query(appRedirect, nil), capability, COOKIE)
+	require.Equal(t, http.StatusSeeOther, w.Code, w.Body.String())
+	assert.True(t, strings.HasPrefix(w.Header().Get("Location"), "/-/login?"))
+
+	w = f.authorize(f.query(appRedirect, url.Values{"prompt": {"none"}}), capability, COOKIE)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	loc, _ := w.Result().Location()
+	assert.Equal(t, "login_required", loc.Query().Get("error"))
+	assert.Empty(t, loc.Query().Get("code"))
 }
 
 func TestAuthorize_LocalAndOIDCBrowserSessionsKeepWorking(t *testing.T) {
