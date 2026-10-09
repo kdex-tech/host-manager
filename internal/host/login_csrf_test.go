@@ -87,3 +87,34 @@ func TestLogoutPost_RejectsCrossOrigin(t *testing.T) {
 		t.Fatalf("status = %d, want 403 for a cross-origin logout", rr.Code)
 	}
 }
+
+func TestConsentOriginAllowed(t *testing.T) {
+	domains := []string{"app.example"}
+	mk := func(h map[string]string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/-/oauth/consent", nil)
+		for k, v := range h {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+	for name, tt := range map[string]struct {
+		headers map[string]string
+		want    bool
+	}{
+		"same-origin Origin":       {map[string]string{"Origin": "https://app.example"}, true},
+		"same-origin Referer":      {map[string]string{"Referer": "https://app.example/-/oauth/authorize"}, true},
+		"no Origin and no Referer": {nil, false},
+		"null Origin":              {map[string]string{"Origin": "null"}, false},
+		"cross-origin Origin":      {map[string]string{"Origin": "https://evil.example"}, false},
+		"cross-site fetch metadata": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "cross-site"}, false},
+		"same-origin fetch metadata": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin"}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := consentOriginAllowed(mk(tt.headers), "https", domains); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

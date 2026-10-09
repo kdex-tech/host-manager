@@ -266,3 +266,25 @@ func ValidatePattern(pattern string, r *http.Request) (err error) {
 
 	return nil
 }
+
+// SameOrigin reports whether raw (an Origin value or a Referer URL) has the
+// given scheme and names one of domains. A domain that carries a port must
+// match it exactly; a domain without one matches the scheme's default port or
+// no port. "null" and anything unparseable never match.
+func SameOrigin(raw, scheme string, domains []string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || !strings.EqualFold(u.Scheme, scheme) {
+		return false
+	}
+	host, port := u.Hostname(), u.Port()
+	defaultPort := (scheme == "https" && port == "443") || (scheme == "http" && port == "80")
+	for _, d := range domains {
+		if strings.EqualFold(u.Host, d) {
+			return true
+		}
+		if (port == "" || defaultPort) && strings.EqualFold(host, d) {
+			return true
+		}
+	}
+	return false
+}

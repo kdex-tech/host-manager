@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
@@ -272,22 +271,29 @@ func (hh *HostHandler) originAllowed(r *http.Request) bool {
 }
 
 // isSameOrigin reports whether raw (an Origin header value or a Referer URL) has
-// the host's scheme and exactly one of its configured domains. It compares
-// against the host's own Routing.Domains — authoritative — rather than the
-// request Host header, which the caller can influence.
+// the host's scheme and one of its configured domains. It compares against the
+// host's own Routing.Domains — authoritative — rather than the request Host
+// header, which the caller can influence.
 func (hh *HostHandler) isSameOrigin(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if hh.host == nil {
 		return false
 	}
-	if u.Scheme != hh.scheme || hh.host == nil {
+	return kdexhttp.SameOrigin(raw, hh.scheme, hh.host.Routing.Domains)
+}
+
+// consentOriginAllowed is originAllowed without the leniency: the consent POST
+// releases an authorization code, so a request that does not PROVE it came
+// from this host's own page is refused. Browsers send Origin on every form
+// POST; "null" (an opaque or no-referrer origin) is not proof.
+func consentOriginAllowed(r *http.Request, scheme string, domains []string) bool {
+	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" {
 		return false
 	}
-	host := u.Hostname()
-	for _, d := range hh.host.Routing.Domains {
-		if strings.EqualFold(host, d) {
-			return true
-		}
+	if o := r.Header.Get("Origin"); o != "" {
+		return kdexhttp.SameOrigin(o, scheme, domains)
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		return kdexhttp.SameOrigin(ref, scheme, domains)
 	}
 	return false
 }
