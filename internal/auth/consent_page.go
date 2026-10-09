@@ -44,27 +44,37 @@ func newConsentView(clientName, redirectURI, account, sealed string, scopes []st
 		RedirectKind:      kind,
 		RedirectDisplay:   display,
 		RegistrableDomain: registrable,
-		RedirectURI:       redirectURI,
+		RedirectURI:       stripControlAndFormat(redirectURI),
 		ClientName:        sanitizeClientName(clientName),
-		Account:           account,
+		Account:           stripControlAndFormat(account),
 		Scopes:            scopes,
 		Request:           sealed,
 		Action:            OAuthConsentPath,
 	}
 }
 
+// networkSchemes are delivered over the network to the host in the URI. Any
+// other scheme is handed to a local application, even when it has an
+// authority (cursor://, vscode://).
+var networkSchemes = map[string]bool{"http": true, "https": true, "ws": true, "wss": true, "ftp": true}
+
 // describeRedirect says where a code will go, in a form a person can judge.
-// The host is shown exactly as registered: redirects with non-ASCII hosts are
-// refused at registration (dcr.FilterRedirectURIs), and a punycode host is
-// never decoded, so a look-alike shows as the xn-- form it really is.
+// A network scheme is "device" only for a loopback host; a custom scheme is
+// always "device". Hosts are ASCII because dcr.FilterRedirectURIs refuses
+// non-ASCII hosts at registration, and a punycode host is never decoded, so a
+// look-alike shows as the xn-- form it really is.
 func describeRedirect(raw string) (kind, display, registrable string) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return RedirectKindWeb, raw, raw
 	}
+	scheme := strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
-	if u.Scheme != "https" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return RedirectKindDevice, u.Scheme, ""
+	if !networkSchemes[scheme] {
+		return RedirectKindDevice, scheme, ""
+	}
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return RedirectKindDevice, scheme, ""
 	}
 	display = strings.ToLower(u.Host)
 	// An IP literal has no registrable domain, and publicsuffix would invent
@@ -79,22 +89,24 @@ func describeRedirect(raw string) (kind, display, registrable string) {
 	return RedirectKindWeb, display, registrable
 }
 
-// sanitizeClientName removes control and format characters (including bidi
-// overrides) from the self-declared client name and caps its length.
-func sanitizeClientName(s string) string {
-	var b strings.Builder
-	n := 0
-	for _, r := range s {
+// stripControlAndFormat removes Unicode Cc and Cf characters (including bidi
+// overrides) from text that is shown to a person.
+func stripControlAndFormat(s string) string {
+	return strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
-			continue
+			return -1
 		}
-		if n == maxClientNameRunes {
-			break
-		}
-		b.WriteRune(r)
-		n++
+		return r
+	}, s)
+}
+
+// sanitizeClientName cleans the self-declared client name and caps its length.
+func sanitizeClientName(s string) string {
+	r := []rune(stripControlAndFormat(s))
+	if len(r) > maxClientNameRunes {
+		r = r[:maxClientNameRunes]
 	}
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(string(r))
 }
 
 // builtinConsentCSP is added to the flow's own frame-ancestors policy. No

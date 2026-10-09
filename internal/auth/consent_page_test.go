@@ -27,6 +27,23 @@ func TestDescribeRedirect(t *testing.T) {
 	assert.Equal(t, "xn--clude-6ve.ai", reg)
 }
 
+func TestDescribeRedirectSchemeAndHost(t *testing.T) {
+	for _, tc := range []struct{ raw, kind, display string }{
+		{"wss://remote.example/cb", "web", "remote.example"},
+		{"http://remote.example/cb", "web", "remote.example"},
+		{"https://localhost/cb", "device", "https"},
+		{"https://[::1]:8443/cb", "device", "https"},
+		{"HTTP://127.0.0.1:5000/cb", "device", "http"},
+		{"https://APP.Example:8443/cb", "web", "app.example:8443"},
+		{"vscode://vscode.github-authentication/cb", "device", "vscode"},
+		{"com.example.app:/cb", "device", "com.example.app"},
+	} {
+		kind, display, _ := describeRedirect(tc.raw)
+		assert.Equal(t, tc.kind, kind, tc.raw)
+		assert.Equal(t, tc.display, display, tc.raw)
+	}
+}
+
 func TestDescribeRedirectIPLiteralHost(t *testing.T) {
 	// publicsuffix treats the last label of an IP as a TLD ("113.5"), which
 	// would present a made-up domain as the trust signal.
@@ -43,7 +60,7 @@ func TestDescribeRedirectIPLiteralHost(t *testing.T) {
 }
 
 func TestSanitizeClientName(t *testing.T) {
-	assert.Equal(t, "Claude", sanitizeClientName("Cl‮aude\u0000"))
+	assert.Equal(t, "Claude", sanitizeClientName("Cl\u202eaude\u0000"))
 	assert.Equal(t, 64, len([]rune(sanitizeClientName(strings.Repeat("é", 100)))))
 }
 
@@ -62,4 +79,14 @@ func TestRenderBuiltinConsentEscapesAndAddsItsCSP(t *testing.T) {
 	assert.Less(t, strings.Index(body, `value="deny"`), strings.Index(body, `value="allow"`))
 	assert.Contains(t, w.Header().Values("Content-Security-Policy"), "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	assert.NotContains(t, strings.Join(w.Header().Values("Content-Security-Policy"), ";"), "form-action")
+}
+
+func TestRenderBuiltinConsentButtonsAndAttributeEscaping(t *testing.T) {
+	w := httptest.NewRecorder()
+	v := newConsentView("n", `https://app.example/cb?x="><script>`, "a", `"><script>`, nil)
+	RenderBuiltinConsent(w, httptest.NewRequest("GET", "/", nil), v)
+	body := w.Body.String()
+	assert.NotContains(t, body, `"><script>`)
+	assert.Regexp(t, `<button[^>]*value="deny"[^>]*autofocus|<button[^>]*autofocus[^>]*value="deny"`, body)
+	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="allow"`, body)
 }
