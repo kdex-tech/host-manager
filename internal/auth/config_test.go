@@ -586,6 +586,25 @@ func TestEnrichAuthContext(t *testing.T) {
 			EnrichAuthContext(nil, mapper)
 		})
 	})
+
+	// The proxy enriches the caller's context before projecting the FAT, so
+	// a mapping that set auth_method here would reach the FAT. The mint
+	// decides it, as in sign.Signer.Project.
+	t.Run("a mapping cannot change, add or remove auth_method", func(t *testing.T) {
+		setter, err := dmapper.NewMapper([]dmapper.MappingRule{{
+			SourceExpression: `"local"`,
+			TargetPropPath:   "auth_method",
+		}})
+		require.NoError(t, err)
+
+		ac := AuthContext{"sub": "alice", "auth_method": string(AuthMethodOAuth2)}
+		EnrichAuthContext(ac, setter)
+		assert.Equal(t, string(AuthMethodOAuth2), ac["auth_method"])
+
+		ac = AuthContext{"sub": "alice"}
+		EnrichAuthContext(ac, setter)
+		assert.NotContains(t, ac, "auth_method")
+	})
 }
 
 // authCookieCleared reports whether the response clears the named cookie

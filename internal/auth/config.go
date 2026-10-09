@@ -152,8 +152,10 @@ type Config struct {
 // already-enriched context (no raw source claims remain to re-fold);
 // attenuation-safe (only ADDS mapped output, never removes a claim, and a
 // downscoped capability token carries no source claims to re-expand); fail-safe
-// (a mapping error leaves the context unchanged). No claim name is special-cased
-// — ClaimMappings are the generic enrichment mechanism.
+// (a mapping error leaves the context unchanged). ClaimMappings are the generic
+// enrichment mechanism; the one exception is auth_method, which the mint
+// decides and a mapping can neither change, add nor remove (as in
+// sign.Signer.Project): the proxy projects the FAT from this context.
 func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if mapper == nil || ac == nil {
 		return
@@ -162,7 +164,13 @@ func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if err != nil {
 		return
 	}
+	method, hadMethod := ac["auth_method"]
 	maps.Copy(ac, extra)
+	if hadMethod {
+		ac["auth_method"] = method
+	} else {
+		delete(ac, "auth_method")
+	}
 }
 
 type ConfigBuilder struct {
