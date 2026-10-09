@@ -384,7 +384,9 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 			succeeds: false,
 		},
 		{
-			name:         "CheckPageAccess - claims=foo:1:read,admin / req=[{bearer:[foo:1:read],oauth2:[admin]}]",
+			// A scope is not an oauth2 grant: scope bucketing is off
+			// (AuthorizationChecker.scopeBuckets).
+			name:         "CheckPageAccess - claims=foo:1:read,scope admin / req=[{bearer:[foo:1:read],oauth2:[admin]}]",
 			kind:         "foo",
 			resourceName: "1",
 			claims: AuthContext{
@@ -398,7 +400,7 @@ func TestAuthorizationChecker_CheckAccess(t *testing.T) {
 					"oauth2": []string{"admin"},
 				},
 			},
-			succeeds: true,
+			succeeds: false,
 		},
 	}
 	for _, tt := range tests {

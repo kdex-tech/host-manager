@@ -13,6 +13,19 @@ import (
 type AuthorizationChecker struct {
 	ec  *entitlements.EntitlementsChecker
 	log logr.Logger
+	// scopeBuckets files a token's `scope` claim into the "oidc" or "oauth2"
+	// scheme bucket by its auth_method. It is deliberately OFF, and nothing in
+	// production turns it on. Until the DCR consent work, no token this host
+	// signed carried auth_method, so the bucketing never ran and every gate
+	// decision was made without it; auth_method is now signed for the consent
+	// gate alone (isBrowserSession), and authorization must decide exactly as
+	// before. Turning it on is a separate decision: it would let a
+	// client_credentials client satisfy an oauth2 requirement with any scope
+	// string it asks for (that grant's scope is not filtered against
+	// SupportedScopes), and let any OAuth or OIDC token through an empty
+	// {oauth2: []} / {oidc: []} requirement. Kept, not deleted, so that
+	// decision starts from logic its tests still cover.
+	scopeBuckets bool
 }
 
 // NewAuthorizationChecker creates a new authorization checker.
@@ -97,8 +110,9 @@ func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entit
 		}
 	}
 
+	// Off: see AuthorizationChecker.scopeBuckets.
 	contextScopes, _ := authContext.GetScopes()
-	if len(contextScopes) > 0 {
+	if ac.scopeBuckets && len(contextScopes) > 0 {
 		authMethod, _ := authContext.GetAuthMethod()
 		switch authMethod {
 		case AuthMethodOIDC:
@@ -112,9 +126,10 @@ func (ac *AuthorizationChecker) GetParsedEntitlements(ctx context.Context) entit
 			// function (aa73843).
 			//
 			// Assigning clobbered it. Nothing carries both a PATBridgeClaim and
-			// a scope claim today, so this never fired in production, but the
-			// two writes describe different things about the SAME caller and
-			// one added scope claim would have silently un-fixed aa73843.
+			// a scope claim today, and scope bucketing is off (scopeBuckets),
+			// so this does not run in production; but the two writes describe
+			// different things about the SAME caller, and turning bucketing on
+			// with an assignment here would silently un-fix aa73843.
 			userEntitlements["oauth2"] = append(userEntitlements["oauth2"], contextScopes...)
 		}
 	}

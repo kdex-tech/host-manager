@@ -735,10 +735,10 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// filter with the browser-session default, then SignScoped. This path used
 	// a bare Sign, which left the token with no `scope` claim at all while a
 	// rotation of the SAME session (mintTokensFromSubject -> SignScoped) minted
-	// one. GetParsedEntitlements files the signed `scope` claim into the oauth2
-	// scheme bucket, so that asymmetry let an OIDC session satisfy oauth2-scheme
-	// requirements after its first rotation that it could not satisfy at login.
-	// See kdex-tech/host-manager#189.
+	// one, so a session's claim set changed at its first rotation. (Filing the
+	// `scope` claim into a scheme bucket by auth_method is off, see
+	// AuthorizationChecker.scopeBuckets, so the scope does not authorize
+	// anything here.) See kdex-tech/host-manager#189.
 	grantedScopes := applyScopeFilter(signingContext, "", defaultSessionScopes)
 	grantedScope := strings.Join(grantedScopes, " ")
 
@@ -2015,13 +2015,17 @@ func applyScopeFilter(signingContext jwt.MapClaims, requestedScope string, defau
 	// and publishes as scopes_supported (RFC 8414 2); it cannot invent values.
 	//
 	// An earlier revision appended every unrecognised requested string to the
-	// granted set. Because GetParsedEntitlements files the signed `scope` claim
-	// into the "oauth2" scheme bucket, that let a client author its own
+	// granted set. Had GetParsedEntitlements filed the signed `scope` claim into
+	// the "oauth2" scheme bucket, that would let a client author its own
 	// entitlement-shaped string -- e.g. "vector_stores:vs_victim:write" -- and
 	// satisfy an oauth2-declared operation requirement its role bindings never
-	// granted. Narrowing here is explicitly permitted by 3.3 ("MAY fully or
-	// partially ignore the scope requested"); the granted set is returned to the
-	// caller so the 3.3 MUST on reporting the actual scope is satisfiable.
+	// granted. What actually prevents that is that scope bucketing is off
+	// (AuthorizationChecker.scopeBuckets): this filter covers only the user
+	// grants, and the client_credentials scope (buildClientSigningContext) is
+	// not filtered against SupportedScopes at all. Narrowing here is explicitly
+	// permitted by 3.3 ("MAY fully or partially ignore the scope requested");
+	// the granted set is returned to the caller so the 3.3 MUST on reporting
+	// the actual scope is satisfiable.
 	granted := []string{}
 	for _, known := range SupportedScopes {
 		if slices.Contains(requested, known) {
