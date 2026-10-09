@@ -687,6 +687,10 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	}
 
 	signingContext["idp"] = "oidc"
+	// Set, not inherited from the IdP's claims: it marks this token as a
+	// browser session, which the DCR consent gate admits (isBrowserSession).
+	// The refresh record below carries the same method, so rotation keeps it.
+	signingContext["auth_method"] = string(AuthMethodOIDC)
 
 	sub, err := signingContext.GetSubject()
 	// `err != nil` alone never fired for the case this check was written for.
@@ -1924,7 +1928,9 @@ var reservedMintClaims = map[string]struct{}{
 	// NOTE: this does NOT constrain a host ClaimMappings rule -- sign.Signer.Project
 	// applies the mapper output last and does not consult reservedMintClaims (the
 	// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
-	// the mapper output against reserved claims in Project is tracked separately.
+	// the mapper output against reserved claims in Project is tracked separately;
+	// auth_method alone is already re-asserted there, since the DCR consent gate
+	// trusts it.
 	// See the #206 quad (SEC-2) and its re-review (RR-2).
 	"act": {},
 }
@@ -2065,7 +2071,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 
 	signingContext := jwt.MapClaims{
 		"sub":          claims.Subject,
-		"auth_method":  claims.AuthMethod,
+		"auth_method":  string(claims.AuthMethod),
 		"roles":        roles,
 		"entitlements": entitlements,
 	}

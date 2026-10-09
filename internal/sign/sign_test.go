@@ -508,3 +508,35 @@ func TestSigner_Sign_RefusesClaimMappingThatZeroesExp(t *testing.T) {
 	assert.ErrorIs(t, err, sign.ErrNonExpiringToken)
 	assert.Empty(t, tok)
 }
+
+// TestSigner_Project_CarriesAuthMethod pins that auth_method, the login method
+// a token was minted for, is a signed claim. The DCR consent gate tells a
+// person's browser session from an OAuth client's token by it, so a token that
+// dropped it would look like neither.
+func TestSigner_Project_CarriesAuthMethod(t *testing.T) {
+	p, err := testSigner(t).Project(jwt.MapClaims{"sub": "alice", "auth_method": "local"})
+	require.NoError(t, err)
+	assert.Equal(t, "local", p["auth_method"])
+
+	p, err = testSigner(t).Project(jwt.MapClaims{"sub": "alice"})
+	require.NoError(t, err)
+	assert.NotContains(t, p, "auth_method", "no method in, no method out")
+}
+
+// TestSigner_Project_ClaimMappingCannotSetAuthMethod pins that a host
+// claimMappings rule cannot change, add or remove auth_method: the mint
+// decides it, and the consent gate trusts it.
+func TestSigner_Project_ClaimMappingCannotSetAuthMethod(t *testing.T) {
+	s := testSignerWithMapper(t, []dmapper.MappingRule{{
+		SourceExpression: `"local"`,
+		TargetPropPath:   "auth_method",
+	}})
+
+	p, err := s.Project(jwt.MapClaims{"sub": "alice", "auth_method": "oauth2"})
+	require.NoError(t, err)
+	assert.Equal(t, "oauth2", p["auth_method"], "the mapper cannot change the mint's method")
+
+	p, err = s.Project(jwt.MapClaims{"sub": "alice"})
+	require.NoError(t, err)
+	assert.NotContains(t, p, "auth_method", "the mapper cannot add a method the mint did not set")
+}

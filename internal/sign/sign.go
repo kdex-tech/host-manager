@@ -194,7 +194,13 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// OAuth2/MCP/PKCE clients even though OIDC login/refresh (which resolve
 	// the binding key from the raw, pre-projection id_token) granted them
 	// correctly. See kdex-tech/host-manager#189 and the Task 8 fix.
-	for _, claim := range []string{"email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
+	//
+	// "auth_method" is how the token was obtained (local or OIDC browser
+	// login, or an OAuth grant). The DCR consent gate admits only a browser
+	// session, and a token handed to an OAuth client can be put in the session
+	// cookie, so the method has to travel in the signature. It is re-asserted
+	// after the mapper below.
+	for _, claim := range []string{"auth_method", "email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val
 		}
@@ -222,6 +228,15 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 		}
 
 		maps.Copy(projected, extra)
+
+		// The mint decides auth_method, never a claimMappings rule: a rule
+		// that wrote "local" into an OAuth client's token would make it pass
+		// as a browser session.
+		if method, ok := signingContext["auth_method"]; ok {
+			projected["auth_method"] = method
+		} else {
+			delete(projected, "auth_method")
+		}
 	}
 
 	// Compact the entitlements claim before it is signed. Role flattening (a
