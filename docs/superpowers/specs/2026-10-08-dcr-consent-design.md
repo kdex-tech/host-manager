@@ -1,180 +1,240 @@
 # Consent for dynamically registered clients (stage 1)
 
-**Status:** approved design, 2026-10-08
+**Status:** approved design, 2026-10-08; revised 2026-10-09 after a four-lens review
 **Repos:** kdex-host-manager only (stage 1). Stage 2, a themeable Consent utility page, spans
 kdex-crds → kdex-nexus-manager → kdex-host-manager and is out of scope here.
 
 ## Problem
 
-`/-/oauth/authorize` issues an authorization code to any client the moment the browser carries a
-session. There is no consent step. For operator-configured (static) clients that is acceptable: an
-operator authored them. Dynamically registered (RFC 7591) clients are different: registration is
-anonymous, and `allowedRedirectSchemes` admits `https` by default (and on knowdrive dev and prod).
+`/-/oauth/authorize` issues an authorization code to a client as soon as the browser has a session.
+For operator-configured (static) clients that is acceptable. Dynamically registered (RFC 7591)
+clients are registered anonymously and may use remote redirects, so issuing them a code without the
+user's explicit agreement is not acceptable (RFC 6749 §10.2, RFC 7591 §5, RFC 9700 §2.1).
 
-So anyone can register a client whose redirect is their own `https` site, then send a signed-in
-user a link to `/-/oauth/authorize?client_id=<theirs>&redirect_uri=<theirs>&code_challenge=<theirs>`.
-The session cookie is `SameSite=Lax`, so it rides the top-level navigation, a code is issued to the
-attacker's redirect, and the attacker redeems it with their own PKCE verifier for the user's access
-and refresh tokens (or a resource PAT). One click, no prompt.
-
-Removing `https` from the allowed schemes is not a usable mitigation: claude.ai MCP connectors
-register an `https` callback.
-
-A related gap (quad finding, 2026-10-08): `GetClient` re-applies the DCR **grant** policy to stored
-clients (d3fa133) but not the **redirect** policy, so tightening `allowedRedirectSchemes` does not
-affect clients already registered, and the store slides each client's TTL on use.
+A related gap: `GetClient` re-applies the DCR grant policy to stored clients but not the redirect
+policy, so tightening `allowedRedirectSchemes` does not affect clients already registered.
 
 ## Intent and success criteria
 
-- A DCR client never receives a code for a user who has not explicitly allowed that client.
-- An Allow is remembered per (user, client_id) until it expires (the DCR client TTL), so a client
-  re-authorizing for no new scopes or resources does not prompt again. A new registration (new
-  client_id) always prompts.
-- `prompt=none` without stored consent returns `consent_required`; `prompt=consent` always shows
-  the page for a DCR client.
+- A DCR client never receives a code for a user who has not explicitly allowed **that client at that
+  redirect**.
+- An Allow is remembered per (user, client, redirect) while the client is in use, so routine
+  re-authorization does not prompt. A new registration always prompts.
+- `prompt=none` without covering consent returns `consent_required`; `prompt=consent` always shows
+  the page for a DCR client, and Allow then completes.
+- A DCR session cannot outlive its consent: the refresh grant requires it.
 - Static clients behave exactly as today.
 - Tightening `allowedRedirectSchemes` takes effect on stored DCR clients immediately.
-- claude.ai, Cursor, VS Code and codex keep working; their users see the page once per client.
+- claude.ai, Cursor, VS Code and codex keep working.
 
 ## Design
 
 ### 1. Which clients need consent
 
-`AuthClient` gains `Dynamic bool`, set only by the DCR branch of `Exchanger.GetClient`. Consent is
-required for every dynamic client, whatever its redirect scheme (decided 2026-10-08: one rule; it
-also covers a local app squatting a private-use scheme). Static clients never see the page, and
-`prompt=consent` is ignored for them.
+`AuthClient` gains `RequireConsent bool`, set only by the DCR branch of `Exchanger.GetClient`, and
+pinned by a `GetClient` test. Every DCR client requires consent, whatever its redirect scheme.
+Static clients never see the page; `prompt=consent` is ignored for them.
 
-### 2. Authorize flow
+### 2. What a consent covers
 
-In `AuthorizeHandler`, after the existing client, redirect, PKCE, session, `prompt`/`login_hint`
-and subject checks, and before minting the code:
+A consent is recorded per **(subject, client_id, redirect_uri)** and holds the set of **granted
+scopes**. Only scopes this host supports count: requested scopes are intersected with
+`SupportedScopes` (what `applyScopeFilter` will actually issue) for display, storage and the covers
+check, so attacker-written scope strings are neither shown nor recorded.
 
-1. If the client is not dynamic: unchanged.
-2. Let *requested* be the scope set (`strings.Fields(scope)`) plus the `resource` value if any.
-   If `prompt` does not contain `consent` and the stored consent for (subject, client_id) covers
-   *requested*: issue the code as today, and refresh the consent record's TTL.
-3. Else if `prompt` contains `none`: redirect to `redirect_uri` with `error=consent_required` and
-   `state` (RFC 6749 §4.1.2.1 / OIDC Core §3.1.2.6).
-4. Else: answer **200** with the consent page (section 4). No code is minted.
+A request is *covered* when a record exists for its (subject, client_id, redirect_uri) and its
+supported scopes are a subset of the granted set. An empty scope request is covered by any record
+for that redirect (it yields the minimal token, `confineByScope`).
 
-"Covers" means a consent record exists and *requested* ⊆ its stored set. An empty scope request
-is covered by any existing record (it asks for the client's default access, which the first Allow
-already showed).
+`resource` is not part of consent. The page states that the application gets access to the user's
+account with the user's permissions, which is what both a host JWT and a resource PAT amount to.
+Enforcing that a code's `resource` matches the token request's (RFC 8707 §2.2) is a separate,
+pre-existing defect, filed and fixed on its own.
 
-### 3. `POST /-/oauth/consent`
+### 3. Authorize flow
 
-Registered with the authentication middleware (like authorize), so the session is in context.
+`AuthorizeHandler`, for a client with `RequireConsent`, after the client, redirect, PKCE and
+response-type checks:
 
-Form fields: `request` (sealed, below) and `decision` (`allow` | `deny`).
+1. **No session** → as today: `prompt=none` gives `login_required`, otherwise the login redirect.
+2. **A session that did not come from the session cookie** (an `Authorization: Bearer` header) →
+   treated as no session. Codes for DCR clients are only issued to a browser session; the middleware
+   records the auth source in the context. (Static clients unchanged.)
+3. **`prompt=none` and no covering consent** → `consent_required`, decided **before** `login_hint` is
+   evaluated, so an unconsented client cannot use `login_hint` to learn who is signed in.
+4. Then the existing `prompt=login|select_account` / `login_hint` handling (ddba71e).
+5. **Covered and `prompt` lacks `consent`** → issue the code as today.
+6. **Otherwise** → render the consent page (200). No code is minted.
 
-Refuse with **400** (no redirect, no state change) unless all hold:
+`prompt` rewriting goes through one helper used by both detours, so neither loops nor loses a value:
+the **login** detour removes `login`, `select_account` and `none` from the return URL and **keeps
+`consent`**; the **Allow** redirect removes `consent`.
 
-- **Same origin.** `Origin`, else `Referer`, names one of the host's domains with its scheme. Unlike
-  `originAllowed` for `/-/login`, a request carrying neither header is refused: browsers send
-  `Origin` on every form POST. (Defence in depth: the `SameSite=Lax` session cookie is not sent on a
-  cross-site POST, so a forged submission also arrives without a session.)
-- **A session** whose subject equals the sealed request's subject.
-- **The sealed request** decrypts, and has not expired.
-- **The client still resolves** through `GetClient`, is dynamic, and still lists the request's
+### 4. `POST /-/oauth/consent`
+
+Registered with the authentication middleware. Form fields: `request` (sealed) and `decision`
+(`allow` | `deny`).
+
+Refuse with **403** and no state change unless all hold:
+
+- **Same origin, strictly.** `Origin` (else `Referer`) must name one of the host's domains with its
+  scheme **and port**; a request with neither header, or `Origin: null`, is refused. Where present,
+  `Sec-Fetch-Site` must be `same-origin`. The comparison is extracted from `login.go` into
+  `kdexhttp.SameOrigin(raw, scheme, domains)`; `/-/login` keeps its lenient wrapper, consent uses a
+  strict one, passed into `OAuth2` as a func field.
+- **A cookie-sourced session** whose subject equals the sealed request's subject.
+- **The sealed request** opens, names this issuer, and has not expired.
+- **The client still resolves**, still requires consent, and still lists the request's
   `redirect_uri`.
 
-Then:
+The sealed request is a JWE carrying only `{sub, iss, query, exp}` (10 minutes). Both authorize and
+the POST derive client_id, redirect_uri and the supported-scope set from the query through one
+`parseAuthorizeRequest` helper, so they cannot disagree. It is not single-use: replaying an Allow
+needs the same user's browser session and a same-origin POST, and only re-records what that user
+already allowed.
 
-- `allow`: union *requested* into the stored consent for (subject, client_id), with TTL = the DCR
-  client TTL, and **303** to `/-/oauth/authorize?<original query>`. Authorize re-runs every check,
-  finds the consent, and issues the code: minting stays in one place, and nothing in the sealed
-  query is trusted beyond what authorize re-validates.
-- `deny`: **302** to `redirect_uri` with `error=access_denied` and `state`.
+- `allow`: record the consent (section 6) and **303** to `/-/oauth/authorize?<query with consent
+  removed from prompt>`. Authorize re-runs every check and mints the code.
+- `deny`: delete any consent for (subject, client_id, redirect_uri), then **302** to `redirect_uri`
+  with `error=access_denied` and `state`.
 
-**Sealed request.** A JWE (`dir` + `A256GCM`) under a key derived from the OIDC block key with its
-own purpose label (`"dcr-consent\x00"`), carrying `{sub, client_id, redirect_uri, requested[],
-query, exp}` with a 10-minute expiry. It is not single-use: replaying an Allow needs the same
-user's session and a same-origin POST, and only re-records the consent that user already gave.
+### 5. The consent page
 
-The block key is mandatory outside dev mode (`loaders.go`). The JWE seal/open is written once as a
-purpose-keyed helper and also used by the OIDC login-state cookie (resolving the quad's duplicate
-JWE finding in ddba71e).
+**Flow-level headers**, set by the auth flow on every consent response before rendering:
+`Cache-Control: no-store`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` (not
+`no-referrer`: that makes the browser send `Origin: null` on the POST, which section 4 refuses), and
+`Content-Security-Policy: frame-ancestors 'none'`.
 
-### 4. The consent page (built-in)
+**Renderer.** `OAuth2.RenderConsent func(http.ResponseWriter, *http.Request, ConsentView)`. When nil,
+`auth.RenderBuiltinConsent` is used; it is exported so stage 2 falls back to it rather than to a copy.
+Its own CSP adds `default-src 'none'; style-src 'unsafe-inline'`. **No `form-action` directive**:
+browsers apply it to the redirects that follow the POST, which leave the origin by design. Its
+template is parsed once at package init. Stage 2's themeable page must keep a script-free CSP on this
+response; a theme script on the consent page could click Allow.
 
-Rendered through a hook, `OAuth2.RenderConsent func(http.ResponseWriter, *http.Request, ConsentView)`,
-set by the host. Stage 2 swaps the implementation for the Consent utility page without touching
-the flow; stage 1 renders a small `html/template` page in host-manager: English only, inline CSS,
-no external assets.
+**`ConsentView`** carries data, not copy, under fixed field names (they become the stage-2 template
+contract):
 
-`ConsentView` carries: the redirect **host** (shown most prominently; it is where the code goes),
-the full `redirect_uri`, the client's self-declared `client_name` (labelled as provided by the
-application and unverified), the requested scopes (an empty request shown as "basic access to your
-account"), the requested resource if any, the signed-in account (email, else subject), the sealed
-request, and the form action.
+- `RedirectDisplay`: for `https`, the ASCII (punycode) host and port, with `RegistrableDomain`
+  (eTLD+1, `golang.org/x/net/publicsuffix`) for emphasis; for loopback or a private-use scheme,
+  `RedirectKind: "device"` and the scheme, rendered as "an application on this device".
+- `RedirectURI`: the full URI, shown small.
+- `ClientName`: Unicode control and format characters (Cc, Cf, including bidi overrides) removed,
+  capped at 64 characters, marked as provided by the application and unverified.
+- `Scopes`: the supported requested scopes (empty means minimal access; the renderer words it).
+- `Account`: the signed-in email, else subject.
+- `Request`, `Action`.
 
-Response headers: `Content-Type: text/html; charset=utf-8`, `Cache-Control: no-store`,
-`Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self';
-frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`. Framing must be
-impossible: a framed consent page is a clickjacking target.
+**Against click hijacking:** Deny comes first and is the default; Allow is not focused and ignores
+pointer events for its first second (a CSS animation, allowed under the CSP).
 
-All values are HTML-escaped by `html/template`; `client_name` is length-capped for display.
+### 6. Consent store
 
-### 5. Consent store
+`dcr.ConsentStore`, built beside `dcr.Store` in `buildDCRStore` with the same cache manager and the
+DCR `ClientTTL`, `Uncycled` (it must survive a reconcile, #122), with an explicit `MaxItems` for the
+in-memory backend (the default 1000 is too small; in-memory mode is documented as dev-only).
 
-A `dcr-consent` cache on the Exchanger: `Uncycled` (it must survive a config reconcile, like the DCR
-client store, #122), TTL = `DCR.ClientTTL` (720h on knowdrive). Key: `sha256(subject + "\x00" +
-client_id)` hex. Value: JSON `{"granted": [...]}`, the union of every allowed *requested* set.
-Present only when DCR is enabled. A store error on read is treated as "no consent" (the page is
-shown, never skipped); on write it is a 500 from the POST.
+One record per **subject**, keyed `sha256(subject)`: `{client_id: {redirect_uri: {scopes, touched}}}`.
+Per-subject keys let the follow-up list and revoke a user's consents without a cache scan. Bounds:
+at most 64 clients per subject (oldest `touched` evicted), 4 redirects per client, 32 scopes of at
+most 128 bytes. Methods: `Covers`, `Grant`, `Revoke(client, redirect)`, `Touch`.
 
-### 6. Stored-client redirect re-check
+The TTL is the client TTL and slides with use: `Covers` on authorize and the refresh check rewrite
+the record only when `touched` is more than 24h old, so a consent lives exactly as long as its client
+is in use, at no more than one write per user per day. Concurrent updates to one subject's record
+are last-writer-wins; a lost update only means the user is asked again.
 
-`redirectAllowed` and `dangerousSchemes` move from `internal/host/register.go` into
-`internal/auth/dcr`, beside `FilterGrantTypes`, as `dcr.RedirectAllowed(uri, schemes)`.
-`GetClient`'s DCR branch keeps only the stored `redirect_uris` the **current**
-`DCR.AllowedRedirectSchemes` admit; if none survive, the client does not exist. Registration uses
-the same function, so the two cannot drift.
+All store calls use the request context with a 2s deadline. A read error or timeout on authorize
+means "not covered" (the page is shown; never skipped). Any store error in the POST, including the
+client lookup, answers **503** with `Retry-After`. Errors are logged at error level.
+
+### 7. The refresh grant requires consent
+
+`RedeemRefreshToken`, for a client with `RequireConsent`, requires a consent record for (subject,
+client_id) (any redirect), and touches it. Without one the grant fails with `invalid_grant`. Deny,
+the follow-up's revoke, and client expiry therefore end the session.
+
+At rollout no consent records exist, so **every existing DCR session's next refresh fails once** and
+the client sends the user through authorize, where they consent. This is deliberate: it also ends any
+session obtained before the fix.
+
+### 8. Redirect policy on stored clients
+
+`dcr.FilterRedirectURIs(uris, schemes) []string` replaces the per-URI `redirectAllowed`, beside
+`FilterGrantTypes`, together with the dangerous-scheme list and the default schemes. It also refuses
+a URI with userinfo, a fragment, an empty host, a non-ASCII host, or more than 2 KiB. Registration
+and `GetClient` both use it. In `GetClient`, a stored client whose redirects all fail is **deleted**
+from the store (not just hidden) and does not exist; tightening the policy therefore ends those
+clients' sessions, which is the intent.
+
+### 9. Shared plumbing
+
+- One `sealJSON(purpose, v)` / `openJSON(purpose, s, &v)` (JWE `dir`+`A256GCM`, key
+  `sha256(purpose ‖ 0x00 ‖ BlockKey)` derived once) for the consent request, the OIDC login state,
+  and authorization codes. Codes keep an empty purpose so their key does not change at rollout.
+- Path constants `OAuthAuthorizePath`, `OAuthConsentPath` beside `OAuthLoginPath` and
+  `OAuthCallbackPath`.
+- `hh.newOAuth2()` builds the one `auth.OAuth2` used by authorize, the callback and the token
+  endpoint, so the hooks cannot be set on one and missed on another.
+- `POST /-/oauth/consent` is registered in OpenAPI; the authorize operation documents the 200
+  `text/html` response.
+- Error redirects reuse `redirectAuthorizeError`.
 
 ## Error handling
 
 | Case | Answer |
 |---|---|
-| DCR client, no covering consent, `prompt=none` | 302 `redirect_uri?error=consent_required&state=…` |
+| DCR client, `prompt=none`, no covering consent | 302 `consent_required` (before `login_hint`) |
+| DCR client, bearer-sourced session | as no session |
 | DCR client, no covering consent | 200 consent page |
-| Consent POST: cross-origin, no Origin/Referer, no session, subject mismatch, bad or expired seal, client gone, redirect no longer listed | 400 |
-| Consent POST `deny` | 302 `redirect_uri?error=access_denied&state=…` |
-| Consent POST `allow`, store write fails | 500 |
-| Consent read fails | page shown (fail closed) |
+| Consent POST: cross-origin, null or missing Origin, cross-site `Sec-Fetch-Site`, no cookie session, subject mismatch, bad or expired seal, wrong issuer, client gone, redirect no longer listed | 403 |
+| Consent POST, store error | 503 `Retry-After` |
+| Consent POST `deny` | consent removed, 302 `access_denied` |
+| Consent read error on authorize | page shown |
+| Refresh for a DCR client without consent | `invalid_grant` |
 
 ## Rollout
 
-- Every user of an existing DCR client sees the page once, the next time that client sends them
-  through authorize. claude.ai connectors only do so when a refresh fails.
-- Releases as host-manager 0.23.0 together with ddba71e (OIDC login binding, #233/#234) and the
-  fixes the quad found in it.
-- No CRD, chart or nexus change.
+- host-manager 0.23.0, together with ddba71e (OIDC login binding, #233/#234) and the quad fixes to it.
+- Every existing DCR session refreshes into `invalid_grant` once; each user consents once per client.
+- No CRD, chart or nexus change. `golang.org/x/net` becomes a direct dependency (already indirect).
+- Keep this design, the code and the tests unpushed until the release is built, and push them
+  together with the tag.
 
 ## Testing (TDD)
 
-- Signed-in user + DCR client, no consent → 200 page, no code; headers in section 4 present.
-- Allow → 303 to authorize → code issued; second authorize with the same or fewer scopes → code
-  without the page; a broader scope or a new resource → page again.
-- `prompt=consent` forces the page even with consent stored; `prompt=none` without consent →
-  `consent_required`; with consent → code.
-- Deny → `access_denied` with state.
-- POST refused for: foreign Origin, missing Origin and Referer, no session, another subject,
-  tampered seal, expired seal, client deleted, redirect no longer registered.
-- Static client: unchanged, never shown the page, `prompt=consent` ignored.
-- Stored DCR client whose only redirect scheme was removed from `allowedRedirectSchemes` → unknown
-  client at authorize and token.
-- End to end, the attack: anonymous registration with an `https` redirect, signed-in user follows
-  the authorize link → no code reaches the redirect.
-- Page escapes a hostile `client_name` and redirect.
+- Page, not a code: signed-in DCR client without consent; headers as in section 5.
+- Allow → code. Same redirect with the same or fewer scopes → code without the page. A broader
+  supported scope → page. Unsupported scope strings → not shown, not recorded, no new prompt.
+- **A second redirect of the same client is not covered** by consent given for the first.
+- `prompt=consent` → page → Allow → code (no loop). `prompt=login consent` keeps `consent` across
+  login. `prompt=none` → `consent_required`; with consent → code.
+- `prompt=none` + `login_hint` for an unconsented client → `consent_required` whether the hint
+  matches or not.
+- Bearer-sourced session at authorize for a DCR client → treated as signed out.
+- Deny → `access_denied`, and a following authorize prompts again.
+- POST refused (403) for: foreign Origin, `Origin: null`, no Origin and no Referer, cross-site
+  `Sec-Fetch-Site`, no session, bearer session, another subject, tampered seal, expired seal, other
+  issuer, deleted client, unregistered redirect. Store failure → 503.
+- Refresh for a DCR client without consent → `invalid_grant`; with consent → rotates.
+- Stored client whose redirects all fail the current policy → deleted, unknown at authorize and
+  token. Registration refuses userinfo, fragment, empty, non-ASCII and over-long redirects.
+- Rendering: a hostile `client_name` (bidi override, HTML) and a punycode host are shown safely;
+  a private-use redirect is shown as an application on this device.
+- Static client unchanged; `prompt=consent` ignored for it.
+- The attack end to end: anonymous registration with a remote redirect, signed-in user follows the
+  link, no code reaches the redirect; consent given for one redirect does not release a code to a
+  second.
 
 ## Follow-ups (not in stage 1)
 
-- Stage 2: `Consent` KDexUtilityPageType (kdex-crds), `utilityPages.consentRef` and the bundled
-  default page (nexus), host-manager renders it when bound, built-in page as fallback; translations.
-- A way for a user to list and revoke their consents.
+- Stage 2: `Consent` KDexUtilityPageType, `utilityPages.consentRef`, the bundled default page,
+  translations; built-in page as fallback.
+- List and revoke your consents (the per-subject record supports it).
+- RFC 8707: bind a code's and a refresh token's `resource` to the token request (filed separately).
+- Optionally `auth_time` in tokens, so a client can tell a fresh login after `prompt=login`.
 
 ## Out of scope
 
 - Consent for static clients.
-- Changing what DCR registration accepts (other than the shared redirect check).
+- Any change to what DCR registration accepts beyond the stricter shared redirect check.
