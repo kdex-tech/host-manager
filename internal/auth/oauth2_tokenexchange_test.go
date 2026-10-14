@@ -44,7 +44,7 @@ const (
 // Config.Clients is deliberately left nil: TestTokenHandler_TokenExchange_NoClientRequired
 // (and every other test here) relies on that to prove the grant is clientless
 // -- if the clientless branch in OAuth2TokenHandler were ever moved after the
-// client-authentication block, GetClient("") would fail against this fixture
+// client-authentication block, LookupClient(ctx, "") would fail against this fixture
 // and these tests would start failing with invalid_client.
 func newTestOAuth2(t *testing.T) *OAuth2 {
 	t.Helper()

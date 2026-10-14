@@ -23,7 +23,7 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 
 		// Fail closed on an id-less client rather than load it under the ""
 		// key. Nothing reaches a ""-keyed client from the token endpoint
-		// today (a caller cannot present client_id="" because GetClient("")
+		// today (a caller cannot present client_id="" because LookupClient(ctx, "")
 		// must succeed first), but "" is the ClientID the cookie path mints
 		// its grace records with — so an id-less entry here is a bridge
 		// straight past the client binding #169 added to keep a rotated

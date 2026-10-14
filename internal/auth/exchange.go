@@ -805,14 +805,11 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	return ts, nil
 }
 
-func (e *Exchanger) GetClient(clientID string) (AuthClient, bool) {
-	c, ok, _ := e.LookupClient(context.Background(), clientID)
-	return c, ok
-}
-
-// LookupClient is GetClient that reports a store failure, for callers that
-// must tell "no such client" from "cannot tell right now" (the consent POST
-// answers 503 for the latter).
+// LookupClient resolves a client: an operator-configured one, else a
+// dynamically registered one as the current policy allows it. A store failure
+// is returned as an error, never as "no such client", so every caller can
+// answer it as the server's fault rather than the client's. Reading a DCR
+// client may delete it (see below).
 func (e *Exchanger) LookupClient(ctx context.Context, clientID string) (AuthClient, bool, error) {
 	if e == nil {
 		return AuthClient{}, false, nil
@@ -1005,7 +1002,7 @@ func (f *clientSigningContextFailure) Unwrap() error { return f.err }
 // context (sub/azp/scope/roles/entitlements) shared by the host-audience
 // client_credentials mint (LoginClient) and the resource-audience mint
 // (LoginClientResource). It does NOT sign.
-func (e *Exchanger) buildClientSigningContext(clientID, clientSecret, scope string) (jwt.MapClaims, string, error) {
+func (e *Exchanger) buildClientSigningContext(ctx context.Context, clientID, clientSecret, scope string) (jwt.MapClaims, string, error) {
 	if e == nil {
 		// Deployment/config facts, not anything the client presented. See
 		// kdex-tech/host-manager#168 review round 2.
@@ -1016,7 +1013,10 @@ func (e *Exchanger) buildClientSigningContext(clientID, clientSecret, scope stri
 		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("%w: M2M auth not configured", ErrServerError)}
 	}
 
-	client, ok := e.GetClient(clientID)
+	client, ok, lerr := e.LookupClient(ctx, clientID)
+	if lerr != nil {
+		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("%w: client lookup failed: %v", ErrServerError, lerr)}
+	}
 	if !ok {
 		return nil, "", &clientSigningContextFailure{err: fmt.Errorf("invalid client_id")}
 	}
@@ -1101,7 +1101,7 @@ func clientTokenSetForContextFailure(clientID string, err error) (TokenSet, erro
 }
 
 func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, scope string) (TokenSet, error) {
-	signingContext, grantedScopeStr, err := e.buildClientSigningContext(clientID, clientSecret, scope)
+	signingContext, grantedScopeStr, err := e.buildClientSigningContext(ctx, clientID, clientSecret, scope)
 	if err != nil {
 		return clientTokenSetForContextFailure(clientID, err)
 	}
@@ -1129,7 +1129,7 @@ func (e *Exchanger) LoginClient(ctx context.Context, clientID, clientSecret, sco
 // plays no part in resolving the audience. No `act` -- the client is itself
 // the subject.
 func (e *Exchanger) LoginClientResource(ctx context.Context, clientID, clientSecret, scope, targetAudience string) (TokenSet, error) {
-	signingContext, grantedScopeStr, err := e.buildClientSigningContext(clientID, clientSecret, scope)
+	signingContext, grantedScopeStr, err := e.buildClientSigningContext(ctx, clientID, clientSecret, scope)
 	if err != nil {
 		return clientTokenSetForContextFailure(clientID, err)
 	}
@@ -1441,7 +1441,10 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		return grantFailed("redirect_uri mismatch")
 	}
 
-	client, ok := e.GetClient(clientID)
+	client, ok, lerr := e.LookupClient(ctx, clientID)
+	if lerr != nil {
+		return failed("%w: client lookup failed: %v", ErrServerError, lerr)
+	}
 	if !ok {
 		return failed("invalid client_id")
 	}

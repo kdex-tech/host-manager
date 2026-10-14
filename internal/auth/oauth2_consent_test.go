@@ -720,3 +720,58 @@ func TestIsBrowserSession_RealMintedTokens(t *testing.T) {
 		}
 	})
 }
+
+// clientStoreDown is a cache manager whose caches cannot be read, so the DCR
+// client store fails every lookup.
+type clientStoreDown struct{}
+
+func (clientStoreDown) Cycle(string, bool) error { return nil }
+func (clientStoreDown) GetCache(string, cache.CacheOptions) cache.Cache {
+	return consentStoreDown{}
+}
+
+// A client store that cannot be read is the server's fault, never the
+// client's: every path that resolves a client answers it as a server error,
+// not as "no such client".
+func TestClientLookup_StoreFailureIsAServerError(t *testing.T) {
+	down := func(f *consentFixture) {
+		f.ex.config.DCRStore = dcr.NewStore(clientStoreDown{}, consentIssuer, time.Hour, 100)
+	}
+
+	t.Run("authorize", func(t *testing.T) {
+		f := newConsentFixture(t)
+		down(f)
+		w := f.authorize(f.query(appRedirect, nil), aliceSession, COOKIE)
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	})
+
+	t.Run("token endpoint", func(t *testing.T) {
+		f := newConsentFixture(t)
+		down(f)
+		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"x"}, "client_id": {f.clientID}}
+		r := httptest.NewRequest("POST", "/-/token", strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		f.o.OAuth2TokenHandler(w, r)
+		assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+		assert.Contains(t, w.Body.String(), "server_error")
+	})
+
+	t.Run("code redemption", func(t *testing.T) {
+		f := newConsentFixture(t)
+		code := codeFrom(t, f.allow(t, f.query(appRedirect, nil)))
+		down(f)
+		_, err := f.ex.RedeemAuthorizationCode(context.Background(), code, f.clientID, appRedirect, f.verifier)
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrServerError), "server error, not a grant failure: %v", err)
+	})
+
+	t.Run("client credentials", func(t *testing.T) {
+		f := newConsentFixture(t)
+		f.ex.config.Clients["static"] = AuthClient{ClientID: "static", ClientSecret: "s"}
+		down(f)
+		_, err := f.ex.LoginClient(context.Background(), "unknown", "s", "")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, ErrServerError), "server error, not an unknown client: %v", err)
+	})
+}

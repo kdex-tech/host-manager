@@ -280,7 +280,7 @@ func TestLoginClient_M2MNotConfiguredIsServerError(t *testing.T) {
 	require.NoError(t, err)
 	// ActivePair deliberately left nil: IsM2MEnabled() requires it, so this
 	// is the "M2M auth not configured" branch specifically, not
-	// GetClient's "invalid client_id" a moment later.
+	// LookupClient's "invalid client_id" a moment later.
 	cfg := Config{Issuer: "test-iss", Audience: "test-aud", Signer: *signer}
 	ex, err := NewExchanger(context.Background(), cfg, nil, rotationStubIdentityProvider{}, nil)
 	require.NoError(t, err)

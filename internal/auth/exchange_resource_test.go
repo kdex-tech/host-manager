@@ -111,13 +111,13 @@ func decryptAuthCode(t *testing.T, ex *Exchanger, code string) AuthorizationCode
 	return claims
 }
 
-// TestGetClientFallsBackToDCRStore verifies that GetClient returns a
+// TestLookupClientFallsBackToDCRStore verifies that LookupClient returns a
 // synthesized AuthClient when the clientID is absent from the static Clients
 // map but present in the DCR store.
-func TestGetClientFallsBackToDCRStore(t *testing.T) {
+func TestLookupClientFallsBackToDCRStore(t *testing.T) {
 	ex, clientID := newTestExchangerWithDCR(t)
 
-	c, ok := ex.GetClient(clientID)
+	c, ok := lookupClient(t, ex, clientID)
 	if !ok {
 		t.Fatal("expected DCR client resolved via fallback")
 	}
@@ -150,14 +150,14 @@ func registerStoredDCRClient(t *testing.T, ex *Exchanger, grants []string) strin
 	return c.ClientID
 }
 
-// A stored DCR record is not trusted for its grants: GetClient re-applies the
+// A stored DCR record is not trusted for its grants: LookupClient re-applies the
 // DCR grant policy on read, so a record holding `password` (or
 // client_credentials) can no longer use them. GHSA-hm9g-w2cw-j7gg.
-func TestGetClientDCRDropsGrantsADCRClientMayNotHold(t *testing.T) {
+func TestLookupClientDCRDropsGrantsADCRClientMayNotHold(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	id := registerStoredDCRClient(t, ex, []string{"password", "refresh_token", "client_credentials"})
 
-	c, ok := ex.GetClient(id)
+	c, ok := lookupClient(t, ex, id)
 	require.True(t, ok)
 	assert.Equal(t, []string{"refresh_token"}, c.AllowedGrantTypes)
 }
@@ -165,11 +165,11 @@ func TestGetClientDCRDropsGrantsADCRClientMayNotHold(t *testing.T) {
 // An empty AllowedGrantTypes means "every grant" at the token endpoint, so a
 // stored record with no grant_types must not reach it as empty. It gets the
 // default DCR pair, as a registration that omitted grant_types does.
-func TestGetClientDCRWithNoStoredGrantsGetsTheDefaultPair(t *testing.T) {
+func TestLookupClientDCRWithNoStoredGrantsGetsTheDefaultPair(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	id := registerStoredDCRClient(t, ex, nil)
 
-	c, ok := ex.GetClient(id)
+	c, ok := lookupClient(t, ex, id)
 	require.True(t, ok)
 	assert.Equal(t, []string{"authorization_code", "refresh_token"}, c.AllowedGrantTypes)
 }
@@ -177,11 +177,11 @@ func TestGetClientDCRWithNoStoredGrantsGetsTheDefaultPair(t *testing.T) {
 // A stored record whose grants are all ones a DCR client may not hold has no
 // usable grant left. It is not a client, rather than one with an empty (and so
 // unrestricted) grant list.
-func TestGetClientDCRWithOnlyDisallowedGrantsIsNotAClient(t *testing.T) {
+func TestLookupClientDCRWithOnlyDisallowedGrantsIsNotAClient(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	id := registerStoredDCRClient(t, ex, []string{"password"})
 
-	_, ok := ex.GetClient(id)
+	_, ok := lookupClient(t, ex, id)
 	assert.False(t, ok)
 }
 
@@ -211,9 +211,9 @@ func TestTokenEndpointRefusesThePasswordGrantToAStoredDCRClient(t *testing.T) {
 	assert.NotContains(t, body, "access_token")
 }
 
-// TestGetClientStaticMapTakesPrecedence verifies that a client present in the
+// TestLookupClientStaticMapTakesPrecedence verifies that a client present in the
 // static map is returned without touching the DCR store (static wins).
-func TestGetClientStaticMapTakesPrecedence(t *testing.T) {
+func TestLookupClientStaticMapTakesPrecedence(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	ex.config.Clients["static_client"] = AuthClient{
 		ClientID:     "static_client",
@@ -222,7 +222,7 @@ func TestGetClientStaticMapTakesPrecedence(t *testing.T) {
 		RedirectURIs: []string{"https://static.example.com/cb"},
 		Name:         "Static",
 	}
-	c, ok := ex.GetClient("static_client")
+	c, ok := lookupClient(t, ex, "static_client")
 	require.True(t, ok)
 	assert.False(t, c.Public, "static client must not be overridden by DCR synthesized defaults")
 }
@@ -264,44 +264,52 @@ func registerStoredDCRClientWithRedirects(t *testing.T, ex *Exchanger, redirects
 	return c.ClientID
 }
 
-func TestGetClientMarksDCRClientsAsRequiringConsent(t *testing.T) {
+func TestLookupClientMarksDCRClientsAsRequiringConsent(t *testing.T) {
 	ex, id := newTestExchangerWithDCR(t)
-	c, ok := ex.GetClient(id)
+	c, ok := lookupClient(t, ex, id)
 	require.True(t, ok)
 	assert.True(t, c.RequireConsent)
 
 	ex.config.Clients["static"] = AuthClient{ClientID: "static"}
-	s, ok := ex.GetClient("static")
+	s, ok := lookupClient(t, ex, "static")
 	require.True(t, ok)
 	assert.False(t, s.RequireConsent, "operator-configured clients never require consent")
 }
 
-func TestGetClientDropsRedirectsTheCurrentPolicyRefuses(t *testing.T) {
+func TestLookupClientDropsRedirectsTheCurrentPolicyRefuses(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	id := registerStoredDCRClientWithRedirects(t, ex, []string{"https://app.example/cb", "cursor://x/cb"})
 	ex.config.DCR.AllowedRedirectSchemes = []string{"https"}
 
-	c, ok := ex.GetClient(id)
+	c, ok := lookupClient(t, ex, id)
 	require.True(t, ok)
 	assert.Equal(t, []string{"https://app.example/cb"}, c.RedirectURIs)
 }
 
-func TestGetClientDeletesADCRClientWithNoAllowedRedirect(t *testing.T) {
+func TestLookupClientDeletesADCRClientWithNoAllowedRedirect(t *testing.T) {
 	ex, _ := newTestExchangerWithDCR(t)
 	id := registerStoredDCRClientWithRedirects(t, ex, []string{"cursor://x/cb"})
 	ex.config.DCR.AllowedRedirectSchemes = []string{"https"}
 
-	_, ok := ex.GetClient(id)
+	_, ok := lookupClient(t, ex, id)
 	assert.False(t, ok)
 
 	// deleted, not merely hidden: re-allowing the scheme does not resurrect it
 	ex.config.DCR.AllowedRedirectSchemes = []string{"https", "cursor"}
-	_, ok = ex.GetClient(id)
+	_, ok = lookupClient(t, ex, id)
 	assert.False(t, ok)
 }
 
-func TestGetClientUsesDefaultSchemesWhenNoneConfigured(t *testing.T) {
+func TestLookupClientUsesDefaultSchemesWhenNoneConfigured(t *testing.T) {
 	ex, id := newTestExchangerWithDCR(t) // registers https://example.com/cb, no DCR config
-	_, ok := ex.GetClient(id)
+	_, ok := lookupClient(t, ex, id)
 	assert.True(t, ok)
+}
+
+// lookupClient is LookupClient for tests whose store cannot fail.
+func lookupClient(t *testing.T, ex *Exchanger, clientID string) (AuthClient, bool) {
+	t.Helper()
+	c, ok, err := ex.LookupClient(context.Background(), clientID)
+	require.NoError(t, err)
+	return c, ok
 }

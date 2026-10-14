@@ -31,7 +31,7 @@ func authClientSecret(data map[string]string) corev1.Secret {
 //
 // A client authored with no client_id loads under the "" key. There is no
 // live path to it from the token endpoint today — a caller cannot present
-// client_id="" because GetClient("") must succeed first — but the ""-keyed
+// client_id="" because LookupClient(ctx, "") must succeed first — but the ""-keyed
 // entry is a bridge to the cookie-path grace records, which are the records
 // minted with ClientID: "". A public client authored with no id would
 // therefore become reachable by exactly the client-binding check #169 added

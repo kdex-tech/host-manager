@@ -102,7 +102,15 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authClient, ok := o.AuthExchanger.GetClient(clientId)
+	authClient, ok, lerr := o.AuthExchanger.LookupClient(r.Context(), clientId)
+	if lerr != nil {
+		// The store, not the request, is at fault: a 400 here would tell a
+		// legitimate client its registration is gone.
+		err = fmt.Errorf("client lookup failed: %w", lerr)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
 	if !ok {
 		err = fmt.Errorf("invalid client_id")
 		http.Error(w, "Invalid client_id", http.StatusBadRequest)
@@ -519,8 +527,12 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		clientId = r.FormValue("client_id")
 	}
 
-	client, ok := o.AuthExchanger.GetClient(clientId)
-
+	client, ok, lerr := o.AuthExchanger.LookupClient(r.Context(), clientId)
+	if lerr != nil {
+		err = fmt.Errorf("client lookup failed: %w", lerr)
+		writeOAuthError(w, http.StatusInternalServerError, errCodeServerError, "client lookup failed")
+		return
+	}
 	if !ok {
 		err = fmt.Errorf("invalid client_id")
 		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidClient, "unknown client_id")
