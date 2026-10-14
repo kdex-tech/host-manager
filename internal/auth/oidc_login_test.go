@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
@@ -35,10 +37,13 @@ func redirectOrigin(t *testing.T, o *OAuth2) *url.URL {
 
 // startLogin drives GET /-/oauth/login on the callback's origin and returns
 // the IdP redirect plus the per-login cookie it set.
-func startLogin(t *testing.T, o *OAuth2, query string) (*url.URL, *http.Cookie) {
+func startLogin(t *testing.T, o *OAuth2, query string, held ...*http.Cookie) (*url.URL, *http.Cookie) {
 	t.Helper()
 	req := httptest.NewRequest("GET", OAuthLoginPath+"?"+query, nil)
 	req.Host = redirectOrigin(t, o).Host
+	for _, c := range held {
+		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	}
 	w := httptest.NewRecorder()
 
 	o.OAuthLoginGet(w, req)
@@ -80,7 +85,9 @@ func TestOAuthLoginGet_BindsTheLoginToThisBrowser(t *testing.T) {
 	assert.NotEmpty(t, st.Nonce)
 	assert.Equal(t, st.Nonce, q.Get("nonce"))
 
-	assert.Equal(t, OAuthCallbackPath, cookie.Path)
+	assert.Equal(t, loginStateCookiePath, cookie.Path)
+	assert.True(t, strings.HasPrefix(OAuthCallbackPath, cookie.Path), "the callback reads it")
+	assert.True(t, strings.HasPrefix(OAuthLoginPath, cookie.Path), "the start counts it")
 	assert.True(t, cookie.HttpOnly)
 	assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite)
 	assert.Positive(t, cookie.MaxAge)
@@ -445,4 +452,84 @@ func TestAuthorize_LoginHintMatchingTheSubjectIssuesACode(t *testing.T) {
 	loc, err := w.Result().Location()
 	require.NoError(t, err)
 	assert.NotEmpty(t, loc.Query().Get("code"))
+}
+
+// heldLogin is a login cookie this browser already holds, expiring at exp.
+func heldLogin(t *testing.T, f *oidcFixture, exp time.Time) *http.Cookie {
+	t.Helper()
+	st := loginState{State: rand.Text(), Return: "/", Verifier: "v", Nonce: "n", Exp: exp.Unix()}
+	sealed, err := f.ex.sealLoginState(st)
+	require.NoError(t, err)
+	return &http.Cookie{Name: f.cfg.CookieName + loginStateCookieInfix + st.State, Value: sealed}
+}
+
+// Every start sets a cookie the callback path carries, and an abandoned
+// login's cookie lives ten minutes. Without a bound, a page that steers a
+// browser through a few starts pushes the callback's Cookie header past what
+// the ingress accepts, and sign-in fails. A start keeps at most three logins
+// in flight, expiring the oldest.
+func TestOAuthLoginGet_KeepsAtMostThreeLoginsInFlight(t *testing.T) {
+	f := newOIDCFixture(t)
+	o := f.oauth2()
+	now := time.Now()
+	oldest := heldLogin(t, f, now.Add(time.Minute))
+	newer := []*http.Cookie{heldLogin(t, f, now.Add(5*time.Minute)), heldLogin(t, f, now.Add(6*time.Minute))}
+
+	req := httptest.NewRequest("GET", OAuthLoginPath+"?return=%2F", nil)
+	req.Host = redirectOrigin(t, o).Host
+	for _, c := range append([]*http.Cookie{oldest}, newer...) {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	o.OAuthLoginGet(w, req)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+
+	set := map[string]*http.Cookie{}
+	for _, c := range w.Result().Cookies() {
+		set[c.Name] = c
+	}
+	require.Contains(t, set, oldest.Name, "the oldest login is expired")
+	assert.Negative(t, set[oldest.Name].MaxAge)
+	assert.Equal(t, loginStateCookiePath, set[oldest.Name].Path, "expired on the path it was set on")
+	for _, c := range newer {
+		assert.NotContains(t, set, c.Name, "newer logins are left alone")
+	}
+	started := 0
+	for name, c := range set {
+		if name != oldest.Name && strings.HasPrefix(name, o.AuthConfig.CookieName+loginStateCookieInfix) && c.MaxAge > 0 {
+			started++
+		}
+	}
+	assert.Equal(t, 1, started, "the new login is started")
+
+	// Two logins in flight are below the bound: nothing is expired.
+	req = httptest.NewRequest("GET", OAuthLoginPath+"?return=%2F", nil)
+	req.Host = redirectOrigin(t, o).Host
+	for _, c := range newer {
+		req.AddCookie(c)
+	}
+	w = httptest.NewRecorder()
+	o.OAuthLoginGet(w, req)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	for _, c := range w.Result().Cookies() {
+		assert.Positive(t, c.MaxAge, "%s must not be expired", c.Name)
+	}
+}
+
+// A login whose cookie would exceed the per-login budget is refused up front.
+// A browser silently drops an oversized cookie, which would fail the login at
+// the callback for no visible reason, and the budget is what bounds the
+// header the callback receives.
+func TestOAuthLoginGet_RefusesAnOversizedLogin(t *testing.T) {
+	f := newOIDCFixture(t)
+	o := f.oauth2()
+	req := httptest.NewRequest("GET", OAuthLoginPath+"?return="+url.QueryEscape("/"+strings.Repeat("x", 3000)), nil)
+	req.Host = redirectOrigin(t, o).Host
+	w := httptest.NewRecorder()
+	o.OAuthLoginGet(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	for _, c := range w.Result().Cookies() {
+		assert.False(t, strings.HasPrefix(c.Name, o.AuthConfig.CookieName+loginStateCookieInfix), "no cookie set")
+	}
 }
