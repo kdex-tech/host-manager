@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"html/template"
 	"net/http"
 	"net/netip"
@@ -109,10 +111,40 @@ func sanitizeClientName(s string) string {
 	return strings.TrimSpace(string(r))
 }
 
-// builtinConsentCSP is added to the flow's own frame-ancestors policy. No
-// form-action: browsers apply it to the redirects after the POST, and those
-// leave this origin by design. No script anywhere on this page.
-const builtinConsentCSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+// consentArmScript holds Allow back until the user really interacts with the
+// page while it is visible and focused, plus half a second. Framing is already
+// refused; this answers the double-click variant, where a popup asks for a
+// double-click and swaps this page in under the second click: that page was
+// not visible for the first, and there is no time for a deliberate move.
+// Losing focus or visibility holds Allow back again. It only ever holds Allow
+// back, never acts for the user, and without script the CSS hold below still
+// applies.
+const consentArmScript = `(function(){
+var f=document.querySelector('form'),a=f&&f.querySelector('button[value=allow]');
+if(!a)return;
+var armed=false,t=0;
+function off(){armed=false;clearTimeout(t);t=0;a.setAttribute('aria-disabled','true');}
+function gesture(e){
+if(!e.isTrusted||armed||t||document.visibilityState!=='visible'||!document.hasFocus())return;
+t=setTimeout(function(){armed=true;t=0;a.removeAttribute('aria-disabled');},500);
+}
+off();
+document.addEventListener('pointermove',gesture);
+document.addEventListener('keydown',gesture);
+window.addEventListener('blur',off);
+document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='visible')off();});
+f.addEventListener('submit',function(e){if(e.submitter===a&&!armed)e.preventDefault();});
+})();`
+
+// builtinConsentCSP is added to the flow's own frame-ancestors policy. The
+// only script allowed is consentArmScript, by hash. No form-action: browsers
+// apply it to the redirects after the POST, and those leave this origin by
+// design.
+var builtinConsentCSP = func() string {
+	sum := sha256.Sum256([]byte(consentArmScript))
+	return "default-src 'none'; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) +
+		"'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+}()
 
 var builtinConsentTemplate = template.Must(template.New("consent").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -124,6 +156,7 @@ body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding
 form{display:flex;gap:1rem;margin-top:2rem}
 button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid #888;background:#fff}
 .allow{background:#1a56db;color:#fff;border-color:#1a56db;animation:arm 1s steps(1,end)}
+.allow[aria-disabled]{opacity:.5;cursor:default}
 @keyframes arm{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}
 </style></head><body>
 <h1>Allow access to your account?</h1>
@@ -144,6 +177,7 @@ button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid 
 <button type="submit" name="decision" value="deny" autofocus>Deny</button>
 <button type="submit" name="decision" value="allow" class="allow">Allow</button>
 </form>
+<script>` + consentArmScript + `</script>
 </body></html>`))
 
 // RenderBuiltinConsent is the consent page used when the host supplies none

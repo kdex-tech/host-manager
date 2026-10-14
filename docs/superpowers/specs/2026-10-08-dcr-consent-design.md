@@ -119,10 +119,17 @@ already allowed.
 
 **Renderer.** `OAuth2.RenderConsent func(http.ResponseWriter, *http.Request, ConsentView)`. When nil,
 `auth.RenderBuiltinConsent` is used; it is exported so stage 2 falls back to it rather than to a copy.
-Its own CSP adds `default-src 'none'; style-src 'unsafe-inline'`. **No `form-action` directive**:
-browsers apply it to the redirects that follow the POST, which leave the origin by design. Its
-template is parsed once at package init. Stage 2's themeable page must keep a script-free CSP on this
-response; a theme script on the consent page could click Allow.
+Its own CSP adds `default-src 'none'; script-src 'sha256-<arm script>'; style-src 'unsafe-inline'`.
+**No `form-action` directive**: browsers apply it to the redirects that follow the POST, which leave
+the origin by design. Its template is parsed once at package init.
+
+**Holding Allow back.** Framing is refused, but a double-click lure is not: a popup asks for a
+double-click and swaps this page in under the second click. The page's one script, allowed only by
+its hash, marks Allow `aria-disabled` and refuses its submit until a trusted pointer move or key
+press on the page while it is visible and focused, plus 500 ms; losing focus or visibility holds it
+back again. It never clicks, submits or navigates. Without script, the CSS hold (Allow inert for one
+second after load) still applies. Stage 2's themeable page must allow no script on this response
+other than this one by hash; a theme script on the consent page could click Allow.
 
 **`ConsentView`** carries data, not copy, under fixed field names (they become the stage-2 template
 contract):
