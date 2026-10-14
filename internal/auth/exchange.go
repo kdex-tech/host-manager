@@ -1658,8 +1658,9 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	}
 
 	// A dynamically registered client's session cannot outlive the user's
-	// consent: Deny, a future revoke, or the consent expiring ends it at the
-	// next refresh. A store failure is a server error, so the deferred
+	// consent: once no redirect the current policy allows for the client
+	// holds consent (each Deny revokes one redirect's; it may also expire, or
+	// the policy drop the redirect it was given at), the next refresh ends it. A store failure is a server error, so the deferred
 	// restore puts the refresh token back instead of logging the user out.
 	// A client that no longer resolves (deleted, expired, or dropped by the
 	// redirect policy) ends the session too: whether it needs consent cannot
@@ -1675,7 +1676,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		if client.RequireConsent {
 			held := false
 			if e.config.DCRConsent != nil {
-				h, cerr := e.config.DCRConsent.HasClient(ctx, claims.Subject, clientID)
+				h, cerr := e.config.DCRConsent.HasClient(ctx, claims.Subject, clientID, client.RedirectURIs)
 				if cerr != nil {
 					return failed("%w: consent lookup failed: %v", ErrServerError, cerr)
 				}

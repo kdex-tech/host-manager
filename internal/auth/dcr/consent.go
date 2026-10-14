@@ -28,7 +28,8 @@ type consentGrant struct {
 	Touched int64    `json:"t"`
 }
 
-// consentRecord is ONE subject's consents: client_id -> redirect_uri -> grant.
+// consentRecord is ONE subject's consents: client_id -> redirectKey(redirect_uri)
+// -> grant.
 // One key per subject lets a future "list and revoke your consents" read it
 // without a cache scan, which cache.Cache does not offer.
 type consentRecord struct {
@@ -64,6 +65,25 @@ func NewConsentStoreFromCache(c cache.Cache, ttl time.Duration) *ConsentStore {
 func consentKey(subject string) string {
 	sum := sha256.Sum256([]byte(subject))
 	return hex.EncodeToString(sum[:])
+}
+
+// redirectKey is the fixed-size form a redirect is stored under. Redirects are
+// only ever matched exactly, and a registered one may be 2 KB: keyed raw, one
+// subject's record could reach half a megabyte, read on every authorize and
+// refresh.
+func redirectKey(redirectURI string) string {
+	sum := sha256.Sum256([]byte(redirectURI))
+	return hex.EncodeToString(sum[:])
+}
+
+// touchEvery is how stale a grant may get before a read renews the record. The
+// read is what keeps a consent in use alive, so it must come well inside the
+// TTL; a day caps the writes once the TTL is long.
+func (s *ConsentStore) touchEvery() time.Duration {
+	if s.ttl <= 0 {
+		return consentTouchEvery
+	}
+	return min(consentTouchEvery, s.ttl/4)
 }
 
 func (s *ConsentStore) load(ctx context.Context, subject string) (consentRecord, error) {
@@ -106,7 +126,7 @@ func (s *ConsentStore) Covers(ctx context.Context, subject, clientID, redirectUR
 	if err != nil {
 		return false, err
 	}
-	g, ok := rec.Clients[clientID][redirectURI]
+	g, ok := rec.Clients[clientID][redirectKey(redirectURI)]
 	if !ok {
 		return false, nil
 	}
@@ -119,19 +139,22 @@ func (s *ConsentStore) Covers(ctx context.Context, subject, clientID, redirectUR
 	return true, nil
 }
 
-// HasClient reports whether subject holds any consent for clientID. The
+// HasClient reports whether subject holds consent for clientID at any of
+// redirects -- the client's redirects as the current policy allows them, so
+// consent given at one the policy has since dropped no longer counts. The
 // refresh grant uses it: a session cannot outlive its consent.
-func (s *ConsentStore) HasClient(ctx context.Context, subject, clientID string) (bool, error) {
+func (s *ConsentStore) HasClient(ctx context.Context, subject, clientID string, redirects []string) (bool, error) {
 	rec, err := s.load(ctx, subject)
 	if err != nil {
 		return false, err
 	}
-	// The most recently touched redirect: if it is fresh, so is the record.
+	// The most recently touched allowed redirect: if it is fresh, so is the record.
 	var newest string
 	var grant consentGrant
 	found := false
-	for redirect, g := range rec.Clients[clientID] {
-		if !found || g.Touched > grant.Touched || (g.Touched == grant.Touched && redirect < newest) {
+	for _, redirect := range redirects {
+		g, ok := rec.Clients[clientID][redirectKey(redirect)]
+		if ok && (!found || g.Touched > grant.Touched) {
 			newest, grant, found = redirect, g, true
 		}
 	}
@@ -142,10 +165,10 @@ func (s *ConsentStore) HasClient(ctx context.Context, subject, clientID string) 
 }
 
 // touchIfStale touches a grant the caller just read, unless that read shows
-// it was touched within the day: every covered authorize and every refresh
+// it was touched within touchEvery: every covered authorize and every refresh
 // reads the record, and only a stale grant should cost the re-load and write.
 func (s *ConsentStore) touchIfStale(ctx context.Context, subject, clientID, redirectURI string, read consentGrant) {
-	if s.now().Sub(time.Unix(read.Touched, 0)) < consentTouchEvery {
+	if s.now().Sub(time.Unix(read.Touched, 0)) < s.touchEvery() {
 		return
 	}
 	s.touch(ctx, subject, clientID, redirectURI)
@@ -158,16 +181,17 @@ func (s *ConsentStore) touch(ctx context.Context, subject, clientID, redirectURI
 	if err != nil {
 		return
 	}
-	g, ok := rec.Clients[clientID][redirectURI]
+	key := redirectKey(redirectURI)
+	g, ok := rec.Clients[clientID][key]
 	if !ok {
 		return
 	}
 	now := s.now()
-	if now.Sub(time.Unix(g.Touched, 0)) < consentTouchEvery {
+	if now.Sub(time.Unix(g.Touched, 0)) < s.touchEvery() {
 		return
 	}
 	g.Touched = now.Unix()
-	rec.Clients[clientID][redirectURI] = g
+	rec.Clients[clientID][key] = g
 	_ = s.save(ctx, subject, rec) // best effort: a failed touch only shortens the consent
 }
 
@@ -183,7 +207,8 @@ func (s *ConsentStore) Grant(ctx context.Context, subject, clientID, redirectURI
 	if redirects == nil {
 		redirects = map[string]consentGrant{}
 	}
-	g := redirects[redirectURI]
+	key := redirectKey(redirectURI)
+	g := redirects[key]
 	merged := slices.Clone(g.Scopes)
 	for _, sc := range scopes {
 		if len(sc) <= MaxConsentScopeLen && !slices.Contains(merged, sc) {
@@ -195,8 +220,8 @@ func (s *ConsentStore) Grant(ctx context.Context, subject, clientID, redirectURI
 		merged = merged[len(merged)-MaxConsentScopes:]
 	}
 	slices.Sort(merged)
-	redirects[redirectURI] = consentGrant{Scopes: merged, Touched: now}
-	evictOldest(redirects, MaxConsentRedirects, redirectURI, func(g consentGrant) int64 { return g.Touched })
+	redirects[key] = consentGrant{Scopes: merged, Touched: now}
+	evictOldest(redirects, MaxConsentRedirects, key, func(g consentGrant) int64 { return g.Touched })
 	rec.Clients[clientID] = redirects
 	evictOldest(rec.Clients, MaxConsentClients, clientID, func(r map[string]consentGrant) int64 {
 		var newest int64
@@ -214,7 +239,7 @@ func (s *ConsentStore) Revoke(ctx context.Context, subject, clientID, redirectUR
 	if err != nil {
 		return err
 	}
-	delete(rec.Clients[clientID], redirectURI)
+	delete(rec.Clients[clientID], redirectKey(redirectURI))
 	if len(rec.Clients[clientID]) == 0 {
 		delete(rec.Clients, clientID)
 	}

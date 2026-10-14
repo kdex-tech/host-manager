@@ -536,6 +536,36 @@ func TestRedeemRefreshToken_DCRClientWithConsentRotates(t *testing.T) {
 	assert.NotEmpty(t, ts.RefreshToken)
 }
 
+// Narrowing the redirect policy ends sessions consented at a redirect it now
+// refuses, even when the client survives on another redirect.
+func TestRedeemRefreshToken_ConsentAtADroppedRedirectNoLongerCounts(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	f.ex.config.DCR.AllowedRedirectSchemes = []string{"https", "cursor"}
+	c, err := f.ex.config.DCRStore.Register(ctx, dcr.Client{
+		RedirectURIs: []string{appRedirect, "cursor://app/cb"},
+		GrantTypes:   []string{"authorization_code", "refresh_token"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.ex.config.DCRConsent.Grant(ctx, "alice", c.ClientID, "cursor://app/cb", nil))
+	refresh := func() error {
+		id, err := f.ex.createRefreshToken(ctx, RefreshTokenClaims{
+			Subject: "alice", ClientID: c.ClientID,
+			ExpiresAt: time.Now().Add(time.Hour).Unix(), OriginalIssuedAt: time.Now().Unix(),
+		})
+		require.NoError(t, err)
+		_, err = f.ex.RedeemRefreshToken(ctx, id, c.ClientID)
+		return err
+	}
+	require.NoError(t, refresh(), "consented at an allowed redirect")
+
+	f.ex.config.DCR.AllowedRedirectSchemes = []string{"https"}
+
+	err = refresh()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrGrantFailure), "invalid_grant: %v", err)
+}
+
 // A client that no longer resolves (deleted, expired, or dropped by the
 // redirect policy) cannot be checked for consent, so its refresh fails
 // rather than skipping the check. A static client still resolves.

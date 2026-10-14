@@ -146,14 +146,15 @@ pointer events for its first second (a CSS animation, allowed under the CSP).
 DCR `ClientTTL`, `Uncycled` (it must survive a reconcile, #122), with an explicit `MaxItems` for the
 in-memory backend (the default 1000 is too small; in-memory mode is documented as dev-only).
 
-One record per **subject**, keyed `sha256(subject)`: `{client_id: {redirect_uri: {scopes, touched}}}`.
+One record per **subject**, keyed `sha256(subject)`: `{client_id: {sha256(redirect_uri): {scopes, touched}}}`.
+Redirects are stored as digests: they are only matched exactly, and a registered one may be 2 KB.
 Per-subject keys let the follow-up list and revoke a user's consents without a cache scan. Bounds:
 at most 64 clients per subject (oldest `touched` evicted), 4 redirects per client, 32 scopes of at
 most 128 bytes. Methods: `Covers`, `Grant`, `Revoke(client, redirect)`, `Touch`.
 
 The TTL is the client TTL and slides with use: `Covers` on authorize and the refresh check rewrite
-the record only when `touched` is more than 24h old, so a consent lives exactly as long as its client
-is in use, at no more than one write per user per day. Concurrent updates to one subject's record
+the record only when `touched` is older than `min(24h, TTL/4)`, so a consent lives exactly as long as
+its client is in use, at no more than one write per user per day once the TTL is long. Concurrent updates to one subject's record
 are last-writer-wins; a lost update only means the user is asked again.
 
 All store calls use the request context with a 2s deadline. A read error or timeout on authorize
@@ -163,8 +164,10 @@ client lookup, answers **503** with `Retry-After`. Errors are logged at error le
 ### 7. The refresh grant requires consent
 
 `RedeemRefreshToken`, for a client with `RequireConsent`, requires a consent record for (subject,
-client_id) (any redirect), and touches it. Without one the grant fails with `invalid_grant`. Deny,
-the follow-up's revoke, and client expiry therefore end the session.
+client_id) at a redirect the current policy still allows for the client, and touches it. Without one
+the grant fails with `invalid_grant`. Revoking the consent at every allowed redirect (each Deny
+revokes one), consent expiry, client expiry, and narrowing the policy past the consented redirect
+therefore end the session.
 
 At rollout no consent records exist, so **every existing DCR session's next refresh fails once** and
 the client sends the user through authorize, where they consent. This is deliberate: it also ends any

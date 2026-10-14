@@ -15,10 +15,20 @@ import (
 
 func newConsentStore(t *testing.T) *ConsentStore {
 	t.Helper()
-	ttl := time.Hour
+	return newConsentStoreWithTTL(t, 720*time.Hour) // the CRD's default client TTL
+}
+
+func newConsentStoreWithTTL(t *testing.T, ttl time.Duration) *ConsentStore {
+	t.Helper()
 	cm, err := cache.NewCacheManager("", "consent-test", &ttl)
 	require.NoError(t, err)
 	return NewConsentStore(cm, ttl, 10000)
+}
+
+// grantAt is the stored grant for clientID at redirectURI, as the store keys it.
+func grantAt(rec consentRecord, clientID, redirectURI string) (consentGrant, bool) {
+	g, ok := rec.Clients[clientID][redirectKey(redirectURI)]
+	return g, ok
 }
 
 func TestConsentCoversOnlyTheRedirectAndScopesAllowed(t *testing.T) {
@@ -49,14 +59,14 @@ func TestConsentGrantUnionsAndRevokeRemoves(t *testing.T) {
 	ok, _ := s.Covers(ctx, "alice", "c1", "https://a.example/cb", []string{"openid", "email"})
 	assert.True(t, ok)
 
-	has, err := s.HasClient(ctx, "alice", "c1")
+	has, err := s.HasClient(ctx, "alice", "c1", []string{"https://a.example/cb"})
 	require.NoError(t, err)
 	assert.True(t, has)
 
 	require.NoError(t, s.Revoke(ctx, "alice", "c1", "https://a.example/cb"))
 	ok, _ = s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
 	assert.False(t, ok)
-	has, _ = s.HasClient(ctx, "alice", "c1")
+	has, _ = s.HasClient(ctx, "alice", "c1", []string{"https://a.example/cb"})
 	assert.False(t, has)
 }
 
@@ -88,7 +98,8 @@ func TestConsentRecordIsBounded(t *testing.T) {
 	require.NoError(t, s.Grant(ctx, "carol", "c1", "https://a.example/cb", long))
 	rec, err := s.load(ctx, "carol")
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(rec.Clients["c1"]["https://a.example/cb"].Scopes), MaxConsentScopes)
+	g, _ := grantAt(rec, "c1", "https://a.example/cb")
+	assert.LessOrEqual(t, len(g.Scopes), MaxConsentScopes)
 }
 
 func TestConsentTouchWritesAtMostDaily(t *testing.T) {
@@ -100,12 +111,14 @@ func TestConsentTouchWritesAtMostDaily(t *testing.T) {
 	now = now.Add(time.Hour)
 	_, _ = s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
 	rec, _ := s.load(ctx, "alice")
-	assert.Equal(t, time.Unix(1_000_000, 0).Unix(), rec.Clients["c1"]["https://a.example/cb"].Touched, "not stale yet")
+	g, _ := grantAt(rec, "c1", "https://a.example/cb")
+	assert.Equal(t, time.Unix(1_000_000, 0).Unix(), g.Touched, "not stale yet")
 
 	now = now.Add(25 * time.Hour)
 	_, _ = s.Covers(ctx, "alice", "c1", "https://a.example/cb", nil)
 	rec, _ = s.load(ctx, "alice")
-	assert.Equal(t, now.Unix(), rec.Clients["c1"]["https://a.example/cb"].Touched)
+	g, _ = grantAt(rec, "c1", "https://a.example/cb")
+	assert.Equal(t, now.Unix(), g.Touched)
 }
 
 // countingCache counts the store's cache round trips.
@@ -133,7 +146,7 @@ func TestConsentFreshGrantCostsOneRead(t *testing.T) {
 			return s.Covers(ctx, "alice", "c1", redirect, nil)
 		},
 		"HasClient": func(s *ConsentStore, ctx context.Context) (bool, error) {
-			return s.HasClient(ctx, "alice", "c1")
+			return s.HasClient(ctx, "alice", "c1", []string{redirect})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -199,7 +212,7 @@ func TestConsentTouchDoesNotResurrectRevoked(t *testing.T) {
 			return s.Covers(ctx, "alice", "c1", redirect, nil)
 		},
 		"HasClient": func(s *ConsentStore, ctx context.Context) (bool, error) {
-			return s.HasClient(ctx, "alice", "c1")
+			return s.HasClient(ctx, "alice", "c1", []string{redirect})
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -275,4 +288,59 @@ func TestConsentCoversPropagatesCacheError(t *testing.T) {
 	ok, err := s.Covers(context.Background(), "alice", "c1", "https://a.example/cb", nil)
 	assert.False(t, ok)
 	assert.Error(t, err)
+}
+
+// A client whose TTL is under a day must still keep its consent alive with
+// use: the touch interval follows the TTL, or a consent in steady use expires
+// TTL after the Allow while the client itself lives on.
+func TestConsentTouchKeepsAShortTTLConsentAlive(t *testing.T) {
+	s, ctx := newConsentStoreWithTTL(t, 12*time.Hour), context.Background()
+	const redirect = "https://a.example/cb"
+	now := time.Unix(1_000_000, 0)
+	s.now = func() time.Time { return now }
+	require.NoError(t, s.Grant(ctx, "alice", "c1", redirect, nil))
+
+	now = now.Add(4 * time.Hour)
+	has, err := s.HasClient(ctx, "alice", "c1", []string{redirect})
+	require.NoError(t, err)
+	require.True(t, has)
+
+	rec, _ := s.load(ctx, "alice")
+	g, _ := grantAt(rec, "c1", redirect)
+	assert.Equal(t, now.Unix(), g.Touched, "a third of the TTL in, the read must renew the record")
+}
+
+// The record stores a fixed-size digest of each redirect, not the redirect:
+// a registered redirect may be 2 KB, and every authorize and refresh for the
+// subject reads and parses the whole record.
+func TestConsentRecordStoresRedirectDigests(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	long := "https://a.example/" + strings.Repeat("x", 2000)
+	require.NoError(t, s.Grant(ctx, "alice", "c1", long, nil))
+
+	raw, ok, _, err := s.cache.Get(ctx, consentKey("alice"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.NotContains(t, raw, "xxxxxxxx", "the redirect itself must not be stored")
+	assert.Less(t, len(raw), 200)
+
+	covered, err := s.Covers(ctx, "alice", "c1", long, nil)
+	require.NoError(t, err)
+	assert.True(t, covered)
+}
+
+// The refresh grant asks about the client's redirects as the current policy
+// allows them: consent given at a redirect the policy has since dropped no
+// longer keeps a session alive.
+func TestConsentHasClientCountsOnlyTheGivenRedirects(t *testing.T) {
+	s, ctx := newConsentStore(t), context.Background()
+	require.NoError(t, s.Grant(ctx, "alice", "c1", "com.app:/cb", nil))
+
+	has, err := s.HasClient(ctx, "alice", "c1", []string{"https://app.example/cb"})
+	require.NoError(t, err)
+	assert.False(t, has, "consent at a redirect no longer allowed must not count")
+
+	has, err = s.HasClient(ctx, "alice", "c1", []string{"https://app.example/cb", "com.app:/cb"})
+	require.NoError(t, err)
+	assert.True(t, has)
 }

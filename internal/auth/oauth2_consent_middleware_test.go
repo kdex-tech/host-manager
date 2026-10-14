@@ -209,7 +209,7 @@ func TestConsent_OAuthClientTokensInTheCookieGetNoCodeThroughTheMiddleware(t *te
 			assert.Equal(t, http.StatusForbidden, w.Code, "consent POST refused")
 			assert.Empty(t, w.Header().Get("Location"))
 
-			ok, err := f.ex.config.DCRConsent.HasClient(ctx, "alice", clientB)
+			ok, err := f.ex.config.DCRConsent.HasClient(ctx, "alice", clientB, []string{appRedirect})
 			require.NoError(t, err)
 			assert.False(t, ok, "no consent recorded")
 
