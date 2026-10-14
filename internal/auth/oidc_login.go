@@ -93,6 +93,19 @@ func OIDCLoginURL(returnPath, prompt, loginHint string) string {
 // OAuthLoginGet mints a login's state, PKCE verifier and nonce, keeps them in
 // the per-login cookie, and sends the browser to the provider.
 func (o *OAuth2) OAuthLoginGet(w http.ResponseWriter, r *http.Request) {
+	// The provider returns the browser to the one registered redirect_uri, on
+	// the primary domain, and a cookie set on any other host never reaches it.
+	// A login started on a secondary domain is first moved to the callback's
+	// origin, before anything is minted. The target is fixed configuration,
+	// never the request, so this cannot redirect anywhere else.
+	if cb, err := url.Parse(o.AuthConfig.OIDC.RedirectURL); err == nil && cb.Host != "" &&
+		!kdexhttp.SameOrigin(cb.Scheme+"://"+r.Host, cb.Scheme, []string{cb.Host}) {
+		target := url.URL{Scheme: cb.Scheme, Host: cb.Host, Path: OAuthLoginPath, RawQuery: r.URL.RawQuery}
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, target.String(), http.StatusFound)
+		return
+	}
+
 	q := r.URL.Query()
 	st := loginState{
 		State:    rand.Text(),

@@ -25,11 +25,20 @@ func (f *oidcFixture) oauth2() *OAuth2 {
 	return &OAuth2{AuthConfig: f.cfg, AuthExchanger: f.ex}
 }
 
-// startLogin drives GET /-/oauth/login and returns the IdP redirect plus the
-// per-login cookie it set.
+// redirectOrigin is the origin the IdP returns the browser to.
+func redirectOrigin(t *testing.T, o *OAuth2) *url.URL {
+	t.Helper()
+	u, err := url.Parse(o.AuthConfig.OIDC.RedirectURL)
+	require.NoError(t, err)
+	return u
+}
+
+// startLogin drives GET /-/oauth/login on the callback's origin and returns
+// the IdP redirect plus the per-login cookie it set.
 func startLogin(t *testing.T, o *OAuth2, query string) (*url.URL, *http.Cookie) {
 	t.Helper()
 	req := httptest.NewRequest("GET", OAuthLoginPath+"?"+query, nil)
+	req.Host = redirectOrigin(t, o).Host
 	w := httptest.NewRecorder()
 
 	o.OAuthLoginGet(w, req)
@@ -75,6 +84,40 @@ func TestOAuthLoginGet_BindsTheLoginToThisBrowser(t *testing.T) {
 	assert.True(t, cookie.HttpOnly)
 	assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite)
 	assert.Positive(t, cookie.MaxAge)
+}
+
+// The IdP always returns the browser to the one registered redirect_uri, on
+// the primary domain. A login started on a secondary domain would set its
+// cookie there, where the callback can never see it, and fail with a 400. So
+// the start endpoint first moves the browser to the callback's origin, without
+// minting anything.
+func TestOAuthLoginGet_MovesASecondaryDomainLoginToTheCallbackOrigin(t *testing.T) {
+	f := newOIDCFixture(t)
+	o := f.oauth2()
+	query := "return=%2Fdocs&prompt=select_account&login_hint=alice%40example.com"
+
+	req := httptest.NewRequest("GET", OAuthLoginPath+"?"+query, nil)
+	req.Host = "secondary.example"
+	w := httptest.NewRecorder()
+	o.OAuthLoginGet(w, req)
+
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	cb := redirectOrigin(t, o)
+	assert.Equal(t, cb.Scheme, loc.Scheme)
+	assert.Equal(t, cb.Host, loc.Host)
+	assert.Equal(t, OAuthLoginPath, loc.Path)
+	assert.Equal(t, query, loc.RawQuery, "the login's parameters must survive the hop")
+	for _, c := range w.Result().Cookies() {
+		assert.False(t, strings.HasPrefix(c.Name, o.AuthConfig.CookieName+loginStateCookieInfix),
+			"no login cookie on an origin the callback cannot read")
+	}
+
+	// And the hop lands on a start that completes the binding.
+	idp, cookie := startLogin(t, o, loc.RawQuery)
+	assert.NotEmpty(t, idp.Query().Get("state"))
+	assert.NotNil(t, cookie)
 }
 
 func TestOAuthLoginGet_SanitizesTheReturnPath(t *testing.T) {
