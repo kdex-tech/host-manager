@@ -210,3 +210,91 @@ func TestWithAuthentication_AutoExtend_ExpiredTokenWithValidRefreshContinues(t *
 	require.NoError(t, err, "rotated auth_token must validate against the host's keys")
 	require.True(t, verified.Valid, "rotated auth_token must be Valid")
 }
+
+// serveAutoExtend runs the middleware for a cookie session carrying
+// accessToken plus a redeemable refresh cookie for alice, and returns the
+// authContext the wrapped handler saw (nil if it saw none).
+func serveAutoExtend(t *testing.T, cfg *Config, ex *Exchanger, accessToken string) AuthContext {
+	t.Helper()
+	refreshID, err := ex.createRefreshToken(context.Background(), RefreshTokenClaims{
+		AuthMethod: AuthMethodLocal,
+		Subject:    "alice",
+		Scope:      "openid",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/-/state/", nil)
+	req.AddCookie(&http.Cookie{Name: cfg.CookieName, Value: accessToken})
+	req.AddCookie(&http.Cookie{Name: cfg.CookieName + "_refresh", Value: refreshID})
+
+	var seen AuthContext
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen, _ = GetAuthContext(r.Context())
+	})
+	cfg.WithAuthentication(ex)(next).ServeHTTP(httptest.NewRecorder(), req)
+	return seen
+}
+
+// signAccessToken signs claims as a host-shaped access token with key.
+func signAccessToken(t *testing.T, key *ecdsa.PrivateKey, claims jwt.MapClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	tok.Header["kid"] = "test-kid"
+	signed, err := tok.SignedString(key)
+	require.NoError(t, err)
+	return signed
+}
+
+// A cookie whose signature does not verify must contribute NOTHING to the
+// request's identity. jwt.ParseWithClaims decodes the claims before it checks
+// the signature, and the auto-extend path used to re-parse the refreshed token
+// into the SAME map, so every claim the forged cookie carried that the fresh
+// token did not (pat_bridge, email, email_verified, ...) rode along on a
+// genuinely refreshed session.
+func TestWithAuthentication_AutoExtend_ForgedCookieClaimsDoNotSurviveRefresh(t *testing.T) {
+	cfg, ex, _ := newAutoExtendTestSetup(t)
+
+	attacker, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	now := time.Now()
+	forged := signAccessToken(t, attacker, jwt.MapClaims{
+		"sub":            "alice",
+		"iss":            "test-iss",
+		"aud":            []string{"test-aud"},
+		"iat":            now.Add(-2 * time.Hour).Unix(),
+		"exp":            now.Add(-time.Hour).Unix(),
+		PATBridgeClaim:   true,
+		"email":          "admin@example.com",
+		"email_verified": true,
+	})
+
+	ac := serveAutoExtend(t, cfg, ex, forged)
+
+	require.NotNil(t, ac, "the refresh cookie is genuine, so the session must still be re-minted")
+	assert.Equal(t, "alice", ac["sub"])
+	for _, claim := range []string{PATBridgeClaim, "email", "email_verified"} {
+		assert.NotContains(t, ac, claim, "a claim from an unverified cookie reached the authContext")
+	}
+}
+
+// After a near-expiry refresh the authContext is the refreshed token, not the
+// old token's claims with the new ones laid over them.
+func TestWithAuthentication_AutoExtend_NearExpiryRefreshReplacesClaims(t *testing.T) {
+	cfg, ex, priv := newAutoExtendTestSetup(t)
+
+	now := time.Now()
+	nearExpiry := signAccessToken(t, priv, jwt.MapClaims{
+		"sub":         "alice",
+		"iss":         "test-iss",
+		"aud":         []string{"test-aud"},
+		"iat":         now.Add(-55 * time.Minute).Unix(),
+		"exp":         now.Add(5 * time.Minute).Unix(),
+		"stale_claim": "from-the-old-token",
+	})
+
+	ac := serveAutoExtend(t, cfg, ex, nearExpiry)
+
+	require.NotNil(t, ac)
+	assert.Equal(t, "alice", ac["sub"])
+	assert.NotContains(t, ac, "stale_claim", "the old token's claims outlived the refresh")
+}

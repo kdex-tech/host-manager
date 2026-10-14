@@ -244,8 +244,6 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				authSource = COOKIE
 			}
 
-			authContext := AuthContext{}
-
 			if tokenString == "" {
 				log.Info("No token found")
 				next.ServeHTTP(w, r)
@@ -296,16 +294,33 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			// themselves; the host doesn't need to.
 			audiences := []string{c.Audience}
 
-			token, err := jwt.ParseWithClaims(
-				tokenString,
-				&authContext,
-				func(token *jwt.Token) (any, error) {
-					return c.ActivePair.Private.Public(), nil
-				},
-				gateParserOptions(c.Issuer, audiences)...,
-			)
+			// Every parse decodes into a FRESH map, and only a verified token's
+			// map becomes the authContext. jwt.ParseWithClaims fills the claims
+			// BEFORE it checks the signature, so parsing into authContext itself
+			// let an unverified cookie's claims (pat_bridge, email, ...) survive
+			// beneath a refreshed token that never carried them.
+			parseGate := func(raw, issuer string) (AuthContext, error) {
+				claims := AuthContext{}
+				token, err := jwt.ParseWithClaims(
+					raw,
+					&claims,
+					func(token *jwt.Token) (any, error) {
+						return c.ActivePair.Private.Public(), nil
+					},
+					gateParserOptions(issuer, audiences)...,
+				)
+				if err == nil && !token.Valid {
+					err = jwt.ErrTokenSignatureInvalid
+				}
+				if err != nil {
+					return AuthContext{}, err
+				}
+				return claims, nil
+			}
 
-			if (err != nil || !token.Valid) && authSource == COOKIE && c.AutoExtendSession && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
+			authContext, err := parseGate(tokenString, c.Issuer)
+
+			if err != nil && authSource == COOKIE && c.AutoExtendSession && exchanger != nil && exchanger.IsRefreshTokenEnabled() {
 				// Token is invalid (e.g. expired), try to refresh it
 				refreshCookie, cerr := r.Cookie(c.CookieName + "_refresh")
 				if cerr == nil && refreshCookie.Value != "" {
@@ -343,15 +358,8 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 						// error-handler still cleared both cookies (Max-Age:-1)
 						// and redirected to "/", defeating auto-extend entirely
 						// at every JWT TTL boundary. See #100.
-						token, err = jwt.ParseWithClaims(
-							ts.AccessToken,
-							&authContext,
-							func(token *jwt.Token) (any, error) {
-								return c.ActivePair.Private.Public(), nil
-							},
-							gateParserOptions(exchanger.config.Issuer, audiences)...,
-						)
-						if err == nil && token.Valid {
+						authContext, err = parseGate(ts.AccessToken, exchanger.config.Issuer)
+						if err == nil {
 							log.Info("Token refreshed after expiry")
 						}
 					}
@@ -372,7 +380,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			// not in anything the caller did. jwt.MapClaims.GetSubject reports
 			// a missing `sub` as ("", nil), so nothing above this line has
 			// objected. See sign.ErrSubjectlessCredential.
-			if err == nil && token.Valid {
+			if err == nil {
 				if sub, serr := authContext.GetSubject(); serr != nil || sub == "" {
 					log.Error(sign.ErrSubjectlessCredential,
 						"rejecting a credential that names nobody; "+sign.SubjectlessRemedy,
@@ -381,7 +389,7 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				}
 			}
 
-			if err != nil || !token.Valid {
+			if err != nil {
 				// NOT an error. With jwt.tokenTTL at an hour, every session
 				// crosses expiry hourly by design, and both branches below
 				// treat the rejection as an expected outcome. Logged at V(1)
@@ -390,12 +398,8 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				// a dead token kept every error-severity alert on the
 				// deployment permanently lit (~5,700 lines/day, measured).
 				// See kdex-tech/host-manager#181.
-				cause := "the token is not valid"
-				if err != nil {
-					cause = err.Error()
-				}
 				log.V(1).Info("token is not valid; rejecting the credential",
-					"source", authSource, "cause", cause)
+					"source", authSource, "cause", err.Error())
 
 				if authSource == COOKIE {
 					// Clear the cookie
@@ -483,15 +487,10 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							// refresh (entitlement changes, role changes since
 							// the original mint) get silently dropped from the
 							// in-request authContext. See #100.
-							newToken, err := jwt.ParseWithClaims(
-								ts.AccessToken,
-								&authContext,
-								func(token *jwt.Token) (any, error) {
-									return c.ActivePair.Private.Public(), nil
-								},
-								gateParserOptions(exchanger.config.Issuer, audiences)...,
-							)
-							if err == nil && newToken.Valid {
+							// If the fresh token somehow fails to verify, the
+							// current (still-valid) token stays the identity.
+							if refreshed, err := parseGate(ts.AccessToken, exchanger.config.Issuer); err == nil {
+								authContext = refreshed
 								log.Info("Token refreshed")
 							}
 						} else {
