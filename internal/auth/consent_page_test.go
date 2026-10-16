@@ -5,9 +5,12 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,7 +146,7 @@ func TestBuiltinConsent_ScriptOnlyHoldsAllowBack(t *testing.T) {
 func TestBuiltinConsent_CSSHoldStaysForNoScript(t *testing.T) {
 	body, _ := renderedConsent(t)
 	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="allow"`, body)
-	assert.Contains(t, body, "@keyframes arm")
+	assert.Contains(t, body, "@keyframes "+consentArmKeyframes)
 }
 
 func englishOnly(string, ...any) (string, bool) { return "", false }
@@ -259,16 +262,17 @@ func TestRenderConsentCore_Conditions(t *testing.T) {
 // another argument's sentinel is shown as itself, never expanded.
 func TestRenderConsentCore_SentinelsAreNotRescanned(t *testing.T) {
 	v := coreView()
-	v.RedirectKind, v.RedirectDisplay, v.RegistrableDomain = RedirectKindDevice, "0", ""
+	v.RedirectKind, v.RedirectDisplay, v.RegistrableDomain = RedirectKindDevice, consentSentinel(0), ""
 	out := string(RenderConsentCore(v, "m1", englishOnly))
 	assert.Equal(t, 1, strings.Count(out, "an application on this device"))
-	assert.Contains(t, out, "(0).")
+	assert.Contains(t, out, "("+consentSentinel(0)+").")
 }
 
 // The block's sentinels are private-use runes; view fields drop them so a
 // client cannot inject one.
 func TestNewConsentViewStripsPrivateUse(t *testing.T) {
-	v := newConsentView("App", "https://app.example/cb", "a0@b", "S", nil)
+	v := newConsentView("A"+consentSentinelOpen+"pp"+consentSentinelClose, "https://app.example/cb"+consentSentinelOpen,
+		"a"+consentSentinelClose+"0@b", "S", nil)
 	assert.Equal(t, "App", v.ClientName)
 	assert.Equal(t, "a0@b", v.Account)
 	assert.Equal(t, "https://app.example/cb", v.RedirectURI)
@@ -277,6 +281,11 @@ func TestNewConsentViewStripsPrivateUse(t *testing.T) {
 func TestConsentScriptHoldsEveryAllow(t *testing.T) {
 	assert.Contains(t, consentArmScript, "querySelectorAll('[name=decision][value=allow]')")
 	assert.Contains(t, consentArmScript, "matches('[name=decision][value=allow]')")
+	// An injected unclosed <form> before the block absorbs its controls, so a
+	// click on Deny would also submit the injected decision=allow: the guard
+	// looks at what the form would send, not only at the button.
+	assert.Contains(t, consentArmScript, "new FormData(e.target,s).getAll('decision').indexOf('allow')>=0")
+	assert.Contains(t, consentArmScript, "if(!armed&&allows(e))e.preventDefault()")
 	assert.NotContains(t, consentArmScript, "button[value=allow]", "an input type=submit is held too")
 	assert.NotContains(t, consentArmScript, "querySelector('form')", "not only the first form")
 }
@@ -337,4 +346,46 @@ func TestNewConsentMarker(t *testing.T) {
 	a, b := NewConsentMarker(), NewConsentMarker()
 	assert.Regexp(t, `^[0-9a-f]{32}$`, a)
 	assert.NotEqual(t, a, b)
+}
+
+// The CSS hold (Allow ignores the pointer for its first second, and looks
+// held while aria-disabled) works without script, so it travels with the
+// block: the branded page carries it as well as the built-in one.
+func TestRenderConsentCore_CarriesTheCSSHold(t *testing.T) {
+	out := string(RenderConsentCore(coreView(), "m1", englishOnly))
+	assert.Contains(t, out, "[name=decision][value=allow]{animation:"+consentArmKeyframes+" 1s steps(1,end)}")
+	assert.Contains(t, out, "[name=decision][value=allow][aria-disabled]{opacity:.5;cursor:default}")
+	assert.Contains(t, out, "@keyframes "+consentArmKeyframes+"{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}")
+
+	body, _ := renderedConsent(t)
+	assert.Equal(t, 1, strings.Count(body, "@keyframes"), "the built-in page keeps only its layout styles")
+}
+
+// The sentinels are invisible private-use runes; the source spells them as
+// escapes so a reader can see them.
+func TestConsentSourcesHaveNoRawPrivateUseRunes(t *testing.T) {
+	assert.Equal(t, "\ue000", consentSentinelOpen)
+	assert.Equal(t, "\ue001", consentSentinelClose)
+	assert.Equal(t, consentSentinelOpen+"7"+consentSentinelClose, consentSentinel(7))
+
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		for i, r := range string(src) {
+			if unicode.Is(unicode.Co, r) {
+				t.Errorf("%s: raw private-use rune %U at byte %d", f, r, i)
+				break
+			}
+		}
+	}
+}
+
+func TestBrandedConsentCSP(t *testing.T) {
+	assert.Equal(t,
+		"default-src 'none'; script-src "+ConsentScriptHash()+
+			"; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; base-uri 'none'",
+		BrandedConsentCSP())
 }

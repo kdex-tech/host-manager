@@ -19,10 +19,10 @@ import (
 	"kdex.dev/crds/render"
 )
 
-// ConsentView is the data a consent page renders. Its field names are the
-// template contract for the stage-2 Consent utility page, so do not rename
-// them casually. It carries data, not copy: an empty Scopes means minimal
-// access, and the renderer words that.
+// ConsentView is the data RenderConsentCore renders; it is never handed to
+// templates (a Consent utility page receives only the rendered block). It
+// carries data, not copy: an empty Scopes means minimal access, and the
+// renderer words that.
 type ConsentView struct {
 	// RedirectKind is "web" (an https redirect: the code leaves this device)
 	// or "device" (loopback or a private-use scheme: an app on this device).
@@ -40,7 +40,7 @@ type ConsentView struct {
 
 const maxClientNameRunes = 64
 
-// ConsentView.RedirectKind values; the templates branch on them.
+// ConsentView.RedirectKind values; RenderConsentCore branches on them.
 const (
 	RedirectKindWeb    = "web"
 	RedirectKindDevice = "device"
@@ -126,8 +126,14 @@ func sanitizeClientName(s string) string {
 // deliberate move. Losing focus or visibility holds Allow back again. It
 // guards every [name=decision][value=allow] (a button or an input), not only
 // the block's own, and the submit guard is delegated so one added later is
-// held too. It only ever holds Allow back, never acts for the user, and
-// without script the CSS hold still applies.
+// held too. The guard also looks at what the form would send: an unclosed
+// <form> injected before the block absorbs the block's controls, so a click
+// on Deny would submit an injected decision=allow too (the server refuses a
+// doubled decision as well). FormData's submitter argument is used where the
+// browser supports it; where it is ignored the submitter's own value is
+// missing, which only holds back more. It only ever holds Allow back, never
+// acts for the user. Without script the block's CSS hold (consentHoldCSS)
+// still delays Allow, unless the page's own styles override it.
 const consentArmScript = `(function(){
 var armed=false,t=0;
 function set(on){var b=document.querySelectorAll('[name=decision][value=allow]');for(var i=0;i<b.length;i++){if(on)b[i].removeAttribute('aria-disabled');else b[i].setAttribute('aria-disabled','true');}}
@@ -141,7 +147,8 @@ document.addEventListener('pointermove',gesture);
 document.addEventListener('keydown',gesture);
 window.addEventListener('blur',off);
 document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='visible')off();});
-document.addEventListener('submit',function(e){var s=e.submitter;if(!armed&&s&&s.matches('[name=decision][value=allow]'))e.preventDefault();},true);
+function allows(e){var s=e.submitter;if(s&&s.matches('[name=decision][value=allow]'))return true;try{return new FormData(e.target,s).getAll('decision').indexOf('allow')>=0;}catch(x){return true;}}
+document.addEventListener('submit',function(e){if(!armed&&allows(e))e.preventDefault();},true);
 })();`
 
 var consentScriptHash = func() string {
@@ -160,6 +167,19 @@ func ConsentScriptHash() string { return consentScriptHash }
 var builtinConsentCSP = "default-src 'none'; script-src " + ConsentScriptHash() +
 	"; style-src 'unsafe-inline'; frame-ancestors 'none'"
 
+// brandedConsentCSP is added to the flow's own frame-ancestors policy on the
+// branded consent page (the host's Consent utility page). The only script
+// allowed is consentArmScript, by hash; connect, frame and object sources
+// fall under default-src 'none'. Styles, fonts and images are open to
+// 'self', https: and data: so any theme works unconfigured, and base-uri
+// 'none' stops a <base> tag redirecting relative URLs. No form-action, as for
+// the built-in page.
+var brandedConsentCSP = "default-src 'none'; script-src " + ConsentScriptHash() +
+	"; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; base-uri 'none'"
+
+// BrandedConsentCSP is the page policy of the branded consent page.
+func BrandedConsentCSP() string { return brandedConsentCSP }
+
 // ConsentMarkerAttr is the attribute on the consent block's root that carries
 // the per-render marker, so a page that embeds the block can check it is
 // there exactly once.
@@ -176,7 +196,16 @@ type Translator func(key string, args ...any) (string, bool)
 // one-pass substitution in consentMessage (strings.NewReplacer never rescans
 // replaced text); newConsentView also strips private-use runes from the
 // fields it cleans, as a second layer.
-func consentSentinel(i int) string { return "" + strconv.Itoa(i) + "" }
+func consentSentinel(i int) string {
+	return consentSentinelOpen + strconv.Itoa(i) + consentSentinelClose
+}
+
+// The sentinel delimiters: U+E000 and U+E001, private-use (Unicode Co) runes
+// that newConsentView strips from the fields it cleans.
+const (
+	consentSentinelOpen  = "\ue000"
+	consentSentinelClose = "\ue001"
+)
 
 // consentMessage renders one consent.* message as HTML. The (translated or
 // English) text is formatted with sentinels only, then escaped, then each
@@ -240,8 +269,20 @@ type consentBlockData struct {
 	Warning, Allow, Deny                     template.HTML
 }
 
+// consentArmKeyframes names the CSS hold's animation.
+const consentArmKeyframes = "kdex-consent-arm"
+
+// consentHoldCSS holds every Allow back without script: it ignores the
+// pointer for its first second, and looks held while the script marks it
+// aria-disabled. It is part of the block, so the branded page carries it as
+// well as the built-in one.
+const consentHoldCSS = `[name=decision][value=allow]{animation:` + consentArmKeyframes + ` 1s steps(1,end)}` +
+	`[name=decision][value=allow][aria-disabled]{opacity:.5;cursor:default}` +
+	`@keyframes ` + consentArmKeyframes + `{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}`
+
 var consentBlockTemplate = template.Must(template.New("consent-block").Parse(
 	`<div ` + ConsentMarkerAttr + `="{{.Marker}}">
+<style>` + consentHoldCSS + `</style>
 <h1>{{.Title}}</h1>
 <p>{{.SignedInAs}}</p>
 {{if .Web}}<p>{{.SendsTo}}</p>
@@ -314,9 +355,7 @@ body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding
 .small{color:#555;font-size:.85rem;word-break:break-all}
 form{display:flex;gap:1rem;margin-top:2rem}
 button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid #888;background:#fff}
-.allow{background:#1a56db;color:#fff;border-color:#1a56db;animation:arm 1s steps(1,end)}
-.allow[aria-disabled]{opacity:.5;cursor:default}
-@keyframes arm{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}
+.allow{background:#1a56db;color:#fff;border-color:#1a56db}
 </style></head><body>
 {{.Block}}
 </body></html>`))
@@ -341,3 +380,4 @@ func RenderBuiltinConsent(w http.ResponseWriter, _ *http.Request, v ConsentView)
 		Block: RenderConsentCore(v, NewConsentMarker(), nil),
 	})
 }
+

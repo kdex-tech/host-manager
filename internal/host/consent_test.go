@@ -216,10 +216,6 @@ func TestConsentPage_Branded(t *testing.T) {
 	assert.Equal(t, "en", w.Header().Get("Content-Language"))
 }
 
-func TestBrandedConsentCSP(t *testing.T) {
-	assert.Equal(t, expectedBrandedConsentCSP(), brandedConsentCSP())
-}
-
 func TestConsentPage_Translated(t *testing.T) {
 	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
 

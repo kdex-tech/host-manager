@@ -40,7 +40,8 @@ type OAuth2 struct {
 	AccessTokenTTL time.Duration
 	// RenderConsent renders the consent page for a dynamically registered
 	// client. nil means RenderBuiltinConsent. The host may set its own
-	// (stage 2: the Consent utility page); it must keep a script-free CSP.
+	// (stage 2: the Consent utility page); its CSP must allow no script but
+	// ConsentScriptHash().
 	RenderConsent func(http.ResponseWriter, *http.Request, ConsentView)
 	// ConsentOriginAllowed decides whether a consent POST provably came from
 	// this host's own page. nil refuses every POST (fail closed).

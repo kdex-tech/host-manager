@@ -11,19 +11,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// brandedConsentPolicy is added to the flow's own frame-ancestors policy on
-// the branded consent page. The only script allowed is the block's hold-back
-// script, by hash; connect, frame and object sources fall under
-// default-src 'none'. Styles, fonts and images are open to 'self', https: and
-// data: so any theme works unconfigured, and base-uri 'none' stops a <base>
-// tag redirecting relative URLs. No form-action: browsers apply it to the
-// redirects after the POST, and those leave this origin by design.
-var brandedConsentPolicy = "default-src 'none'; script-src " + auth.ConsentScriptHash() +
-	"; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; base-uri 'none'"
-
-// brandedConsentCSP is the page policy of the branded consent page.
-func brandedConsentCSP() string { return brandedConsentPolicy }
-
 // renderConsentPage is the host's auth.OAuth2.RenderConsent: host-manager's
 // fixed consent block inside the host's Consent utility page, rendered
 // scriptless. The page is served only when the block appears in it exactly
@@ -83,7 +70,7 @@ func (hh *HostHandler) renderConsentPage(w http.ResponseWriter, r *http.Request,
 	}
 
 	h := w.Header()
-	h.Add("Content-Security-Policy", brandedConsentCSP())
+	h.Add("Content-Security-Policy", auth.BrandedConsentCSP())
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Content-Language", l.String())
 	w.WriteHeader(http.StatusOK)
