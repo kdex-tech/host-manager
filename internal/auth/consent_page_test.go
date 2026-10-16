@@ -99,7 +99,7 @@ func TestRenderBuiltinConsentButtonsAndAttributeEscaping(t *testing.T) {
 	body := w.Body.String()
 	assert.NotContains(t, body, `"><script>`)
 	assert.Regexp(t, `<button[^>]*value="deny"[^>]*autofocus|<button[^>]*autofocus[^>]*value="deny"`, body)
-	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="allow"`, body)
+	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="kdex-consent-allow"`, body)
 }
 
 var scriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
@@ -145,7 +145,7 @@ func TestBuiltinConsent_ScriptOnlyHoldsAllowBack(t *testing.T) {
 // before; the script only adds to that.
 func TestBuiltinConsent_CSSHoldStaysForNoScript(t *testing.T) {
 	body, _ := renderedConsent(t)
-	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="allow"`, body)
+	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="kdex-consent-allow"`, body)
 	assert.Contains(t, body, "@keyframes "+consentArmKeyframes)
 }
 
@@ -173,7 +173,7 @@ func TestRenderConsentCore_EnglishFallback(t *testing.T) {
 	assert.Contains(t, out, `name="request" value="SEALED"`)
 	assert.Contains(t, out, `action="/-/oauth/consent"`)
 	assert.Equal(t, 1, strings.Count(out, ConsentMarkerAttr+`="m1"`))
-	assert.True(t, strings.HasPrefix(out, `<div data-kdex-consent="m1">`), "the marker is on the block's root")
+	assert.True(t, strings.HasPrefix(out, `<div class="kdex-consent" data-kdex-consent="m1">`), "the marker is on the block's root")
 	assert.Equal(t, 1, strings.Count(out, "<script>"+consentArmScript+"</script>"), "the block carries the hold-back script")
 }
 
@@ -192,7 +192,7 @@ func TestRenderConsentCore_PartialTranslation(t *testing.T) {
 		return v
 	}()} {
 		out := string(RenderConsentCore(v, "m1", tr))
-		assert.Contains(t, out, "<h1>Zugriff auf Ihr Konto erlauben?</h1>")
+		assert.Contains(t, out, `<h1 class="kdex-consent-title">Zugriff auf Ihr Konto erlauben?</h1>`)
 		assert.NotContains(t, out, "Allow access to your account?")
 		assert.Contains(t, out, "Signed in as <strong>a@b.c</strong>.")
 		assert.Contains(t, out, ">Allow</button>")
@@ -234,15 +234,15 @@ func TestRenderConsentCore_Conditions(t *testing.T) {
 	device := coreView()
 	device.RedirectKind, device.RedirectDisplay, device.RegistrableDomain = RedirectKindDevice, "cursor", ""
 	out := string(RenderConsentCore(device, "m1", englishOnly))
-	assert.Contains(t, out, "<p>Allowing sends access to <strong>an application on this device</strong> (cursor).</p>")
+	assert.Contains(t, out, `<p class="kdex-consent-sends-to">Allowing sends access to <strong>an application on this device</strong> (cursor).</p>`)
 	assert.NotContains(t, out, "Website:")
-	assert.NotContains(t, out, `class="where"`)
+	assert.NotContains(t, out, `kdex-consent-where`)
 
 	out = string(RenderConsentCore(coreView(), "m1", englishOnly))
-	assert.Contains(t, out, "<p>Allowing sends access to:</p>")
-	assert.Contains(t, out, `<p class="where">app.example.com</p>`)
-	assert.Contains(t, out, "<p>Website: <strong>example.com</strong></p>")
-	assert.Contains(t, out, `<p class="small">Full address: https://app.example.com/cb</p>`)
+	assert.Contains(t, out, `<p class="kdex-consent-sends-to">Allowing sends access to:</p>`)
+	assert.Contains(t, out, `<p class="kdex-consent-where">app.example.com</p>`)
+	assert.Contains(t, out, `<p class="kdex-consent-website">Website: <strong>example.com</strong></p>`)
+	assert.Contains(t, out, `<p class="kdex-consent-address">Full address: https://app.example.com/cb</p>`)
 	assert.Contains(t, out, "The application calls itself <strong>App</strong>.")
 	assert.Contains(t, out, "with your permissions and read: email, profile.")
 	assert.NotContains(t, out, "an application on this device")
@@ -254,7 +254,7 @@ func TestRenderConsentCore_Conditions(t *testing.T) {
 	out = string(RenderConsentCore(web, "m1", englishOnly))
 	assert.NotContains(t, out, "Website:")
 	assert.NotContains(t, out, "calls itself")
-	assert.Contains(t, out, "<p>It will be able to act on your account with your permissions.</p>")
+	assert.Contains(t, out, `<p class="kdex-consent-permissions">It will be able to act on your account with your permissions.</p>`)
 	assert.NotContains(t, out, "and read:")
 }
 
@@ -315,14 +315,14 @@ func TestBuiltinConsentMarkerIsFresh(t *testing.T) {
 func TestRenderConsentCore_UnusableTranslationFallsBack(t *testing.T) {
 	for _, tc := range []struct{ name, key, format, want string }{
 		{"drops the arg", "consent.client-name", "Hello",
-			"<p>The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>"},
+			`<p class="kdex-consent-client">The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>`},
 		{"repeats the arg", "consent.client-name", "%s %s",
-			"<p>The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>"},
-		{"mangles the verb", "consent.signed-in-as", "Konto %d.", "<p>Signed in as <strong>a@b.c</strong>.</p>"},
-		{"blank", "consent.allow", "  ", `class="allow">Allow</button>`},
-		{"empty", "consent.deny", "", `autofocus>Deny</button>`},
+			`<p class="kdex-consent-client">The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>`},
+		{"mangles the verb", "consent.signed-in-as", "Konto %d.", `<p class="kdex-consent-account">Signed in as <strong>a@b.c</strong>.</p>`},
+		{"blank", "consent.allow", "  ", `class="kdex-consent-allow">Allow</button>`},
+		{"empty", "consent.deny", "", `class="kdex-consent-deny" autofocus>Deny</button>`},
 		{"drops one of two", "consent.device.sends-to", "Zugriff an %s.",
-			"<p>Allowing sends access to <strong>an application on this device</strong> (cursor).</p>"},
+			`<p class="kdex-consent-sends-to">Allowing sends access to <strong>an application on this device</strong> (cursor).</p>`},
 	} {
 		tr := func(key string, args ...any) (string, bool) {
 			if key == tc.key {
@@ -354,8 +354,8 @@ func TestNewConsentMarker(t *testing.T) {
 func TestRenderConsentCore_CarriesTheCSSHold(t *testing.T) {
 	out := string(RenderConsentCore(coreView(), "m1", englishOnly))
 	assert.Contains(t, out, "[name=decision][value=allow]{animation:"+consentArmKeyframes+" 1s steps(1,end)}")
-	assert.Contains(t, out, "[name=decision][value=allow][aria-disabled]{opacity:.5;cursor:default}")
-	assert.Contains(t, out, "@keyframes "+consentArmKeyframes+"{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}")
+	assert.Contains(t, out, ":where([name=decision][value=allow][aria-disabled]){opacity:.5;cursor:not-allowed}")
+	assert.Contains(t, out, "@keyframes "+consentArmKeyframes+"{from{pointer-events:none}to{pointer-events:auto}}")
 
 	body, _ := renderedConsent(t)
 	assert.Equal(t, 1, strings.Count(body, "@keyframes"), "the built-in page keeps only its layout styles")
@@ -388,4 +388,42 @@ func TestBrandedConsentCSP(t *testing.T) {
 		"default-src 'none'; script-src "+ConsentScriptHash()+
 			"; style-src 'self' https: 'unsafe-inline'; font-src 'self' https: data:; img-src 'self' https: data:; base-uri 'none'",
 		BrandedConsentCSP())
+}
+
+// The block's markup is a styling contract: every section and control carries
+// a stable kdex-consent-* class for themes, and the block itself carries no
+// presentational styling, only the hold-back CSS.
+func TestRenderConsentCore_StylingContract(t *testing.T) {
+	web := string(RenderConsentCore(coreView(), "m1", englishOnly))
+	for _, want := range []string{
+		`<div class="kdex-consent" data-kdex-consent="m1">`,
+		`<h1 class="kdex-consent-title">`,
+		`<p class="kdex-consent-account">`,
+		`<div class="kdex-consent-destination" data-kind="web">`,
+		`<p class="kdex-consent-sends-to">`,
+		`<p class="kdex-consent-where">`,
+		`<p class="kdex-consent-website">`,
+		`<p class="kdex-consent-address">`,
+		`<p class="kdex-consent-client">`,
+		`<p class="kdex-consent-permissions">`,
+		`<p class="kdex-consent-warning">`,
+		`<form class="kdex-consent-form" method="post"`,
+		`<div class="kdex-consent-actions">`,
+		`<button type="submit" name="decision" value="deny" class="kdex-consent-deny" autofocus>`,
+		`<button type="submit" name="decision" value="allow" class="kdex-consent-allow">`,
+	} {
+		assert.Equal(t, 1, strings.Count(web, want), want)
+	}
+	assert.NotContains(t, web, "style=", "no inline style attributes")
+	css := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindAllStringSubmatch(web, -1)
+	require.Len(t, css, 1)
+	assert.Equal(t, consentHoldCSS, css[0][1], "the block's only CSS is the hold-back")
+	assert.NotRegexp(t, `\bclass="(where|small|allow)"`, web, "the stage-1 classes are gone")
+
+	device := coreView()
+	device.RedirectKind, device.RedirectDisplay, device.RegistrableDomain = RedirectKindDevice, "cursor", ""
+	out := string(RenderConsentCore(device, "m1", englishOnly))
+	assert.Contains(t, out, `<div class="kdex-consent-destination" data-kind="device">`)
+	assert.NotContains(t, out, "kdex-consent-where")
+	assert.NotContains(t, out, "kdex-consent-website")
 }

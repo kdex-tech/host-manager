@@ -234,6 +234,47 @@ a code.
 - Letting a CR alter the disclosure, the form or the buttons' placement (rejected: option B).
 - Per-host CSP allow-lists for theme origins (rejected in favour of open non-script sources).
 
+## Styling contract (host-manager 0.24.1)
+
+host-manager owns the consent block's structure; the theme owns its look. The block carries no
+presentational CSS. Its only `<style>` is the hold-back: every `[name=decision][value=allow]`
+ignores the pointer for its first second (the hold without script), and a zero-specificity
+baseline, `:where([name=decision][value=allow][aria-disabled]){opacity:.5;cursor:not-allowed}`,
+makes a held Allow look held under a theme that styles nothing. Any theme rule overrides it.
+
+The markup below is stable API for themes. Renaming or removing a class, changing
+`data-kind`, or changing the held-state attribute is a breaking change.
+
+```
+<div class="kdex-consent" data-kdex-consent="<per-render marker>">
+  <h1 class="kdex-consent-title">
+  <p class="kdex-consent-account">                 Signed in as <strong>account</strong>.
+  <div class="kdex-consent-destination" data-kind="web|device">
+    <p class="kdex-consent-sends-to">
+    <p class="kdex-consent-where">                 web only: host[:port]
+    <p class="kdex-consent-website">               web, when the registrable domain is known
+  <p class="kdex-consent-address">                 Full address: the redirect URI
+  <p class="kdex-consent-client">                  only when the client sent a name
+  <p class="kdex-consent-permissions">
+  <p class="kdex-consent-warning">
+  <form class="kdex-consent-form" method="post">
+    <input type="hidden" name="request">
+    <div class="kdex-consent-actions">
+      <button name="decision" value="deny"  class="kdex-consent-deny" autofocus>
+      <button name="decision" value="allow" class="kdex-consent-allow">   aria-disabled="true" while held
+```
+
+- `data-kind="device"`: a loopback or private-use-scheme redirect (an application on this
+  device); `"web"`: an https redirect to a website.
+- Held state: `aria-disabled="true"` on Allow until a trusted pointer move or key press on the
+  visible, focused page plus 500 ms; set again on blur or when the page is hidden.
+- The security contract is separate and is not for themes to target: the `name=decision` values,
+  the sealed `request` input, the marker attribute, and the hold-back script (pinned by hash).
+- The built-in page styles these classes with its own `<style>`; the bundled default theme
+  (nexus) styles them for branded pages; a site theme does the same for its hosts.
+- Themes must not hide or reorder the disclosure or the buttons, and every https: stylesheet a
+  theme loads is inside the consent page's trust boundary (pin and integrity-hash it).
+
 ## Implementation notes and deviations
 
 Recorded after the final review (2026-10-16). Where this section and the design above differ, this

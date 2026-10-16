@@ -272,31 +272,36 @@ type consentBlockData struct {
 // consentArmKeyframes names the CSS hold's animation.
 const consentArmKeyframes = "kdex-consent-arm"
 
-// consentHoldCSS holds every Allow back without script: it ignores the
-// pointer for its first second, and looks held while the script marks it
-// aria-disabled. It is part of the block, so the branded page carries it as
-// well as the built-in one.
+// consentHoldCSS is the block's only CSS, and it is security, not styling:
+// every Allow ignores the pointer for its first second (the hold without
+// script), and a zero-specificity baseline makes a held Allow look held even
+// under a theme that styles nothing. Everything else about the look belongs
+// to the theme, through the kdex-consent-* classes (see the spec's styling
+// contract). It is part of the block, so both pages carry it.
 const consentHoldCSS = `[name=decision][value=allow]{animation:` + consentArmKeyframes + ` 1s steps(1,end)}` +
-	`[name=decision][value=allow][aria-disabled]{opacity:.5;cursor:default}` +
-	`@keyframes ` + consentArmKeyframes + `{from{pointer-events:none;opacity:.5}to{pointer-events:auto;opacity:1}}`
+	`:where([name=decision][value=allow][aria-disabled]){opacity:.5;cursor:not-allowed}` +
+	`@keyframes ` + consentArmKeyframes + `{from{pointer-events:none}to{pointer-events:auto}}`
 
 var consentBlockTemplate = template.Must(template.New("consent-block").Parse(
-	`<div ` + ConsentMarkerAttr + `="{{.Marker}}">
+	`<div class="kdex-consent" ` + ConsentMarkerAttr + `="{{.Marker}}">
 <style>` + consentHoldCSS + `</style>
-<h1>{{.Title}}</h1>
-<p>{{.SignedInAs}}</p>
-{{if .Web}}<p>{{.SendsTo}}</p>
-<p class="where">{{.RedirectDisplay}}</p>
-{{with .Website}}<p>{{.}}</p>
-{{end}}{{else}}<p>{{.SendsTo}}</p>
-{{end}}<p class="small">{{.FullAddress}}</p>
-{{with .ClientName}}<p>{{.}}</p>
-{{end}}<p>{{.Permissions}}</p>
-<p>{{.Warning}}</p>
-<form method="post" action="{{.Action}}">
+<h1 class="kdex-consent-title">{{.Title}}</h1>
+<p class="kdex-consent-account">{{.SignedInAs}}</p>
+<div class="kdex-consent-destination" data-kind="{{if .Web}}web{{else}}device{{end}}">
+<p class="kdex-consent-sends-to">{{.SendsTo}}</p>
+{{if .Web}}<p class="kdex-consent-where">{{.RedirectDisplay}}</p>
+{{with .Website}}<p class="kdex-consent-website">{{.}}</p>
+{{end}}{{end}}</div>
+<p class="kdex-consent-address">{{.FullAddress}}</p>
+{{with .ClientName}}<p class="kdex-consent-client">{{.}}</p>
+{{end}}<p class="kdex-consent-permissions">{{.Permissions}}</p>
+<p class="kdex-consent-warning">{{.Warning}}</p>
+<form class="kdex-consent-form" method="post" action="{{.Action}}">
 <input type="hidden" name="request" value="{{.Request}}">
-<button type="submit" name="decision" value="deny" autofocus>{{.Deny}}</button>
-<button type="submit" name="decision" value="allow" class="allow">{{.Allow}}</button>
+<div class="kdex-consent-actions">
+<button type="submit" name="decision" value="deny" class="kdex-consent-deny" autofocus>{{.Deny}}</button>
+<button type="submit" name="decision" value="allow" class="kdex-consent-allow">{{.Allow}}</button>
+</div>
 </form>
 <script>` + consentArmScript + `</script>
 </div>`))
@@ -351,11 +356,11 @@ var builtinConsentTemplate = template.Must(template.New("consent").Parse(`<!doct
 <title>{{.Title}}</title>
 <style>
 body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;color:#1a1a1a}
-.where{font-size:1.4rem;font-weight:600;word-break:break-all}
-.small{color:#555;font-size:.85rem;word-break:break-all}
-form{display:flex;gap:1rem;margin-top:2rem}
-button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid #888;background:#fff}
-.allow{background:#1a56db;color:#fff;border-color:#1a56db}
+.kdex-consent-where{font-size:1.4rem;font-weight:600;word-break:break-all}
+.kdex-consent-address{color:#555;font-size:.85rem;word-break:break-all}
+.kdex-consent-actions{display:flex;gap:1rem;margin-top:2rem}
+.kdex-consent-actions button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid #888;background:#fff}
+.kdex-consent-allow{background:#1a56db;color:#fff;border-color:#1a56db}
 </style></head><body>
 {{.Block}}
 </body></html>`))
