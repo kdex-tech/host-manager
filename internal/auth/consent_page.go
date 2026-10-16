@@ -380,4 +380,3 @@ func RenderBuiltinConsent(w http.ResponseWriter, _ *http.Request, v ConsentView)
 		Block: RenderConsentCore(v, NewConsentMarker(), nil),
 	})
 }
-
