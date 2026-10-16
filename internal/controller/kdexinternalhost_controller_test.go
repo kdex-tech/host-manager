@@ -135,6 +135,10 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			Expect(httpRoute.OwnerReferences[0].Kind).To(Equal("KDexInternalHost"))
 		})
 
+		// The warm-up list is pinned by the utilityPage.Consent.generation
+		// status attribute, which the host writes only for listed types. The
+		// {.Spec.ConsentRef} watch is not pinned here: indexing happens in the
+		// utility page reconciler whether or not the host watches the page.
 		It("should index a Consent utility page the host references", func() {
 			consentPageName := focalHost + "-consent"
 
@@ -191,6 +195,13 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			assertResourceReady(
 				ctx, k8sClient, focalHost, namespace,
 				&kdexv1alpha1.KDexInternalHost{}, true)
+
+			By("warming up the Consent utility page with the others")
+			Eventually(func(g Gomega) {
+				internalHost := &kdexv1alpha1.KDexInternalHost{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, internalHost)).To(Succeed())
+				g.Expect(internalHost.Status.Attributes).To(HaveKey("utilityPage.Consent.generation"))
+			}, "5s").Should(Succeed())
 		})
 	})
 })

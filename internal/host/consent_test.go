@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -55,10 +57,12 @@ var consentTestView = auth.ConsentView{
 }
 
 // syncLog collects a logger's output for assertions; renders run
-// concurrently, so writes are serialized.
+// concurrently, so writes are serialized. The logger rides on the request
+// context, as the request path logs.
 type syncLog struct {
 	mu sync.Mutex
 	b  strings.Builder
+	l  logr.Logger
 }
 
 func (s *syncLog) write(prefix, args string) {
@@ -98,9 +102,10 @@ func setConsentTestHost(hh *HostHandler) {
 func newConsentPageHost(t *testing.T, mainTemplate, content string) (*HostHandler, *syncLog) {
 	t.Helper()
 	logs := &syncLog{}
+	logs.l = funcr.New(logs.write, funcr.Options{Verbosity: 1})
 	cm, err := cache.NewCacheManager("", "consent-page-test", nil)
 	require.NoError(t, err)
-	hh := NewHostHandler(nil, "consent-page-test", "default", funcr.New(logs.write, funcr.Options{}), cm)
+	hh := NewHostHandler(nil, "consent-page-test", "default", logr.Discard(), cm)
 	setConsentTestHost(hh)
 	hh.AddOrUpdateTranslation("consent-fr", &kdexv1alpha1.KDexTranslationSpec{
 		Translations: []kdexv1alpha1.Translation{
@@ -131,8 +136,9 @@ func newConsentPageHost(t *testing.T, mainTemplate, content string) (*HostHandle
 	return hh, logs
 }
 
-func renderConsentRequest(hh *HostHandler, target, acceptLanguage string) *httptest.ResponseRecorder {
+func renderConsentRequest(hh *HostHandler, logs *syncLog, target, acceptLanguage string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodGet, target, nil)
+	r = r.WithContext(logf.IntoContext(r.Context(), logs.l))
 	if acceptLanguage != "" {
 		r.Header.Set("Accept-Language", acceptLanguage)
 	}
@@ -167,10 +173,21 @@ func assertBuiltinConsent(t *testing.T, w *httptest.ResponseRecorder) {
 	assert.Empty(t, w.Header().Get("Content-Language"))
 }
 
-func TestConsentPage_Branded(t *testing.T) {
-	hh, _ := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+// assertConsentErrorLog checks that an error-level line names the utility page.
+func assertConsentErrorLog(t *testing.T, logs *syncLog) {
+	t.Helper()
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `"error"=`) && strings.Contains(line, `"page"="`+consentPageName+`"`) {
+			return
+		}
+	}
+	t.Errorf("no error-level log naming %s in:\n%s", consentPageName, logs.String())
+}
 
-	w := renderConsentRequest(hh, auth.OAuthAuthorizePath, "en")
+func TestConsentPage_Branded(t *testing.T) {
+	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+
+	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en")
 
 	require.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
@@ -204,9 +221,9 @@ func TestBrandedConsentCSP(t *testing.T) {
 }
 
 func TestConsentPage_Translated(t *testing.T) {
-	hh, _ := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
 
-	w := renderConsentRequest(hh, auth.OAuthAuthorizePath, "fr")
+	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "fr")
 
 	require.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
@@ -217,9 +234,9 @@ func TestConsentPage_Translated(t *testing.T) {
 
 // The consent flow must not answer a bad language with a 400.
 func TestConsentPage_BadLanguageUsesDefault(t *testing.T) {
-	hh, _ := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
 
-	w := renderConsentRequest(hh, auth.OAuthAuthorizePath+"?l10n=!!", "")
+	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath+"?l10n=!!", "")
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), consentHeader)
@@ -227,48 +244,53 @@ func TestConsentPage_BadLanguageUsesDefault(t *testing.T) {
 }
 
 func TestConsentPage_FallbackNoUtilityPage(t *testing.T) {
-	hh, _ := newConsentPageHost(t, "", "")
+	hh, logs := newConsentPageHost(t, "", "")
 
-	assertBuiltinConsent(t, renderConsentRequest(hh, auth.OAuthAuthorizePath, "en"))
+	assertBuiltinConsent(t, renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en"))
+	// A host without a Consent page is supported: V(1) info, not an error.
+	assert.Contains(t, logs.String(), `"level"=1 "msg"="serving the built-in consent page"`)
+	assert.NotContains(t, logs.String(), `"error"=`)
 }
 
 func TestConsentPage_FallbackMarkerMissing(t *testing.T) {
 	hh, logs := newConsentPageHost(t, consentArchetype, `<p>no block here</p>`)
 
-	assertBuiltinConsent(t, renderConsentRequest(hh, auth.OAuthAuthorizePath, "en"))
-	assert.Contains(t, logs.String(), consentPageName, "the error names the utility page")
+	assertBuiltinConsent(t, renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en"))
+	assertConsentErrorLog(t, logs)
 }
 
 func TestConsentPage_FallbackMarkerTwice(t *testing.T) {
 	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot+consentBlockSlot)
 
-	assertBuiltinConsent(t, renderConsentRequest(hh, auth.OAuthAuthorizePath, "en"))
-	assert.Contains(t, logs.String(), consentPageName)
+	assertBuiltinConsent(t, renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en"))
+	assertConsentErrorLog(t, logs)
 }
 
 func TestConsentPage_FallbackRenderError(t *testing.T) {
 	// Parses, then fails at execution: index of a non-map.
 	hh, logs := newConsentPageHost(t, `<html>[[ index .Title "x" ]]</html>`, consentBlockSlot)
 
-	assertBuiltinConsent(t, renderConsentRequest(hh, auth.OAuthAuthorizePath, "en"))
-	assert.Contains(t, logs.String(), consentPageName)
+	assertBuiltinConsent(t, renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en"))
+	assertConsentErrorLog(t, logs)
 }
 
-// A template that hides the block passes the exactly-once check when the
-// block's markup survives: the page then shows no working form. That is a
-// broken-looking page the operator made, not a bypass: the form, the sealed
-// request and the hold-back script are still host-manager's, and no other
-// script can run.
-func TestConsentPage_BlockInCommentPassesCheck(t *testing.T) {
+// A template that hides the block. Wrapped in an HTML comment, the block is
+// gone: html/template drops comments and the actions inside them, so the
+// marker is missing and the built-in page is served. Wrapped in an inert
+// <template>, the markup survives and passes the exactly-once check, but the
+// page shows no working form. That is a broken-looking page the operator
+// made, not a bypass: the form, the sealed request and the hold-back script
+// are still host-manager's, and no other script can run.
+func TestConsentPage_HiddenBlock(t *testing.T) {
 	t.Run("html comment: html/template drops it, so the built-in page is served", func(t *testing.T) {
-		hh, _ := newConsentPageHost(t, consentArchetype, `<!-- [[ .Extra.consent.Block ]] -->`)
+		hh, logs := newConsentPageHost(t, consentArchetype, `<!-- [[ .Extra.consent.Block ]] -->`)
 
-		assertBuiltinConsent(t, renderConsentRequest(hh, auth.OAuthAuthorizePath, "en"))
+		assertBuiltinConsent(t, renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en"))
 	})
 	t.Run("inert template element: branded page, marker once", func(t *testing.T) {
-		hh, _ := newConsentPageHost(t, consentArchetype, `<template>[[ .Extra.consent.Block ]]</template>`)
+		hh, logs := newConsentPageHost(t, consentArchetype, `<template>[[ .Extra.consent.Block ]]</template>`)
 
-		w := renderConsentRequest(hh, auth.OAuthAuthorizePath, "en")
+		w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en")
 
 		require.Equal(t, http.StatusOK, w.Code)
 		body := w.Body.String()
@@ -281,7 +303,7 @@ func TestConsentPage_BlockInCommentPassesCheck(t *testing.T) {
 // The OAuth2 request path holds no host lock, so renderConsentPage takes its
 // own; a reconcile racing renders must not race them (run under -race).
 func TestConsentPage_ConcurrentSetHost(t *testing.T) {
-	hh, _ := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
 
 	stop := make(chan struct{})
 	setHostDone := make(chan struct{})
@@ -302,7 +324,7 @@ func TestConsentPage_ConcurrentSetHost(t *testing.T) {
 	branded := make([]bool, 50)
 	for i := range codes {
 		wg.Go(func() {
-			w := renderConsentRequest(hh, auth.OAuthAuthorizePath, "en")
+			w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath, "en")
 			codes[i] = w.Code
 			branded[i] = strings.Contains(w.Body.String(), consentHeader)
 		})
