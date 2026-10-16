@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"kdex.dev/crds/render"
 )
 
 func TestDescribeRedirect(t *testing.T) {
@@ -142,4 +144,157 @@ func TestBuiltinConsent_CSSHoldStaysForNoScript(t *testing.T) {
 	body, _ := renderedConsent(t)
 	assert.Regexp(t, `<button[^>]*value="allow"[^>]*class="allow"`, body)
 	assert.Contains(t, body, "@keyframes arm")
+}
+
+func englishOnly(string, ...any) (string, bool) { return "", false }
+
+func coreView() ConsentView {
+	return ConsentView{
+		RedirectKind:      RedirectKindWeb,
+		RedirectDisplay:   "app.example.com",
+		RegistrableDomain: "example.com",
+		RedirectURI:       "https://app.example.com/cb",
+		ClientName:        "App",
+		Account:           "a@b.c",
+		Scopes:            []string{"email", "profile"},
+		Request:           "SEALED",
+		Action:            OAuthConsentPath,
+	}
+}
+
+func TestRenderConsentCore_EnglishFallback(t *testing.T) {
+	out := string(RenderConsentCore(coreView(), "m1", englishOnly))
+	assert.Contains(t, out, "Allow access to your account?")
+	assert.Contains(t, out, "Signed in as <strong>a@b.c</strong>.")
+	assert.Contains(t, out, "Only allow this if you started connecting this application yourself.")
+	assert.Contains(t, out, `name="request" value="SEALED"`)
+	assert.Contains(t, out, `action="/-/oauth/consent"`)
+	assert.Equal(t, 1, strings.Count(out, ConsentMarkerAttr+`="m1"`))
+	assert.True(t, strings.HasPrefix(out, `<div data-kdex-consent="m1">`), "the marker is on the block's root")
+	assert.Equal(t, 1, strings.Count(out, "<script>"+consentArmScript+"</script>"), "the block carries the hold-back script")
+}
+
+// A stale or partial translation never shows a raw key: every key it lacks
+// falls back to its English text.
+func TestRenderConsentCore_PartialTranslation(t *testing.T) {
+	tr := func(key string, _ ...any) (string, bool) {
+		if key == "consent.title" {
+			return "Zugriff auf Ihr Konto erlauben?", true
+		}
+		return "", false
+	}
+	for _, v := range []ConsentView{coreView(), func() ConsentView {
+		v := coreView()
+		v.RedirectKind, v.RedirectDisplay, v.RegistrableDomain, v.Scopes = RedirectKindDevice, "cursor", "", nil
+		return v
+	}()} {
+		out := string(RenderConsentCore(v, "m1", tr))
+		assert.Contains(t, out, "<h1>Zugriff auf Ihr Konto erlauben?</h1>")
+		assert.NotContains(t, out, "Allow access to your account?")
+		assert.Contains(t, out, "Signed in as <strong>a@b.c</strong>.")
+		assert.Contains(t, out, ">Allow</button>")
+		assert.NotContains(t, out, "consent.")
+	}
+}
+
+// Arguments are never format strings: a client name or account full of verbs
+// shows as typed, escaped, and inside <strong>.
+func TestRenderConsentCore_ArgsAreLiteral(t *testing.T) {
+	v := coreView()
+	v.ClientName = "%s<b>&x%!"
+	v.Account = "%d@x"
+	for _, tr := range []Translator{englishOnly, func(key string, args ...any) (string, bool) {
+		return fmt.Sprintf(render.ConsentMessages[key], args...), true
+	}} {
+		out := string(RenderConsentCore(v, "m1", tr))
+		assert.Contains(t, out, "<strong>%s&lt;b&gt;&amp;x%!</strong>")
+		assert.Contains(t, out, "<strong>%d@x</strong>")
+		assert.NotContains(t, out, "%!(")
+		assert.NotContains(t, out, "<b>")
+	}
+}
+
+// Translations are plain text: markup in one is shown, never interpreted.
+func TestRenderConsentCore_TranslationHTMLEscaped(t *testing.T) {
+	tr := func(key string, _ ...any) (string, bool) {
+		if key == "consent.warning" {
+			return "<b>Careful</b>", true
+		}
+		return "", false
+	}
+	out := string(RenderConsentCore(coreView(), "m1", tr))
+	assert.Contains(t, out, "&lt;b&gt;Careful&lt;/b&gt;")
+	assert.NotContains(t, out, "<b>")
+}
+
+func TestRenderConsentCore_Conditions(t *testing.T) {
+	device := coreView()
+	device.RedirectKind, device.RedirectDisplay, device.RegistrableDomain = RedirectKindDevice, "cursor", ""
+	out := string(RenderConsentCore(device, "m1", englishOnly))
+	assert.Contains(t, out, "<p>Allowing sends access to <strong>an application on this device</strong> (cursor).</p>")
+	assert.NotContains(t, out, "Website:")
+	assert.NotContains(t, out, `class="where"`)
+
+	out = string(RenderConsentCore(coreView(), "m1", englishOnly))
+	assert.Contains(t, out, "<p>Allowing sends access to:</p>")
+	assert.Contains(t, out, `<p class="where">app.example.com</p>`)
+	assert.Contains(t, out, "<p>Website: <strong>example.com</strong></p>")
+	assert.Contains(t, out, `<p class="small">Full address: https://app.example.com/cb</p>`)
+	assert.Contains(t, out, "The application calls itself <strong>App</strong>.")
+	assert.Contains(t, out, "with your permissions and read: email, profile.")
+	assert.NotContains(t, out, "an application on this device")
+
+	web := coreView()
+	web.RegistrableDomain = ""
+	web.ClientName = ""
+	web.Scopes = nil
+	out = string(RenderConsentCore(web, "m1", englishOnly))
+	assert.NotContains(t, out, "Website:")
+	assert.NotContains(t, out, "calls itself")
+	assert.Contains(t, out, "<p>It will be able to act on your account with your permissions.</p>")
+	assert.NotContains(t, out, "and read:")
+}
+
+// Arguments are substituted in one pass: an argument that happens to contain
+// another argument's sentinel is shown as itself, never expanded.
+func TestRenderConsentCore_SentinelsAreNotRescanned(t *testing.T) {
+	v := coreView()
+	v.RedirectKind, v.RedirectDisplay, v.RegistrableDomain = RedirectKindDevice, "0", ""
+	out := string(RenderConsentCore(v, "m1", englishOnly))
+	assert.Equal(t, 1, strings.Count(out, "an application on this device"))
+	assert.Contains(t, out, "(0).")
+}
+
+// The block's sentinels are private-use runes; view fields drop them so a
+// client cannot inject one.
+func TestNewConsentViewStripsPrivateUse(t *testing.T) {
+	v := newConsentView("App", "https://app.example/cb", "a0@b", "S", nil)
+	assert.Equal(t, "App", v.ClientName)
+	assert.Equal(t, "a0@b", v.Account)
+	assert.Equal(t, "https://app.example/cb", v.RedirectURI)
+}
+
+func TestConsentScriptHoldsEveryAllow(t *testing.T) {
+	assert.Contains(t, consentArmScript, "querySelectorAll('button[value=allow]')")
+	assert.Contains(t, consentArmScript, "matches('button[value=allow]')")
+	assert.NotContains(t, consentArmScript, "querySelector('form')", "not only the first form")
+}
+
+func TestBuiltinConsentCSPMatchesScript(t *testing.T) {
+	body, csp := renderedConsent(t)
+	scripts := scriptRe.FindAllStringSubmatch(body, -1)
+	require.Len(t, scripts, 1)
+	sum := sha256.Sum256([]byte(scripts[0][1]))
+	hash := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	assert.Equal(t, hash, ConsentScriptHash())
+	assert.Contains(t, csp, "script-src "+hash+";")
+	assert.Contains(t, body, "<title>Allow access?</title>")
+	assert.Regexp(t, `data-kdex-consent="[0-9a-f]{32}"`, body)
+}
+
+func TestBuiltinConsentMarkerIsFresh(t *testing.T) {
+	a, _ := renderedConsent(t)
+	b, _ := renderedConsent(t)
+	re := regexp.MustCompile(`data-kdex-consent="([0-9a-f]{32})"`)
+	assert.NotEqual(t, re.FindStringSubmatch(a)[1], re.FindStringSubmatch(b)[1])
 }
