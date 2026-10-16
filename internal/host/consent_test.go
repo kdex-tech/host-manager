@@ -232,7 +232,7 @@ func TestConsentPage_Translated(t *testing.T) {
 func TestConsentPage_BadLanguageUsesDefault(t *testing.T) {
 	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
 
-	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath+"?l10n=!!", "")
+	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath+"?l10n=!!", "!!, zz-ZZ;q=x")
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), consentHeader)
@@ -348,4 +348,52 @@ func TestNewOAuth2SetsRenderConsent(t *testing.T) {
 	w := httptest.NewRecorder()
 	render(w, httptest.NewRequest(http.MethodGet, auth.OAuthAuthorizePath, nil), consentTestView)
 	assert.Contains(t, w.Body.String(), consentHeader)
+}
+
+// The authorize request's query is built by whoever sends the user there, so
+// the consent page's language comes from the user's Accept-Language only.
+func TestConsentPage_LanguageIgnoresTheL10nParam(t *testing.T) {
+	hh, logs := newConsentPageHost(t, consentArchetype, consentBlockSlot)
+
+	w := renderConsentRequest(hh, logs, auth.OAuthAuthorizePath+"?l10n=fr", "en")
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "Allow access to your account?")
+	assert.NotContains(t, w.Body.String(), "Autoriser")
+	assert.Equal(t, "en", w.Header().Get("Content-Language"))
+}
+
+// lockProbeWriter reports whether the host's write lock could be taken while
+// the response body was being written.
+type lockProbeWriter struct {
+	*httptest.ResponseRecorder
+	hh           *HostHandler
+	lockedInside bool
+}
+
+func (w *lockProbeWriter) Write(b []byte) (int, error) {
+	if w.hh.mu.TryLock() {
+		w.lockedInside = true
+		w.hh.mu.Unlock()
+	}
+	return w.ResponseRecorder.Write(b)
+}
+
+// A slow reader must not hold the host's read lock (and so stall a queued
+// SetHost and every request behind it): the body is written after the lock
+// is released, on the branded page and on the built-in fallback alike.
+func TestConsentPage_WritesOutsideTheHostLock(t *testing.T) {
+	for name, mainTemplate := range map[string]string{"branded": consentArchetype, "built-in fallback": ""} {
+		t.Run(name, func(t *testing.T) {
+			hh, logs := newConsentPageHost(t, mainTemplate, consentBlockSlot)
+			r := httptest.NewRequest(http.MethodGet, auth.OAuthAuthorizePath, nil)
+			r = r.WithContext(logf.IntoContext(r.Context(), logs.l))
+			w := &lockProbeWriter{ResponseRecorder: httptest.NewRecorder(), hh: hh}
+
+			hh.renderConsentPage(w, r, consentTestView)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.True(t, w.lockedInside, "the host lock is free while the body is written")
+		})
+	}
 }

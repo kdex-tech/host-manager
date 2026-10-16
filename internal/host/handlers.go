@@ -1017,7 +1017,6 @@ func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
 			l,
 			map[string]any{},
 			&hh.Translations,
-			renderOptions{},
 		)
 
 		if rendered == "" {

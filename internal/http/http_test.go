@@ -424,3 +424,18 @@ func TestSameOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestGetAcceptLanguage_IgnoresTheL10nParam(t *testing.T) {
+	g := NewGomegaWithT(t)
+	supported := []language.Tag{language.English, language.French}
+	req := httptest.NewRequest(http.MethodGet, "/x?l10n=fr", nil)
+	req.Header.Set("Accept-Language", "en")
+
+	got, err := GetAcceptLanguage(req, "en", supported)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(got).To(Equal(language.English))
+
+	got, err = GetLang(req, "en", supported)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(got).To(Equal(language.French), "GetLang still honours l10n")
+}

@@ -12,18 +12,47 @@ import (
 )
 
 // renderConsentPage is the host's auth.OAuth2.RenderConsent: host-manager's
-// fixed consent block inside the host's Consent utility page, rendered
-// scriptless. The page is served only when the block appears in it exactly
-// once, counted by a marker made fresh for each render, so a stale or
+// fixed consent block inside the host's Consent utility page, which always
+// renders scriptless. The page is served only when the block appears in it
+// exactly once, counted by a marker made fresh for each render, so a stale or
 // hand-copied block cannot satisfy the check. The marker is not secret from
 // the template, which receives the block; the operator's template is trusted.
 // With no Consent page, a render error or a failed check, the built-in page
-// is served instead. The flow has already set the no-store, framing and
-// referrer headers.
+// is served instead. The language comes from Accept-Language only: whoever
+// built the authorize request chose its query, l10n included. The flow has
+// already set the no-store, framing and referrer headers.
 func (hh *HostHandler) renderConsentPage(w http.ResponseWriter, r *http.Request, v auth.ConsentView) {
 	log := logf.FromContext(r.Context())
 
-	// The OAuth2 request path holds no host lock.
+	page, ok := hh.renderBrandedConsent(r, v)
+	if !ok {
+		auth.RenderBuiltinConsent(w, r, v)
+		return
+	}
+
+	h := w.Header()
+	h.Add("Content-Security-Policy", auth.BrandedConsentCSP())
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Language", page.lang.String())
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(page.html)); err != nil {
+		log.V(1).Info("writing the consent page", "page", page.name, "err", err)
+	}
+}
+
+type brandedConsentPage struct {
+	html, name string
+	lang       language.Tag
+}
+
+// renderBrandedConsent renders the Consent utility page with the block under
+// the host's read lock, and reports false (having logged why) when the
+// built-in page must be served instead. The response is written by the
+// caller, after the lock is released, so a slow reader cannot hold it. The
+// OAuth2 request path holds no host lock, so this takes its own.
+func (hh *HostHandler) renderBrandedConsent(r *http.Request, v auth.ConsentView) (brandedConsentPage, bool) {
+	log := logf.FromContext(r.Context())
+
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
@@ -31,12 +60,11 @@ func (hh *HostHandler) renderConsentPage(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		// A host without a Consent page is a supported configuration.
 		log.V(1).Info("serving the built-in consent page", "reason", "no Consent utility page")
-		auth.RenderBuiltinConsent(w, r, v)
-		return
+		return brandedConsentPage{}, false
 	}
 
-	// A bad Accept-Language or l10n must not fail the consent flow.
-	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
+	// A bad Accept-Language must not fail the consent flow.
+	l, err := kdexhttp.GetAcceptLanguage(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {
 		l = language.Make(hh.defaultLanguage)
 	}
@@ -55,24 +83,15 @@ func (hh *HostHandler) renderConsentPage(w http.ResponseWriter, r *http.Request,
 		l,
 		map[string]any{"consent": map[string]any{"Block": auth.RenderConsentCore(v, marker, translate)}},
 		&hh.Translations,
-		renderOptions{Scriptless: true},
 	)
 	if rendered == "" {
 		log.Error(nil, "serving the built-in consent page", "page", ph.Name, "reason", "render failed")
-		auth.RenderBuiltinConsent(w, r, v)
-		return
+		return brandedConsentPage{}, false
 	}
 	if n := strings.Count(rendered, auth.ConsentMarkerAttr+`="`+marker+`"`); n != 1 {
 		log.Error(nil, "serving the built-in consent page: the Consent utility page must show .Extra.consent.Block exactly once",
 			"page", ph.Name, "reason", "marker count", "count", n)
-		auth.RenderBuiltinConsent(w, r, v)
-		return
+		return brandedConsentPage{}, false
 	}
-
-	h := w.Header()
-	h.Add("Content-Security-Policy", auth.BrandedConsentCSP())
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Content-Language", l.String())
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(rendered))
+	return brandedConsentPage{html: rendered, name: ph.Name, lang: l}, true
 }

@@ -43,7 +43,6 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		l,
 		extras,
 		&hh.Translations,
-		renderOptions{},
 	)
 
 	if rendered == "" {

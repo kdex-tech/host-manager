@@ -298,7 +298,7 @@ func TestHostHandler_L10nRender(t *testing.T) {
 			th.SetHost(context.Background(), &tt.host.host, nil, nil, nil, nil, "", map[string]ko.PathInfo{}, nil, nil, nil, "http", nil, time.Now())
 			th.AddOrUpdateTranslation(tt.translationName, tt.translation)
 
-			got, gotErr := th.L10nRender(tt.pageHandler, map[string]any{}, language.Make(tt.lang), tt.extraTemplateData, &th.Translations, renderOptions{})
+			got, gotErr := th.L10nRender(tt.pageHandler, map[string]any{}, language.Make(tt.lang), tt.extraTemplateData, &th.Translations)
 
 			g.Expect(gotErr).NotTo(G.HaveOccurred())
 

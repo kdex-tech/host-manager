@@ -95,7 +95,7 @@ func TestBackgroundRender_NoRaceWithSetHost(t *testing.T) {
 		func() {
 			defer func() { _ = recover() }()
 			hh.mu.RLock()
-			_ = hh.renderUtilityPage(kdexv1alpha1.ErrorUtilityPageType, language.English, nil, &hh.Translations, renderOptions{})
+			_ = hh.renderUtilityPage(kdexv1alpha1.ErrorUtilityPageType, language.English, nil, &hh.Translations)
 			hh.mu.RUnlock()
 		}()
 

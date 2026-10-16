@@ -62,7 +62,7 @@ func (hh *HostHandler) pageHandlerFunc(
 			if isTextPage {
 				return hh.L10nRenderText(p, lang, trans)
 			}
-			return hh.L10nRender(p, nil, lang, map[string]any{}, trans, renderOptions{})
+			return hh.L10nRender(p, nil, lang, map[string]any{}, trans)
 		}
 
 		servePage := func(rendered string) {

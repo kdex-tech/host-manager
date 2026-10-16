@@ -53,16 +53,14 @@ func DiscoverPattern(patterns []string, r *http.Request) (string, error) {
 	return matched, nil
 }
 
+// GetLang negotiates the response language: the l10n path or query parameter
+// when present, else the Accept-Language header (see GetAcceptLanguage).
 func GetLang(r *http.Request, defaultLanguage string, languages []language.Tag) (language.Tag, error) {
-	log := logf.FromContext(r.Context())
-
 	if len(languages) == 0 {
 		return language.Und, errors.New("no supported languages provided")
 	}
 
 	l10n := GetParam("l10n", "", r)
-
-	matcher := language.NewMatcher(languages)
 
 	if l10n != "" {
 		tag, err := language.Parse(l10n)
@@ -70,13 +68,29 @@ func GetLang(r *http.Request, defaultLanguage string, languages []language.Tag) 
 			return language.Und, fmt.Errorf("invalid language tag: %s", l10n)
 		}
 
-		_, index, confidence := matcher.Match(tag)
+		_, index, confidence := language.NewMatcher(languages).Match(tag)
 		if confidence == language.No {
 			return language.Und, fmt.Errorf("language not supported: %s", l10n)
 		}
 
 		return languages[index], nil
 	}
+
+	return GetAcceptLanguage(r, defaultLanguage, languages)
+}
+
+// GetAcceptLanguage negotiates the response language from the
+// Accept-Language header alone, falling back to defaultLanguage. Use it where
+// the URL is not the user's own choice (the consent page: whoever built the
+// authorize request chose its query).
+func GetAcceptLanguage(r *http.Request, defaultLanguage string, languages []language.Tag) (language.Tag, error) {
+	log := logf.FromContext(r.Context())
+
+	if len(languages) == 0 {
+		return language.Und, errors.New("no supported languages provided")
+	}
+
+	matcher := language.NewMatcher(languages)
 
 	preferredLanguages := []language.Tag{}
 
