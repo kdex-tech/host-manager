@@ -128,13 +128,21 @@ func (o *OAuth2) ConsentPost(w http.ResponseWriter, r *http.Request) {
 		forbidden("unparseable form")
 		return
 	}
-	decision := r.PostFormValue("decision")
+	// Exactly one decision and one request. An unclosed <form> injected
+	// before the consent block absorbs the block's controls, so a click on
+	// Deny would post the injected decision=allow first, and PostFormValue
+	// reads only the first value.
+	if len(r.PostForm["decision"]) != 1 || len(r.PostForm["request"]) != 1 {
+		forbidden("decision and request must each appear exactly once")
+		return
+	}
+	decision := r.PostForm.Get("decision")
 	if decision != "allow" && decision != "deny" {
 		forbidden("unknown decision")
 		return
 	}
 	var sealed consentRequest
-	if err := o.AuthExchanger.openJSON(sealPurposeConsent, r.PostFormValue("request"), &sealed); err != nil {
+	if err := o.AuthExchanger.openJSON(sealPurposeConsent, r.PostForm.Get("request"), &sealed); err != nil {
 		forbidden("sealed request does not open")
 		return
 	}

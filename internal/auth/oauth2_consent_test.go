@@ -369,6 +369,50 @@ func TestConsentPost_Refusals(t *testing.T) {
 	assert.False(t, ok, "no refusal records the sealed request's scopes")
 }
 
+// An unclosed <form> injected before the consent block (a theme asset
+// attribute breakout, host assets, a header) absorbs the block's controls, so
+// clicking Deny posts the injected decision=allow first. A decision or a
+// request that appears more than once is refused outright.
+func TestConsentPost_DuplicatedFieldsAreRefused(t *testing.T) {
+	f := newConsentFixture(t)
+	ctx := context.Background()
+	sealed := sealedFrom(t, f.authorize(f.query(appRedirect, nil), aliceSession, COOKIE))
+	require.NoError(t, f.ex.config.DCRConsent.Grant(ctx, "alice", f.clientID, appRedirect, []string{"email"}))
+
+	postForm := func(form url.Values) *httptest.ResponseRecorder {
+		r := sessionRequest("POST", OAuthConsentPath, strings.NewReader(form.Encode()), aliceSession, COOKIE)
+		for k, v := range sameOrigin {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		f.o.ConsentPost(w, r)
+		return w
+	}
+
+	for name, form := range map[string]url.Values{
+		"injected allow before deny": {"decision": {"allow", "deny"}, "request": {sealed}},
+		"deny before allow":          {"decision": {"deny", "allow"}, "request": {sealed}},
+		"allow twice":                {"decision": {"allow", "allow"}, "request": {sealed}},
+		"request twice":              {"decision": {"allow"}, "request": {sealed, sealed}},
+		"no request":                 {"decision": {"allow"}},
+		"no decision":                {"request": {sealed}},
+	} {
+		w := postForm(form)
+		assert.Equal(t, http.StatusForbidden, w.Code, name)
+		assert.Empty(t, w.Header().Get("Location"), name)
+	}
+
+	ok, err := f.ex.config.DCRConsent.Covers(ctx, "alice", f.clientID, appRedirect, []string{"email"})
+	require.NoError(t, err)
+	assert.True(t, ok, "no refusal revokes the existing consent")
+	ok, err = f.ex.config.DCRConsent.Covers(ctx, "alice", f.clientID, appRedirect, []string{"email", "openid"})
+	require.NoError(t, err)
+	assert.False(t, ok, "no refusal grants the sealed request's scopes")
+
+	// A single decision and a single request still work.
+	assert.Equal(t, http.StatusSeeOther, postForm(url.Values{"decision": {"allow"}, "request": {sealed}}).Code)
+}
+
 func TestConsentPost_NilOriginCheckRefusesEverything(t *testing.T) {
 	f := newConsentFixture(t)
 	sealed := sealedFrom(t, f.authorize(f.query(appRedirect, nil), aliceSession, COOKIE))
