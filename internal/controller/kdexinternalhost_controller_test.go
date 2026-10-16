@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -135,10 +136,13 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			Expect(httpRoute.OwnerReferences[0].Kind).To(Equal("KDexInternalHost"))
 		})
 
-		// The warm-up list is pinned by the utilityPage.Consent.generation
-		// status attribute, which the host writes only for listed types. The
-		// {.Spec.ConsentRef} watch is not pinned here: indexing happens in the
-		// utility page reconciler whether or not the host watches the page.
+		// Consent is in the utility page loop (it does not block warm-up, see
+		// the next spec); that is pinned by the utilityPage.Consent.generation
+		// status attribute, which the host writes only for listed types and,
+		// for Consent, only while its handler is registered, with the internal
+		// page's generation. The {.Spec.ConsentRef} watch is not pinned here:
+		// indexing happens in the utility page reconciler whether or not the
+		// host watches the page.
 		It("should index a Consent utility page the host references", func() {
 			consentPageName := focalHost + "-consent"
 
@@ -196,12 +200,67 @@ var _ = Describe("KDexInternalHost Controller", func() {
 				ctx, k8sClient, focalHost, namespace,
 				&kdexv1alpha1.KDexInternalHost{}, true)
 
-			By("warming up the Consent utility page with the others")
+			By("recording the Consent utility page's generation with the others")
+			consentPage := &kdexv1alpha1.KDexInternalUtilityPage{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: consentPageName, Namespace: namespace}, consentPage)).To(Succeed())
+			Expect(consentPage.Generation).NotTo(BeZero())
 			Eventually(func(g Gomega) {
 				internalHost := &kdexv1alpha1.KDexInternalHost{}
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, internalHost)).To(Succeed())
-				g.Expect(internalHost.Status.Attributes).To(HaveKey("utilityPage.Consent.generation"))
+				g.Expect(internalHost.Status.Attributes).To(HaveKeyWithValue("utilityPage.Consent.generation", fmt.Sprintf("%d", consentPage.Generation)))
 			}, "5s").Should(Succeed())
+		})
+
+		// The consent flow falls back to the built-in page when the host has
+		// no Consent handler, so a Consent page that never registers (here its
+		// archetype does not exist) must not hold the host back from Ready.
+		It("should not wait for a Consent utility page that never registers", func() {
+			consentPageName := focalHost + "-consent"
+
+			Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexInternalUtilityPage{
+				ObjectMeta: metav1.ObjectMeta{Name: consentPageName, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexInternalUtilityPageSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					KDexUtilityPageSpec: kdexv1alpha1.KDexUtilityPageSpec{
+						Type: kdexv1alpha1.ConsentUtilityPageType,
+						ContentEntries: []kdexv1alpha1.ContentEntry{{
+							Slot: "main",
+							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
+								RawHTML: "[[ .Extra.consent.Block ]]",
+							},
+						}},
+						PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
+							Kind: "KDexPageArchetype",
+							Name: "no-such-archetype",
+						},
+					},
+				},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexInternalHost{
+				ObjectMeta: metav1.ObjectMeta{Name: focalHost, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexInternalHostSpec{
+					ConsentRef: &corev1.LocalObjectReference{Name: consentPageName},
+					KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+						BrandName:    "KDex Tech",
+						DevMode:      true,
+						ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+						Organization: "KDex Tech Inc.",
+						Routing: kdexv1alpha1.Routing{
+							Domains: []string{"foo.bar"},
+						},
+					},
+				},
+			})).To(Succeed())
+
+			assertResourceReady(
+				ctx, k8sClient, focalHost, namespace,
+				&kdexv1alpha1.KDexInternalHost{}, true)
+
+			Expect(hostHandler.GetUtilityPageHandler(kdexv1alpha1.ConsentUtilityPageType).Name).To(BeEmpty())
+			internalHost := &kdexv1alpha1.KDexInternalHost{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, internalHost)).To(Succeed())
+			Expect(internalHost.Status.Attributes).NotTo(HaveKey("utilityPage.Consent.generation"))
 		})
 	})
 })

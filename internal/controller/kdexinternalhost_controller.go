@@ -238,29 +238,31 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		kdexv1alpha1.ErrorUtilityPageType,
 		kdexv1alpha1.LoginUtilityPageType,
 	} {
+		generationKey := fmt.Sprintf("utilityPage.%s.generation", utilityPageType)
 		pageHandler := r.HostHandler.GetUtilityPageHandler(utilityPageType)
-		generation := 0
-		if pageHandler.Name == "" {
-			// check if it's supposed to be there
-			expected := false
-			for _, up := range utilityPages.Items {
-				if up.Spec.Type == utilityPageType {
-					expected = true
-					generation = int(up.GetGeneration())
-					break
-				}
+		listed := listedUtilityPage(utilityPages.Items, utilityPageType, pageHandler.Name)
+		if pageHandler.Name == "" && listed != nil {
+			// Consent never waits: its page can stay unregistered for good
+			// (a broken archetype, header, footer or script reference), and
+			// the consent flow serves the built-in page while it has no
+			// handler. Waiting would keep the host from Ready forever.
+			if utilityPageType == kdexv1alpha1.ConsentUtilityPageType {
+				delete(internalHost.Status.Attributes, generationKey)
+				continue
 			}
-			if expected {
-				log.V(2).Info("waiting for host handler to warm up (utility page missing)", "type", utilityPageType)
-				return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-			}
+			log.V(2).Info("waiting for host handler to warm up (utility page missing)", "type", utilityPageType)
+			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		}
 
 		packageRefs = append(packageRefs, pageHandler.PackageReferences...)
 		backendRefs = append(backendRefs, pageHandler.RequiredBackends...)
 		// we don't add page scripts here, because they are added by the pages
 
-		internalHost.Status.Attributes[fmt.Sprintf("utilityPage.%s.generation", utilityPageType)] = fmt.Sprintf("%d", generation)
+		var generation int64
+		if listed != nil {
+			generation = listed.GetGeneration()
+		}
+		internalHost.Status.Attributes[generationKey] = fmt.Sprintf("%d", generation)
 	}
 
 	if internalHost.Spec.IsConfigured(defaultBackendServerImage) {
@@ -2162,4 +2164,23 @@ type resolvedBackend struct {
 	Kind      string
 	Name      string
 	Namespace string
+}
+
+// listedUtilityPage returns the listed internal utility page of the given
+// type: the one named name (the registered handler's) when there is one, else
+// the first of that type, else nil.
+func listedUtilityPage(items []kdexv1alpha1.KDexInternalUtilityPage, t kdexv1alpha1.KDexUtilityPageType, name string) *kdexv1alpha1.KDexInternalUtilityPage {
+	var first *kdexv1alpha1.KDexInternalUtilityPage
+	for i := range items {
+		if items[i].Spec.Type != t {
+			continue
+		}
+		if name != "" && items[i].Name == name {
+			return &items[i]
+		}
+		if first == nil {
+			first = &items[i]
+		}
+	}
+	return first
 }
