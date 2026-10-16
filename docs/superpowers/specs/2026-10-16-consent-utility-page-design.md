@@ -233,3 +233,70 @@ a code.
 - Listing and revoking your consents (stage-1 follow-up; the per-subject record supports it).
 - Letting a CR alter the disclosure, the form or the buttons' placement (rejected: option B).
 - Per-host CSP allow-lists for theme origins (rejected in favour of open non-script sources).
+
+## Implementation notes and deviations
+
+Recorded after the final review (2026-10-16). Where this section and the design above differ, this
+section describes what shipped.
+
+**Hold-back.**
+
+- The script holds back every `[name=decision][value=allow]` (a button or an `<input>`), not only
+  `button[value=allow]`.
+- Its submit guard also prevents an unarmed submit whose form data carries `decision=allow`
+  (`new FormData(form, submitter)`). An unclosed `<form>` injected before the block absorbs the
+  block's controls, so a click on Deny would also send an injected hidden `decision=allow`.
+- The server refuses (403) a consent POST unless `decision` and `request` each appear exactly once.
+- The CSS hold (Allow ignores the pointer for its first second and looks held while
+  `aria-disabled`) is an inline `<style>` in the block, so the branded page carries it too. A theme
+  can override it; the script hold does not depend on it.
+
+**Logging.** A host with no Consent page logs at V(1) info, per the error table above. A render
+error and a marker count other than one log an error naming the utility page.
+
+**Trust boundary.**
+
+- The marker is fresh per render, but it is not secret from templates.
+- The sealed request is reachable from every chrome template through `.Extra`: theme, host assets,
+  header, footer, archetype and page.
+- All of those authors are inside the trust boundary, as is every `https:` stylesheet origin a
+  theme references. That is why the bundled default theme's CDN stylesheet is version-pinned with
+  SRI. Google Fonts CSS varies by user agent and cannot carry SRI.
+- `consent.*` keys are accepted only from `kdex-default-translation` and the host's own
+  `translationRefs`. nexus drops them from self-attached translations (`spec.hostRef`), which need
+  no opt-in from the host owner.
+
+**Hidden blocks.**
+
+- A block wrapped in an HTML comment yields the built-in page: html/template drops comments and the
+  actions inside them, so the marker count is zero.
+- A block in an inert `<template>` passes the check. The page looks broken but this is not a bypass.
+
+**Language.** The consent page negotiates its language from `Accept-Language` only. The `l10n`
+parameter is ignored, because whoever built the authorize request chose its query.
+
+**Resilience.**
+
+- A broken or unresolvable `consentRef` never degrades the host. A missing, not-Ready or wrong-type
+  page is noted on the host's conditions (Progressing, like an unresolved theme), and the internal
+  host is still written with no `consentRef`. The stale `<host>-consent` internal page is deleted
+  and `consent.utilitypage.generation` is dropped, so host-manager serves the built-in page.
+- host-manager never holds warm-up for the Consent page. A Consent page whose archetype, header,
+  footer or script reference breaks just leaves no handler, and the flow serves the built-in page.
+- Existing hosts get the default through a controller fallback: a stored nil `consentRef` resolves
+  `kdex-default-utility-page-consent`, and changes to that page enqueue those hosts. The fail-open
+  defaulter is not relied on.
+
+**Other notes.**
+
+- Scriptless rendering is a rule of the Consent type in host-manager's renderer, not a per-call
+  option.
+- `consent.page-title` is used only by the built-in page.
+- The key list and English text live in kdex-crds `render.ConsentMessages`. host-manager's fallback
+  and nexus's translation test both read it.
+- CEL behaviour is tested in nexus-manager's envtest suite, which installs the kdex-crds CRDs from
+  the pinned module (kdex-crds has no envtest).
+- The branded and built-in CSPs both live in `internal/auth/consent_page.go`.
+
+**Rollout.** Apply the v0.14.251 CRDs to each cluster BEFORE upgrading nexus-manager. The old enum
+rejects the bundled Consent page, and the old schemas prune `consentRef`.
