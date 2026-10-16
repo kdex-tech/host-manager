@@ -275,8 +275,9 @@ func TestNewConsentViewStripsPrivateUse(t *testing.T) {
 }
 
 func TestConsentScriptHoldsEveryAllow(t *testing.T) {
-	assert.Contains(t, consentArmScript, "querySelectorAll('button[value=allow]')")
-	assert.Contains(t, consentArmScript, "matches('button[value=allow]')")
+	assert.Contains(t, consentArmScript, "querySelectorAll('[name=decision][value=allow]')")
+	assert.Contains(t, consentArmScript, "matches('[name=decision][value=allow]')")
+	assert.NotContains(t, consentArmScript, "button[value=allow]", "an input type=submit is held too")
 	assert.NotContains(t, consentArmScript, "querySelector('form')", "not only the first form")
 }
 
@@ -297,4 +298,43 @@ func TestBuiltinConsentMarkerIsFresh(t *testing.T) {
 	b, _ := renderedConsent(t)
 	re := regexp.MustCompile(`data-kdex-consent="([0-9a-f]{32})"`)
 	assert.NotEqual(t, re.FindStringSubmatch(a)[1], re.FindStringSubmatch(b)[1])
+}
+
+// A translation that loses, repeats or mangles an argument, or is blank,
+// would hide part of the disclosure or a button's label: that key falls back
+// to English.
+func TestRenderConsentCore_UnusableTranslationFallsBack(t *testing.T) {
+	for _, tc := range []struct{ name, key, format, want string }{
+		{"drops the arg", "consent.client-name", "Hello",
+			"<p>The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>"},
+		{"repeats the arg", "consent.client-name", "%s %s",
+			"<p>The application calls itself <strong>%s&lt;b&gt;</strong>. This name is provided by the application and has not been verified.</p>"},
+		{"mangles the verb", "consent.signed-in-as", "Konto %d.", "<p>Signed in as <strong>a@b.c</strong>.</p>"},
+		{"blank", "consent.allow", "  ", `class="allow">Allow</button>`},
+		{"empty", "consent.deny", "", `autofocus>Deny</button>`},
+		{"drops one of two", "consent.device.sends-to", "Zugriff an %s.",
+			"<p>Allowing sends access to <strong>an application on this device</strong> (cursor).</p>"},
+	} {
+		tr := func(key string, args ...any) (string, bool) {
+			if key == tc.key {
+				return fmt.Sprintf(tc.format, args...), true
+			}
+			return "", false
+		}
+		v := coreView()
+		v.ClientName = "%s<b>"
+		if tc.key == "consent.device.sends-to" {
+			v.RedirectKind, v.RedirectDisplay, v.RegistrableDomain = RedirectKindDevice, "cursor", ""
+		}
+		out := string(RenderConsentCore(v, "m1", tr))
+		assert.Contains(t, out, tc.want, tc.name)
+		assert.NotContains(t, out, "%!", tc.name)
+		assert.NotContains(t, out, "Hello", tc.name)
+	}
+}
+
+func TestNewConsentMarker(t *testing.T) {
+	a, b := NewConsentMarker(), NewConsentMarker()
+	assert.Regexp(t, `^[0-9a-f]{32}$`, a)
+	assert.NotEqual(t, a, b)
 }

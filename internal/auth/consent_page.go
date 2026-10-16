@@ -124,13 +124,13 @@ func sanitizeClientName(s string) string {
 // popup asks for a double-click and swaps this page in under the second
 // click: that page was not visible for the first, and there is no time for a
 // deliberate move. Losing focus or visibility holds Allow back again. It
-// guards every button[value=allow], not only the block's own, and the submit
-// guard is delegated so a button added later is held too. It only ever holds
-// Allow back, never acts for the user, and without script the CSS hold still
-// applies.
+// guards every [name=decision][value=allow] (a button or an input), not only
+// the block's own, and the submit guard is delegated so one added later is
+// held too. It only ever holds Allow back, never acts for the user, and
+// without script the CSS hold still applies.
 const consentArmScript = `(function(){
 var armed=false,t=0;
-function set(on){var b=document.querySelectorAll('button[value=allow]');for(var i=0;i<b.length;i++){if(on)b[i].removeAttribute('aria-disabled');else b[i].setAttribute('aria-disabled','true');}}
+function set(on){var b=document.querySelectorAll('[name=decision][value=allow]');for(var i=0;i<b.length;i++){if(on)b[i].removeAttribute('aria-disabled');else b[i].setAttribute('aria-disabled','true');}}
 function off(){armed=false;clearTimeout(t);t=0;set(false);}
 function gesture(e){
 if(!e.isTrusted||armed||t||document.visibilityState!=='visible'||!document.hasFocus())return;
@@ -141,7 +141,7 @@ document.addEventListener('pointermove',gesture);
 document.addEventListener('keydown',gesture);
 window.addEventListener('blur',off);
 document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='visible')off();});
-document.addEventListener('submit',function(e){var s=e.submitter;if(!armed&&s&&s.matches('button[value=allow]'))e.preventDefault();},true);
+document.addEventListener('submit',function(e){var s=e.submitter;if(!armed&&s&&s.matches('[name=decision][value=allow]'))e.preventDefault();},true);
 })();`
 
 var consentScriptHash = func() string {
@@ -167,11 +167,15 @@ const ConsentMarkerAttr = "data-kdex-consent"
 
 // Translator returns the host's translation of a consent.* key, formatted
 // with args, and true; or false when the host's catalog lacks the key.
+// A translation that is blank, or loses, repeats or mangles an argument, is
+// not used: that key shows its English text.
 type Translator func(key string, args ...any) (string, bool)
 
 // consentSentinel stands in for argument i while a message is formatted and
-// escaped. Private-use runes cannot reach it from a view field: newConsentView
-// strips them.
+// escaped. The guard against a sentinel arriving inside an argument is the
+// one-pass substitution in consentMessage (strings.NewReplacer never rescans
+// replaced text); newConsentView also strips private-use runes from the
+// fields it cleans, as a second layer.
 func consentSentinel(i int) string { return "" + strconv.Itoa(i) + "" }
 
 // consentMessage renders one consent.* message as HTML. The (translated or
@@ -180,25 +184,44 @@ func consentSentinel(i int) string { return "" + strconv.Itoa(i) + "" }
 // built from escaped text. So an argument never passes through a format
 // string, and a translation is plain text.
 func consentMessage(t Translator, key string, args ...template.HTML) template.HTML {
-	sentinels := make([]any, len(args))
+	sentinels := make([]string, len(args))
+	fmtArgs := make([]any, len(args))
 	pairs := make([]string, 0, 2*len(args))
 	for i, a := range args {
 		s := consentSentinel(i)
-		sentinels[i] = s
+		sentinels[i], fmtArgs[i] = s, s
 		pairs = append(pairs, s, string(a))
 	}
 	text, ok := "", false
 	if t != nil {
-		text, ok = t(key, sentinels...)
+		text, ok = t(key, fmtArgs...)
 	}
-	if !ok {
-		text = fmt.Sprintf(render.ConsentMessages[key], sentinels...)
+	if !ok || !usableConsentTranslation(text, sentinels) {
+		text = fmt.Sprintf(render.ConsentMessages[key], fmtArgs...)
 	}
 	escaped := html.EscapeString(text)
 	if len(pairs) == 0 {
 		return template.HTML(escaped) // escaped above
 	}
 	return template.HTML(strings.NewReplacer(pairs...).Replace(escaped)) // escaped text, escaped args
+}
+
+// usableConsentTranslation reports whether a translated message can stand in
+// for the English one: it is not blank, it shows every argument exactly once,
+// and formatting it raised no error (a "%!" marker: a wrong verb, a missing
+// or an extra argument). Otherwise a translation could silently drop the
+// account, the redirect or the client name from the disclosure, or blank a
+// button.
+func usableConsentTranslation(text string, sentinels []string) bool {
+	if strings.TrimSpace(text) == "" || strings.Contains(text, "%!") {
+		return false
+	}
+	for _, s := range sentinels {
+		if strings.Count(text, s) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 func consentPlain(s string) template.HTML {
@@ -298,8 +321,9 @@ button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid 
 {{.Block}}
 </body></html>`))
 
-// newConsentMarker returns a fresh random marker for one render of the block.
-func newConsentMarker() string {
+// NewConsentMarker returns a fresh random marker (16 random bytes, hex) for
+// one render of the consent block.
+func NewConsentMarker() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // crypto/rand.Read never fails
 	return hex.EncodeToString(b)
@@ -314,6 +338,6 @@ func RenderBuiltinConsent(w http.ResponseWriter, _ *http.Request, v ConsentView)
 	w.WriteHeader(http.StatusOK)
 	_ = builtinConsentTemplate.Execute(w, struct{ Title, Block template.HTML }{
 		Title: consentMessage(nil, "consent.page-title"),
-		Block: RenderConsentCore(v, newConsentMarker(), nil),
+		Block: RenderConsentCore(v, NewConsentMarker(), nil),
 	})
 }
