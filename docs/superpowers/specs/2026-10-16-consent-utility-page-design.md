@@ -274,6 +274,11 @@ The markup below is stable API for themes. Renaming or removing a class, changin
   (nexus) styles them for branded pages; a site theme does the same for its hosts.
 - Themes must not hide or reorder the disclosure or the buttons, and every https: stylesheet a
   theme loads is inside the consent page's trust boundary (pin and integrity-hash it).
+- A theme that styles buttons must also style `.kdex-consent-allow[aria-disabled]`: the block's
+  held-look baseline has zero specificity, so any generic button rule overrides it. Without
+  script nothing marks Allow as held; the one-second pointer hold still applies.
+- The contract starts at host-manager 0.24.1. The 0.24.0 block's `where`, `small` and `allow`
+  classes were never part of it and are gone.
 
 ## Implementation notes and deviations
 

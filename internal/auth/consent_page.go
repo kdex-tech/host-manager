@@ -356,11 +356,12 @@ var builtinConsentTemplate = template.Must(template.New("consent").Parse(`<!doct
 <title>{{.Title}}</title>
 <style>
 body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;color:#1a1a1a}
+.kdex-consent{overflow-wrap:anywhere}
 .kdex-consent-where{font-size:1.4rem;font-weight:600;word-break:break-all}
 .kdex-consent-address{color:#555;font-size:.85rem;word-break:break-all}
 .kdex-consent-actions{display:flex;gap:1rem;margin-top:2rem}
 .kdex-consent-actions button{font-size:1rem;padding:.6rem 1.4rem;border-radius:.4rem;border:1px solid #888;background:#fff}
-.kdex-consent-allow{background:#1a56db;color:#fff;border-color:#1a56db}
+.kdex-consent-actions .kdex-consent-allow{background:#1a56db;color:#fff;border-color:#1a56db}
 </style></head><body>
 {{.Block}}
 </body></html>`))

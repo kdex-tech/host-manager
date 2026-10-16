@@ -254,6 +254,7 @@ func TestRenderConsentCore_Conditions(t *testing.T) {
 	out = string(RenderConsentCore(web, "m1", englishOnly))
 	assert.NotContains(t, out, "Website:")
 	assert.NotContains(t, out, "calls itself")
+	assert.NotContains(t, out, "kdex-consent-client", "no client line without a name")
 	assert.Contains(t, out, `<p class="kdex-consent-permissions">It will be able to act on your account with your permissions.</p>`)
 	assert.NotContains(t, out, "and read:")
 }
@@ -426,4 +427,13 @@ func TestRenderConsentCore_StylingContract(t *testing.T) {
 	assert.Contains(t, out, `<div class="kdex-consent-destination" data-kind="device">`)
 	assert.NotContains(t, out, "kdex-consent-where")
 	assert.NotContains(t, out, "kdex-consent-website")
+}
+
+// The built-in page is the fallback on a security page, so its own CSS must
+// keep both buttons legible: Allow's rule must outrank the shared button rule
+// (a class-plus-element base would otherwise give Allow white text on white).
+func TestBuiltinConsent_ButtonsAreLegible(t *testing.T) {
+	body, _ := renderedConsent(t)
+	assert.Contains(t, body, ".kdex-consent-actions .kdex-consent-allow{background:#1a56db;color:#fff;border-color:#1a56db}")
+	assert.Contains(t, body, ".kdex-consent{overflow-wrap:anywhere}", "long values wrap")
 }
