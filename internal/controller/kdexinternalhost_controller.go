@@ -234,6 +234,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	for _, utilityPageType := range []kdexv1alpha1.KDexUtilityPageType{
 		kdexv1alpha1.AnnouncementUtilityPageType,
+		kdexv1alpha1.ConsentUtilityPageType,
 		kdexv1alpha1.ErrorUtilityPageType,
 		kdexv1alpha1.LoginUtilityPageType,
 	} {
@@ -892,7 +893,7 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			})).
 		Watches(
 			&kdexv1alpha1.KDexInternalUtilityPage{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.AnnouncementRef}", "{.Spec.ErrorRef}", "{.Spec.LoginRef}")).
+			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.AnnouncementRef}", "{.Spec.ConsentRef}", "{.Spec.ErrorRef}", "{.Spec.LoginRef}")).
 		Watches(
 			&kdexv1alpha1.KDexPage{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {

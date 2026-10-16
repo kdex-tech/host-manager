@@ -134,6 +134,64 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			Expect(httpRoute.OwnerReferences[0].Name).To(Equal(focalHost))
 			Expect(httpRoute.OwnerReferences[0].Kind).To(Equal("KDexInternalHost"))
 		})
+
+		It("should index a Consent utility page the host references", func() {
+			consentPageName := focalHost + "-consent"
+
+			addOrUpdatePageArchetype(ctx, k8sClient, kdexv1alpha1.KDexPageArchetype{
+				ObjectMeta: metav1.ObjectMeta{Name: "consent-archetype", Namespace: namespace},
+				Spec: kdexv1alpha1.KDexPageArchetypeSpec{
+					Content: "<main>[[ .Content.main ]]</main>",
+				},
+			})
+			assertResourceReady(
+				ctx, k8sClient, "consent-archetype", namespace,
+				&kdexv1alpha1.KDexPageArchetype{}, true)
+
+			Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexInternalUtilityPage{
+				ObjectMeta: metav1.ObjectMeta{Name: consentPageName, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexInternalUtilityPageSpec{
+					HostRef: corev1.LocalObjectReference{Name: focalHost},
+					KDexUtilityPageSpec: kdexv1alpha1.KDexUtilityPageSpec{
+						Type: kdexv1alpha1.ConsentUtilityPageType,
+						ContentEntries: []kdexv1alpha1.ContentEntry{{
+							Slot: "main",
+							ContentEntryStatic: kdexv1alpha1.ContentEntryStatic{
+								RawHTML: "[[ .Extra.consent.Block ]]",
+							},
+						}},
+						PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{
+							Kind: "KDexPageArchetype",
+							Name: "consent-archetype",
+						},
+					},
+				},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexInternalHost{
+				ObjectMeta: metav1.ObjectMeta{Name: focalHost, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexInternalHostSpec{
+					ConsentRef: &corev1.LocalObjectReference{Name: consentPageName},
+					KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+						BrandName:    "KDex Tech",
+						DevMode:      true,
+						ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+						Organization: "KDex Tech Inc.",
+						Routing: kdexv1alpha1.Routing{
+							Domains: []string{"foo.bar"},
+						},
+					},
+				},
+			})).To(Succeed())
+
+			Eventually(func() string {
+				return hostHandler.GetUtilityPageHandler(kdexv1alpha1.ConsentUtilityPageType).Name
+			}, "10s").Should(Equal(consentPageName))
+
+			assertResourceReady(
+				ctx, k8sClient, focalHost, namespace,
+				&kdexv1alpha1.KDexInternalHost{}, true)
+		})
 	})
 })
 

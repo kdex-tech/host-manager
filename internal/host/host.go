@@ -268,12 +268,21 @@ func (hh *HostHandler) l10nRenderer(
 	}
 }
 
+// renderOptions adjusts a full-HTML render.
+type renderOptions struct {
+	// Scriptless leaves the head and foot script slots and the navigations
+	// (each a fetch script) empty, whatever the archetype prints. The consent
+	// page renders this way: no script but host-manager's own may run on it.
+	Scriptless bool
+}
+
 func (hh *HostHandler) L10nRender(
 	handler page.PageHandler,
 	pageMap map[string]any,
 	l language.Tag,
 	extraTemplateData map[string]any,
 	translations *Translations,
+	opts renderOptions,
 ) (string, error) {
 	renderer := hh.l10nRenderer(handler, pageMap, l, extraTemplateData, translations)
 
@@ -283,11 +292,13 @@ func (hh *HostHandler) L10nRender(
 	renderer.Contents = handler.ContentToHTMLMap()
 	renderer.Footer = handler.Footer
 	renderer.Header = handler.Header
-	renderer.Navigations = handler.NavigationToHTMLMap()
 	renderer.TemplateContent = handler.MainTemplate
-	renderer.FootScript = hh.FootScriptToHTML(handler)
-	renderer.HeadScript = hh.HeadScriptToHTML(handler)
 	renderer.Meta = hh.MetaToString(handler, l)
+	if !opts.Scriptless {
+		renderer.Navigations = handler.NavigationToHTMLMap()
+		renderer.FootScript = hh.FootScriptToHTML(handler)
+		renderer.HeadScript = hh.HeadScriptToHTML(handler)
+	}
 
 	return renderer.RenderPage()
 }
@@ -333,7 +344,7 @@ func (hh *HostHandler) L10nRenders(
 ) map[string]string {
 	l10nRenders := make(map[string]string)
 	for _, l := range translations.Languages() {
-		rendered, err := hh.L10nRender(handler, pageMaps[l], l, map[string]any{}, translations)
+		rendered, err := hh.L10nRender(handler, pageMaps[l], l, map[string]any{}, translations, renderOptions{})
 		if err != nil {
 			hh.log.Error(err, "failed to render page for language", "page", handler.Name, "language", l)
 			continue
@@ -1198,7 +1209,7 @@ func (hh *HostHandler) registerPath(path string, info ko.PathInfo, m map[string]
 	m[path] = current
 }
 
-func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPageType, l language.Tag, extraTemplateData map[string]any, translations *Translations) string {
+func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPageType, l language.Tag, extraTemplateData map[string]any, translations *Translations, opts renderOptions) string {
 	ph, ok := hh.utilityPages[utilityType]
 	if !ok {
 		return ""
@@ -1207,8 +1218,10 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 	utilityCache := hh.cacheManager.GetCache("utility", cache.CacheOptions{})
 	cacheKey := ph.CacheKey(l)
 
-	// Only attempt cache logic if there's no dynamic extra data
-	if len(extraTemplateData) == 0 {
+	// Only attempt cache logic for the plain render: the cache key carries
+	// neither dynamic extra data nor the render options.
+	cacheable := len(extraTemplateData) == 0 && opts == (renderOptions{})
+	if cacheable {
 		rendered, ok, isCurrent, err := utilityCache.Get(context.Background(), cacheKey)
 		if err == nil && ok {
 			if isCurrent {
@@ -1236,7 +1249,7 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 				defer cancel()
 
 				// Re-render to ensure any CRD changes are reflected in vN
-				newRender, err := hh.L10nRender(ph, map[string]any{}, l, extraTemplateData, translations)
+				newRender, err := hh.L10nRender(ph, map[string]any{}, l, extraTemplateData, translations, opts)
 				if err == nil {
 					_ = utilityCache.Set(bgCtx, cacheKey, newRender)
 				}
@@ -1246,13 +1259,13 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 	}
 
 	// Standard Render Path (Cache Miss or Extra Data)
-	rendered, err := hh.L10nRender(ph, map[string]any{}, l, extraTemplateData, translations)
+	rendered, err := hh.L10nRender(ph, map[string]any{}, l, extraTemplateData, translations, opts)
 	if err != nil {
 		hh.log.Error(err, "failed to render utility page", "page", ph.Name, "language", l)
 		return ""
 	}
 
-	if len(extraTemplateData) == 0 {
+	if cacheable {
 		if err := utilityCache.Set(context.Background(), cacheKey, rendered); err != nil {
 			hh.log.Error(err, "failed to set utility cache", "page", ph.Name, "language", l)
 		}
@@ -1288,6 +1301,7 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 		l,
 		map[string]any{"ErrorCode": code, "ErrorCodeString": http.StatusText(code), "ErrorMessage": msg},
 		&hh.Translations,
+		renderOptions{},
 	)
 
 	if rendered == "" {

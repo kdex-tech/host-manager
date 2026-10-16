@@ -387,7 +387,8 @@ func (hh *HostHandler) addHandlerAndRegister(
 // newOAuth2 builds the auth.OAuth2 every OAuth route uses, so a hook set for
 // one (consent rendering, the consent origin check) cannot be missed on
 // another. The host's scheme and domains are snapshotted at mux build, like
-// ResourceAudiences, so the request path takes no host lock.
+// ResourceAudiences, so the request path takes no host lock; renderConsentPage
+// takes its own read lock.
 func (hh *HostHandler) newOAuth2() *auth.OAuth2 {
 	scheme := hh.scheme
 	var domains []string
@@ -400,6 +401,7 @@ func (hh *HostHandler) newOAuth2() *auth.OAuth2 {
 		ResourceAudiences: hh.oauth2ResourceAudiences(),
 		ExchangeTargets:   hh.exchangeTargetAudiences(),
 		AccessTokenTTL:    hh.authConfig.TokenTTL,
+		RenderConsent:     hh.renderConsentPage,
 		ConsentOriginAllowed: func(r *http.Request) bool {
 			return consentOriginAllowed(r, scheme, domains)
 		},
@@ -1015,6 +1017,7 @@ func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
 			l,
 			map[string]any{},
 			&hh.Translations,
+			renderOptions{},
 		)
 
 		if rendered == "" {
