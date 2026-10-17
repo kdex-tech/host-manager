@@ -706,7 +706,7 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 		return false, nil
 	}
 
-	pat, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
+	pat, ttl, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
 	if err != nil {
 		// This is the SAME token response MCP clients receive from the
 		// standard-JWT path just below — the exact client class #168 was
@@ -718,7 +718,7 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 
 	resp := TokenResponse{
 		AccessToken:  pat,
-		ExpiresIn:    int(o.AccessTokenTTL.Seconds()),
+		ExpiresIn:    int(ttl.Seconds()),
 		RefreshToken: ts.RefreshToken,
 		Scope:        ts.Scope,
 		TokenType:    tokenTypeBearer,

@@ -489,6 +489,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// White-label API token prefix: per-host spec wins, else the
 	// NexusConfiguration framework default. Empty => bare "v4.public." tokens.
 	apiTokenPrefix := resolveAPITokenPrefix(internalHost.Spec.Auth, r.Configuration)
+	apiTokenMaxTTL, err := resolveAPITokenMaxTTL(internalHost.Spec.Auth)
+	if err != nil {
+		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
+	}
 
 	authConfigBuilder := auth.NewConfigBuilder().WithAuthClientLoader(
 		func() (map[string]auth.AuthClient, error) {
@@ -522,7 +526,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				return nil, err
 			}
 			if tm != nil {
-				tm.WithTokenPrefix(apiTokenPrefix)
+				tm.WithTokenPrefix(apiTokenPrefix).WithMaxTTL(apiTokenMaxTTL)
 			}
 			return tm, nil
 		},
@@ -1921,6 +1925,24 @@ func resolveAPITokenPrefix(authSpec *kdexv1alpha1.Auth, cfg configuration.NexusC
 		return authSpec.APIToken.TokenPrefix
 	}
 	return cfg.APIToken.TokenPrefix
+}
+
+// resolveAPITokenMaxTTL returns the host's maximum API token lifetime from
+// KDexHost.spec.auth.apiToken.maxTTL, zero when unset (unbounded). A value CEL
+// should have refused is an error rather than "unbounded", so a host never
+// loses its bound to a bad edit. See kdex-tech/host-manager#238.
+func resolveAPITokenMaxTTL(authSpec *kdexv1alpha1.Auth) (time.Duration, error) {
+	if authSpec == nil || authSpec.APIToken == nil || authSpec.APIToken.MaxTTL == "" {
+		return 0, nil
+	}
+	maxTTL, err := time.ParseDuration(authSpec.APIToken.MaxTTL)
+	if err != nil {
+		return 0, fmt.Errorf("spec.auth.apiToken.maxTTL: %w", err)
+	}
+	if maxTTL <= 0 {
+		return 0, fmt.Errorf("spec.auth.apiToken.maxTTL: %s is not a positive duration", authSpec.APIToken.MaxTTL)
+	}
+	return maxTTL, nil
 }
 
 func (r *KDexInternalHostReconciler) getMemoizedService() *corev1.ServiceSpec {

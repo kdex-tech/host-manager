@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -38,6 +39,10 @@ var (
 // parse, so the bytes handed to the parser are identical to what V4Sign
 // produced and the signature is unaffected.
 const pasetoV4PublicHeader = "v4.public."
+
+// ErrTTLExceedsMax is returned when a mint asks for a lifetime longer than the
+// host's KDexHost.spec.auth.apiToken.maxTTL. See kdex-tech/host-manager#238.
+var ErrTTLExceedsMax = errors.New("ttl exceeds the host's maximum API token lifetime")
 
 type TokenData struct {
 	Action     string `json:"act"`
@@ -89,6 +94,7 @@ type TokenManager struct {
 	activeKey       KeyPair
 	issuer          string
 	keyPairs        KeyPairs
+	maxTTL          time.Duration
 	revocationCache cache.Cache
 	tokenPrefix     string
 }
@@ -181,6 +187,29 @@ func (tm *TokenManager) WithTokenPrefix(prefix string) *TokenManager {
 // reaching into the manager's internals.
 func (tm *TokenManager) TokenPrefix() string {
 	return tm.tokenPrefix
+}
+
+// WithMaxTTL sets the longest lifetime this host mints an API token for; zero
+// (the default) leaves mint lifetimes unbounded. The controller sources it from
+// KDexHost.spec.auth.apiToken.maxTTL. Returns the receiver for chaining.
+func (tm *TokenManager) WithMaxTTL(maxTTL time.Duration) *TokenManager {
+	tm.maxTTL = maxTTL
+	return tm
+}
+
+// MaxTTL returns the host's maximum API token lifetime, zero when unbounded.
+func (tm *TokenManager) MaxTTL() time.Duration {
+	return tm.maxTTL
+}
+
+// CapTTL shortens ttl to the host's maximum. It is for lifetimes the server
+// chooses itself; a lifetime a caller asked for is refused, not shortened, so
+// the caller is never handed a token that expires sooner than it requested.
+func (tm *TokenManager) CapTTL(ttl time.Duration) time.Duration {
+	if tm.maxTTL > 0 && ttl > tm.maxTTL {
+		return tm.maxTTL
+	}
+	return ttl
 }
 
 // wrap converts a freshly signed token to its on-the-wire form by REPLACING the
@@ -295,6 +324,12 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 			"refusing to mint an API token for a credential that names nobody; "+sign.SubjectlessRemedy,
 			"audience", aud, "action", action)
 		return "", sign.ErrSubjectlessCredential
+	}
+
+	// Every mint path signs here, so the host's maximum holds whichever one
+	// computed ttl (host-manager#238).
+	if tm.maxTTL > 0 && ttl > tm.maxTTL {
+		return "", fmt.Errorf("%w: requested %s, maximum %s", ErrTTLExceedsMax, ttl, tm.maxTTL)
 	}
 
 	now := time.Now()

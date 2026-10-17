@@ -3,12 +3,14 @@ package host
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
@@ -237,10 +239,17 @@ func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.R
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	err := json.NewEncoder(w).Encode(map[string]any{
+	doc := map[string]any{
 		"keys": keys,
-	})
+	}
+	// Published so a client can choose a valid mint ttl without guessing
+	// (host-manager#238). Absent when mint lifetimes are unbounded.
+	if maxTTL := hh.authConfig.TokenManager.MaxTTL(); maxTTL > 0 {
+		doc["max_ttl"] = maxTTL.String()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	err := json.NewEncoder(w).Encode(doc)
 	if err != nil {
 		log.Error(err, "Failed to encode response")
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
@@ -338,18 +347,27 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	ttl, err := time.ParseDuration(req.TTL)
-	if err != nil {
-		ttl = 24 * time.Hour // Default
-	}
-
 	if hh.authConfig.TokenManager == nil {
 		log.Error(nil, "Token manager not configured")
 		http.Error(w, "Token manager not configured", http.StatusNotImplemented)
 		return
 	}
 
+	// An absent ttl defaults to 24h, capped at the host's maximum. An explicit
+	// ttl above the maximum is refused below rather than shortened, so the
+	// caller never holds a token that expires sooner than it asked for
+	// (host-manager#238).
+	ttl, err := time.ParseDuration(req.TTL)
+	if err != nil {
+		ttl = hh.authConfig.TokenManager.CapTTL(24 * time.Hour)
+	}
+
 	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, req.Action, req.Scope, ttl)
+	if errors.Is(err, apitoken.ErrTTLExceedsMax) {
+		log.V(1).Info("mint refused: ttl above the host maximum", "subject", requestingSub, "target", subject, "error", err.Error())
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		log.Error(err, "Failed to mint token")
 		http.Error(w, "Failed to mint token", http.StatusInternalServerError)
@@ -460,6 +478,10 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 													Type: &openapi.Types{openapi.TypeArray},
 												},
 											},
+											"max_ttl": &openapi.SchemaRef{Value: &openapi.Schema{
+												Description: "The longest ttl /-/apitokens/mint accepts, as a Go duration. Absent when mint lifetimes are unbounded.",
+												Type:        &openapi.Types{openapi.TypeString},
+											}},
 										},
 										Type: &openapi.Types{openapi.TypeObject},
 									},
@@ -501,7 +523,10 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 													"aud": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"scp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"sub": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{
+														Description: "Token lifetime as a Go duration. Defaults to 24h, capped at the host's max_ttl (see /.well-known/pks.json). A ttl above max_ttl is refused with 400.",
+														Type:        &openapi.Types{openapi.TypeString},
+													}},
 												},
 												Required: []string{"aud", "sub"},
 												Type:     &openapi.Types{openapi.TypeObject},

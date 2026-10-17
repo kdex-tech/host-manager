@@ -53,7 +53,7 @@ func newTestExchangerWithTokenManager(t *testing.T) *Exchanger {
 func TestMintResourcePATSetsAudience(t *testing.T) {
 	e := newTestExchangerWithTokenManager(t)
 	resource := "https://dev.knowdrive.ai/api/v1/mcp"
-	pat, err := e.MintResourcePAT(resource, "alice@example.com", "functions:/api/v1/mcp:read", time.Hour)
+	pat, _, err := e.MintResourcePAT(resource, "alice@example.com", "functions:/api/v1/mcp:read", time.Hour)
 	if err != nil {
 		t.Fatalf("MintResourcePAT: %v", err)
 	}
@@ -204,6 +204,29 @@ func TestOAuth2TokenHandlerMintsPATForResource(t *testing.T) {
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 		// Standard JWT issued (id_token present for openid scope).
 		assert.NotEmpty(t, resp["id_token"])
+	})
+
+	// The server picks this PAT's lifetime, so a host maximum below the access
+	// token TTL shortens it -- and expires_in must say so (host-manager#238).
+	t.Run("a host maximum caps the PAT and its expires_in", func(t *testing.T) {
+		tm.WithMaxTTL(30 * time.Minute)
+		t.Cleanup(func() { tm.WithMaxTTL(0) })
+
+		w := post(url.Values{
+			"grant_type":    {"authorization_code"},
+			"client_id":     {"valid-client"},
+			"client_secret": {"valid-secret"},
+			"code":          {newCode()},
+			"redirect_uri":  {"http://localhost/cb"},
+			"resource":      {resource},
+		})
+		require.Equal(t, http.StatusOK, w.Result().StatusCode, w.Body.String())
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.EqualValues(t, 1800, resp["expires_in"])
+		data, err := tm.ValidateToken(context.Background(), resp["access_token"].(string), resource)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1800, data.Expiration-data.IssuedAt)
 	})
 }
 

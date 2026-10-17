@@ -596,11 +596,17 @@ func (e *Exchanger) Roles() []RoleInfo {
 // resource. The PAT's aud is the resource URI (RFC 8707); the subject's
 // entitlements are NOT baked in — the proxy re-resolves them from the
 // subject's KDexRoleBindings at request time.
-func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Duration) (string, error) {
+//
+// ttl is the server's choice, not a caller's, so it is capped at the host's
+// maximum API token lifetime rather than refused; the returned duration is the
+// lifetime actually minted, for expires_in (host-manager#238).
+func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Duration) (string, time.Duration, error) {
 	if e.config.TokenManager == nil {
-		return "", fmt.Errorf("no token manager configured")
+		return "", 0, fmt.Errorf("no token manager configured")
 	}
-	return e.config.TokenManager.MintStatelessKey(resource, subject, "mcp", scope, ttl)
+	ttl = e.config.TokenManager.CapTTL(ttl)
+	pat, err := e.config.TokenManager.MintStatelessKey(resource, subject, "mcp", scope, ttl)
+	return pat, ttl, err
 }
 
 // AuthCodeURL is the upstream provider's authorization URL for one browser
