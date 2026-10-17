@@ -430,9 +430,11 @@ func TestRenderConsentCore_StylingContract(t *testing.T) {
 }
 
 // The built-in page is the fallback on a security page, so its own CSS must
-// keep both buttons legible: Allow's rule must outrank the shared button rule
-// (a class-plus-element base would otherwise give Allow white text on white).
-func TestBuiltinConsent_ButtonsAreLegible(t *testing.T) {
+// keep both buttons legible. This pins the exact rules that do it: Allow's is
+// scoped under .kdex-consent-actions so it outranks the shared button rule (a
+// class-plus-element base once gave Allow white text on white). It checks the
+// text, not the cascade, so restyling the page means updating it deliberately.
+func TestBuiltinConsent_PinsTheLegibleButtonRules(t *testing.T) {
 	body, _ := renderedConsent(t)
 	assert.Contains(t, body, ".kdex-consent-actions .kdex-consent-allow{background:#1a56db;color:#fff;border-color:#1a56db}")
 	assert.Contains(t, body, ".kdex-consent{overflow-wrap:anywhere}", "long values wrap")

@@ -193,7 +193,7 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	} else {
-		ttl := 24 * time.Hour
+		ttl := defaultRevocationTTL(hh.authConfig.TokenManager)
 		if req.TTL != "" {
 			if t, err := time.ParseDuration(req.TTL); err == nil {
 				ttl = t
@@ -213,6 +213,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
+}
+
+// defaultRevocationTTL is how long a metadata revocation lasts when the request
+// names no ttl. It must outlive any token it revokes, so on a host with a
+// maximum lifetime longer than 24h it is that maximum; a revocation that
+// expires first would let the token validate again (host-manager#238).
+func defaultRevocationTTL(tm *apitoken.TokenManager) time.Duration {
+	return max(24*time.Hour, tm.MaxTTL())
 }
 
 func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
@@ -353,13 +361,17 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// An absent ttl defaults to 24h, capped at the host's maximum. An explicit
-	// ttl above the maximum is refused below rather than shortened, so the
-	// caller never holds a token that expires sooner than it asked for
-	// (host-manager#238).
-	ttl, err := time.ParseDuration(req.TTL)
-	if err != nil {
-		ttl = hh.authConfig.TokenManager.CapTTL(24 * time.Hour)
+	// An absent ttl defaults to 24h, capped at the host's maximum. A ttl that
+	// is unreadable, non-positive, or above the maximum is refused rather than
+	// replaced, so the caller never holds a token that expires sooner than it
+	// asked for (host-manager#238).
+	ttl := hh.authConfig.TokenManager.CapTTL(24 * time.Hour)
+	if req.TTL != "" {
+		if ttl, err = time.ParseDuration(req.TTL); err != nil || ttl <= 0 {
+			log.V(1).Info("mint refused: unusable ttl", "subject", requestingSub, "ttl", req.TTL)
+			http.Error(w, "ttl must be a positive Go duration such as 2160h", http.StatusBadRequest)
+			return
+		}
 	}
 
 	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, req.Action, req.Scope, ttl)

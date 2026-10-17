@@ -106,3 +106,35 @@ func TestApitokenDiscovery_PublishesTheHostMaximum(t *testing.T) {
 		})
 	}
 }
+
+// "Never silently shortened" has to hold for a ttl the server cannot read too:
+// "90d" is a natural mistake (Go has no day unit), and "0s"/"-1h" would mint a
+// token that is already expired.
+func TestApitokenMint_RefusesAnUnusableTTL(t *testing.T) {
+	for _, ttl := range []string{"90d", "forever", "0s", "-1h"} {
+		t.Run(ttl, func(t *testing.T) {
+			hh, _ := crossSubjectHost(t)
+
+			rr := mintWithTTL(t, hh, "alice", selfServiceGrant, "alice", ttl)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestRevocationTTL_OutlivesTheLongestMintableToken(t *testing.T) {
+	_, tm := crossSubjectHost(t)
+	if got := defaultRevocationTTL(tm); got != 24*time.Hour {
+		t.Fatalf("unbounded host: revocation ttl = %s, want 24h", got)
+	}
+	tm.WithMaxTTL(2160 * time.Hour)
+	if got := defaultRevocationTTL(tm); got != 2160*time.Hour {
+		t.Fatalf("revocation ttl = %s, want the 2160h maximum so a revoked token cannot come back", got)
+	}
+	tm.WithMaxTTL(time.Hour)
+	if got := defaultRevocationTTL(tm); got != 24*time.Hour {
+		t.Fatalf("revocation ttl = %s, want 24h: a lowered maximum does not shorten tokens minted before it", got)
+	}
+}
