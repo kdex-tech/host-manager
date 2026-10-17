@@ -160,3 +160,43 @@ var _ = Describe("KDexInternalPackageReferencesReconciler.secretToRequests", fun
 		Expect(r.secretToRequests(ctx, secret(ns, "npm-auth", hostLabels, npm))).To(ConsistOf(req("rsi-packages")))
 	})
 })
+
+// A Secret watch on a cluster-wide cache sees every write; only a change the
+// render reads may re-render (and re-verify) the IPR.
+var _ = Describe("npmSecretChanged", func() {
+	base := func() *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "npm-auth", Namespace: "kdex",
+				Labels:      map[string]string{"kdex.dev/host": "rsi"},
+				Annotations: map[string]string{"kdex.dev/secret-type": "npm"},
+			},
+			Data: map[string][]byte{".npmrc": []byte("//r/:_authToken=old")},
+		}
+	}
+
+	It("fires when the data changes", func() {
+		changed := base()
+		changed.Data[".npmrc"] = []byte("//r/:_authToken=new")
+		Expect(npmSecretChanged(base(), changed)).To(BeTrue())
+	})
+
+	It("fires when the labels change, since they decide selection", func() {
+		changed := base()
+		changed.Labels = nil
+		Expect(npmSecretChanged(base(), changed)).To(BeTrue())
+	})
+
+	It("fires when the secret-type annotation changes", func() {
+		changed := base()
+		delete(changed.Annotations, "kdex.dev/secret-type")
+		Expect(npmSecretChanged(base(), changed)).To(BeTrue())
+	})
+
+	It("ignores a metadata-only write such as a force-sync annotation", func() {
+		changed := base()
+		changed.Annotations["force-sync"] = "1729200000"
+		changed.ResourceVersion = "42"
+		Expect(npmSecretChanged(base(), changed)).To(BeFalse())
+	})
+})

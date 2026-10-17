@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -371,6 +372,27 @@ func ResolveSecrets(ctx context.Context, c client.Client, objectStatus *kdexv1al
 		objectStatus.Attributes[secret.Name+".secret.generation"] = fmt.Sprintf("%d", secret.GetGeneration())
 	}
 	return secrets, nil
+}
+
+// focalHostSelectsSecret reports whether the focal host's secretSelector
+// matches secret: the selection ResolveSecrets makes at reconcile, for the
+// Secret watches that must enqueue exactly what a reconcile would read.
+func focalHostSelectsSecret(ctx context.Context, c client.Client, namespace, focalHost string, secret *corev1.Secret) bool {
+	if secret.Namespace != namespace {
+		return false
+	}
+	var internalHost kdexv1alpha1.KDexInternalHost
+	if err := c.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, &internalHost); err != nil {
+		return false
+	}
+	if internalHost.Spec.SecretSelector == nil {
+		return false
+	}
+	sel, err := metav1.LabelSelectorAsSelector(internalHost.Spec.SecretSelector)
+	if err != nil {
+		return false
+	}
+	return sel.Matches(labels.Set(secret.Labels))
 }
 
 func isReady(

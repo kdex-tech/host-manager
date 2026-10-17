@@ -42,7 +42,6 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -958,23 +957,7 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				secret, ok := obj.(*corev1.Secret)
-				if !ok || secret.Namespace != r.ControllerNamespace {
-					return nil
-				}
-
-				var internalHost kdexv1alpha1.KDexInternalHost
-				if err := r.Get(ctx, types.NamespacedName{Name: r.FocalHost, Namespace: r.ControllerNamespace}, &internalHost); err != nil {
-					return nil
-				}
-
-				if internalHost.Spec.SecretSelector == nil {
-					return nil
-				}
-				sel, err := metav1.LabelSelectorAsSelector(internalHost.Spec.SecretSelector)
-				if err != nil {
-					return nil
-				}
-				if !sel.Matches(labels.Set(secret.Labels)) {
+				if !ok || !focalHostSelectsSecret(ctx, r.Client, r.ControllerNamespace, r.FocalHost, secret) {
 					return nil
 				}
 

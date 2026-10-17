@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -32,12 +33,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -210,7 +211,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		"secretOperation", secretOp,
 	)
 
-	builder := packref.PackRef{
+	packRef := packref.PackRef{
 		Client:           r.Client,
 		ConfigMap:        configMap,
 		InternalHost:     internalHost,
@@ -224,7 +225,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		ServiceAccount:   os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
 	}
 
-	job, err := builder.GetOrCreatePackRefJob(ctx, &ipr)
+	job, err := packRef.GetOrCreatePackRefJob(ctx, &ipr)
 	if err != nil {
 		kdexv1alpha1.SetConditions(
 			&ipr.Status.Conditions,
@@ -358,7 +359,9 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		// versions BEFORE publishing status.image, so a poisoned build is
 		// never promoted onto the serving Deployment.
 		// See kdex-tech/host-manager#161.
-		if mismatches, verifyErr := r.verifyBuiltImage(ctx, &ipr, builtImage, secrets); verifyErr != nil {
+		if alreadyVerified(&ipr, builtImage) {
+			log.V(3).Info("packages image already verified against its pins", "image", builtImage)
+		} else if mismatches, verifyErr := r.verifyBuiltImage(ctx, &ipr, builtImage, secrets); verifyErr != nil {
 			// Could not verify (registry unreachable, unfamiliar image shape).
 			// Do NOT treat unverifiable as poisoned — that would fail every
 			// build on a registry blip. Publish and record the gap.
@@ -453,7 +456,14 @@ func (r *KDexInternalPackageReferencesReconciler) SetupWithManager(mgr ctrl.Mana
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToRequests)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToRequests),
+			builder.WithPredicates(predicate.Funcs{
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldSecret, okOld := e.ObjectOld.(*corev1.Secret)
+					newSecret, okNew := e.ObjectNew.(*corev1.Secret)
+					return !okOld || !okNew || npmSecretChanged(oldSecret, newSecret)
+				},
+			})).
 		WithEventFilter(enabledFilter).
 		WithOptions(
 			controller.TypedOptions[reconcile.Request]{
@@ -482,9 +492,8 @@ func (r *KDexInternalPackageReferencesReconciler) secretToRequests(ctx context.C
 		return nil
 	}
 
-	selected := secret.Namespace == r.ControllerNamespace &&
-		secret.Annotations["kdex.dev/secret-type"] == "npm" &&
-		r.hostSelects(ctx, secret)
+	selected := isNPMSecret(*secret) &&
+		focalHostSelectsSecret(ctx, r.Client, r.ControllerNamespace, r.FocalHost, secret)
 
 	var requests []reconcile.Request
 	for _, ipr := range iprs.Items {
@@ -500,33 +509,47 @@ func (r *KDexInternalPackageReferencesReconciler) secretToRequests(ctx context.C
 	return requests
 }
 
-// hostSelects reports whether the focal host's secretSelector matches secret,
-// the same selection ResolveSecrets makes at reconcile.
-func (r *KDexInternalPackageReferencesReconciler) hostSelects(ctx context.Context, secret *corev1.Secret) bool {
-	var internalHost kdexv1alpha1.KDexInternalHost
-	if err := r.Get(ctx, types.NamespacedName{Name: r.FocalHost, Namespace: r.ControllerNamespace}, &internalHost); err != nil {
-		return false
+// npmSecretChanged reports whether an update touches anything the render
+// reads: the data, the labels the host selector matches, or the secret-type
+// annotation. The cache is cluster-wide, so without this every metadata-only
+// write (an ExternalSecret force-sync annotation, say) would re-reconcile.
+func npmSecretChanged(oldSecret, newSecret *corev1.Secret) bool {
+	return !reflect.DeepEqual(oldSecret.Data, newSecret.Data) ||
+		!maps.Equal(oldSecret.Labels, newSecret.Labels) ||
+		isNPMSecret(*oldSecret) != isNPMSecret(*newSecret)
+}
+
+// alreadyVerified reports whether builtImage is the image status already
+// published as verified against its pins. A digest cannot change, so pulling
+// and parsing it again would only repeat work (#161 verification, made more
+// frequent by the #239 Secret watch).
+func alreadyVerified(ipr *kdexv1alpha1.KDexInternalPackageReferences, builtImage string) bool {
+	return ipr.Status.Attributes["image"] == builtImage && ipr.Status.Attributes["verified"] == "pins"
+}
+
+// isNPMSecret reports whether a host-selected Secret contributes to the
+// rendered .npmrc. The render and the Secret watch both ask this, so they can
+// never disagree about which Secrets matter.
+func isNPMSecret(s corev1.Secret) bool {
+	return s.Annotations["kdex.dev/secret-type"] == "npm"
+}
+
+// secretRefKey returns the Secret a packageReference's secretRef names; the
+// namespace defaults to the IPR's.
+func secretRefKey(ipr *kdexv1alpha1.KDexInternalPackageReferences, pkg kdexv1alpha1.PackageReference) (client.ObjectKey, bool) {
+	if pkg.SecretRef == nil {
+		return client.ObjectKey{}, false
 	}
-	if internalHost.Spec.SecretSelector == nil {
-		return false
+	namespace := pkg.SecretRef.Namespace
+	if namespace == "" {
+		namespace = ipr.Namespace
 	}
-	sel, err := metav1.LabelSelectorAsSelector(internalHost.Spec.SecretSelector)
-	if err != nil {
-		return false
-	}
-	return sel.Matches(labels.Set(secret.Labels))
+	return client.ObjectKey{Namespace: namespace, Name: pkg.SecretRef.Name}, true
 }
 
 func referencesSecret(ipr *kdexv1alpha1.KDexInternalPackageReferences, secret *corev1.Secret) bool {
 	for _, pkg := range ipr.Spec.PackageReferences {
-		if pkg.SecretRef == nil || pkg.SecretRef.Name != secret.Name {
-			continue
-		}
-		namespace := pkg.SecretRef.Namespace
-		if namespace == "" {
-			namespace = ipr.Namespace
-		}
-		if namespace == secret.Namespace {
+		if key, ok := secretRefKey(ipr, pkg); ok && key == client.ObjectKeyFromObject(secret) {
 			return true
 		}
 	}
@@ -682,24 +705,16 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 
 			fmt.Fprintf(&npmrcContent, "registry=%s\n", npmRegistry)
 
-			npmSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "npm" })
+			npmSecrets := secrets.Filter(isNPMSecret)
 
 			for _, s := range npmSecrets {
 				fmt.Fprintf(&npmrcContent, "%s\n", s.Data[".npmrc"])
 			}
 
 			for _, packageReference := range ipr.Spec.PackageReferences {
-				if packageReference.SecretRef != nil {
-					namespace := ipr.Namespace
-					if packageReference.SecretRef.Namespace != "" {
-						namespace = packageReference.SecretRef.Namespace
-					}
-
+				if key, ok := secretRefKey(ipr, packageReference); ok {
 					secret := &corev1.Secret{}
-					if err := r.Get(ctx, client.ObjectKey{
-						Namespace: namespace,
-						Name:      packageReference.SecretRef.Name,
-					}, secret); err != nil {
+					if err := r.Get(ctx, key, secret); err != nil {
 						return err
 					}
 					fmt.Fprintf(&npmrcContent, "%s\n", secret.Data[".npmrc"])
