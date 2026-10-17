@@ -32,7 +32,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -450,6 +453,7 @@ func (r *KDexInternalPackageReferencesReconciler) SetupWithManager(mgr ctrl.Mana
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToRequests)).
 		WithEventFilter(enabledFilter).
 		WithOptions(
 			controller.TypedOptions[reconcile.Request]{
@@ -458,6 +462,75 @@ func (r *KDexInternalPackageReferencesReconciler) SetupWithManager(mgr ctrl.Mana
 		).
 		Named("kdexinternalpackagereferences").
 		Complete(r)
+}
+
+// secretToRequests maps a Secret to the focal-host IPRs whose rendered .npmrc
+// reads it: every IPR when it is a host-selected `kdex.dev/secret-type: npm`
+// Secret, and any IPR naming it in a packageReference secretRef. Without this
+// a rotated credential stays in the rendered Secret until something else
+// reconciles the IPR. Re-rendering does not rebuild: the packager Job is keyed
+// by generation. See kdex-tech/host-manager#239.
+func (r *KDexInternalPackageReferencesReconciler) secretToRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	var iprs kdexv1alpha1.KDexInternalPackageReferencesList
+	if err := r.List(ctx, &iprs, client.InNamespace(r.ControllerNamespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "listing package references for secret watch", "secret", secret.Name)
+		return nil
+	}
+
+	selected := secret.Namespace == r.ControllerNamespace &&
+		secret.Annotations["kdex.dev/secret-type"] == "npm" &&
+		r.hostSelects(ctx, secret)
+
+	var requests []reconcile.Request
+	for _, ipr := range iprs.Items {
+		if ipr.Spec.HostRef.Name != r.FocalHost {
+			continue
+		}
+		if selected || referencesSecret(&ipr, secret) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: ipr.Name, Namespace: ipr.Namespace},
+			})
+		}
+	}
+	return requests
+}
+
+// hostSelects reports whether the focal host's secretSelector matches secret,
+// the same selection ResolveSecrets makes at reconcile.
+func (r *KDexInternalPackageReferencesReconciler) hostSelects(ctx context.Context, secret *corev1.Secret) bool {
+	var internalHost kdexv1alpha1.KDexInternalHost
+	if err := r.Get(ctx, types.NamespacedName{Name: r.FocalHost, Namespace: r.ControllerNamespace}, &internalHost); err != nil {
+		return false
+	}
+	if internalHost.Spec.SecretSelector == nil {
+		return false
+	}
+	sel, err := metav1.LabelSelectorAsSelector(internalHost.Spec.SecretSelector)
+	if err != nil {
+		return false
+	}
+	return sel.Matches(labels.Set(secret.Labels))
+}
+
+func referencesSecret(ipr *kdexv1alpha1.KDexInternalPackageReferences, secret *corev1.Secret) bool {
+	for _, pkg := range ipr.Spec.PackageReferences {
+		if pkg.SecretRef == nil || pkg.SecretRef.Name != secret.Name {
+			continue
+		}
+		namespace := pkg.SecretRef.Namespace
+		if namespace == "" {
+			namespace = ipr.Namespace
+		}
+		if namespace == secret.Namespace {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupJobs deletes packager Jobs from generations strictly older than
