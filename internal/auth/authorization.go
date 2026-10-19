@@ -55,6 +55,13 @@ func (ac *AuthorizationChecker) CheckAccess(
 	return ac.ec.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, requirements, verbs...)
 }
 
+// HoldsScope reports whether the caller holds the opaque scope. An opaque
+// scope matches only by exact name, so no wildcard or `all` grant implies it.
+func (ac *AuthorizationChecker) HoldsScope(ctx context.Context, scope string) bool {
+	requirements := ac.ParseRequirements([]kdexv1alpha1.SecurityRequirement{{"bearer": {scope}}})
+	return ac.ec.VerifyParsedEntitlements(ac.GetParsedEntitlements(ctx), requirements)
+}
+
 func (ac *AuthorizationChecker) CalculateRequirements(
 	resource string,
 	resourceName string,

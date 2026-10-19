@@ -49,7 +49,7 @@ func (e *Exchanger) BumpGrantGeneration(ctx context.Context) {
 
 // resolveClaimsRaw resolves a subject's backend Lookup claims live via the
 // provider with no cache — the shared core of the cached ResolveSubjectClaims and
-// the freshness-critical resolveSubjectClaimsDirect. A non-nil error means a
+// the freshness-critical ResolveSubjectClaimsLive. A non-nil error means a
 // configured Lookup was unavailable and the result cannot be trusted as complete;
 // an authorization-path caller must fail open. Providers that only implement the
 // no-error ResolveClaims (test stubs) never error here.
@@ -70,11 +70,13 @@ func (e *Exchanger) resolveClaimsRaw(subject string) (jwt.MapClaims, error) {
 	return nil, nil
 }
 
-// resolveSubjectClaimsDirect resolves backend Lookup claims fresh, bypassing the
-// 60s subjectResolveCache (the grant cache is the coalescing layer for the cookie
-// path, so this must reach a live Lookup or a revocation would lag). It surfaces a
-// Lookup-unavailable error so refreshSessionGrants fails open on an outage (#203).
-func (e *Exchanger) resolveSubjectClaimsDirect(subject string) (jwt.MapClaims, error) {
+// ResolveSubjectClaimsLive resolves backend Lookup claims fresh, bypassing the
+// 60s subjectResolveCache, for a decision that must not lag a change: the
+// cookie session-grant refresh (whose grant cache is its coalescing layer) and
+// the provisioned-subject mint (#237). It surfaces a Lookup-unavailable error,
+// so each caller chooses its own outage behaviour: the grant refresh fails open
+// to the frozen token (#203), the mint answers 503.
+func (e *Exchanger) ResolveSubjectClaimsLive(subject string) (jwt.MapClaims, error) {
 	return e.resolveClaimsRaw(subject)
 }
 
@@ -155,7 +157,7 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 		if rerr != nil {
 			return nil, rerr // fail open — leave ac as the frozen token carried it
 		}
-		backend, berr := e.resolveSubjectClaimsDirect(subject)
+		backend, berr := e.ResolveSubjectClaimsLive(subject)
 		if berr != nil {
 			return nil, berr // fail open on a backend Lookup outage (SEC-S3)
 		}

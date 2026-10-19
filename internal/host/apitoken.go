@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,20 @@ const (
 	apitokenVerbImpersonate = "impersonate"
 	// apitokenVerbRevokeAny revokes another subject's tokens.
 	apitokenVerbRevokeAny = "revoke-any"
+)
+
+// A confidential client holding provisionedMintScope may mint API tokens for
+// the subjects it provisioned. It is an opaque CLASS scope: it matches only by
+// exact name, so no `all` verb or wildcard apitokens grant implies it, and it
+// covers an open-ended, changing set of subjects that no instance grant
+// (apitokens:<sub>:impersonate) can name. Which subjects is decided per mint
+// by the target's provisionedByClaim, a claim only host-manager reads, so
+// its name is fixed: the site's Lookup returns it, holding the provisioning
+// client's id, for as long as the subject still belongs to that client.
+// See kdex-tech/host-manager#237.
+const (
+	provisionedMintScope = "apitokens_impersonate_provisioned"
+	provisionedByClaim   = "provisioned_by"
 )
 
 type MintRequest struct {
@@ -215,6 +230,63 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// scopeHolder is the optional capability of an authorization checker that can
+// test an opaque scope (auth.AuthorizationChecker). A checker without it holds
+// no scope, so the provisioned path stays closed.
+type scopeHolder interface {
+	HoldsScope(context.Context, string) bool
+}
+
+// provisionedVerdict is the outcome of the provisioned-subject check.
+type provisionedVerdict int
+
+const (
+	// provisionedUnchecked: the caller is not a client holding
+	// provisionedMintScope, or the Lookup does not attribute the subject to it.
+	provisionedUnchecked provisionedVerdict = iota
+	// provisionedByCaller: the Lookup attributes the subject to the caller.
+	provisionedByCaller
+	// provisionedUnknown: the caller qualifies, but the Lookup was unavailable.
+	provisionedUnknown
+)
+
+// checkProvisioned decides whether caller may mint for target under
+// provisionedMintScope. The caller must be a client authenticating as itself
+// -- a client_credentials token whose azp is its sub -- because
+// KDexRoleBinding.subject is shared with users, and a user who holds the scope
+// is not the client (#243). Ownership is the target's provisionedByClaim,
+// resolved live so that claiming the account ends the client's right on the
+// next mint. It takes hh.mu only to read the checker and exchanger, never
+// across the Lookup. See kdex-tech/host-manager#237.
+func (hh *HostHandler) checkProvisioned(ctx context.Context, ac auth.AuthContext, caller, target string) provisionedVerdict {
+	if grantType, _ := ac["grant_type"].(string); grantType != "client_credentials" {
+		return provisionedUnchecked
+	}
+	if azp, _ := ac["azp"].(string); azp != caller {
+		return provisionedUnchecked
+	}
+
+	hh.mu.RLock()
+	scopes, ok := hh.authChecker.(scopeHolder)
+	holds := ok && scopes.HoldsScope(ctx, provisionedMintScope)
+	exchanger := hh.authExchanger
+	hh.mu.RUnlock()
+	if !holds || exchanger == nil {
+		return provisionedUnchecked
+	}
+
+	claims, err := exchanger.ResolveSubjectClaimsLive(target)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "could not resolve a subject's provisioning",
+			"client", caller, "subject", target)
+		return provisionedUnknown
+	}
+	if provisionedBy, _ := claims[provisionedByClaim].(string); provisionedBy != "" && provisionedBy == caller {
+		return provisionedByCaller
+	}
+	return provisionedUnchecked
+}
+
 // defaultRevocationTTL is how long a metadata revocation lasts when the request
 // names no ttl. It must outlive any token it revokes, so on a host with a
 // maximum lifetime longer than 24h it is that maximum; a revocation that
@@ -322,6 +394,14 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"bearer": []string{"apitokens:" + verb},
 	}
 
+	// The provisioned-subject check reads the Lookup live, so it runs before
+	// hh.mu is held for the rest of the mint: network I/O under the read lock
+	// would let a pending host reconfiguration stall every other reader.
+	ownership := provisionedUnchecked
+	if verb == apitokenVerbImpersonate {
+		ownership = hh.checkProvisioned(r.Context(), ac, requestingSub, subject)
+	}
+
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
@@ -332,6 +412,17 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		[]kdexv1alpha1.SecurityRequirement{requirement},
 		verb,
 	)
+	if err == nil && !authorized {
+		switch ownership {
+		case provisionedByCaller:
+			authorized = true
+			log.Info("minting an API token for a provisioned subject",
+				"client", requestingSub, "subject", subject, "scope", provisionedMintScope)
+		case provisionedUnknown:
+			http.Error(w, "the subject's provisioning could not be checked", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	if err != nil || !authorized {
 		// V(1) for the policy denial (#181), Error for a checker failure --
 		// see the same split in apitokenRevokeHandler above.
@@ -593,6 +684,11 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 							},
 							openapi.SecurityRequirement{
 								"bearer": {"apitokens:" + apitokenVerbImpersonate},
+							},
+							// A client minting for a subject its Lookup
+							// attributes to it (provisioned_by). See #237.
+							openapi.SecurityRequirement{
+								"bearer": {provisionedMintScope},
 							},
 						},
 						Summary: "Mint PASETO API Token",
