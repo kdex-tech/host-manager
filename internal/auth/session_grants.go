@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // grantGeneration returns the current shared grant-generation token, or "" when
@@ -139,6 +140,15 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	bindingKey := resolveBindingKey(jwt.MapClaims(ac), subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
 	bindingKeyLog.V(2).Info("role-binding key resolved (session-grant refresh)",
 		bindingKeyLogKV(jwt.MapClaims(ac), subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+
+	// A session named like a client keeps none of that client's grants. Unlike
+	// a resolve failure this is not an outage, so it fails closed. See
+	// kdex-tech/host-manager#243.
+	if err := e.refuseClientNamedIdentity(subject, bindingKey); err != nil {
+		logf.FromContext(reqCtx).Error(err, "dropping the grants of a session whose subject names a client", "sub", subject)
+		overlayScopedClaims(ac, jwt.MapClaims{"roles": []string{}, "entitlements": []string{}}, scopes)
+		return
+	}
 
 	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
 		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bindingKey)

@@ -39,12 +39,17 @@ func NewStore(cm cache.CacheManager, host string, ttl time.Duration, maxClients 
 	return &Store{cache: cm.GetCache("dcr", cache.CacheOptions{TTL: &ttl, Uncycled: true}), ttl: ttl, maxClients: maxClients}
 }
 
+// ClientIDPrefix starts every dynamically registered client id. It is reserved:
+// no user identity may carry it, which keeps DCR client ids disjoint from user
+// subjects by construction. See kdex-tech/host-manager#243.
+const ClientIDPrefix = "dcr_"
+
 func newClientID() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return "dcr_" + hex.EncodeToString(b), nil
+	return ClientIDPrefix + hex.EncodeToString(b), nil
 }
 
 func (s *Store) Register(ctx context.Context, c Client) (Client, error) {

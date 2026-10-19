@@ -729,6 +729,13 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	bindingKey := resolveBindingKey(signingContext, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
 	bindingKeyLog.V(2).Info("role-binding key resolved (oidc login)",
 		bindingKeyLogKV(signingContext, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+	if err := e.refuseClientNamedIdentity(sub, bindingKey); err != nil {
+		logf.FromContext(ctx).Error(err, "refusing an OIDC login whose subject names a client", "sub", sub)
+		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+			Event: EventLoginFailed, Subject: sub, AuthMethod: string(AuthMethodOIDC), Reason: err.Error(),
+		})
+		return TokenSet{Subject: sub}, err
+	}
 	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(bindingKey)
 	if err != nil {
 		return TokenSet{}, err
@@ -1232,6 +1239,15 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// See kdex-tech/host-manager#158.
 	failed := func(format string, args ...any) (TokenSet, error) {
 		return TokenSet{Subject: username}, fmt.Errorf(format, args...)
+	}
+
+	sub, _ := signingContext.GetSubject()
+	if err := e.refuseClientNamedIdentity(sub, username); err != nil {
+		logf.FromContext(ctx).Error(err, "refusing a login whose subject names a client", "username", username)
+		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
+			Event: EventLoginFailed, Subject: username, AuthMethod: string(authMethod), Reason: err.Error(),
+		})
+		return failed("%w", err)
 	}
 
 	// The credential store establishes identity (sub) but must not set reserved
@@ -2075,6 +2091,9 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	bindingKey := resolveBindingKey(claims.IDPClaims, claims.Subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
 	bindingKeyLog.V(2).Info("role-binding key resolved (auth-code redeem)",
 		bindingKeyLogKV(claims.IDPClaims, claims.Subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+	if err := e.refuseClientNamedIdentity(claims.Subject, bindingKey); err != nil {
+		return failed("%w", err)
+	}
 	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bindingKey)
 	if err != nil {
 		// The subject is already known/vouched (decrypted from our own
@@ -2169,6 +2188,9 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	bindingKey := resolveBindingKey(idpClaims, subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
 	bindingKeyLog.V(2).Info("role-binding key resolved (refresh)",
 		bindingKeyLogKV(idpClaims, subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+	if err := e.refuseClientNamedIdentity(subject, bindingKey); err != nil {
+		return failed("%w", err)
+	}
 	roles, entitlements, backend, err := e.subjectSigningContext(subject, bindingKey)
 	if err != nil {
 		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
@@ -2390,4 +2412,27 @@ func (e *Exchanger) refreshUpstreamClaims(
 	}
 
 	return idpClaimSnapshot(refreshed), token.RefreshToken, nil
+}
+
+// ErrSubjectNamesClient is returned when a user identity's sub or role-binding
+// key names a client. See kdex-tech/host-manager#243.
+var ErrSubjectNamesClient = errors.New("subject names a client")
+
+// refuseClientNamedIdentity refuses a user identity whose sub or role-binding
+// key names a client. KDexRoleBinding.subject is one namespace shared by users
+// and clients, so such a user would inherit every binding written for the
+// client. Configured clients are matched exactly (in memory); dynamically
+// registered ones by their reserved id prefix, so no login depends on the DCR
+// store. Called wherever a user identity is issued or re-resolved, it holds
+// whichever side was created first. See kdex-tech/host-manager#243.
+func (e *Exchanger) refuseClientNamedIdentity(keys ...string) error {
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, ok := e.config.Clients[key]; ok || strings.HasPrefix(key, dcr.ClientIDPrefix) {
+			return fmt.Errorf("%w: %q; rename the user or the client", ErrSubjectNamesClient, key)
+		}
+	}
+	return nil
 }
