@@ -208,10 +208,15 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	} else {
-		ttl := defaultRevocationTTL(hh.authConfig.TokenManager)
+		// The TokenManager raises any ttl to its revocation lifetime, so a
+		// caller can lengthen a revocation but never shorten one. An unusable
+		// ttl is refused, as mint refuses one, rather than replaced.
+		var ttl time.Duration
 		if req.TTL != "" {
-			if t, err := time.ParseDuration(req.TTL); err == nil {
-				ttl = t
+			var err error
+			if ttl, err = time.ParseDuration(req.TTL); err != nil || ttl <= 0 {
+				http.Error(w, "ttl must be a positive Go duration such as 2160h", http.StatusBadRequest)
+				return
 			}
 		}
 
@@ -230,20 +235,13 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-// scopeHolder is the optional capability of an authorization checker that can
-// test an opaque scope (auth.AuthorizationChecker). A checker without it holds
-// no scope, so the provisioned path stays closed.
-type scopeHolder interface {
-	HoldsScope(context.Context, string) bool
-}
-
 // provisionedVerdict is the outcome of the provisioned-subject check.
 type provisionedVerdict int
 
 const (
-	// provisionedUnchecked: the caller is not a client holding
-	// provisionedMintScope, or the Lookup does not attribute the subject to it.
-	provisionedUnchecked provisionedVerdict = iota
+	// notProvisioned: the caller does not qualify, or the Lookup does not
+	// attribute the subject to it.
+	notProvisioned provisionedVerdict = iota
 	// provisionedByCaller: the Lookup attributes the subject to the caller.
 	provisionedByCaller
 	// provisionedUnknown: the caller qualifies, but the Lookup was unavailable.
@@ -251,28 +249,28 @@ const (
 )
 
 // checkProvisioned decides whether caller may mint for target under
-// provisionedMintScope. The caller must be a client authenticating as itself
-// -- a client_credentials token whose azp is its sub -- because
-// KDexRoleBinding.subject is shared with users, and a user who holds the scope
-// is not the client (#243). Ownership is the target's provisionedByClaim,
-// resolved live so that claiming the account ends the client's right on the
-// next mint. It takes hh.mu only to read the checker and exchanger, never
-// across the Lookup. See kdex-tech/host-manager#237.
+// provisionedMintScope.
+//   - The caller must be a configured client authenticating as itself with
+//     client_credentials. Because #243 refuses every user identity named
+//     like a client, no user session can pass, even one holding the scope.
+//   - The target must not itself name a client, or the token would carry that
+//     client's KDexRoleBindings (the PAT paths resolve roles by sub, #243).
+//   - Ownership is the target's provisionedByClaim, resolved live so that
+//     claiming the account ends the client's right on the next mint.
+//
+// Callers must not hold hh.mu: it is taken here only to read the checker and
+// the exchanger, never across the Lookup. See kdex-tech/host-manager#237.
 func (hh *HostHandler) checkProvisioned(ctx context.Context, ac auth.AuthContext, caller, target string) provisionedVerdict {
-	if grantType, _ := ac["grant_type"].(string); grantType != "client_credentials" {
-		return provisionedUnchecked
-	}
-	if azp, _ := ac["azp"].(string); azp != caller {
-		return provisionedUnchecked
+	if client, ok := ac.ClientCredentialsSubject(); !ok || client != caller {
+		return notProvisioned
 	}
 
 	hh.mu.RLock()
-	scopes, ok := hh.authChecker.(scopeHolder)
-	holds := ok && scopes.HoldsScope(ctx, provisionedMintScope)
+	holds := hh.authChecker.HoldsScope(ctx, provisionedMintScope)
 	exchanger := hh.authExchanger
 	hh.mu.RUnlock()
-	if !holds || exchanger == nil {
-		return provisionedUnchecked
+	if !holds || !exchanger.IsConfiguredClient(caller) || exchanger.NamesClient(target) {
+		return notProvisioned
 	}
 
 	claims, err := exchanger.ResolveSubjectClaimsLive(target)
@@ -281,18 +279,10 @@ func (hh *HostHandler) checkProvisioned(ctx context.Context, ac auth.AuthContext
 			"client", caller, "subject", target)
 		return provisionedUnknown
 	}
-	if provisionedBy, _ := claims[provisionedByClaim].(string); provisionedBy != "" && provisionedBy == caller {
+	if provisionedBy, _ := claims[provisionedByClaim].(string); provisionedBy == caller {
 		return provisionedByCaller
 	}
-	return provisionedUnchecked
-}
-
-// defaultRevocationTTL is how long a metadata revocation lasts when the request
-// names no ttl. It must outlive any token it revokes, so on a host with a
-// maximum lifetime longer than 24h it is that maximum; a revocation that
-// expires first would let the token validate again (host-manager#238).
-func defaultRevocationTTL(tm *apitoken.TokenManager) time.Duration {
-	return max(24*time.Hour, tm.MaxTTL())
+	return notProvisioned
 }
 
 func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
@@ -339,7 +329,8 @@ func (hh *HostHandler) apitokenDiscoveryHandler(w http.ResponseWriter, r *http.R
 
 // apitokenMintHandler mints a stateless API token. A caller holding
 // apitokens:<self>:mint mints for itself; minting for another subject takes
-// apitokens:<sub>:impersonate.
+// apitokens:<sub>:impersonate, or, for a configured client minting for a
+// subject its Lookup attributes to it, provisionedMintScope (checkProvisioned).
 func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Request) {
 	log := logf.FromContext(r.Context())
 
@@ -394,17 +385,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		"bearer": []string{"apitokens:" + verb},
 	}
 
-	// The provisioned-subject check reads the Lookup live, so it runs before
-	// hh.mu is held for the rest of the mint: network I/O under the read lock
-	// would let a pending host reconfiguration stall every other reader.
-	ownership := provisionedUnchecked
-	if verb == apitokenVerbImpersonate {
-		ownership = hh.checkProvisioned(r.Context(), ac, requestingSub, subject)
-	}
-
 	hh.mu.RLock()
-	defer hh.mu.RUnlock()
-
 	authorized, err := hh.authChecker.CheckAccess(
 		r.Context(),
 		"apitokens",
@@ -412,17 +393,28 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		[]kdexv1alpha1.SecurityRequirement{requirement},
 		verb,
 	)
-	if err == nil && !authorized {
-		switch ownership {
+	hh.mu.RUnlock()
+
+	// Only a denied impersonation consults the provisioned path. Its Lookup is
+	// live network I/O, so it runs with hh.mu released: under the read lock a
+	// pending host reconfiguration would stall every other reader.
+	if err == nil && !authorized && verb == apitokenVerbImpersonate {
+		switch hh.checkProvisioned(r.Context(), ac, requestingSub, subject) {
 		case provisionedByCaller:
 			authorized = true
 			log.Info("minting an API token for a provisioned subject",
 				"client", requestingSub, "subject", subject, "scope", provisionedMintScope)
 		case provisionedUnknown:
+			w.Header().Set("Retry-After", "5")
 			http.Error(w, "the subject's provisioning could not be checked", http.StatusServiceUnavailable)
 			return
+		case notProvisioned:
 		}
 	}
+
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+
 	if err != nil || !authorized {
 		// V(1) for the policy denial (#181), Error for a checker failure --
 		// see the same split in apitokenRevokeHandler above.
@@ -627,7 +619,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 													"scp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"sub": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{
-														Description: "Token lifetime as a Go duration. Defaults to 24h, capped at the host's max_ttl (see /.well-known/pks.json). A ttl above max_ttl is refused with 400.",
+														Description: "Token lifetime as a Go duration. Defaults to 24h, capped at the host's max_ttl (see /.well-known/pks.json). A ttl that is unparseable (Go has no day unit: send 2160h, not 90d), not positive, or above max_ttl is refused with 400.",
 														Type:        &openapi.Types{openapi.TypeString},
 													}},
 												},
@@ -675,9 +667,15 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 							openapi.WithStatus(500, &openapi.ResponseRef{
 								Ref: ko.RespRefInternalServerError,
 							}),
+							openapi.WithStatus(503, &openapi.ResponseRef{
+								Value: &openapi.Response{
+									Description: new("The Lookup that attributes a provisioned subject is unavailable; retry after Retry-After."),
+								},
+							}),
 						),
-						// Alternatives: mint for yourself, or impersonate
-						// to mint for another subject.
+						// Alternatives: mint for yourself, impersonate to mint
+						// for another subject, or mint as a client for a
+						// subject it provisioned.
 						Security: &openapi.SecurityRequirements{
 							openapi.SecurityRequirement{
 								"bearer": {"apitokens:mint"},

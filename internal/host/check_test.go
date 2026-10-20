@@ -201,3 +201,5 @@ func (m *checkAuthChecker) VerifyResourceParsedEntitlements(resource, resourceNa
 	key := resource + ":" + resourceName + ":" + verb
 	return m.allowed[key], nil
 }
+
+func (m *checkAuthChecker) HoldsScope(context.Context, string) bool { return false }

@@ -172,3 +172,32 @@ func TestExchangeToken_RefusesAClientNamedSubOrBindingKey(t *testing.T) {
 		})
 	}
 }
+
+// A grant cached for the subject (by a replica still on an older version, or
+// before the client existed) must not outlive the guard.
+func TestRefreshSessionGrants_GuardPrecedesTheGrantCache(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	cs := crypto.Signer(priv)
+	signer, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", nil)
+	require.NoError(t, err)
+	cfg := &Config{
+		Issuer: "test-iss", Audience: "test-aud", CookieName: "auth_token",
+		ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: cs},
+		Signer:     *signer,
+		Clients:    map[string]AuthClient{clientNamed: {ClientID: clientNamed}},
+	}
+	cm, err := cache.NewCacheManager("", "grant-client-named-cache-243", nil)
+	require.NoError(t, err)
+	ex, err := NewExchanger(context.Background(), *cfg, cm, newRoleBindingScopeProvider(t, clientNamed), nil)
+	require.NoError(t, err)
+	require.NotNil(t, ex.grantCache)
+	key := ex.grantGeneration(context.Background()) + "|" + clientNamed
+	require.NoError(t, ex.grantCache.Set(context.Background(), key, `{"roles":["acme-admin"],"entitlements":["page::read"]}`))
+
+	ac := AuthContext{"sub": clientNamed, "scope": "openid roles entitlements", "roles": []any{}, "entitlements": []any{}}
+	cfg.refreshSessionGrants(context.Background(), ac, ex)
+
+	assert.Empty(t, ac["roles"])
+	assert.Empty(t, ac["entitlements"])
+}

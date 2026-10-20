@@ -40,6 +40,19 @@ var (
 // produced and the signature is unaffected.
 const pasetoV4PublicHeader = "v4.public."
 
+// RevocationHorizon is how long a revocation lasts on a host with no maximum
+// API token lifetime. A revocation must outlive every token it revokes, and it
+// only revokes tokens issued up to its own timestamp, so a long one blocks no
+// key minted afterwards under the same name.
+const RevocationHorizon = 10 * 365 * 24 * time.Hour
+
+// RevocationCacheOptions are the options of the revocation cache. It is
+// uncycled: a cycled cache keeps two generations, so two host
+// reconfigurations would silently drop every revocation.
+func RevocationCacheOptions() cache.CacheOptions {
+	return cache.CacheOptions{Uncycled: true}
+}
+
 // ErrTTLExceedsMax is returned when a mint asks for a lifetime longer than the
 // host's KDexHost.spec.auth.apiToken.maxTTL. See kdex-tech/host-manager#238.
 var ErrTTLExceedsMax = errors.New("ttl exceeds the host's maximum API token lifetime")
@@ -202,6 +215,20 @@ func (tm *TokenManager) MaxTTL() time.Duration {
 	return tm.maxTTL
 }
 
+// RevocationTTL is the shortest lifetime of a revocation: never shorter than
+// the longest token this host can mint, so a revoked token cannot come back.
+func (tm *TokenManager) RevocationTTL() time.Duration {
+	return max(RevocationHorizon, tm.maxTTL)
+}
+
+// revoke records that every token carrying jti and issued up to now is
+// revoked, for at least RevocationTTL. A shorter ttl is raised, so no caller
+// can shorten a revocation by re-revoking with a small one.
+func (tm *TokenManager) revoke(ctx context.Context, jti string, ttl time.Duration) error {
+	return tm.revocationCache.Set(ctx, jti, time.Now().UTC().Format(time.RFC3339Nano),
+		cache.WithTTL(max(ttl, tm.RevocationTTL())))
+}
+
 // CapTTL shortens ttl to the host's maximum. It is for lifetimes the server
 // chooses itself; a lifetime a caller asked for is refused, not shortened, so
 // the caller is never handed a token that expires sooner than it requested.
@@ -251,9 +278,7 @@ func (tm *TokenManager) RevokeByMetadata(ctx context.Context, aud, sub, act stri
 		return fmt.Errorf("revocation cache not configured")
 	}
 
-	jti := GenerateJTI(aud, sub, act)
-
-	return tm.revocationCache.Set(ctx, jti, "revoked", cache.WithTTL(ttl))
+	return tm.revoke(ctx, GenerateJTI(aud, sub, act), ttl)
 }
 
 func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
@@ -308,7 +333,22 @@ func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
 		return nil
 	}
 
-	return tm.revocationCache.Set(ctx, jti, "revoked", cache.WithTTL(ttl))
+	return tm.revoke(ctx, jti, ttl)
+}
+
+// issuedBy reports whether token was issued at or before a revocation stored
+// at revokedAt. An entry without a timestamp (written before revocations
+// carried one) or a token without an iat revokes outright.
+func issuedBy(token *paseto.Token, revokedAt string) bool {
+	at, err := time.Parse(time.RFC3339Nano, revokedAt)
+	if err != nil {
+		return true
+	}
+	iat, err := token.GetIssuedAt()
+	if err != nil {
+		return true
+	}
+	return !iat.After(at)
 }
 
 func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, scope string, ttl time.Duration) (string, error) {
@@ -413,11 +453,11 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 			return nil, err
 		}
 
-		_, found, _, err := tm.revocationCache.Get(ctx, jti)
+		revokedAt, found, _, err := tm.revocationCache.Get(ctx, jti)
 		if err != nil {
 			return nil, fmt.Errorf("failed to check revocation status: %w", err)
 		}
-		if found {
+		if found && issuedBy(token, revokedAt) {
 			return nil, fmt.Errorf("token revoked")
 		}
 	}

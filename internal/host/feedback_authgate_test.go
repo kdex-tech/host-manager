@@ -376,3 +376,7 @@ func (statelessDenier) BindRequirements(reqs entitlements.ParsedRequirements, _ 
 func (statelessDenier) VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error) {
 	return false, nil
 }
+
+func (m *snifferGateChecker) HoldsScope(context.Context, string) bool { return false }
+
+func (statelessDenier) HoldsScope(context.Context, string) bool { return false }

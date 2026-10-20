@@ -144,3 +144,5 @@ func TestRebuildMux_NoOrphanLockOnPanic(t *testing.T) {
 
 	assert.True(t, true, "lock acquired and subsequent rebuild completed")
 }
+
+func (p *panickingAuthChecker) HoldsScope(context.Context, string) bool { return false }

@@ -140,3 +140,5 @@ func TestProxyGateErroredCheckIs500NotADenial(t *testing.T) {
 		t.Fatalf("WWW-Authenticate = %q, want none on a 500", got)
 	}
 }
+
+func (faultyChecker) HoldsScope(context.Context, string) bool { return false }

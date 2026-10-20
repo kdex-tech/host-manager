@@ -261,3 +261,5 @@ func TestPageHandlerFunc_Redirection(t *testing.T) {
 		g.Expect(w.Header().Get("WWW-Authenticate")).To(G.BeEmpty())
 	})
 }
+
+func (m *pageMockAuthChecker) HoldsScope(context.Context, string) bool { return false }

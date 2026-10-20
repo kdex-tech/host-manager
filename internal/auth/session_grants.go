@@ -47,13 +47,16 @@ func (e *Exchanger) BumpGrantGeneration(ctx context.Context) {
 	_ = e.grantGenCache.Set(ctx, grantGenKey, gen)
 }
 
-// resolveClaimsRaw resolves a subject's backend Lookup claims live via the
-// provider with no cache — the shared core of the cached ResolveSubjectClaims and
-// the freshness-critical ResolveSubjectClaimsLive. A non-nil error means a
-// configured Lookup was unavailable and the result cannot be trusted as complete;
-// an authorization-path caller must fail open. Providers that only implement the
-// no-error ResolveClaims (test stubs) never error here.
-func (e *Exchanger) resolveClaimsRaw(subject string) (jwt.MapClaims, error) {
+// ResolveSubjectClaimsLive resolves a subject's backend Lookup claims live
+// through the provider, with no cache. It is the core of the cached
+// ResolveSubjectClaims, and is called directly for a decision that must not
+// lag a change: the cookie session-grant refresh (whose grant cache is its
+// coalescing layer) and the provisioned-subject mint (#237). A non-nil error
+// means a configured Lookup was unavailable, so the result cannot be trusted
+// as complete; each caller chooses its outage behaviour (the grant refresh
+// fails open to the frozen token, #203; the mint answers 503). Providers that
+// only implement the no-error ResolveClaims (test stubs) never error here.
+func (e *Exchanger) ResolveSubjectClaimsLive(subject string) (jwt.MapClaims, error) {
 	if e == nil || e.sp == nil || subject == "" {
 		return nil, nil
 	}
@@ -68,16 +71,6 @@ func (e *Exchanger) resolveClaimsRaw(subject string) (jwt.MapClaims, error) {
 		return resolver.ResolveClaims(subject), nil
 	}
 	return nil, nil
-}
-
-// ResolveSubjectClaimsLive resolves backend Lookup claims fresh, bypassing the
-// 60s subjectResolveCache, for a decision that must not lag a change: the
-// cookie session-grant refresh (whose grant cache is its coalescing layer) and
-// the provisioned-subject mint (#237). It surfaces a Lookup-unavailable error,
-// so each caller chooses its own outage behaviour: the grant refresh fails open
-// to the frozen token (#203), the mint answers 503.
-func (e *Exchanger) ResolveSubjectClaimsLive(subject string) (jwt.MapClaims, error) {
-	return e.resolveClaimsRaw(subject)
 }
 
 // refreshSessionGrants re-resolves a browser session's roles/entitlements against
@@ -112,6 +105,27 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	ctx, cancel := context.WithTimeout(reqCtx, grantResolveTimeout)
 	defer cancel()
 
+	// Role/entitlement resolution keys on the configured binding key (e.g. email),
+	// recomputed from the frozen session token's OWN claims -- exactly as the OIDC
+	// login/refresh/auth-code mints resolve it from their IdP-claims snapshot -- so a
+	// membership grant on an email-keyed KDexRoleBinding survives this per-request
+	// refresh instead of being reverted to the sub-matched set. `ac` carries the
+	// email/email_verified/idp the mint copied through (sign.Signer.Project), and a
+	// non-OIDC cookie session (no such claim) degrades to sub, resolveBindingKey's
+	// historical behavior. Identity (the cache key, the backend Lookup below, and the
+	// signed sub) stays on `subject` unconditionally. See kdex-tech/host-manager#215.
+	//
+	// It runs before the grant cache: a session named like a client keeps none
+	// of that client's grants, cached or not (#243). Unlike a resolve failure
+	// this is not an outage, so it fails closed.
+	bindingKey, err := e.userBindingKey(jwt.MapClaims(ac), subject, "session-grant refresh")
+	if err != nil {
+		logf.FromContext(reqCtx).V(1).Info("dropping the grants of a session whose subject names a client",
+			"sub", subject, "reason", err.Error())
+		overlayScopedClaims(ac, jwt.MapClaims{"roles": []string{}, "entitlements": []string{}}, scopes)
+		return
+	}
+
 	gen := e.grantGeneration(ctx)
 	key := gen + "|" + subject
 
@@ -130,27 +144,6 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	// per "<generation>|<subject>" so a parallel fan-out of requests from one
 	// subject (e.g. right after a generation bump) collapses to a single live
 	// resolve; each caller still overlays onto its own ac/scope below.
-	// Role/entitlement resolution keys on the configured binding key (e.g. email),
-	// recomputed from the frozen session token's OWN claims -- exactly as the OIDC
-	// login/refresh/auth-code mints resolve it from their IdP-claims snapshot -- so a
-	// membership grant on an email-keyed KDexRoleBinding survives this per-request
-	// refresh instead of being reverted to the sub-matched set. `ac` carries the
-	// email/email_verified/idp the mint copied through (sign.Signer.Project), and a
-	// non-OIDC cookie session (no such claim) degrades to sub, resolveBindingKey's
-	// historical behavior. Identity (the cache key, the backend Lookup below, and the
-	// signed sub) stays on `subject` unconditionally. See kdex-tech/host-manager#215.
-	bindingKey := resolveBindingKey(jwt.MapClaims(ac), subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
-	bindingKeyLog.V(2).Info("role-binding key resolved (session-grant refresh)",
-		bindingKeyLogKV(jwt.MapClaims(ac), subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-
-	// A session named like a client keeps none of that client's grants. Unlike
-	// a resolve failure this is not an outage, so it fails closed. See
-	// kdex-tech/host-manager#243.
-	if err := e.refuseClientNamedIdentity(subject, bindingKey); err != nil {
-		logf.FromContext(reqCtx).Error(err, "dropping the grants of a session whose subject names a client", "sub", subject)
-		overlayScopedClaims(ac, jwt.MapClaims{"roles": []string{}, "entitlements": []string{}}, scopes)
-		return
-	}
 
 	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
 		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bindingKey)

@@ -349,3 +349,5 @@ func TestSetHost_DoesNotEvictUncycledCache(t *testing.T) {
 	assert.True(t, found, "Uncycled cache must survive repeated SetHost calls")
 	assert.Equal(t, "rt-payload", val)
 }
+
+func (m *mockAuthChecker) HoldsScope(context.Context, string) bool { return false }

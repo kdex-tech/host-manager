@@ -246,7 +246,8 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 		Audience: "aud",
 		Sub:      "test-user",
 		Action:   "act",
-		TTL:      "invalid", // Test invalid TTL duration fallback
+		// No ttl: the revocation lasts its full lifetime. An unusable ttl is
+		// refused (TestApitokenRevoke_RefusesAnUnusableTTL).
 	})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
 	rr := httptest.NewRecorder()
@@ -314,3 +315,5 @@ func (m *mockApitokenAuthChecker) BindRequirements(reqs entitlements.ParsedRequi
 func (m *mockApitokenAuthChecker) VerifyResourceParsedEntitlements(s1, s2 string, pe entitlements.ParsedEntitlements, pr entitlements.ParsedRequirements, s3 ...string) (bool, error) {
 	return false, nil
 }
+
+func (m *mockApitokenAuthChecker) HoldsScope(context.Context, string) bool { return false }

@@ -124,17 +124,16 @@ func TestApitokenMint_RefusesAnUnusableTTL(t *testing.T) {
 	}
 }
 
-func TestRevocationTTL_OutlivesTheLongestMintableToken(t *testing.T) {
-	_, tm := crossSubjectHost(t)
-	if got := defaultRevocationTTL(tm); got != 24*time.Hour {
-		t.Fatalf("unbounded host: revocation ttl = %s, want 24h", got)
-	}
-	tm.WithMaxTTL(2160 * time.Hour)
-	if got := defaultRevocationTTL(tm); got != 2160*time.Hour {
-		t.Fatalf("revocation ttl = %s, want the 2160h maximum so a revoked token cannot come back", got)
-	}
-	tm.WithMaxTTL(time.Hour)
-	if got := defaultRevocationTTL(tm); got != 24*time.Hour {
-		t.Fatalf("revocation ttl = %s, want 24h: a lowered maximum does not shorten tokens minted before it", got)
+func TestApitokenRevoke_RefusesAnUnusableTTL(t *testing.T) {
+	for _, ttl := range []string{"90d", "0s", "-1h"} {
+		t.Run(ttl, func(t *testing.T) {
+			hh, _ := crossSubjectHost(t)
+
+			rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Audience: "aud", Sub: "alice", Action: "key-1", TTL: ttl})
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %q)", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }

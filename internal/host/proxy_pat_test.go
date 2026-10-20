@@ -277,3 +277,5 @@ func TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 }
+
+func (g *entitlementGateChecker) HoldsScope(context.Context, string) bool { return false }

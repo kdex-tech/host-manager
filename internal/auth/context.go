@@ -85,6 +85,17 @@ func (ac AuthContext) IsPATBridge() bool {
 	return b
 }
 
+// ClientCredentialsSubject returns the subject of a client_credentials token,
+// whose subject is the client itself. ok is false for every other kind of
+// token.
+func (ac AuthContext) ClientCredentialsSubject() (string, bool) {
+	if grantType, _ := ac["grant_type"].(string); grantType != GRANT_TYPE_CLIENT_CREDENTIALS {
+		return "", false
+	}
+	sub, _ := ac["sub"].(string)
+	return sub, sub != ""
+}
+
 func (ac AuthContext) GetAuthMethod() (AuthMethod, error) {
 	authMethod, ok := ac["auth_method"].(string)
 	if !ok {

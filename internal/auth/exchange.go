@@ -470,7 +470,7 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// pivot from one allowlisted resource to any registered ExchangeTarget.
 	// Only the client_credentials mint stamps grant_type; genuine proxy FATs and
 	// exchanged tokens carry none (it is a reservedMintClaim). Reject it.
-	if gt, _ := claims["grant_type"].(string); gt == "client_credentials" {
+	if gt, _ := claims["grant_type"].(string); gt == GRANT_TYPE_CLIENT_CREDENTIALS {
 		return TokenSet{}, fmt.Errorf("subject_token minted via client_credentials is not exchangeable")
 	}
 	// A genuine FAT carries exactly ONE audience -- the target function, never the
@@ -569,8 +569,8 @@ func (e *Exchanger) ResolveSubjectClaims(subject string) jwt.MapClaims {
 	// MULTI-lookup partial outage differs: this now yields nil rather than a
 	// partial merge of the healthy lookups — fail-closed (fewer claims, never
 	// more). If a multi-lookup deployment ever ships, route this path through the
-	// best-effort ResolveClaims instead of resolveClaimsRaw to restore the merge.
-	claims, _ := e.resolveClaimsRaw(subject)
+	// best-effort ResolveClaims instead of ResolveSubjectClaimsLive to restore the merge.
+	claims, _ := e.ResolveSubjectClaimsLive(subject)
 	if e.subjectResolveCache != nil && len(claims) > 0 {
 		if payload, err := json.Marshal(claims); err == nil {
 			_ = e.subjectResolveCache.Set(context.Background(), subject, string(payload))
@@ -726,10 +726,8 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// human-authorable claim (e.g. email) instead of the IdP's opaque
 	// subject. Identity (idpClaims, GateLogin, enrichAfterGate, and the
 	// signed token below) still keys on `sub` unconditionally.
-	bindingKey := resolveBindingKey(signingContext, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
-	bindingKeyLog.V(2).Info("role-binding key resolved (oidc login)",
-		bindingKeyLogKV(signingContext, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-	if err := e.refuseClientNamedIdentity(sub, bindingKey); err != nil {
+	bindingKey, err := e.userBindingKey(signingContext, sub, "oidc login")
+	if err != nil {
 		logf.FromContext(ctx).Error(err, "refusing an OIDC login whose subject names a client", "sub", sub)
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event: EventLoginFailed, Subject: sub, AuthMethod: string(AuthMethodOIDC), Reason: err.Error(),
@@ -1049,7 +1047,7 @@ func (e *Exchanger) buildClientSigningContext(ctx context.Context, clientID, cli
 		"sub":         clientID,
 		"azp":         clientID,
 		"auth_method": string(AuthMethodOAuth2),
-		"grant_type":  "client_credentials",
+		"grant_type":  GRANT_TYPE_CLIENT_CREDENTIALS,
 	}
 
 	// Determine granted scopes, filtered by the client's AllowedScopes if configured.
@@ -2088,10 +2086,8 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	// claims.IDPClaims is nil for non-OIDC grants, for which resolveBindingKey
 	// degrades to claims.Subject (its historical behavior). See
 	// kdex-tech/host-manager#189.
-	bindingKey := resolveBindingKey(claims.IDPClaims, claims.Subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
-	bindingKeyLog.V(2).Info("role-binding key resolved (auth-code redeem)",
-		bindingKeyLogKV(claims.IDPClaims, claims.Subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-	if err := e.refuseClientNamedIdentity(claims.Subject, bindingKey); err != nil {
+	bindingKey, err := e.userBindingKey(claims.IDPClaims, claims.Subject, "auth-code redeem")
+	if err != nil {
 		return failed("%w", err)
 	}
 	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bindingKey)
@@ -2185,10 +2181,8 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	// every refresh instead of silently falling back to sub. idpClaims is nil
 	// for every non-OIDC grant, for which resolveBindingKey degrades to
 	// subject (its historical behavior). See kdex-tech/host-manager#189.
-	bindingKey := resolveBindingKey(idpClaims, subject, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
-	bindingKeyLog.V(2).Info("role-binding key resolved (refresh)",
-		bindingKeyLogKV(idpClaims, subject, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-	if err := e.refuseClientNamedIdentity(subject, bindingKey); err != nil {
+	bindingKey, err := e.userBindingKey(idpClaims, subject, "refresh")
+	if err != nil {
 		return failed("%w", err)
 	}
 	roles, entitlements, backend, err := e.subjectSigningContext(subject, bindingKey)
@@ -2418,19 +2412,51 @@ func (e *Exchanger) refreshUpstreamClaims(
 // key names a client. See kdex-tech/host-manager#243.
 var ErrSubjectNamesClient = errors.New("subject names a client")
 
+// NamesClient reports whether key names a client: a configured client id
+// exactly (in memory), or any key carrying the reserved dcr_ prefix of a
+// dynamically registered one, so the check never waits on the DCR store.
+func (e *Exchanger) NamesClient(key string) bool {
+	if e == nil || key == "" {
+		return false
+	}
+	_, configured := e.config.Clients[key]
+	return configured || strings.HasPrefix(key, dcr.ClientIDPrefix)
+}
+
+// IsConfiguredClient reports whether id is an operator-configured client: the
+// only kind that can authenticate with client_credentials (a dynamically
+// registered client is public).
+func (e *Exchanger) IsConfiguredClient(id string) bool {
+	if e == nil {
+		return false
+	}
+	_, ok := e.config.Clients[id]
+	return ok
+}
+
+// userBindingKey resolves the role-binding key of a user identity (the
+// RoleBindingClaim, e.g. email, else sub; #189), logs it under site, and
+// refuses an identity named like a client (#243). Every site that issues or
+// re-resolves a user identity goes through it, so none can resolve bindings
+// without the guard.
+func (e *Exchanger) userBindingKey(claims jwt.MapClaims, sub, site string) (string, error) {
+	bindingKey := resolveBindingKey(claims, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
+	bindingKeyLog.V(2).Info("role-binding key resolved ("+site+")",
+		bindingKeyLogKV(claims, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
+	return bindingKey, e.refuseClientNamedIdentity(sub, bindingKey)
+}
+
 // refuseClientNamedIdentity refuses a user identity whose sub or role-binding
-// key names a client. KDexRoleBinding.subject is one namespace shared by users
-// and clients, so such a user would inherit every binding written for the
-// client. Configured clients are matched exactly (in memory); dynamically
-// registered ones by their reserved id prefix, so no login depends on the DCR
-// store. Called wherever a user identity is issued or re-resolved, it holds
-// whichever side was created first. See kdex-tech/host-manager#243.
+// key names a client (NamesClient). KDexRoleBinding.subject is one namespace
+// shared by users and clients, so such a user would inherit every binding
+// written for the client. It runs wherever a user identity is issued or
+// re-resolved, so on a collision the client keeps its name and the user is
+// refused, whichever was created first. Exact names only: a /regex/ or `*`
+// binding matches users and clients alike, by design of the matcher. See
+// kdex-tech/host-manager#243.
 func (e *Exchanger) refuseClientNamedIdentity(keys ...string) error {
 	for _, key := range keys {
-		if key == "" {
-			continue
-		}
-		if _, ok := e.config.Clients[key]; ok || strings.HasPrefix(key, dcr.ClientIDPrefix) {
+		if e.NamesClient(key) {
 			return fmt.Errorf("%w: %q; rename the user or the client", ErrSubjectNamesClient, key)
 		}
 	}

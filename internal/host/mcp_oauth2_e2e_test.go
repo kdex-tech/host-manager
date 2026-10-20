@@ -505,3 +505,5 @@ func normalizeAud(t *testing.T, claims jwt.MapClaims) []string {
 		return nil
 	}
 }
+
+func (g *e2eEntitlementGateChecker) HoldsScope(context.Context, string) bool { return false }

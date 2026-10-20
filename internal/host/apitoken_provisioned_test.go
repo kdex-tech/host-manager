@@ -11,6 +11,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	"github.com/kdex-tech/host-manager/internal/keys"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // apitokens_impersonate_provisioned: a confidential client mints API tokens
@@ -29,7 +31,11 @@ type provisioningLookup struct {
 
 func (p provisioningLookup) FindInternal(string, string) (jwt.MapClaims, error) { return nil, nil }
 
-func (p provisioningLookup) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+// The orchestrator client's own KDexRoleBinding grants it the class scope.
+func (p provisioningLookup) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
+	if subject == orchestrator {
+		return []string{"provisioner"}, []string{provisionedMintScope}, nil
+	}
 	return nil, nil, nil
 }
 
@@ -47,7 +53,21 @@ func provisioningHost(t *testing.T, lookup provisioningLookup) *HostHandler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cm, lookup, nil)
+	cfg, err := auth.NewConfigBuilder().
+		WithAuthClientLoader(func() (map[string]auth.AuthClient, error) {
+			return map[string]auth.AuthClient{
+				orchestrator:  {ClientID: orchestrator, ClientSecret: "s"},
+				"billing-svc": {ClientID: "billing-svc", ClientSecret: "s"},
+			}, nil
+		}).
+		WithKeyLoader(func() (*keys.KeyPairs, error) { return keys.GenerateECDSAKeyPair(), nil }).
+		WithOIDCClientConfigLoader(func() (*auth.OIDCClientConfig, error) { return nil, nil }).
+		WithAudience("aud").WithIssuer("iss").WithDevMode(true).WithCacheManager(cm).
+		Build(&kdexv1alpha1.Auth{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ex, err := auth.NewExchanger(t.Context(), *cfg, cm, lookup, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +82,22 @@ func clientCaller() map[string]any {
 		"sub": orchestrator, "azp": orchestrator, "grant_type": "client_credentials",
 		"entitlements": []any{provisionedMintScope},
 	}
+}
+
+// realClientCaller is the auth context the host middleware builds from a real
+// client_credentials token: the claims the signer actually emits, not a
+// hand-built map that could carry claims no real token has.
+func realClientCaller(t *testing.T, hh *HostHandler) map[string]any {
+	t.Helper()
+	ts, err := hh.authExchanger.LoginClient(t.Context(), orchestrator, "s", "entitlements")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := jwt.MapClaims{}
+	if _, _, err := jwt.NewParser().ParseUnverified(ts.AccessToken, claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims
 }
 
 func mintFor(t *testing.T, hh *HostHandler, caller map[string]any, sub string) *httptest.ResponseRecorder {
@@ -99,11 +135,39 @@ func TestProvisionedMint_MintsForASubjectTheClientProvisioned(t *testing.T) {
 	}
 }
 
+func TestProvisionedMint_AcceptsARealClientCredentialsToken(t *testing.T) {
+	hh := provisioningHost(t, sandbox(orchestrator))
+
+	rr := mintFor(t, hh, realClientCaller(t, hh), "sandbox-1")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+	}
+}
+
+// Minting for a subject named like a client would hand the token that client's
+// KDexRoleBindings: the PAT paths resolve roles by sub (#243).
+func TestProvisionedMint_RefusesATargetNamedLikeAClient(t *testing.T) {
+	for _, target := range []string{"billing-svc", "dcr_0a1b2c"} {
+		t.Run(target, func(t *testing.T) {
+			hh := provisioningHost(t, provisioningLookup{claims: map[string]jwt.MapClaims{
+				target: {"provisioned_by": orchestrator},
+			}})
+
+			rr := mintFor(t, hh, realClientCaller(t, hh), target)
+
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (body %q)", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestProvisionedMint_Refuses(t *testing.T) {
 	notClientCredentials := clientCaller()
 	delete(notClientCredentials, "grant_type")
-	foreignAzp := clientCaller()
-	foreignAzp["azp"] = "someone-else"
+	notAClient := clientCaller()
+	notAClient["sub"] = "sandbox-2"
 	noScope := clientCaller()
 	noScope["entitlements"] = selfServiceGrant
 
@@ -119,7 +183,7 @@ func TestProvisionedMint_Refuses(t *testing.T) {
 		// A user session that happens to hold the scope (e.g. a user named
 		// like the client) is not the client.
 		"a caller that is not a client_credentials token": {lookup: sandbox(orchestrator), caller: notClientCredentials},
-		"a caller whose azp is not its sub":               {lookup: sandbox(orchestrator), caller: foreignAzp},
+		"a caller that is not a configured client":        {lookup: sandbox("sandbox-2"), caller: notAClient},
 		"a caller without the scope":                      {lookup: sandbox(orchestrator), caller: noScope},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -143,6 +207,9 @@ func TestProvisionedMint_LookupOutageIs503(t *testing.T) {
 
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 (body %q)", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Fatal("a 503 must say when to retry")
 	}
 }
 
