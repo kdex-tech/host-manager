@@ -61,8 +61,8 @@ type MintRequest struct {
 	Scope string `json:"scp"`
 	// Sub is the subject of the tokens to mint (metadata-based revocation).
 	Sub string `json:"sub"`
-	// TTL is the duration for which the tokens should be valid (metadata-based revocation).
-	// Default: 24h.
+	// TTL is the token lifetime, a Go duration. Absent: 24h, capped at the
+	// host's maxTTL. Unparseable, non-positive or above maxTTL: refused (400).
 	TTL string `json:"ttl"`
 }
 
@@ -82,8 +82,8 @@ type RevokeRequest struct {
 	Audience string `json:"aud"`
 	// Sub is the subject of the tokens to revoke (metadata-based revocation).
 	Sub string `json:"sub"`
-	// TTL is the duration for which the revocation should be persisted in the cache (metadata-based revocation).
-	// Default: 24h.
+	// TTL lengthens a metadata revocation beyond its lifetime, max(10y,
+	// maxTTL); it can never shorten one. An unusable value is ignored.
 	TTL string `json:"ttl"`
 	// Token is the full signed token to revoke.
 	Token string `json:"token"`
@@ -210,13 +210,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	} else {
 		// The TokenManager raises any ttl to its revocation lifetime, so a
 		// caller can lengthen a revocation but never shorten one. An unusable
-		// ttl is refused, as mint refuses one, rather than replaced.
+		// ttl could only have lengthened it, so it is ignored rather than
+		// allowed to fail a security action.
 		var ttl time.Duration
 		if req.TTL != "" {
-			var err error
-			if ttl, err = time.ParseDuration(req.TTL); err != nil || ttl <= 0 {
-				http.Error(w, "ttl must be a positive Go duration such as 2160h", http.StatusBadRequest)
-				return
+			if parsed, err := time.ParseDuration(req.TTL); err == nil && parsed > 0 {
+				ttl = parsed
+			} else {
+				log.V(1).Info("ignoring an unusable revocation ttl", "ttl", req.TTL)
 			}
 		}
 
@@ -788,7 +789,10 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 													"aud":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"sub":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
-													"ttl":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{
+														Description: "Go duration that can lengthen a metadata revocation beyond its lifetime, max(10y, the host's max_ttl); it never shortens one, and an unusable value is ignored. A revocation revokes the tokens issued up to it, so a key re-minted afterwards under the same name is valid.",
+														Type:        &openapi.Types{openapi.TypeString},
+													}},
 												},
 												Type: &openapi.Types{openapi.TypeObject},
 											},

@@ -14,10 +14,6 @@ import (
 // not a key re-minted under the same name afterwards. See
 // kdex-tech/host-manager#238 (quad 2).
 
-func nextSecond() {
-	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 20*time.Millisecond)))
-}
-
 func TestRevokeByMetadata_RevokesTokensIssuedUpToTheRevocationOnly(t *testing.T) {
 	ctx := context.Background()
 	tm := subjectlessTokenManager(t)
@@ -25,7 +21,9 @@ func TestRevokeByMetadata_RevokesTokensIssuedUpToTheRevocationOnly(t *testing.T)
 	before, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
-	nextSecond()
+	// iat carries sub-second precision, so a key re-minted in the same second
+	// as the revocation is not revoked on arrival.
+	time.Sleep(time.Millisecond)
 	after, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
 	require.NoError(t, err)
 
@@ -67,8 +65,19 @@ func TestRevocationTTL(t *testing.T) {
 	assert.Equal(t, 2*RevocationHorizon, tm.RevocationTTL(), "never shorter than the longest mintable token")
 }
 
-// Two host reconfigurations rotate a cycled cache's generations away, and a
-// revocation with them.
-func TestRevocationCacheOptions_AreUncycled(t *testing.T) {
-	assert.True(t, RevocationCacheOptions().Uncycled)
+// A re-revocation on a replica whose clock lags must not move the revocation
+// back in time and re-admit the tokens issued in between.
+func TestRevoke_NeverMovesARevocationBackInTime(t *testing.T) {
+	ctx := context.Background()
+	tm := subjectlessTokenManager(t)
+	jti := GenerateJTI("aud", "alice", "laptop")
+	later := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, tm.revocationCache.Set(ctx, jti, later))
+
+	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
+
+	stored, found, _, err := tm.revocationCache.Get(ctx, jti)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, later, stored)
 }

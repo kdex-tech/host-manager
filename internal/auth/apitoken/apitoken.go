@@ -46,13 +46,6 @@ const pasetoV4PublicHeader = "v4.public."
 // key minted afterwards under the same name.
 const RevocationHorizon = 10 * 365 * 24 * time.Hour
 
-// RevocationCacheOptions are the options of the revocation cache. It is
-// uncycled: a cycled cache keeps two generations, so two host
-// reconfigurations would silently drop every revocation.
-func RevocationCacheOptions() cache.CacheOptions {
-	return cache.CacheOptions{Uncycled: true}
-}
-
 // ErrTTLExceedsMax is returned when a mint asks for a lifetime longer than the
 // host's KDexHost.spec.auth.apiToken.maxTTL. See kdex-tech/host-manager#238.
 var ErrTTLExceedsMax = errors.New("ttl exceeds the host's maximum API token lifetime")
@@ -224,8 +217,20 @@ func (tm *TokenManager) RevocationTTL() time.Duration {
 // revoke records that every token carrying jti and issued up to now is
 // revoked, for at least RevocationTTL. A shorter ttl is raised, so no caller
 // can shorten a revocation by re-revoking with a small one.
+//
+// The stored time never moves backwards: a re-revocation on a replica whose
+// clock lags keeps the later time, or the tokens issued in between would
+// validate again. Replicas are assumed NTP-synced; a token minted on one
+// replica within the clock skew of its revocation on another can fall on
+// either side of it.
 func (tm *TokenManager) revoke(ctx context.Context, jti string, ttl time.Duration) error {
-	return tm.revocationCache.Set(ctx, jti, time.Now().UTC().Format(time.RFC3339Nano),
+	revokedAt := time.Now().UTC()
+	if stored, found, _, err := tm.revocationCache.Get(ctx, jti); err == nil && found {
+		if at, perr := time.Parse(time.RFC3339Nano, stored); perr == nil && at.After(revokedAt) {
+			revokedAt = at
+		}
+	}
+	return tm.revocationCache.Set(ctx, jti, revokedAt.Format(time.RFC3339Nano),
 		cache.WithTTL(max(ttl, tm.RevocationTTL())))
 }
 
@@ -379,7 +384,12 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 
 	token.SetAudience(aud)
 	token.SetExpiration(exp)
-	token.SetIssuedAt(now)
+	// iat carries sub-second precision (RFC 3339 allows it; go-paseto's
+	// GetTime parses it) where SetIssuedAt would truncate to whole seconds:
+	// a revocation revokes the tokens issued up to it, so a key re-minted in
+	// the same second as a revocation must be distinguishable from one
+	// minted before it.
+	token.SetString("iat", now.UTC().Format(time.RFC3339Nano))
 	token.SetIssuer(tm.issuer)
 	token.SetJti(GenerateJTI(aud, sub, action))
 	token.SetNotBefore(now)

@@ -124,15 +124,24 @@ func TestApitokenMint_RefusesAnUnusableTTL(t *testing.T) {
 	}
 }
 
-func TestApitokenRevoke_RefusesAnUnusableTTL(t *testing.T) {
+// A revoke is a security action: an unusable ttl, which could only have
+// lengthened the revocation, must not make it fail.
+func TestApitokenRevoke_IgnoresAnUnusableTTL(t *testing.T) {
 	for _, ttl := range []string{"90d", "0s", "-1h"} {
 		t.Run(ttl, func(t *testing.T) {
-			hh, _ := crossSubjectHost(t)
+			hh, tm := crossSubjectHost(t)
+			token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Audience: "aud", Sub: "alice", Action: "key-1", TTL: ttl})
 
-			if rr.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400 (body %q)", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+			}
+			if _, err := tm.ValidateToken(t.Context(), token, "aud"); err == nil {
+				t.Fatal("the token must be revoked")
 			}
 		})
 	}
