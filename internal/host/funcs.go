@@ -115,9 +115,9 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	if isPrivate && hh.IsAuthEnabled() {
 		vary += ", Authorization, Cookie"
 	}
-	// Merge rather than replace: a wrapping handler (gzhttp on /-/openapi)
-	// has already added Vary: Accept-Encoding, and dropping it would let a
-	// cache serve one coding to a client that asked for another.
+	// Merge rather than replace: gzhttp (DesignMiddleware, for compressible
+	// routes) has already added Vary: Accept-Encoding, and dropping it would
+	// let a cache serve one coding to a client that asked for another.
 	addVary(w.Header(), vary)
 
 	identity := ""
@@ -132,6 +132,13 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	seedSuffix := ""
 	if seed != "" {
 		seedSuffix = ":" + seed
+	}
+	// DesignMiddleware serves host-manager's own renders through gzhttp, so
+	// one URL is sent in more than one coding, and each coding must have its
+	// own ETag (RFC 9110 8.8.3): a 304 must never be answered for a coding
+	// the client did not get. See acceptEncodingSeed and #247.
+	if ae := acceptEncodingSeed(r); ae != "" {
+		seedSuffix += ":" + ae
 	}
 
 	if lastModified.IsZero() {

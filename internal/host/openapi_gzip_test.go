@@ -48,7 +48,7 @@ func getOpenAPI(th *HostHandler, headers map[string]string) *httptest.ResponseRe
 		req.Header.Set(k, v)
 	}
 	w := httptest.NewRecorder()
-	th.Mux.ServeHTTP(w, req)
+	th.DesignMiddleware(th.Mux).ServeHTTP(w, req)
 	return w
 }
 

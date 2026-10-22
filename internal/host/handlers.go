@@ -13,7 +13,6 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/utils"
-	"github.com/klauspost/compress/gzhttp"
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -320,7 +319,10 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// Localized:false registers only the bare default-language route below,
 	// unconditionally, on every pass through the loop.
 	for _, lang := range translations.Languages() {
-		var handler http.HandlerFunc = hh.pageHandlerFunc(pr.ph, translations, lang)
+		// A page is host-manager's own render, so it is compressible. A
+		// rewrite alias is not: its target may be a function streaming
+		// text/event-stream (see compressibleHandler).
+		handler := compressible(http.HandlerFunc(hh.pageHandlerFunc(pr.ph, translations, lang)))
 		if pr.ph.Page != nil && pr.ph.Page.Rewrite != nil {
 			handler = hh.rewriteHandlerFunc(pr, lang, mux)
 		}
@@ -796,7 +798,7 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 	}
 
 	const loginPath = "/-/login"
-	mux.HandleFunc("GET "+loginPath, hh.LoginGet)
+	mux.Handle("GET "+loginPath, compressible(http.HandlerFunc(hh.LoginGet)))
 	mux.HandleFunc("POST "+loginPath, hh.LoginPost)
 
 	hh.registerPath(loginPath, ko.PathInfo{
@@ -860,7 +862,7 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 	}, registeredPaths)
 
 	const loginClientRoutePath = "/-/login/{path...}"
-	mux.HandleFunc("GET "+loginClientRoutePath, hh.LoginGet)
+	mux.Handle("GET "+loginClientRoutePath, compressible(http.HandlerFunc(hh.LoginGet)))
 
 	hh.registerPath(loginClientRoutePath, ko.PathInfo{
 		API: ko.OpenAPI{
@@ -942,7 +944,7 @@ func (hh *HostHandler) loginHandler(mux *http.ServeMux, registeredPaths map[stri
 
 func (hh *HostHandler) navigationHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/-/navigation/{navKey}/{l10n}/{basePathMinusLeadingSlash...}"
-	mux.HandleFunc("GET "+path, hh.NavigationGet)
+	mux.Handle("GET "+path, compressible(http.HandlerFunc(hh.NavigationGet)))
 
 	hh.registerPath(path, ko.PathInfo{
 		API: ko.OpenAPI{
@@ -1124,10 +1126,10 @@ func (hh *HostHandler) oauthHandler(mux *http.ServeMux, registeredPaths map[stri
 func (hh *HostHandler) openapiHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/-/openapi"
 
-	// The document is large (hundreds of KB on a real tenant) and was served
-	// uncompressed. gzhttp compresses it for clients that accept gzip or zstd,
-	// and adds Vary: Accept-Encoding.
-	mux.Handle("GET "+path, gzhttp.GzipHandler(http.HandlerFunc(hh.OpenAPIGet)))
+	// The document is large (hundreds of KB on a real tenant). DesignMiddleware
+	// compresses it for clients that accept gzip or zstd, and adds
+	// Vary: Accept-Encoding.
+	mux.Handle("GET "+path, compressible(http.HandlerFunc(hh.OpenAPIGet)))
 
 	// Register the path itself so it appears in the spec
 	hh.registerPath(path, ko.PathInfo{
@@ -1546,7 +1548,7 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 
 func (hh *HostHandler) translationHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	const path = "/-/translation/{l10n}"
-	mux.HandleFunc("GET "+path, hh.TranslationGet)
+	mux.Handle("GET "+path, compressible(http.HandlerFunc(hh.TranslationGet)))
 
 	hh.registerPath(path, ko.PathInfo{
 		API: ko.OpenAPI{

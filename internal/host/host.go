@@ -625,12 +625,13 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		// which this snapshot has not been swapped into yet) is the source
 		// of truth for this build's supported languages.
 		for _, lang := range newTranslations.Languages() {
-			handler := hh.notReadyHandlerFunc(lang)
+			// The announcement is a utility render: compressible.
+			handler := compressible(hh.notReadyHandlerFunc(lang))
 			if lang.String() == defaultLanguageResource {
-				mux.HandleFunc("GET /{$}", handler)
+				mux.Handle("GET /{$}", handler)
 				continue
 			}
-			mux.HandleFunc("GET /"+lang.String()+"/{$}", handler)
+			mux.Handle("GET /"+lang.String()+"/{$}", handler)
 		}
 		return rebuildSnapshot{
 			translations:    newTranslations,
