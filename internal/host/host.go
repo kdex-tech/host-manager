@@ -193,25 +193,36 @@ func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
 	var buffer bytes.Buffer
 	separator := ""
 
-	if len(packageReferences) > 0 {
+	// The importmap is host-wide and stays on every page that has one, even a
+	// page that imports nothing: its inline module scripts may use bare
+	// specifiers (#246).
+	if hh.importmap != "" {
 		buffer.WriteString("<script type=\"importmap\">\n")
 		buffer.WriteString(hh.importmap)
-		buffer.WriteString("\n</script>\n")
+		buffer.WriteString("\n</script>")
+		separator = "\n"
+	}
 
+	if len(packageReferences) > 0 {
+		buffer.WriteString(separator)
 		buffer.WriteString("<script type=\"module\">\n")
 
 		seen := map[string]bool{}
+		first := true
 		for _, pr := range packageReferences {
 			statement := pr.ToImportStatement()
 			if seen[statement] {
 				continue
 			}
 			seen[statement] = true
-			buffer.WriteString(separator)
+			if !first {
+				buffer.WriteString("\n")
+			}
+			first = false
 			buffer.WriteString(statement)
-			separator = "\n"
 		}
 		buffer.WriteString("\n</script>")
+		separator = "\n"
 	}
 
 	for _, script := range hh.scripts {

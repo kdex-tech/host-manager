@@ -69,3 +69,17 @@ func TestHeadScriptToHTML_DeterministicOrder(t *testing.T) {
 	g.Expect(a).To(BeNumerically("<", m))
 	g.Expect(m).To(BeNumerically("<", z))
 }
+
+func TestHeadScriptToHTML_ImportmapWithoutImports(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	hh := newHeadScriptHost(t)
+	out := hh.HeadScriptToHTML(page.PageHandler{})
+	g.Expect(out).To(ContainSubstring(headScriptImportmap))
+	g.Expect(out).To(ContainSubstring(`<script type="importmap">`))
+	g.Expect(out).NotTo(ContainSubstring(`<script type="module">`))
+
+	empty := newHeadScriptHost(t)
+	empty.importmap = ""
+	g.Expect(empty.HeadScriptToHTML(page.PageHandler{})).NotTo(ContainSubstring(`importmap`))
+}
