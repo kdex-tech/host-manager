@@ -104,6 +104,31 @@ func TestSecurityHeaders_SetHostComputesHSTS(t *testing.T) {
 	assert.Equal(t, "max-age=63072000; includeSubDomains", hh.hstsValue)
 }
 
+// An http host with routing.hsts set computes no HSTS value through SetHost,
+// and a rendered page then sends no Strict-Transport-Security.
+func TestSecurityHeaders_SetHostHTTPSchemeGatesHSTS(t *testing.T) {
+	hh := compressHost(t, nil)
+	hundred := int32(100)
+	hh.SetHost(t.Context(),
+		&kdexv1alpha1.KDexHostSpec{DefaultLang: "en", Routing: kdexv1alpha1.Routing{
+			Domains: []string{"example.com"},
+			HSTS:    &kdexv1alpha1.HSTS{MaxAge: &hundred, IncludeSubDomains: true},
+		}},
+		&kdexv1alpha1.KDexObjectStatus{}, nil, nil, nil, "", nil, nil, nil, nil, "http", nil, hh.reconcileTime)
+	assert.Equal(t, "", hh.hstsValue)
+
+	hh.Pages.Set(page.PageHandler{
+		Name:         "doc",
+		MainTemplate: "<html><body>doc</body></html>",
+		Page:         &kdexv1alpha1.KDexPageSpec{Label: "Doc", Paths: kdexv1alpha1.Paths{BasePath: "/doc"}},
+	})
+	hh.RebuildMux()
+	rr := compressGet(t, hh, "/doc", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	requirePageSecurityHeaders(t, rr.Header(), "")
+	assert.Empty(t, rr.Header().Values("Strict-Transport-Security"))
+}
+
 func TestSecurityHeaders_ConsentKeepsStricterValues(t *testing.T) {
 	hh, _ := newConsentPageHost(t, `<html><body>[[ .Content ]]</body></html>`, "hello")
 	hh.hstsValue = hstsHeaderValue("https", nil)
@@ -135,6 +160,24 @@ func TestSecurityHeaders_FunctionResponseHasNone(t *testing.T) {
 
 	rr := compressGet(t, hh, "/api/fn/x", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
+	requireNoSecurityHeaders(t, rr.Header())
+}
+
+func TestSecurityHeaders_AliasToFunctionHasNone(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(upstream.Close)
+	alias := aliasPH("events", "/events", "", kdexv1alpha1.RewriteSpec{
+		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "fn"},
+	})
+	hh := securityHost(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", upstream.URL)}, alias)
+	require.NotEmpty(t, hh.hstsValue)
+
+	rr := compressGet(t, hh, "/events", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), `"ok":true`)
 	requireNoSecurityHeaders(t, rr.Header())
 }
 
