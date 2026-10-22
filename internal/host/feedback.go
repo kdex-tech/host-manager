@@ -15,6 +15,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/sniffer"
+	"github.com/klauspost/compress/gzhttp"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -207,9 +208,20 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 		// X-KDex-Sniffer-Suppressed.
 		hh.mu.RLock()
 		mux := hh.Mux
-		sniffer := hh.sniffer
+		snif := hh.sniffer
 		authChecker := hh.authChecker
 		hh.mu.RUnlock()
+
+		// Match on the mux being DISPATCHED, not on hh.Mux. ServeHTTP
+		// snapshots hh.Mux and hands it here as next, then runs the whole
+		// authentication pass before this line; a RebuildMux in that gap
+		// swaps hh.Mux, so re-reading it could decide compression on one
+		// mux and dispatch on another -- and send a function response,
+		// SSE included, through gzhttp. hh.Mux stays the fallback for a
+		// next that is not a mux (tests wrap a bare handler).
+		if nextMux, ok := next.(*http.ServeMux); ok {
+			mux = nextMux
+		}
 
 		h, p := mux.Handler(r)
 		if p == "" {
@@ -218,167 +230,190 @@ func (hh *HostHandler) DesignMiddleware(next http.Handler) http.Handler {
 			log.V(2).Info("request match", "url", r.URL.String(), "pattern", p)
 		}
 
-		// serve is everything below the match. A route marked compressible
-		// (host-manager's own renders) and an unmatched request (the 404
-		// error page) run it inside gzipWrap, so the w it sees -- the writer
-		// the error capture wraps, and the one unwrap and serveError write
-		// the error page to -- is the gzhttp writer. gzhttp therefore sits
-		// OUTSIDE errorResponseWriter: the error capture records plain
-		// bytes, and the handler still writes straight to the error writer,
-		// so auth.PreserveHeader keeps finding it. Every other match (a
-		// function, a backend, a rewrite alias) runs serve unwrapped, exactly
+		// A route marked compressible (host-manager's own renders) and an
+		// unmatched request (the 404 error page) are served inside gzhttp,
+		// so the w serveMatched sees -- the writer the error capture wraps,
+		// and the one unwrap and serveError write the error page to -- is
+		// the gzhttp writer. gzhttp therefore sits OUTSIDE
+		// errorResponseWriter: the error capture records plain bytes, and
+		// the handler still writes straight to the error writer, so
+		// auth.PreserveHeader keeps finding it. Every other match (a
+		// function, a backend, a rewrite alias) is served unwrapped, exactly
 		// as before. See kdex-tech/host-manager#247.
-		serve := func(w http.ResponseWriter, r *http.Request) {
-			ew := &errorResponseWriter{ResponseWriter: w}
-			wrapped := wrappedErrorResponseWriter(ew, w)
-
-			// Only intercept if we have a sniffer (checker), it's not an internal path
-			if sniffer == nil || (strings.HasPrefix(r.URL.Path, "/-/") && p != "") {
-				next.ServeHTTP(wrapped, r)
-				hh.unwrap(ew, r, w)
-				return
-			}
-
-			// We should only invoke the sniffer if:
-			// - there is no handler, OR
-			// - if the handler is a KDexFunctionHandler AND the function is
-			//   mutable AND we have X-KDex-* headers
-			invokeSniffer := false
-			if p != "" {
-				var matchedFunction *kdexv1alpha1.KDexFunction
-				if fh, ok := h.(*KDexFunctionHandler); ok {
-					matchedFunction = fh.Function
-					log.V(2).Info("matched KDexFunction", "name", matchedFunction.Name)
-				}
-
-				// We don't want to invoke the sniffer on an existing mutable function
-				// when there are no X-KDex-* headers because this allows us to test
-				// the function implementation. The sniffer bypasses the
-				// implementation and directly serves the feedback page.
-				hasKDexHeader := false
-				for k := range r.Header {
-					if strings.HasPrefix(k, "X-KDex-") {
-						hasKDexHeader = true
-						break
-					}
-				}
-
-				if matchedFunction != nil && isMutable(matchedFunction) && hasKDexHeader {
-					invokeSniffer = true
-				}
-			} else {
-				// No handler matched, so we should invoke the sniffer
-				invokeSniffer = true
-			}
-
-			// Create a wrapper to capture the status code
-			if invokeSniffer && !canGenerateSniffer(r.Context(), authChecker) {
-				log.V(1).Info("sniffer suppressed: caller lacks functions:create entitlement", "path", r.URL.Path)
-				// The 404 that follows is truthful -- the path does not exist,
-				// which is why the sniffer was reached. But suppression was
-				// previously visible only at V(1), which is why "I expected a
-				// 303, got 404" is a documented question. Name the missing
-				// entitlement in a header so curl -i answers it, without
-				// relabelling an absence as a denial.
-				//
-				// ONLY in the p == "" arm. Suppression is reached from two arms,
-				// and the "the 404 that follows is truthful" reasoning holds for
-				// exactly one of them. In the other -- a matched, mutable
-				// function carrying X-KDex-* headers -- control falls through to
-				// next.ServeHTTP and the function can answer 200. A header
-				// saying "your missing entitlement suppressed something" riding
-				// on a successful response describes nothing that happened to
-				// that request.
-				//
-				// And only for a caller whose subject was actually evaluated.
-				// canGenerateSniffer refuses an anonymous caller -- no
-				// AuthContext, or one with an empty subject -- before
-				// CheckAccess runs, and naming the entitlement there would
-				// advertise the gate rather than explain a decision about them.
-				// hasEvaluatedSubject uses canGenerateSniffer's own definition
-				// of anonymous so the two can never disagree.
-				if p == "" && hasEvaluatedSubject(r.Context()) {
-					// PreserveHeader, not Header().Set: unwrap wipes the header
-					// map by provenance before re-rendering for an
-					// HTML-accepting caller, and this header is exactly the kind
-					// that has to survive it -- it explains the decision rather
-					// than describing the body being replaced.
-					ew.PreserveHeader("X-KDex-Sniffer-Suppressed", "functions:create")
-					// Same reason denial.Write and the discovery redirect carry
-					// it: an entitlement grant that fixes the suppression must
-					// not be shadowed by a cached "you lack it".
-					ew.PreserveHeader("Cache-Control", "no-store")
-				}
-				invokeSniffer = false
-			}
-
-			if invokeSniffer {
-				// Body Persistence: Read body so we can restore it for the next handler AND the sniffer
-				var bodyBytes []byte
-				if r.Body != nil {
-					bodyBytes, _ = io.ReadAll(r.Body)
-					r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-				}
-
-				// Analyze
-				result, err := sniffer.Analyze(r)
-				if err != nil {
-					log.Error(err, "failed to analyze request", "path", r.URL.Path)
-					// Fallback to standard error serving if analysis fails
-					if p == "" {
-						hh.serveError(w, r, http.StatusNotFound, "not found")
-					} else {
-						hh.serveError(w, r, http.StatusBadRequest, err.Error())
-					}
-					return
-				}
-
-				if result == nil || result.Function == nil {
-					if p == "" {
-						hh.serveError(w, r, http.StatusNotFound, "not found")
-					} else {
-						hh.serveError(w, r, ew.statusCode, ew.statusMsg)
-					}
-					return
-				}
-
-				// Store result
-				id := hh.analysisCache.Store(result)
-
-				// Smart Redirection
-				format := "html"
-				if isAgent(r.UserAgent()) {
-					format = "json"
-				} else if isCLI(r.UserAgent()) || strings.Contains(r.Header.Get("Accept"), "text/plain") {
-					format = "text"
-				}
-
-				inspectURL := fmt.Sprintf("/-/sniffer/inspect/%s?format=%s", id, format)
-				absoluteURL := fmt.Sprintf("%s%s", ko.Host(r), inspectURL)
-
-				w.Header().Set("Location", inspectURL)
-				w.Header().Set("X-KDex-Sniffer-Docs", "/-/sniffer/docs")
-				w.WriteHeader(http.StatusSeeOther)
-
-				// Fallback body for those who don't follow redirects
-				// Use OSC 8 for clickable link
-				link := fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", absoluteURL, absoluteURL)
-				_, err = fmt.Fprintf(w, "➔ API Draft Created. View at: %s\n(Note: Use 'curl -L' to follow automatically).\n", link)
-				if err != nil {
-					hh.serveError(w, r, http.StatusInternalServerError, err.Error())
-				}
-			} else {
-				next.ServeHTTP(wrapped, r)
-				hh.unwrap(ew, r, w)
-			}
-		}
-
 		if compressesMatch(h, p) {
-			gzipWrap(http.HandlerFunc(serve)).ServeHTTP(w, r)
+			gzhttp.GzipHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hh.serveMatched(w, r, next, h, p, snif, authChecker)
+			})).ServeHTTP(w, r)
 			return
 		}
-		serve(w, r)
+		hh.serveMatched(w, r, next, h, p, snif, authChecker)
 	})
+}
+
+// requestAnalyzer is the one method serveMatched needs from the host's
+// request sniffer.
+type requestAnalyzer interface {
+	Analyze(*http.Request) (*sniffer.AnalysisResult, error)
+}
+
+// serveMatched is DesignMiddleware below the match: the error capture, the
+// sniffer decision and the dispatch to next. h and p are what the mux matched
+// (p == "" for no match); snif and authChecker are DesignMiddleware's
+// snapshots, taken under hh.mu and never re-read here. It runs without hh.mu
+// held (serveError and unwrap take it themselves).
+func (hh *HostHandler) serveMatched(
+	w http.ResponseWriter,
+	r *http.Request,
+	next http.Handler,
+	h http.Handler,
+	p string,
+	snif requestAnalyzer,
+	authChecker accessChecker,
+) {
+	log := logf.FromContext(r.Context())
+
+	ew := &errorResponseWriter{ResponseWriter: w}
+	wrapped := wrappedErrorResponseWriter(ew, w)
+
+	// Only intercept if we have a sniffer (checker), it's not an internal path
+	if snif == nil || (strings.HasPrefix(r.URL.Path, "/-/") && p != "") {
+		next.ServeHTTP(wrapped, r)
+		hh.unwrap(ew, r, w)
+		return
+	}
+
+	// We should only invoke the sniffer if:
+	// - there is no handler, OR
+	// - if the handler is a KDexFunctionHandler AND the function is
+	//   mutable AND we have X-KDex-* headers
+	invokeSniffer := false
+	if p != "" {
+		var matchedFunction *kdexv1alpha1.KDexFunction
+		if fh, ok := h.(*KDexFunctionHandler); ok {
+			matchedFunction = fh.Function
+			log.V(2).Info("matched KDexFunction", "name", matchedFunction.Name)
+		}
+
+		// We don't want to invoke the sniffer on an existing mutable function
+		// when there are no X-KDex-* headers because this allows us to test
+		// the function implementation. The sniffer bypasses the
+		// implementation and directly serves the feedback page.
+		hasKDexHeader := false
+		for k := range r.Header {
+			if strings.HasPrefix(k, "X-KDex-") {
+				hasKDexHeader = true
+				break
+			}
+		}
+
+		if matchedFunction != nil && isMutable(matchedFunction) && hasKDexHeader {
+			invokeSniffer = true
+		}
+	} else {
+		// No handler matched, so we should invoke the sniffer
+		invokeSniffer = true
+	}
+
+	// Create a wrapper to capture the status code
+	if invokeSniffer && !canGenerateSniffer(r.Context(), authChecker) {
+		log.V(1).Info("sniffer suppressed: caller lacks functions:create entitlement", "path", r.URL.Path)
+		// The 404 that follows is truthful -- the path does not exist,
+		// which is why the sniffer was reached. But suppression was
+		// previously visible only at V(1), which is why "I expected a
+		// 303, got 404" is a documented question. Name the missing
+		// entitlement in a header so curl -i answers it, without
+		// relabelling an absence as a denial.
+		//
+		// ONLY in the p == "" arm. Suppression is reached from two arms,
+		// and the "the 404 that follows is truthful" reasoning holds for
+		// exactly one of them. In the other -- a matched, mutable
+		// function carrying X-KDex-* headers -- control falls through to
+		// next.ServeHTTP and the function can answer 200. A header
+		// saying "your missing entitlement suppressed something" riding
+		// on a successful response describes nothing that happened to
+		// that request.
+		//
+		// And only for a caller whose subject was actually evaluated.
+		// canGenerateSniffer refuses an anonymous caller -- no
+		// AuthContext, or one with an empty subject -- before
+		// CheckAccess runs, and naming the entitlement there would
+		// advertise the gate rather than explain a decision about them.
+		// hasEvaluatedSubject uses canGenerateSniffer's own definition
+		// of anonymous so the two can never disagree.
+		if p == "" && hasEvaluatedSubject(r.Context()) {
+			// PreserveHeader, not Header().Set: unwrap wipes the header
+			// map by provenance before re-rendering for an
+			// HTML-accepting caller, and this header is exactly the kind
+			// that has to survive it -- it explains the decision rather
+			// than describing the body being replaced.
+			ew.PreserveHeader("X-KDex-Sniffer-Suppressed", "functions:create")
+			// Same reason denial.Write and the discovery redirect carry
+			// it: an entitlement grant that fixes the suppression must
+			// not be shadowed by a cached "you lack it".
+			ew.PreserveHeader("Cache-Control", "no-store")
+		}
+		invokeSniffer = false
+	}
+
+	if invokeSniffer {
+		// Body Persistence: Read body so we can restore it for the next handler AND the sniffer
+		var bodyBytes []byte
+		if r.Body != nil {
+			bodyBytes, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+
+		// Analyze
+		result, err := snif.Analyze(r)
+		if err != nil {
+			log.Error(err, "failed to analyze request", "path", r.URL.Path)
+			// Fallback to standard error serving if analysis fails
+			if p == "" {
+				hh.serveError(w, r, http.StatusNotFound, "not found")
+			} else {
+				hh.serveError(w, r, http.StatusBadRequest, err.Error())
+			}
+			return
+		}
+
+		if result == nil || result.Function == nil {
+			if p == "" {
+				hh.serveError(w, r, http.StatusNotFound, "not found")
+			} else {
+				hh.serveError(w, r, ew.statusCode, ew.statusMsg)
+			}
+			return
+		}
+
+		// Store result
+		id := hh.analysisCache.Store(result)
+
+		// Smart Redirection
+		format := "html"
+		if isAgent(r.UserAgent()) {
+			format = "json"
+		} else if isCLI(r.UserAgent()) || strings.Contains(r.Header.Get("Accept"), "text/plain") {
+			format = "text"
+		}
+
+		inspectURL := fmt.Sprintf("/-/sniffer/inspect/%s?format=%s", id, format)
+		absoluteURL := fmt.Sprintf("%s%s", ko.Host(r), inspectURL)
+
+		w.Header().Set("Location", inspectURL)
+		w.Header().Set("X-KDex-Sniffer-Docs", "/-/sniffer/docs")
+		w.WriteHeader(http.StatusSeeOther)
+
+		// Fallback body for those who don't follow redirects
+		// Use OSC 8 for clickable link
+		link := fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", absoluteURL, absoluteURL)
+		_, err = fmt.Fprintf(w, "➔ API Draft Created. View at: %s\n(Note: Use 'curl -L' to follow automatically).\n", link)
+		if err != nil {
+			hh.serveError(w, r, http.StatusInternalServerError, err.Error())
+		}
+	} else {
+		next.ServeHTTP(wrapped, r)
+		hh.unwrap(ew, r, w)
+	}
 }
 
 func (hh *HostHandler) unwrap(ew *errorResponseWriter, r *http.Request, w http.ResponseWriter) {
@@ -531,7 +566,9 @@ func (hh *HostHandler) InspectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate OpenAPI spec snippet
-	spec := hh.GetOpenAPIBuilder().BuildOneOff(ko.Host(r), result.Function)
+	// Locked: InspectHandler holds hh.mu.RLock, and GetOpenAPIBuilder would
+	// take it again (a recursive RLock, the #26/#51/#82 shape).
+	spec := hh.openAPIBuilderLocked().BuildOneOff(ko.Host(r), result.Function)
 	specBytes, _ := json.MarshalIndent(spec, "", "  ")
 	specStr := string(specBytes)
 

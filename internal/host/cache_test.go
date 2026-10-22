@@ -61,7 +61,7 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	assert.Contains(t, body1, "Test Page")
 
 	// Verify it's in cache
-	cacheVal, found, isCurrent, err := cacheManager.GetCache("page", cache.CacheOptions{}).Get(context.Background(), ph.CacheKey(language.English))
+	cacheVal, found, isCurrent, err := cacheManager.GetCache(pageCacheClass, cache.CacheOptions{}).Get(context.Background(), ph.CacheKey(language.English))
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, isCurrent)
@@ -351,3 +351,65 @@ func TestSetHost_DoesNotEvictUncycledCache(t *testing.T) {
 }
 
 func (m *mockAuthChecker) HoldsScope(context.Context, string) bool { return false }
+
+// The render caches are keyed by CR-status checksums only, so a binary whose
+// render format changed would read the previous binary's renders as current.
+// renderFormatVersion is in the cache CLASS, so the two binaries' keys are
+// disjoint: a render stored under another version's class is never served,
+// and this binary's renders never land where that one reads.
+func TestRenderCaches_VersionedByRenderFormat(t *testing.T) {
+	require.Equal(t, "page.v"+renderFormatVersion, pageCacheClass)
+	require.Equal(t, "utility.v"+renderFormatVersion, utilityCacheClass)
+
+	ctx := context.Background()
+	cacheManager, err := cache.NewCacheManager("", "foo", nil)
+	require.NoError(t, err)
+	hh := NewHostHandler(nil, "test-host", "default", logr.Discard(), cacheManager)
+	ph := page.PageHandler{
+		Name:         "test-page",
+		Page:         &kdexv1alpha1.KDexPageSpec{Label: "Test Page", Paths: kdexv1alpha1.Paths{BasePath: "/test"}},
+		MainTemplate: "<html><body>[[ .Title ]]</body></html>",
+	}
+	hh.Pages.Set(ph)
+	hh.utilityPages[kdexv1alpha1.AnnouncementUtilityPageType] = page.PageHandler{
+		Name:         "announcement",
+		MainTemplate: "<html><body>announcement</body></html>",
+		Page:         &kdexv1alpha1.KDexPageSpec{Label: "announcement", Paths: kdexv1alpha1.Paths{BasePath: "/-announcement"}},
+	}
+	hh.SetHost(ctx, &kdexv1alpha1.KDexHostSpec{DefaultLang: "en", BrandName: "KDex"},
+		nil, nil, nil, nil, "", nil, nil, &auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now())
+	hh.authChecker = &mockAuthChecker{}
+
+	// What an older binary (unversioned class) left behind, under the very
+	// key this binary computes.
+	key := ph.CacheKey(language.English)
+	const oldRender = "<html><body>rendered by the previous binary</body></html>"
+	require.NoError(t, cacheManager.GetCache("page", cache.CacheOptions{}).Set(ctx, key, oldRender))
+
+	w := httptest.NewRecorder()
+	hh.Mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/test", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "previous binary", "another version's render is never served")
+	assert.Contains(t, w.Body.String(), "Test Page")
+
+	current, found, _, err := cacheManager.GetCache(pageCacheClass, cache.CacheOptions{}).Get(ctx, key)
+	require.NoError(t, err)
+	require.True(t, found, "this binary's page render is stored under the versioned class")
+	assert.Equal(t, w.Body.String(), current)
+	old, _, _, err := cacheManager.GetCache("page", cache.CacheOptions{}).Get(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, oldRender, old, "and never where the previous binary reads")
+
+	hh.mu.RLock()
+	rendered := hh.renderUtilityPage(kdexv1alpha1.AnnouncementUtilityPageType, language.English, nil, &hh.Translations)
+	hh.mu.RUnlock()
+	require.Contains(t, rendered, "announcement")
+	announcement := hh.utilityPages[kdexv1alpha1.AnnouncementUtilityPageType]
+	utilityKey := announcement.CacheKey(language.English)
+	_, found, _, err = cacheManager.GetCache(utilityCacheClass, cache.CacheOptions{}).Get(ctx, utilityKey)
+	require.NoError(t, err)
+	assert.True(t, found, "a utility render is stored under the versioned class")
+	_, found, _, err = cacheManager.GetCache("utility", cache.CacheOptions{}).Get(ctx, utilityKey)
+	require.NoError(t, err)
+	assert.False(t, found, "and not under the unversioned one")
+}

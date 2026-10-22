@@ -247,7 +247,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 		Sub:      "test-user",
 		Action:   "act",
 		// No ttl: the revocation lasts its full lifetime. An unusable ttl is
-		// refused (TestApitokenRevoke_RefusesAnUnusableTTL).
+		// ignored (TestApitokenRevoke_IgnoresAnUnusableTTL).
 	})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
 	rr := httptest.NewRecorder()

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,5 +162,109 @@ func TestDesignMiddleware_NoRecursiveRLockDeadlock(t *testing.T) {
 	case <-reqDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("request goroutine never completed")
+	}
+}
+
+// blockingHeaderWriter blocks its first Header() call until release is
+// closed, pinning whatever lock the handler holds at that moment.
+type blockingHeaderWriter struct {
+	*httptest.ResponseRecorder
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingHeaderWriter) Header() http.Header {
+	b.once.Do(func() {
+		close(b.entered)
+		<-b.release
+	})
+	return b.ResponseRecorder.Header()
+}
+
+// TestOpenAPIGet_NoRecursiveRLockDeadlock pins the /-/openapi handler to a
+// single RLock. It used to take hh.mu.RLock and then call GetOpenAPIBuilder,
+// which takes it again: a writer queued between the two wedged the host (the
+// #26/#51/#82 shape). The handler's first Header() call (the caching headers)
+// is now under its RLock, so the test pins the lock there, queues a writer,
+// and releases: the handler must finish, and the writer must then acquire,
+// with no further RLock in between.
+func TestOpenAPIGet_NoRecursiveRLockDeadlock(t *testing.T) {
+	cm, err := cache.NewCacheManager("", "openapi-lock-test", nil)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	hh := NewHostHandler(nil, "openapi-lock-test", "default", logr.Discard(), cm)
+	hh.SetHost(
+		context.Background(),
+		&kdexv1alpha1.KDexHostSpec{DefaultLang: "en"},
+		nil, nil, nil, nil, "", nil, nil,
+		&auth.Exchanger{}, &auth.Config{}, "http", nil, time.Now(),
+	)
+
+	bw := &blockingHeaderWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		entered:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	reqDone := make(chan struct{})
+	go func() {
+		defer close(reqDone)
+		hh.OpenAPIGet(bw, httptest.NewRequest(http.MethodGet, "/-/openapi", nil))
+	}()
+
+	select {
+	case <-bw.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenAPIGet never reached its first Header() call")
+	}
+
+	writerAcquired := make(chan struct{})
+	go func() {
+		hh.mu.Lock()
+		hh.mu.Unlock()
+		close(writerAcquired)
+	}()
+	// Give the writer a moment to queue behind the handler's RLock.
+	time.Sleep(50 * time.Millisecond)
+	close(bw.release)
+
+	select {
+	case <-reqDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenAPIGet blocked on a second hh.mu.RLock behind the queued writer")
+	}
+	select {
+	case <-writerAcquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the writer never acquired hh.mu after OpenAPIGet returned")
+	}
+	if bw.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", bw.Code)
+	}
+}
+
+// openAPIBuilderLocked is for a caller already holding hh.mu, so it must
+// never take the lock: under the write lock, a lock attempt would block.
+func TestOpenAPIBuilderLocked_TakesNoLock(t *testing.T) {
+	cm, err := cache.NewCacheManager("", "openapi-locked-test", nil)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	hh := NewHostHandler(nil, "openapi-locked-test", "default", logr.Discard(), cm)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		hh.mu.Lock()
+		defer hh.mu.Unlock()
+		if hh.openAPIBuilderLocked() != &hh.openapiBuilder {
+			t.Error("openAPIBuilderLocked must return the host's builder")
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("openAPIBuilderLocked took hh.mu")
 	}
 }

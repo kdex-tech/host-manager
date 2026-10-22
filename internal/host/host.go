@@ -2,7 +2,6 @@ package host
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -91,10 +90,20 @@ func (hh *HostHandler) GetCacheManager() cache.CacheManager {
 	return hh.cacheManager
 }
 
+// GetOpenAPIBuilder returns the host's OpenAPI builder. It takes hh.mu.RLock,
+// so it is for callers that do NOT hold hh.mu (the controllers); a handler
+// already holding the RLock uses openAPIBuilderLocked instead.
 func (hh *HostHandler) GetOpenAPIBuilder() *ko.Builder {
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 
+	return hh.openAPIBuilderLocked()
+}
+
+// openAPIBuilderLocked is GetOpenAPIBuilder for a caller that already holds
+// hh.mu (read or write). It never takes the lock: a recursive RLock deadlocks
+// against a queued writer.
+func (hh *HostHandler) openAPIBuilderLocked() *ko.Builder {
 	return &hh.openapiBuilder
 }
 
@@ -173,12 +182,25 @@ func (hh *HostHandler) GetUtilityPageHandler(name kdexv1alpha1.KDexUtilityPageTy
 	return ph
 }
 
+// HeadScriptToHTML is headScriptToHTMLLocked for a caller that does NOT hold
+// hh.mu (the controller envtest reads a page's head through it). It takes
+// hh.mu.RLock, so a caller already holding the lock must use
+// headScriptToHTMLLocked: a recursive RLock deadlocks against a queued writer.
 func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	return hh.headScriptToHTMLLocked(handler)
+}
+
+// headScriptToHTMLLocked renders a page's head script slot. The caller MUST
+// hold hh.mu.RLock: it reads hh.hostScopePackageReferences, hh.importmap and
+// hh.scripts, which SetHost rewrites under the write lock.
+func (hh *HostHandler) headScriptToHTMLLocked(handler page.PageHandler) string {
 	// A page imports only what its own CRs declare (the page handler's refs)
 	// plus the host-scope refs (theme and host scriptLibraryRef). The host's
 	// full package aggregate is deliberately not used here; it feeds the
 	// packages image and the importmap only (#246). The page wins over the
-	// host scope on a shared name.
+	// host scope on a shared name, and a name is imported once.
 	byName := make(map[string]kdexv1alpha1.PackageReference, len(hh.hostScopePackageReferences)+len(handler.PackageReferences))
 	for _, pr := range hh.hostScopePackageReferences {
 		byName[pr.Name] = pr
@@ -186,57 +208,33 @@ func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
 	for _, pr := range handler.PackageReferences {
 		byName[pr.Name] = pr
 	}
-	packageReferences := slices.SortedFunc(maps.Values(byName), func(a, b kdexv1alpha1.PackageReference) int {
-		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Version, b.Version))
-	})
 
-	var buffer bytes.Buffer
-	separator := ""
+	var parts []string
 
 	// The importmap is host-wide and stays on every page that has one, even a
 	// page that imports nothing: its inline module scripts may use bare
 	// specifiers (#246).
 	if hh.importmap != "" {
-		buffer.WriteString("<script type=\"importmap\">\n")
-		buffer.WriteString(hh.importmap)
-		buffer.WriteString("\n</script>")
-		separator = "\n"
+		parts = append(parts, "<script type=\"importmap\">\n"+hh.importmap+"\n</script>")
 	}
 
-	if len(packageReferences) > 0 {
-		buffer.WriteString(separator)
-		buffer.WriteString("<script type=\"module\">\n")
-
-		seen := map[string]bool{}
-		first := true
-		for _, pr := range packageReferences {
-			statement := pr.ToImportStatement()
-			if seen[statement] {
-				continue
-			}
-			seen[statement] = true
-			if !first {
-				buffer.WriteString("\n")
-			}
-			first = false
-			buffer.WriteString(statement)
+	if len(byName) > 0 {
+		statements := make([]string, 0, len(byName))
+		for _, name := range slices.Sorted(maps.Keys(byName)) {
+			pr := byName[name]
+			statements = append(statements, pr.ToImportStatement())
 		}
-		buffer.WriteString("\n</script>")
-		separator = "\n"
+		parts = append(parts, "<script type=\"module\">\n"+strings.Join(statements, "\n")+"\n</script>")
 	}
 
 	for _, script := range hh.scripts {
-		buffer.WriteString(separator)
-		buffer.WriteString(script.ToHeadTag())
-		separator = "\n"
+		parts = append(parts, script.ToHeadTag())
 	}
 	for _, script := range handler.Scripts {
-		buffer.WriteString(separator)
-		buffer.WriteString(script.ToHeadTag())
-		separator = "\n"
+		parts = append(parts, script.ToHeadTag())
 	}
 
-	return buffer.String()
+	return strings.Join(parts, "\n")
 }
 
 func (hh *HostHandler) IsAuthEnabled() bool {
@@ -317,7 +315,7 @@ func (hh *HostHandler) L10nRender(
 	if !rendersScriptless(handler) {
 		renderer.Navigations = handler.NavigationToHTMLMap()
 		renderer.FootScript = hh.FootScriptToHTML(handler)
-		renderer.HeadScript = hh.HeadScriptToHTML(handler)
+		renderer.HeadScript = hh.headScriptToHTMLLocked(handler)
 	}
 
 	return renderer.RenderPage()
@@ -1243,7 +1241,7 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 		return ""
 	}
 
-	utilityCache := hh.cacheManager.GetCache("utility", cache.CacheOptions{})
+	utilityCache := hh.cacheManager.GetCache(utilityCacheClass, cache.CacheOptions{})
 	cacheKey := ph.CacheKey(l)
 
 	// Only attempt cache logic for the plain render: the cache key does not
@@ -1314,6 +1312,10 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 
 	// Set here, after unwrap's header wipe, so the wipe cannot drop them.
 	hh.setPageSecurityHeadersLocked(w)
+	// The error page's language comes from Accept-Language (and ?l10n=,
+	// which is in the URL), so a cache must key on it. unwrap's wipe
+	// restores only Accept-Encoding, so this is added here too.
+	addVary(w.Header(), "Accept-Language")
 
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {

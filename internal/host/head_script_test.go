@@ -27,6 +27,14 @@ func newHeadScriptHost(t *testing.T, hostScopeRefs ...kdexv1alpha1.PackageRefere
 	return hh
 }
 
+// headScript renders handler's head under hh.mu.RLock, as every production
+// caller of headScriptToHTMLLocked does.
+func headScript(hh *HostHandler, handler page.PageHandler) string {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	return hh.headScriptToHTMLLocked(handler)
+}
+
 func pkgRef(name string) kdexv1alpha1.PackageReference {
 	return kdexv1alpha1.PackageReference{Name: name, Version: "1.0.0"}
 }
@@ -36,11 +44,11 @@ func importOf(name string) string {
 	return pr.ToImportStatement()
 }
 
-func TestHeadScriptToHTML_ImportsOnlyHostScopeAndPageRefs(t *testing.T) {
+func TestHeadScriptToHTMLLocked_ImportsOnlyHostScopeAndPageRefs(t *testing.T) {
 	g := NewGomegaWithT(t)
 	hh := newHeadScriptHost(t, pkgRef("@x/theme-lib"))
 
-	out := hh.HeadScriptToHTML(page.PageHandler{
+	out := headScript(hh, page.PageHandler{
 		PackageReferences: []kdexv1alpha1.PackageReference{pkgRef("@x/a")},
 	})
 
@@ -50,16 +58,16 @@ func TestHeadScriptToHTML_ImportsOnlyHostScopeAndPageRefs(t *testing.T) {
 	g.Expect(out).To(ContainSubstring(headScriptImportmap))
 }
 
-func TestHeadScriptToHTML_DeterministicOrder(t *testing.T) {
+func TestHeadScriptToHTMLLocked_DeterministicOrder(t *testing.T) {
 	g := NewGomegaWithT(t)
 	hh := newHeadScriptHost(t)
 	handler := page.PageHandler{
 		PackageReferences: []kdexv1alpha1.PackageReference{pkgRef("@x/z"), pkgRef("@x/a"), pkgRef("@x/m")},
 	}
 
-	first := hh.HeadScriptToHTML(handler)
+	first := headScript(hh, handler)
 	for range 50 {
-		g.Expect(hh.HeadScriptToHTML(handler)).To(Equal(first))
+		g.Expect(headScript(hh, handler)).To(Equal(first))
 	}
 
 	a := strings.Index(first, importOf("@x/a"))
@@ -70,16 +78,16 @@ func TestHeadScriptToHTML_DeterministicOrder(t *testing.T) {
 	g.Expect(m).To(BeNumerically("<", z))
 }
 
-func TestHeadScriptToHTML_ImportmapWithoutImports(t *testing.T) {
+func TestHeadScriptToHTMLLocked_ImportmapWithoutImports(t *testing.T) {
 	g := NewGomegaWithT(t)
 
 	hh := newHeadScriptHost(t)
-	out := hh.HeadScriptToHTML(page.PageHandler{})
+	out := headScript(hh, page.PageHandler{})
 	g.Expect(out).To(ContainSubstring(headScriptImportmap))
 	g.Expect(out).To(ContainSubstring(`<script type="importmap">`))
 	g.Expect(out).NotTo(ContainSubstring(`<script type="module">`))
 
 	empty := newHeadScriptHost(t)
 	empty.importmap = ""
-	g.Expect(empty.HeadScriptToHTML(page.PageHandler{})).NotTo(ContainSubstring(`importmap`))
+	g.Expect(headScript(empty, page.PageHandler{})).NotTo(ContainSubstring(`importmap`))
 }

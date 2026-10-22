@@ -70,7 +70,7 @@ func TestBackgroundRender_NoRaceWithSetHost(t *testing.T) {
 	// returns ok=true, isCurrent=false — the stale-hit branch fires
 	// and the background goroutine spawns.
 	require.NoError(t, cm.Cycle("g1", false))
-	uc := cm.GetCache("utility", cache.CacheOptions{})
+	uc := cm.GetCache(utilityCacheClass, cache.CacheOptions{})
 	ph := hh.utilityPages[kdexv1alpha1.ErrorUtilityPageType]
 	cacheKey := ph.CacheKey(language.English)
 	require.NoError(t, uc.Set(context.Background(), cacheKey, "stale-rendered-content"))

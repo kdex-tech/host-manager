@@ -66,7 +66,7 @@ func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFu
 		},
 		GrantTypesSupported: []string{
 			"authorization_code",
-			"client_credentials",
+			GRANT_TYPE_CLIENT_CREDENTIALS,
 			"password",
 			"refresh_token",
 			GRANT_TYPE_TOKEN_EXCHANGE,

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,12 @@ import (
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// revokeTTLDescription is the OpenAPI description of RevokeRequest.TTL. The
+// revocation lifetime is built from apitoken.RevocationHorizon so the document
+// cannot drift from the constant.
+var revokeTTLDescription = fmt.Sprintf("Go duration that can lengthen a metadata revocation beyond its lifetime, max(%d years, the host's max_ttl); it never shortens one, and an unusable value is ignored. A revocation revokes the tokens issued up to it, so a key re-minted afterwards under the same name is valid.",
+	apitoken.RevocationHorizon/(365*24*time.Hour))
 
 // maxAPITokenRequestBytes caps API-token request bodies (mint, verify,
 // revoke). These payloads are short metadata-only documents.
@@ -82,8 +89,9 @@ type RevokeRequest struct {
 	Audience string `json:"aud"`
 	// Sub is the subject of the tokens to revoke (metadata-based revocation).
 	Sub string `json:"sub"`
-	// TTL lengthens a metadata revocation beyond its lifetime, max(10y,
-	// maxTTL); it can never shorten one. An unusable value is ignored.
+	// TTL lengthens a metadata revocation beyond its lifetime,
+	// max(apitoken.RevocationHorizon, maxTTL) (TokenManager.RevocationTTL);
+	// it can never shorten one. An unusable value is ignored.
 	TTL string `json:"ttl"`
 	// Token is the full signed token to revoke.
 	Token string `json:"token"`
@@ -790,7 +798,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 													"sub":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"ttl": &openapi.SchemaRef{Value: &openapi.Schema{
-														Description: "Go duration that can lengthen a metadata revocation beyond its lifetime, max(10y, the host's max_ttl); it never shortens one, and an unusable value is ignored. A revocation revokes the tokens issued up to it, so a key re-minted afterwards under the same name is valid.",
+														Description: revokeTTLDescription,
 														Type:        &openapi.Types{openapi.TypeString},
 													}},
 												},

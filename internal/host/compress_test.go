@@ -16,6 +16,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/page"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -37,10 +38,10 @@ func compressErrorPage() page.PageHandler {
 	}
 }
 
-// compressHost builds a host through RebuildMux, as production does, with the
+// renderHost builds a host through RebuildMux, as production does, with the
 // error utility page, a large page /doc carrying a large navigation, and the
 // given functions.
-func compressHost(t *testing.T, fns []kdexv1alpha1.KDexFunction, extra ...page.PageHandler) *HostHandler {
+func renderHost(t *testing.T, fns []kdexv1alpha1.KDexFunction, extra ...page.PageHandler) *HostHandler {
 	t.Helper()
 	hh := newTestHostHandler(t, "en", []string{"en"})
 	hh.host.Routing.Domains = []string{"example.com"}
@@ -72,7 +73,7 @@ func compressGet(t *testing.T, hh *HostHandler, path string, headers map[string]
 	return rr
 }
 
-// decodedBody returns the body with any gzip Content-Encoding removed.
+// decodedBody returns the body with any gzip or zstd Content-Encoding removed.
 func decodedBody(t *testing.T, rr *httptest.ResponseRecorder) string {
 	t.Helper()
 	switch ce := rr.Header().Get("Content-Encoding"); ce {
@@ -81,6 +82,13 @@ func decodedBody(t *testing.T, rr *httptest.ResponseRecorder) string {
 	case "gzip":
 		zr, err := gzip.NewReader(rr.Body)
 		require.NoError(t, err)
+		raw, err := io.ReadAll(zr)
+		require.NoError(t, err)
+		return string(raw)
+	case "zstd":
+		zr, err := zstd.NewReader(rr.Body)
+		require.NoError(t, err)
+		defer zr.Close()
 		raw, err := io.ReadAll(zr)
 		require.NoError(t, err)
 		return string(raw)
@@ -93,7 +101,7 @@ func decodedBody(t *testing.T, rr *httptest.ResponseRecorder) string {
 var gzipAE = map[string]string{"Accept-Encoding": "gzip"}
 
 func TestCompress_PageNegotiatesGzip(t *testing.T) {
-	hh := compressHost(t, nil)
+	hh := renderHost(t, nil)
 
 	plain := compressGet(t, hh, "/doc", nil)
 	require.Equal(t, http.StatusOK, plain.Code)
@@ -108,7 +116,7 @@ func TestCompress_PageNegotiatesGzip(t *testing.T) {
 }
 
 func TestCompress_IdentityWithoutAcceptEncoding(t *testing.T) {
-	hh := compressHost(t, nil)
+	hh := renderHost(t, nil)
 
 	rr := compressGet(t, hh, "/doc", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -117,7 +125,7 @@ func TestCompress_IdentityWithoutAcceptEncoding(t *testing.T) {
 }
 
 func TestCompress_ETagPerCoding(t *testing.T) {
-	hh := compressHost(t, nil)
+	hh := renderHost(t, nil)
 
 	plain := compressGet(t, hh, "/doc", nil)
 	gz := compressGet(t, hh, "/doc", gzipAE)
@@ -134,7 +142,7 @@ func TestCompress_ETagPerCoding(t *testing.T) {
 }
 
 func TestCompress_TranslationAndNavigation(t *testing.T) {
-	hh := compressHost(t, nil)
+	hh := renderHost(t, nil)
 	kv := map[string]string{}
 	for i := range 60 {
 		kv[fmt.Sprintf("key.number.%d", i)] = fmt.Sprintf("A translated value long enough to matter, number %d", i)
@@ -170,7 +178,7 @@ func TestCompress_LoginAndAnnouncement(t *testing.T) {
 	}
 
 	t.Run("login", func(t *testing.T) {
-		hh := compressHost(t, nil)
+		hh := renderHost(t, nil)
 		hh.AddOrUpdateUtilityPage(utility("login", kdexv1alpha1.LoginUtilityPageType))
 
 		gz := compressGet(t, hh, "/-/login", gzipAE)
@@ -200,7 +208,7 @@ func TestCompress_FunctionRouteUntouched(t *testing.T) {
 		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(upstream.Close)
-	hh := compressHost(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", upstream.URL)})
+	hh := renderHost(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", upstream.URL)})
 
 	rr := compressGet(t, hh, "/api/fn/x", gzipAE)
 	require.Equal(t, http.StatusOK, rr.Code)
@@ -217,7 +225,7 @@ func TestCompress_FunctionErrorMessagePlainText(t *testing.T) {
 		_, _ = io.WriteString(w, "boom")
 	}))
 	t.Cleanup(upstream.Close)
-	hh := compressHost(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", upstream.URL)})
+	hh := renderHost(t, []kdexv1alpha1.KDexFunction{readyFunction("fn", "/api/fn", upstream.URL)})
 
 	rr := compressGet(t, hh, "/api/fn/x", map[string]string{"Accept": "text/html", "Accept-Encoding": "gzip"})
 	require.Equal(t, http.StatusInternalServerError, rr.Code)
@@ -225,7 +233,7 @@ func TestCompress_FunctionErrorMessagePlainText(t *testing.T) {
 }
 
 func TestCompress_UnmatchedErrorPageCompressedWithVary(t *testing.T) {
-	hh := compressHost(t, nil)
+	hh := renderHost(t, nil)
 
 	plain := compressGet(t, hh, "/nowhere", map[string]string{"Accept": "text/html"})
 	require.Equal(t, http.StatusNotFound, plain.Code)
@@ -311,7 +319,7 @@ func TestCompress_AliasToSSEFunctionNotBuffered(t *testing.T) {
 	alias := aliasPH("events", "/events", "", kdexv1alpha1.RewriteSpec{
 		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "sse"},
 	})
-	hh := compressHost(t, []kdexv1alpha1.KDexFunction{readyFunction("sse", "/api/sse", upstream.URL)}, alias)
+	hh := renderHost(t, []kdexv1alpha1.KDexFunction{readyFunction("sse", "/api/sse", upstream.URL)}, alias)
 
 	srv := httptest.NewServer(hh.DesignMiddleware(hh.Mux))
 	t.Cleanup(srv.Close)
@@ -344,4 +352,116 @@ func TestCompress_AliasToSSEFunctionNotBuffered(t *testing.T) {
 	rest, err := io.ReadAll(br)
 	require.NoError(t, err)
 	assert.Contains(t, string(rest), "data: two")
+}
+
+// Chrome and Firefox send zstd, and gzhttp prefers it over gzip.
+func TestCompress_PageNegotiatesZstd(t *testing.T) {
+	hh := renderHost(t, nil)
+
+	plain := compressGet(t, hh, "/doc", nil)
+	require.Equal(t, http.StatusOK, plain.Code)
+
+	zs := compressGet(t, hh, "/doc", map[string]string{"Accept-Encoding": "zstd, gzip"})
+	require.Equal(t, http.StatusOK, zs.Code)
+	assert.Equal(t, "zstd", zs.Header().Get("Content-Encoding"))
+	assert.True(t, varyHas(zs.Header(), "Accept-Encoding"))
+	assert.Equal(t, plain.Body.String(), decodedBody(t, zs))
+}
+
+// RFC 9110 13.1.3: when If-None-Match is present, If-Modified-Since is
+// ignored. The gzip ETag with a date that would otherwise validate must not
+// answer 304 to a client that accepts no coding.
+func TestCompress_IfNoneMatchOverridesIfModifiedSince(t *testing.T) {
+	hh := renderHost(t, nil)
+
+	gz := compressGet(t, hh, "/doc", gzipAE)
+	require.Equal(t, http.StatusOK, gz.Code)
+	gzETag := gz.Header().Get("ETag")
+	lastModified := gz.Header().Get("Last-Modified")
+	require.NotEmpty(t, gzETag)
+	require.NotEmpty(t, lastModified)
+
+	rr := compressGet(t, hh, "/doc", map[string]string{"If-None-Match": gzETag, "If-Modified-Since": lastModified})
+	require.Equal(t, http.StatusOK, rr.Code, "a non-matching If-None-Match decides; the date is ignored")
+	assert.Empty(t, rr.Header().Get("Content-Encoding"))
+	assert.Contains(t, rr.Body.String(), "Doc")
+
+	for name, inm := range map[string]string{
+		"list":     `"other", ` + gzETag,
+		"weak":     "W/" + gzETag,
+		"wildcard": "*",
+	} {
+		nm := compressGet(t, hh, "/doc", map[string]string{"Accept-Encoding": "gzip", "If-None-Match": inm})
+		assert.Equal(t, http.StatusNotModified, nm.Code, name)
+	}
+
+	ims := compressGet(t, hh, "/doc", map[string]string{"If-Modified-Since": lastModified})
+	assert.Equal(t, http.StatusNotModified, ims.Code, "with no If-None-Match the date still validates")
+}
+
+// DesignMiddleware decides compression on the mux it dispatches to, not on
+// hh.Mux, which a RebuildMux during the authentication pass may have swapped.
+func TestCompress_DecisionUsesDispatchedMux(t *testing.T) {
+	body := "<html><body>" + compressPadding + "</body></html>"
+	plainHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, body)
+	})
+	plainMux := http.NewServeMux()
+	plainMux.Handle("GET /x", plainHandler)
+	markedMux := http.NewServeMux()
+	markedMux.Handle("GET /x", compressible(plainHandler))
+
+	serve := func(hh *HostHandler, dispatched *http.ServeMux) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rr := httptest.NewRecorder()
+		hh.DesignMiddleware(dispatched).ServeHTTP(rr, req)
+		return rr
+	}
+
+	t.Run("dispatched mux marks the route", func(t *testing.T) {
+		hh := renderHost(t, nil)
+		hh.Mux = plainMux
+		rr := serve(hh, markedMux)
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "gzip", rr.Header().Get("Content-Encoding"))
+	})
+
+	t.Run("dispatched mux does not mark the route", func(t *testing.T) {
+		hh := renderHost(t, nil)
+		hh.Mux = markedMux
+		rr := serve(hh, plainMux)
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Empty(t, rr.Header().Get("Content-Encoding"))
+		assert.False(t, varyHas(rr.Header(), "Accept-Encoding"))
+		assert.Equal(t, body, rr.Body.String())
+	})
+}
+
+// The Accept-Encoding ETag seed applies only where gzhttp negotiates the
+// response. A route it never wraps, and a HEAD (which gzhttp never
+// compresses), keep the identity ETag whatever the request accepts.
+func TestCompress_ETagSeedOnlyWhereNegotiated(t *testing.T) {
+	hh := renderHost(t, nil)
+
+	plainSchemas := compressGet(t, hh, "/-/schemas", nil)
+	require.Equal(t, http.StatusOK, plainSchemas.Code)
+	gzSchemas := compressGet(t, hh, "/-/schemas", gzipAE)
+	require.Equal(t, http.StatusOK, gzSchemas.Code)
+	require.NotEmpty(t, plainSchemas.Header().Get("ETag"))
+	assert.Empty(t, gzSchemas.Header().Get("Content-Encoding"))
+	assert.Equal(t, plainSchemas.Header().Get("ETag"), gzSchemas.Header().Get("ETag"), "a never-compressed route has one ETag")
+
+	plainDoc := compressGet(t, hh, "/doc", nil)
+	gzDoc := compressGet(t, hh, "/doc", gzipAE)
+	assert.NotEqual(t, plainDoc.Header().Get("ETag"), gzDoc.Header().Get("ETag"), "a compressible route has one ETag per coding")
+
+	req := httptest.NewRequest(http.MethodHead, "/doc", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	head := httptest.NewRecorder()
+	hh.DesignMiddleware(hh.Mux).ServeHTTP(head, req)
+	require.Equal(t, http.StatusOK, head.Code)
+	assert.Empty(t, head.Header().Get("Content-Encoding"))
+	assert.Equal(t, plainDoc.Header().Get("ETag"), head.Header().Get("ETag"), "a HEAD is identity, so it has the identity ETag")
 }

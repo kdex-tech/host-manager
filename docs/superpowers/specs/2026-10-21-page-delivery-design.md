@@ -76,15 +76,21 @@ Utility pages are built the same way (`kdexinternalutilitypage_controller.go`).
   `handleInternalPackageReferences` (the packages image) and the importmap.
 - It passes a separate **host-scope** set to `SetHost`, containing only the theme's and the
   host's `scriptLibraryRef` package references (deduped with `UniquePackageRefs`).
-  `hh.packageReferences` holds that set.
-- `HeadScriptToHTML` unions the host-scope set with the page's own refs. It emits one import
-  statement per distinct statement, in a stable sorted order (by package name, then version,
-  matching `UniquePackageRefs`), instead of ranging over a map.
+  `hh.hostScopePackageReferences` holds that set.
+- `headScriptToHTMLLocked` unions the host-scope set with the page's own refs, keyed by package
+  name (the page wins on a shared name). It emits one import statement per name, sorted by
+  name, instead of ranging over a map.
 - The importmap emitted in the head stays the full host importmap, unchanged.
-- The `len(packageReferences) > 0` gate on emitting the importmap must still hold for a page
-  with no own refs on a host with no host-scope refs. The builder decides whether the importmap
-  should then still be emitted. Today it isn't, and nothing in the site depends on it, so
-  keeping the current gate is fine.
+- **Decided (Task 3 ruling): the importmap is emitted whenever the host has one**, including on a
+  page that ends up with zero imports. The old `len(packageReferences) > 0` gate is gone: a
+  page's inline module scripts may use bare specifiers, and those resolve only through the
+  importmap.
+- **Decided (quad): rendered output is versioned in the render caches.** The page and utility
+  render caches are keyed by CR-status checksums only, so a new binary would serve the previous
+  binary's renders (without #246) as current, and a rollback would serve the new ones.
+  `renderFormatVersion` is part of those caches' class names (`page.v2`, `utility.v2`), so two
+  binaries never read each other's renders. Bump it whenever rendered HTML or head output
+  changes. The `nav` cache is unversioned: navigation fragments carry no head output.
 
 **Known site impact, already arranged.** knowdrive-site's top bar renders `<knowdrive-usermenu>`
 (defined by `@recourse-software/knowdrive-shell`) without importing the shell, relying on the
@@ -110,25 +116,34 @@ inputs still carry the full aggregate.
 
 ## #247: compress host-manager's own responses
 
-**Precedent.** `/-/openapi` (`internal/host/handlers.go`, `openapiHandler`) is already wrapped in
+**Precedent.** `/-/openapi` (`internal/host/handlers.go`, `openapiHandler`) was already wrapped in
 `gzhttp.GzipHandler` from `github.com/klauspost/compress` v1.20.1, which is already a dependency.
-Its ETag is seeded with `acceptEncodingSeed(r)` (`internal/host/openapi.go`) so each coding has
-its own ETag (RFC 9110 8.8.3).
+Its ETag was seeded with `acceptEncodingSeed(r)` so each coding has its own ETag
+(RFC 9110 8.8.3). It now goes through the same mechanism as every other compressed route
+(below).
 
 **Change.**
-- Wrap with the same gzhttp handler:
-  - the page route handlers registered in `handlers.go` (the `pageHandlerFunc` /
-    `rewriteHandlerFunc` registration loop, including the `patternPath` and per-language twins);
+- **Decided: compression is decided once, in `DesignMiddleware`, not wrapped route by route.**
+  A route opts in by being registered as `compressible(handler)` (outermost wrapper). The
+  compressible routes are:
+  - the page routes registered in `handlers.go` (the `pageHandlerFunc` registration loop,
+    including the `patternPath` and per-language twins);
   - `NavigationGet`;
   - `TranslationGet`;
-  - the paths that render utility pages (`serveError`, the login page, the announcement page;
-    the builder finds the exact call sites).
+  - the login and announcement utility pages, and `/-/openapi`.
+
+  An unmatched request (whose response is the 404 error page) is compressed too.
+  `DesignMiddleware` matches against the mux it is actually dispatching to (the snapshot
+  `ServeHTTP` passes as `next`), never a re-read of `hh.Mux`, so a rebuild during the
+  authentication pass cannot send a function response through gzhttp.
 - Do not wrap at the mux root. Function proxies, backend proxies, SSE and `/-/transfer` must
   stay untouched.
-- **Do not wrap rewrite aliases** (`rewriteHandlerFunc`). `rewrite.targetRef.kind` may be a
-  `KDexFunction`, and `rewriteResponseWriter` keeps Flush/Hijack so SSE streams through it.
-  gzhttp v1.20.1 has no `text/event-stream` exclusion, so it would buffer the stream. An alias
-  whose target is a page reaches that page's handler, which is already wrapped.
+- **Decided: rewrite aliases are never compressed, whatever their target.**
+  `rewrite.targetRef.kind` may be a `KDexFunction`, and `rewriteResponseWriter` keeps
+  Flush/Hijack so SSE streams through it. gzhttp v1.20.1 has no `text/event-stream` exclusion,
+  so it would buffer the stream. The alias calls its target's handler directly, beneath
+  `DesignMiddleware`'s decision, so **an alias to a page is served identity** too. A possible
+  future fix is to mark compressible the aliases whose `targetRef.kind` is a page.
 - **The re-rendered error page.** `DesignMiddleware` (`internal/host/feedback.go`) wraps the
   whole mux in `errorResponseWriter`. For any status ≥400 sent to a client that accepts HTML,
   `hh.unwrap` replaces the body with the error utility page through `serveError`. This covers
@@ -148,10 +163,16 @@ its own ETag (RFC 9110 8.8.3).
     costs little.
   - **`Vary` must be put back.** `unwrap`'s wipe deletes the `Vary: Accept-Encoding` gzhttp
     added up front, so `unwrap` restores it.
-- Add `acceptEncodingSeed(r)` to each wrapped handler's existing ETag seed. Pages use
-  `applyCachingHeadersWithSeed(..., ph.Checksum())`, navigation the same, and translation uses
-  `applyCachingHeadersWithLang`. The language and per-page seeds stay. A 304 must never be
-  answered for a coding the client didn't get.
+- **Decided: the Accept-Encoding ETag seed applies only where gzhttp is in play.**
+  `applyCachingHeadersWithSeed` folds `acceptEncodingSeed(r)` into the ETag only when the
+  response's `Vary` already lists `Accept-Encoding`, which gzhttp adds before the handler runs.
+  A route gzhttp never wraps (the favicon, a schema) keeps one ETag for every coding, and a HEAD
+  (which gzhttp never compresses) gets the identity ETag. The language and per-page seeds stay.
+  A 304 must never be answered for a coding the client didn't get. gzhttp's `SuffixETag` is not
+  used: it does not strip the suffix from `If-None-Match`, so the 304 check would never match.
+- **When `If-None-Match` is present, `If-Modified-Since` is ignored** (RFC 9110 13.1.3).
+  Otherwise a matching date would answer 304 for a coding, language or page the client's ETag
+  says it does not hold.
 - Redirect responses (301 legacy redirects, login redirects) are fine wrapped or not; the
   builder chooses.
 - gzhttp's default minimum size and content-type filter are acceptable.
@@ -161,7 +182,10 @@ its own ETag (RFC 9110 8.8.3).
   body decompresses to the uncompressed render;
 - no `Accept-Encoding` gets an identity body;
 - ETags differ between the two, and a conditional request with the gzip ETag plus gzip encoding
-  gets a 304.
+  gets a 304;
+- the gzip ETag plus a validating `If-Modified-Since`, with no `Accept-Encoding`, gets a 200
+  identity body;
+- `Accept-Encoding: zstd, gzip` gets `Content-Encoding: zstd`.
 
 A function proxy route is still not compressed by host-manager.
 
@@ -226,9 +250,10 @@ type HSTS struct {
 
 **Where the headers are applied.** One small helper (e.g. `hh.setPageSecurityHeaders(w)`)
 called from:
-- `serveRendered`;
+- `serveRendered`, which the login and announcement pages also serve through;
 - `serveText`, folding in its existing nosniff line;
-- the utility-page serve paths (error, login, announcement and consent; consent then tightens).
+- the error and consent serve paths (consent then tightens);
+- `NavigationGet`, whose fragments are per-user HTML (added by the quad).
 
 Calling it on the 304 short-circuit is the builder's call: browsers keep the stored response's
 headers, so it isn't required. It must not be reachable from the proxy, function, backend or
@@ -262,8 +287,8 @@ utility serve paths, not in the alias wrapper. **Decided by me (Claude)** after 
 
 - The exact helper names and file placement.
 - Whether to wrap the 301 compatibility redirects in gzhttp.
-- Whether the importmap is emitted on a page that ends up with zero imports (keep the current
-  gate unless there's a reason).
+- ~~Whether the importmap is emitted on a page that ends up with zero imports.~~ Decided: it
+  is (see #246).
 - Whether to call the security-header helper on the 304 path.
 - How the work is ordered across commits. Suggested: kdex-crds HSTS field first, then the
   #246, #247 and #248 commits in host-manager.

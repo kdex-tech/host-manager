@@ -10,6 +10,11 @@ import (
 
 // defaultHSTSMaxAge is one year, the max-age sent when routing.hsts leaves
 // maxAge unset.
+//
+// kdex-crds depends on this exact value: its HSTS CEL rule and field doc
+// treat an unset maxAge as 31536000 (the preload minimum), so changing it
+// here without changing kdex-crds would make the CRD validate one policy and
+// host-manager send another.
 const defaultHSTSMaxAge int32 = 31536000
 
 // hstsHeaderValue builds the Strict-Transport-Security value for a host. It

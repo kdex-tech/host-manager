@@ -199,7 +199,6 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 
 			if scriptLibrary.PackageReference != nil {
-				packageRefs = append(packageRefs, *scriptLibrary.PackageReference)
 				hostScopeRefs = append(hostScopeRefs, *scriptLibrary.PackageReference)
 			}
 			scriptDefs = append(scriptDefs, scriptLibrary.Scripts...)
@@ -226,11 +225,15 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 
 		if scriptLibrary.PackageReference != nil {
-			packageRefs = append(packageRefs, *scriptLibrary.PackageReference)
 			hostScopeRefs = append(hostScopeRefs, *scriptLibrary.PackageReference)
 		}
 		scriptDefs = append(scriptDefs, scriptLibrary.Scripts...)
 	}
+
+	// The host-wide aggregate starts with the host-scope refs, in the same
+	// order (theme's library, then the host's); the utility pages' and
+	// pages' refs follow.
+	packageRefs = append(packageRefs, hostScopeRefs...)
 
 	var utilityPages kdexv1alpha1.KDexInternalUtilityPageList
 	if err := r.List(ctx, &utilityPages, client.InNamespace(r.ControllerNamespace), client.MatchingFields{internal.HOST_INDEX_KEY: r.FocalHost}); err != nil {

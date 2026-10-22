@@ -50,16 +50,7 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.V(1).Info("serving login page", "language", l.String())
-
-	hh.setPageSecurityHeadersLocked(w)
-	w.Header().Set("Content-Language", l.String())
-	w.Header().Set("Content-Type", "text/html")
-
-	_, err = w.Write([]byte(rendered))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	hh.serveRendered(w, log, l, "login", rendered)
 }
 
 // loginOIDCExtra is the login page's `oidc` template data. authCodeURL keeps

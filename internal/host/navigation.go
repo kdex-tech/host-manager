@@ -239,6 +239,9 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 
 	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
 	if err == nil && ok {
+		// A navigation fragment is per-user HTML like a page, so it carries
+		// the same framing and nosniff headers (#248).
+		hh.setPageSecurityHeadersLocked(w)
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(rendered))
 
@@ -302,6 +305,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		log.Error(err, "failed to cache navigation", "key", cacheKey)
 	}
 
+	hh.setPageSecurityHeadersLocked(w)
 	w.Header().Set("Content-Type", "text/html")
 	if _, err = w.Write([]byte(rendered)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

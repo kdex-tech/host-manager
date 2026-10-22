@@ -16,6 +16,31 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// renderFormatVersion versions the FORMAT of the rendered output that the
+// page and utility render caches store. Bump it whenever a release changes
+// the rendered HTML or head output for unchanged CRs.
+//
+// Those caches are keyed by the host checksum and the page checksum, and both
+// come only from CR status: a new host-manager binary computes the same keys
+// as the one it replaces, so without this it would serve the previous
+// binary's renders as current (for up to the cache TTL on Valkey) and never
+// show its own change, and after a rollback the old binary would serve the new
+// renders. The version is part of the cache CLASS, not the checksum, so the
+// keys of two binaries with different versions are disjoint and neither ever
+// reads the other's renders. Version 2 is #246 (a page imports only its own
+// packages).
+const renderFormatVersion = "2"
+
+// pageCacheClass and utilityCacheClass are the render cache classes. The
+// "nav" cache is deliberately unversioned: a navigation fragment renders from
+// the navigation template alone (performNavigationRender), with no head
+// script, importmap or package imports, so #246 did not change it. Version it
+// too the first time a release changes navigation output.
+const (
+	pageCacheClass    = "page.v" + renderFormatVersion
+	utilityCacheClass = "utility.v" + renderFormatVersion
+)
+
 func (hh *HostHandler) pageHandlerFunc(
 	ph page.PageHandler,
 	translations *Translations,
@@ -45,7 +70,7 @@ func (hh *HostHandler) pageHandlerFunc(
 			return
 		}
 
-		pageCache := hh.cacheManager.GetCache("page", cache.CacheOptions{})
+		pageCache := hh.cacheManager.GetCache(pageCacheClass, cache.CacheOptions{})
 
 		cacheKey := ph.CacheKey(l)
 
@@ -127,7 +152,9 @@ func (hh *HostHandler) pageHandlerFunc(
 	}
 }
 
-// Small helper to keep the main handler clean
+// serveRendered writes a host-manager HTML render (a page, or the login and
+// announcement utility pages) with the headers every such render carries.
+// The caller MUST hold hh.mu.RLock (setPageSecurityHeadersLocked).
 func (hh *HostHandler) serveRendered(w http.ResponseWriter, log logr.Logger, l language.Tag, name string, rendered string) {
 	log.V(1).Info("serving", "page", name, "language", l)
 	hh.setPageSecurityHeadersLocked(w)

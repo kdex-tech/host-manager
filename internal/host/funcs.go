@@ -136,9 +136,15 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	// DesignMiddleware serves host-manager's own renders through gzhttp, so
 	// one URL is sent in more than one coding, and each coding must have its
 	// own ETag (RFC 9110 8.8.3): a 304 must never be answered for a coding
-	// the client did not get. See acceptEncodingSeed and #247.
-	if ae := acceptEncodingSeed(r); ae != "" {
-		seedSuffix += ":" + ae
+	// the client did not get. gzhttp adds Vary: Accept-Encoding before the
+	// handler runs (gzhttp v1.20.1 compress.go:616), so that Vary is exactly
+	// the mark of a response it is negotiating; a route it never wraps (the
+	// favicon, a schema) keeps one ETag for every coding. See
+	// acceptEncodingSeed and #247.
+	if varyHas(w.Header(), "Accept-Encoding") {
+		if ae := acceptEncodingSeed(r); ae != "" {
+			seedSuffix += ":" + ae
+		}
 	}
 
 	if lastModified.IsZero() {
@@ -150,19 +156,45 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)
 
-	if r.Header.Get("If-None-Match") == etag {
+	if notModified(r, etag, lastModified) {
 		w.WriteHeader(http.StatusNotModified)
 		return true
 	}
 
+	return false
+}
+
+// notModified evaluates a GET's conditional headers against the response's
+// etag and lastModified (RFC 9110 13.1.2, 13.1.3, 13.2.2). When If-None-Match
+// is present it alone decides, and If-Modified-Since is ignored: the ETag
+// carries the coding (#247), the language (#43) and the page (#44), which a
+// date cannot, so a matching date must never answer 304 for a variant the
+// client's ETag says it does not hold.
+func notModified(r *http.Request, etag string, lastModified time.Time) bool {
+	if inm := r.Header.Values("If-None-Match"); strings.TrimSpace(strings.Join(inm, "")) != "" {
+		return etagListMatches(inm, etag)
+	}
 	if ifModifiedSince := r.Header.Get("If-Modified-Since"); ifModifiedSince != "" {
 		t, err := http.ParseTime(ifModifiedSince)
-		if err == nil && !lastModified.After(t) {
-			w.WriteHeader(http.StatusNotModified)
-			return true
+		return err == nil && !lastModified.After(t)
+	}
+	return false
+}
+
+// etagListMatches reports whether an If-None-Match field list names etag or
+// is "*". The comparison is weak (RFC 9110 8.8.3.2), as If-None-Match
+// requires: a W/ prefix on either side is ignored. Splitting on "," is exact
+// for host-manager's own ETags, which never contain one.
+func etagListMatches(values []string, etag string) bool {
+	etag = strings.TrimPrefix(etag, "W/")
+	for _, v := range values {
+		for tag := range strings.SplitSeq(v, ",") {
+			tag = strings.TrimSpace(tag)
+			if tag == "*" || strings.TrimPrefix(tag, "W/") == etag {
+				return true
+			}
 		}
 	}
-
 	return false
 }
 

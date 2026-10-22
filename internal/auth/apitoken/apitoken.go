@@ -341,10 +341,10 @@ func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
 	return tm.revoke(ctx, jti, ttl)
 }
 
-// issuedBy reports whether token was issued at or before a revocation stored
+// issuedNoLaterThan reports whether token was issued at or before a revocation stored
 // at revokedAt. An entry without a timestamp (written before revocations
 // carried one) or a token without an iat revokes outright.
-func issuedBy(token *paseto.Token, revokedAt string) bool {
+func issuedNoLaterThan(token *paseto.Token, revokedAt string) bool {
 	at, err := time.Parse(time.RFC3339Nano, revokedAt)
 	if err != nil {
 		return true
@@ -389,6 +389,15 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 	// a revocation revokes the tokens issued up to it, so a key re-minted in
 	// the same second as a revocation must be distinguishable from one
 	// minted before it.
+	//
+	// DEPENDENCY workaround. Pinned: aidanwoods.dev/go-paseto v1.6.0, which
+	// is also the newest release (checked 2026-10-22: v1.6.0 of
+	// 2025-12-27 is @latest, and upstream main at 8653d50 is that tag).
+	// Token.SetTime there still formats with time.RFC3339, i.e. whole
+	// seconds, so no upgrade fixes this. It is a library choice rather than
+	// a defect (its GetTime parses fractional seconds), so the workaround
+	// stands: once a release's SetTime keeps sub-second precision, replace
+	// this line with token.SetIssuedAt(now).
 	token.SetString("iat", now.UTC().Format(time.RFC3339Nano))
 	token.SetIssuer(tm.issuer)
 	token.SetJti(GenerateJTI(aud, sub, action))
@@ -467,7 +476,7 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 		if err != nil {
 			return nil, fmt.Errorf("failed to check revocation status: %w", err)
 		}
-		if found && issuedBy(token, revokedAt) {
+		if found && issuedNoLaterThan(token, revokedAt) {
 			return nil, fmt.Errorf("token revoked")
 		}
 	}

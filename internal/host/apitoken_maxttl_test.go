@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -144,5 +145,13 @@ func TestApitokenRevoke_IgnoresAnUnusableTTL(t *testing.T) {
 				t.Fatal("the token must be revoked")
 			}
 		})
+	}
+}
+
+// The revoke ttl's OpenAPI description is built from apitoken.RevocationHorizon,
+// so it states the horizon in years rather than restating a literal.
+func TestRevokeTTLDescription_StatesTheRevocationHorizon(t *testing.T) {
+	if !strings.Contains(revokeTTLDescription, "max(10 years, the host's max_ttl)") {
+		t.Fatalf("description = %q", revokeTTLDescription)
 	}
 }

@@ -107,11 +107,12 @@ type HostHandler struct {
 	functions                  []kdexv1alpha1.KDexFunction
 	functionHandlers           map[string]*KDexFunctionHandler
 	host                       *kdexv1alpha1.KDexHostSpec
+	hostScopePackageReferences []kdexv1alpha1.PackageReference
+	hstsValue                  string
 	importmap                  string
 	log                        logr.Logger
 	mu                         sync.RWMutex
 	openapiBuilder             ko.Builder
-	hostScopePackageReferences []kdexv1alpha1.PackageReference
 	pageDenialMode             PageDenialMode
 	pathsCollectedInReconcile  map[string]ko.PathInfo
 	proxyTimeouts              ProxyTimeouts
@@ -120,7 +121,6 @@ type HostHandler struct {
 	registerLimiter            *registerLimiter
 	registerLimiterOnce        sync.Once
 	scheme                     string
-	hstsValue                  string
 	scripts                    []kdexv1alpha1.ScriptDef
 	sniffer                    interface {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
@@ -221,9 +221,9 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 		functions:                  []kdexv1alpha1.KDexFunction{},
 		functionHandlers:           map[string]*KDexFunctionHandler{},
 		host:                       nil,
+		hostScopePackageReferences: []kdexv1alpha1.PackageReference{},
 		importmap:                  "",
 		log:                        log,
-		hostScopePackageReferences: []kdexv1alpha1.PackageReference{},
 		pathsCollectedInReconcile:  map[string]ko.PathInfo{},
 		reconcileTime:              time.Now(),
 		registeredPaths:            map[string]ko.PathInfo{},

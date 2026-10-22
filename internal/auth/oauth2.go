@@ -603,7 +603,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ts, err = o.AuthExchanger.RedeemAuthorizationCode(r.Context(), code, clientId, redirectURI, codeVerifier)
-	case "client_credentials":
+	case GRANT_TYPE_CLIENT_CREDENTIALS:
 		var handled bool
 		ts, handled, err = o.clientCredentialsGrant(w, r, client, clientId, clientSecret, scope, resource)
 		if handled {

@@ -1026,15 +1026,7 @@ func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
 			return
 		}
 
-		log.V(1).Info("serving announcement page", "language", l.String())
-
-		hh.setPageSecurityHeadersLocked(w)
-		w.Header().Set("Content-Language", l.String())
-		w.Header().Set("Content-Type", "text/html")
-
-		if _, err := w.Write([]byte(rendered)); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+		hh.serveRendered(w, log, l, "announcement", rendered)
 	}
 }
 
