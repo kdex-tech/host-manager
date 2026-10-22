@@ -980,6 +980,7 @@ func (hh *HostHandler) SetHost(
 	hh.pathsCollectedInReconcile = paths
 	hh.reconcileTime = reconcileTime
 	hh.scheme = scheme
+	hh.hstsValue = hstsHeaderValue(scheme, host.Routing.HSTS)
 	hh.scripts = scripts
 	hh.status = status
 	hh.themeAssets = themeAssets
@@ -1310,6 +1311,9 @@ func (hh *HostHandler) serveError(w http.ResponseWriter, r *http.Request, code i
 	// site. See kdex-tech/host-manager#51.
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
+
+	// Set here, after unwrap's header wipe, so the wipe cannot drop them.
+	hh.setPageSecurityHeadersLocked(w)
 
 	l, err := kdexhttp.GetLang(r, hh.defaultLanguage, hh.Translations.Languages())
 	if err != nil {

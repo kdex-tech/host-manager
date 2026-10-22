@@ -24,6 +24,13 @@ import (
 func (hh *HostHandler) renderConsentPage(w http.ResponseWriter, r *http.Request, v auth.ConsentView) {
 	log := logf.FromContext(r.Context())
 
+	// The OAuth2 request path holds no host lock; take a brief one for the
+	// transport headers (hstsValue is rewritten by SetHost). The flow already
+	// set the framing and referrer headers, which stay as they are.
+	hh.mu.RLock()
+	hh.setTransportSecurityHeadersLocked(w)
+	hh.mu.RUnlock()
+
 	page, ok := hh.renderBrandedConsent(r, v)
 	if !ok {
 		auth.RenderBuiltinConsent(w, r, v)

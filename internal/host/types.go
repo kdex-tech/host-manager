@@ -120,6 +120,7 @@ type HostHandler struct {
 	registerLimiter            *registerLimiter
 	registerLimiterOnce        sync.Once
 	scheme                     string
+	hstsValue                  string
 	scripts                    []kdexv1alpha1.ScriptDef
 	sniffer                    interface {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)

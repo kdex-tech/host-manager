@@ -52,6 +52,7 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 
 	log.V(1).Info("serving login page", "language", l.String())
 
+	hh.setPageSecurityHeadersLocked(w)
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
 

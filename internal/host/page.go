@@ -130,6 +130,7 @@ func (hh *HostHandler) pageHandlerFunc(
 // Small helper to keep the main handler clean
 func (hh *HostHandler) serveRendered(w http.ResponseWriter, log logr.Logger, l language.Tag, name string, rendered string) {
 	log.V(1).Info("serving", "page", name, "language", l)
+	hh.setPageSecurityHeadersLocked(w)
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", "text/html")
 	if _, err := w.Write([]byte(rendered)); err != nil {
@@ -144,9 +145,9 @@ func (hh *HostHandler) serveText(w http.ResponseWriter, log logr.Logger, l langu
 	w.Header().Set("Content-Language", l.String())
 	w.Header().Set("Content-Type", contentType)
 	// Text pages serve un-escaped operator-authored content at canonical
-	// URLs (e.g. /llms.txt); nosniff stops a browser from MIME-sniffing past
-	// the declared Content-Type.
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// URLs (e.g. /llms.txt); the helper's nosniff stops a browser from
+	// MIME-sniffing past the declared Content-Type.
+	hh.setPageSecurityHeadersLocked(w)
 	if _, err := w.Write([]byte(rendered)); err != nil {
 		log.Error(err, "failed to write response", "page", name, "language", l)
 	}
