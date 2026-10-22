@@ -147,6 +147,10 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	backendRefs := []kdexv1alpha1.KDexObjectReference{}
 	defaultBackendServerImage := r.Configuration.BackendDefault.ServerImage
 	packageRefs := []kdexv1alpha1.PackageReference{}
+	// hostScopeRefs are the package refs every page imports: only the theme's
+	// and the host's scriptLibraryRef. packageRefs is the host-wide aggregate
+	// that feeds the packages image and importmap, never a page's imports.
+	hostScopeRefs := []kdexv1alpha1.PackageReference{}
 	requiredBackends := []resolvedBackend{}
 	scriptDefs := []kdexv1alpha1.ScriptDef{}
 	seenPaths := map[string]bool{}
@@ -196,6 +200,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 			if scriptLibrary.PackageReference != nil {
 				packageRefs = append(packageRefs, *scriptLibrary.PackageReference)
+				hostScopeRefs = append(hostScopeRefs, *scriptLibrary.PackageReference)
 			}
 			scriptDefs = append(scriptDefs, scriptLibrary.Scripts...)
 		}
@@ -222,6 +227,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		if scriptLibrary.PackageReference != nil {
 			packageRefs = append(packageRefs, *scriptLibrary.PackageReference)
+			hostScopeRefs = append(hostScopeRefs, *scriptLibrary.PackageReference)
 		}
 		scriptDefs = append(scriptDefs, scriptLibrary.Scripts...)
 	}
@@ -668,7 +674,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		ctx,
 		&internalHost.Spec.KDexHostSpec,
 		&internalHost.Status,
-		uniquePackageRefs,
+		UniquePackageRefs(hostScopeRefs),
 		themeAssets,
 		uniqueScriptDefs,
 		importMap,

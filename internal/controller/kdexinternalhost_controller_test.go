@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -262,6 +263,144 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, internalHost)).To(Succeed())
 			Expect(internalHost.Status.Attributes).NotTo(HaveKey("utilityPage.Consent.generation"))
 		})
+	})
+})
+
+// #246: a page imports only the packages its own CRs declare, while the
+// host-wide aggregate still drives the packages image (the KIPR).
+var _ = Describe("KDexInternalHost page imports", func() {
+	const namespace = "default"
+
+	ctx := context.Background()
+
+	AfterEach(func() {
+		cleanupResources(namespace)
+	})
+
+	It("narrows each page's head imports to its own packages but keeps the full aggregate in the KIPR", func() {
+		newApp := func(name, pkg string) {
+			app := &kdexv1alpha1.KDexApp{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexAppSpec{
+					CustomElements: []kdexv1alpha1.CustomElement{{Name: name + "-el", Description: name}},
+					PackageReference: kdexv1alpha1.PackageReference{
+						Name:    pkg,
+						Version: "1.0.0",
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+			// No KDexApp reconciler runs in this suite; mark it Ready the
+			// way the real one would so pages can resolve it.
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, app)).To(Succeed())
+				meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+					Type:   string(kdexv1alpha1.ConditionTypeReady),
+					Status: metav1.ConditionTrue,
+					Reason: "Test",
+				})
+				g.Expect(k8sClient.Status().Update(ctx, app)).To(Succeed())
+			}, "5s").Should(Succeed())
+		}
+		newApp("app-a", "@x/app-a")
+		newApp("app-b", "@x/app-b")
+
+		Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexScriptLibrary{
+			ObjectMeta: metav1.ObjectMeta{Name: "host-lib", Namespace: namespace},
+			Spec: kdexv1alpha1.KDexScriptLibrarySpec{
+				PackageReference: &kdexv1alpha1.PackageReference{Name: "@x/host-lib", Version: "1.0.0"},
+			},
+		})).To(Succeed())
+		assertResourceReady(ctx, k8sClient, "host-lib", namespace, &kdexv1alpha1.KDexScriptLibrary{}, true)
+
+		addOrUpdatePageArchetype(ctx, k8sClient, kdexv1alpha1.KDexPageArchetype{
+			ObjectMeta: metav1.ObjectMeta{Name: "imports-archetype", Namespace: namespace},
+			Spec:       kdexv1alpha1.KDexPageArchetypeSpec{Content: "<main>[[ .Content.main ]]</main>"},
+		})
+		assertResourceReady(ctx, k8sClient, "imports-archetype", namespace, &kdexv1alpha1.KDexPageArchetype{}, true)
+
+		newPage := func(name, basePath, app string) {
+			Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexPage{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: kdexv1alpha1.KDexPageSpec{
+					ContentEntries: []kdexv1alpha1.ContentEntry{{
+						Slot: "main",
+						ContentEntryApp: kdexv1alpha1.ContentEntryApp{
+							AppRef:            &kdexv1alpha1.KDexObjectReference{Kind: "KDexApp", Name: app},
+							CustomElementName: app + "-el",
+						},
+					}},
+					HostRef:          corev1.LocalObjectReference{Name: focalHost},
+					Label:            name,
+					PageArchetypeRef: &kdexv1alpha1.KDexObjectReference{Kind: "KDexPageArchetype", Name: "imports-archetype"},
+					Paths:            kdexv1alpha1.Paths{BasePath: basePath},
+				},
+			})).To(Succeed())
+		}
+		newPage("page-a", "/a", "app-a")
+		newPage("page-b", "/b", "app-b")
+
+		Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexInternalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: focalHost, Namespace: namespace},
+			Spec: kdexv1alpha1.KDexInternalHostSpec{
+				KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+					BrandName:        "KDex Tech",
+					DevMode:          true,
+					ModulePolicy:     kdexv1alpha1.LooseModulePolicy,
+					Organization:     "KDex Tech Inc.",
+					Routing:          kdexv1alpha1.Routing{Domains: []string{"foo.bar"}},
+					ScriptLibraryRef: &kdexv1alpha1.KDexObjectReference{Kind: "KDexScriptLibrary", Name: "host-lib"},
+				},
+			},
+		})).To(Succeed())
+
+		By("aggregating both packages into the KIPR")
+		kipr := &kdexv1alpha1.KDexInternalPackageReferences{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, kipr)).To(Succeed())
+			names := []string{}
+			for _, pr := range kipr.Spec.PackageReferences {
+				names = append(names, pr.Name)
+			}
+			g.Expect(names).To(ConsistOf("@x/app-a", "@x/app-b", "@x/host-lib"))
+		}, "15s").Should(Succeed())
+
+		By("marking the packages image as still building so the host proceeds to SetHost")
+		// No KIPR reconciler runs in this suite and there is no registry to
+		// pull an importmap from; Ready=False is the "Building" outcome, which
+		// continues the host reconcile with an empty importmap.
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, kipr)).To(Succeed())
+			meta.SetStatusCondition(&kipr.Status.Conditions, metav1.Condition{
+				Type:   string(kdexv1alpha1.ConditionTypeReady),
+				Status: metav1.ConditionFalse,
+				Reason: "Building",
+			})
+			g.Expect(k8sClient.Status().Update(ctx, kipr)).To(Succeed())
+		}, "5s").Should(Succeed())
+
+		By("rendering each page head with only its own package")
+		var headA, headB string
+		Eventually(func(g Gomega) {
+			a, okA := hostHandler.Pages.Get("page-a")
+			b, okB := hostHandler.Pages.Get("page-b")
+			g.Expect(okA && okB).To(BeTrue())
+			headA = hostHandler.HeadScriptToHTML(a)
+			headB = hostHandler.HeadScriptToHTML(b)
+			// The host-scope ref only appears once SetHost has run, so
+			// waiting on it keeps the negative assertions below from
+			// passing vacuously before the host is installed.
+			hostLib := kdexv1alpha1.PackageReference{Name: "@x/host-lib"}
+			g.Expect(headA).To(ContainSubstring(hostLib.ToImportStatement()))
+			g.Expect(headB).To(ContainSubstring(hostLib.ToImportStatement()))
+		}, "15s").Should(Succeed())
+
+		appA := kdexv1alpha1.PackageReference{Name: "@x/app-a"}
+		appB := kdexv1alpha1.PackageReference{Name: "@x/app-b"}
+		Expect(headA).To(ContainSubstring(appA.ToImportStatement()))
+		Expect(headA).NotTo(ContainSubstring(appB.ToImportStatement()))
+		Expect(headB).To(ContainSubstring(appB.ToImportStatement()))
+		Expect(headB).NotTo(ContainSubstring(appA.ToImportStatement()))
 	})
 })
 

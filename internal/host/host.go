@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -173,13 +174,21 @@ func (hh *HostHandler) GetUtilityPageHandler(name kdexv1alpha1.KDexUtilityPageTy
 }
 
 func (hh *HostHandler) HeadScriptToHTML(handler page.PageHandler) string {
-	packageReferences := make(map[string]kdexv1alpha1.PackageReference, len(hh.packageReferences)+len(handler.PackageReferences))
-	for _, pr := range hh.packageReferences {
-		packageReferences[pr.Name] = pr
+	// A page imports only what its own CRs declare (the page handler's refs)
+	// plus the host-scope refs (theme and host scriptLibraryRef). The host's
+	// full package aggregate is deliberately not used here; it feeds the
+	// packages image and the importmap only (#246). The page wins over the
+	// host scope on a shared name.
+	byName := make(map[string]kdexv1alpha1.PackageReference, len(hh.hostScopePackageReferences)+len(handler.PackageReferences))
+	for _, pr := range hh.hostScopePackageReferences {
+		byName[pr.Name] = pr
 	}
 	for _, pr := range handler.PackageReferences {
-		packageReferences[pr.Name] = pr
+		byName[pr.Name] = pr
 	}
+	packageReferences := slices.SortedFunc(maps.Values(byName), func(a, b kdexv1alpha1.PackageReference) int {
+		return cmp.Or(strings.Compare(a.Name, b.Name), strings.Compare(a.Version, b.Version))
+	})
 
 	var buffer bytes.Buffer
 	separator := ""
@@ -904,12 +913,18 @@ func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	wrappedMux.ServeHTTP(w, r)
 }
 
+// SetHost installs a reconciled host. hostScopePackageReferences are only the
+// package references declared at host scope (the theme's and the host's
+// scriptLibraryRef): every page imports them. They are NOT the host-wide
+// aggregate of all pages' packages, which the controller keeps for the
+// packages image and importmap (#246).
+//
 // TODO: add individual cache configurations
 func (hh *HostHandler) SetHost(
 	ctx context.Context,
 	host *kdexv1alpha1.KDexHostSpec,
 	status *kdexv1alpha1.KDexObjectStatus,
-	packageReferences []kdexv1alpha1.PackageReference,
+	hostScopePackageReferences []kdexv1alpha1.PackageReference,
 	themeAssets []kdexv1alpha1.Asset,
 	scripts []kdexv1alpha1.ScriptDef,
 	importmap string,
@@ -949,7 +964,7 @@ func (hh *HostHandler) SetHost(
 	hh.functions = functions
 	hh.host = host
 	hh.importmap = importmap
-	hh.packageReferences = packageReferences
+	hh.hostScopePackageReferences = hostScopePackageReferences
 	hh.pathsCollectedInReconcile = paths
 	hh.reconcileTime = reconcileTime
 	hh.scheme = scheme

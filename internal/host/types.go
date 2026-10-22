@@ -97,31 +97,31 @@ type HostHandler struct {
 		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 		VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)
 	}
-	authConfig                *auth.Config
-	authExchanger             *auth.Exchanger
-	cacheManager              cache.CacheManager
-	checksum                  string
-	client                    client.Client
-	defaultLanguage           string
-	favicon                   *ico.Ico
-	functions                 []kdexv1alpha1.KDexFunction
-	functionHandlers          map[string]*KDexFunctionHandler
-	host                      *kdexv1alpha1.KDexHostSpec
-	importmap                 string
-	log                       logr.Logger
-	mu                        sync.RWMutex
-	openapiBuilder            ko.Builder
-	packageReferences         []kdexv1alpha1.PackageReference
-	pageDenialMode            PageDenialMode
-	pathsCollectedInReconcile map[string]ko.PathInfo
-	proxyTimeouts             ProxyTimeouts
-	reconcileTime             time.Time
-	registeredPaths           map[string]ko.PathInfo
-	registerLimiter           *registerLimiter
-	registerLimiterOnce       sync.Once
-	scheme                    string
-	scripts                   []kdexv1alpha1.ScriptDef
-	sniffer                   interface {
+	authConfig                 *auth.Config
+	authExchanger              *auth.Exchanger
+	cacheManager               cache.CacheManager
+	checksum                   string
+	client                     client.Client
+	defaultLanguage            string
+	favicon                    *ico.Ico
+	functions                  []kdexv1alpha1.KDexFunction
+	functionHandlers           map[string]*KDexFunctionHandler
+	host                       *kdexv1alpha1.KDexHostSpec
+	importmap                  string
+	log                        logr.Logger
+	mu                         sync.RWMutex
+	openapiBuilder             ko.Builder
+	hostScopePackageReferences []kdexv1alpha1.PackageReference
+	pageDenialMode             PageDenialMode
+	pathsCollectedInReconcile  map[string]ko.PathInfo
+	proxyTimeouts              ProxyTimeouts
+	reconcileTime              time.Time
+	registeredPaths            map[string]ko.PathInfo
+	registerLimiter            *registerLimiter
+	registerLimiterOnce        sync.Once
+	scheme                     string
+	scripts                    []kdexv1alpha1.ScriptDef
+	sniffer                    interface {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
 		DocsHandler(http.ResponseWriter, *http.Request)
 	}
@@ -210,27 +210,27 @@ func NewHostHandler(c client.Client, name string, namespace string, log logr.Log
 		Pages:        nil,
 		Translations: Translations{},
 
-		analysisCache:             NewAnalysisCache(),
-		authConfig:                nil,
-		authExchanger:             nil,
-		cacheManager:              cacheManager,
-		client:                    c,
-		defaultLanguage:           "en",
-		favicon:                   nil,
-		functions:                 []kdexv1alpha1.KDexFunction{},
-		functionHandlers:          map[string]*KDexFunctionHandler{},
-		host:                      nil,
-		importmap:                 "",
-		log:                       log,
-		packageReferences:         []kdexv1alpha1.PackageReference{},
-		pathsCollectedInReconcile: map[string]ko.PathInfo{},
-		reconcileTime:             time.Now(),
-		registeredPaths:           map[string]ko.PathInfo{},
-		scheme:                    "",
-		scripts:                   []kdexv1alpha1.ScriptDef{},
-		themeAssets:               []kdexv1alpha1.Asset{},
-		translationResources:      map[string]kdexv1alpha1.KDexTranslationSpec{},
-		utilityPages:              map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler{},
+		analysisCache:              NewAnalysisCache(),
+		authConfig:                 nil,
+		authExchanger:              nil,
+		cacheManager:               cacheManager,
+		client:                     c,
+		defaultLanguage:            "en",
+		favicon:                    nil,
+		functions:                  []kdexv1alpha1.KDexFunction{},
+		functionHandlers:           map[string]*KDexFunctionHandler{},
+		host:                       nil,
+		importmap:                  "",
+		log:                        log,
+		hostScopePackageReferences: []kdexv1alpha1.PackageReference{},
+		pathsCollectedInReconcile:  map[string]ko.PathInfo{},
+		reconcileTime:              time.Now(),
+		registeredPaths:            map[string]ko.PathInfo{},
+		scheme:                     "",
+		scripts:                    []kdexv1alpha1.ScriptDef{},
+		themeAssets:                []kdexv1alpha1.Asset{},
+		translationResources:       map[string]kdexv1alpha1.KDexTranslationSpec{},
+		utilityPages:               map[kdexv1alpha1.KDexUtilityPageType]page.PageHandler{},
 	}
 
 	translations, err := NewTranslations(hh.defaultLanguage, map[string]kdexv1alpha1.KDexTranslationSpec{}, nil)

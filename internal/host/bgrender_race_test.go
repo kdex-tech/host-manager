@@ -29,7 +29,7 @@ import (
 // kdex-tech/host-manager#73. Pre-fix, the "stale cache hit → background
 // migration" goroutines in renderUtilityPage / pageHandlerFunc /
 // navigationGet outlived the parent request and accessed mutating
-// hh.* state (hh.host, hh.themeAssets, hh.scripts, hh.packageReferences,
+// hh.* state (hh.host, hh.themeAssets, hh.scripts, hh.hostScopePackageReferences,
 // hh.importmap, hh.reconcileTime, hh.authConfig) without any lock.
 // Concurrent SetHost writes raced the goroutine's reads — race
 // detector trips immediately; in production an unlucky interleaving
