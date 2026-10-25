@@ -92,7 +92,7 @@ func (hh *HostHandler) capabilitiesHandler(mux *http.ServeMux, registeredPaths m
 													}},
 													"uses": &openapi.SchemaRef{Value: &openapi.Schema{
 														Type:        &openapi.Types{openapi.TypeInteger},
-														Description: "Requested use budget; capped by mintToken.usesCap. Forced to 1 for url delivery and for destructive verbs.",
+														Description: "Requested use budget (default 1); capped by mintToken.usesCap. Honored for url delivery; forced to 1 for destructive verbs.",
 													}},
 													"delivery": &openapi.SchemaRef{Value: &openapi.Schema{
 														Type:        &openapi.Types{openapi.TypeString},
