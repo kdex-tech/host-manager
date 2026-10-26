@@ -2,13 +2,16 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
@@ -16,6 +19,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// revocationTokenManager is a TokenManager on its own in-memory revocation
+// store, wired as the controller wires one (apitoken.RevocationCaches).
+func revocationTokenManager(t *testing.T, issuer string) *apitoken.TokenManager {
+	t.Helper()
+	cm, err := cache.NewCacheManager("", "subject-revocation-test", nil)
+	require.NoError(t, err)
+	store, _ := apitoken.RevocationCaches(cm)
+	tm, err := apitoken.NewTokenManager(issuer, apitoken.GenerateDevmodeKeyPair(), store)
+	require.NoError(t, err)
+	return tm
+}
 
 // A subject revoked on the host (/-/apitokens/revoke with all) ends every
 // refresh lineage that authenticated before the revocation, or it would keep
@@ -25,11 +40,7 @@ import (
 func TestRedeemRefreshToken_EndsALineageFromBeforeTheSubjectWasRevoked(t *testing.T) {
 	ctx := context.Background()
 	ex := newRotationTestExchanger(t)
-	cm, err := cache.NewCacheManager("", "subject-revocation-test", nil)
-	require.NoError(t, err)
-	store, _ := apitoken.RevocationCaches(cm)
-	tm, err := apitoken.NewTokenManager("test-iss", apitoken.GenerateDevmodeKeyPair(), store)
-	require.NoError(t, err)
+	tm := revocationTokenManager(t, "test-iss")
 	ex.config.TokenManager = tm
 
 	lineage := func(sub string, authenticatedAt time.Time) string {
@@ -49,7 +60,7 @@ func TestRedeemRefreshToken_EndsALineageFromBeforeTheSubjectWasRevoked(t *testin
 	require.NoError(t, tm.RevokeSubject(ctx, "alice", 0))
 	fresh := lineage("alice", time.Now().Add(2*time.Second))
 
-	_, err = ex.RedeemRefreshToken(ctx, stale, "app")
+	_, err := ex.RedeemRefreshToken(ctx, stale, "app")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrGrantFailure), "the session is over, not a server fault: %v", err)
 
@@ -65,11 +76,7 @@ func TestRedeemRefreshToken_EndsALineageFromBeforeTheSubjectWasRevoked(t *testin
 // redeemed after it either.
 func TestAuthorize_ASessionFromBeforeTheSubjectWasRevokedMustSignInAgain(t *testing.T) {
 	f := newConsentFixture(t)
-	cm, err := cache.NewCacheManager("", "authorize-revocation-test", nil)
-	require.NoError(t, err)
-	store, _ := apitoken.RevocationCaches(cm)
-	tm, err := apitoken.NewTokenManager(consentIssuer, apitoken.GenerateDevmodeKeyPair(), store)
-	require.NoError(t, err)
+	tm := revocationTokenManager(t, consentIssuer)
 	f.ex.config.TokenManager = tm
 	session := func(iat time.Time) map[string]any {
 		s := map[string]any{"iat": float64(iat.Unix())}
@@ -120,11 +127,7 @@ func TestLoginLocal_SessionCarriesTheVouchedSubjectNotTheTypedOne(t *testing.T) 
 	ctx := context.Background()
 	ex := newRotationTestExchanger(t)
 	ex.sp = canonicalizingProvider{}
-	cm, err := cache.NewCacheManager("", "login-subject-test", nil)
-	require.NoError(t, err)
-	store, _ := apitoken.RevocationCaches(cm)
-	tm, err := apitoken.NewTokenManager("test-iss", apitoken.GenerateDevmodeKeyPair(), store)
-	require.NoError(t, err)
+	tm := revocationTokenManager(t, "test-iss")
 	ex.config.TokenManager = tm
 
 	ts, err := ex.LoginLocal(ctx, "Alice@X.com ", "pw", "", "app", AuthMethodLocal)
@@ -142,4 +145,28 @@ func TestLoginLocal_SessionCarriesTheVouchedSubjectNotTheTypedOne(t *testing.T) 
 	require.NoError(t, tm.RevokeSubject(ctx, "alice@x.com", 0))
 	_, err = ex.RedeemRefreshToken(ctx, refreshed.RefreshToken, "app")
 	assert.True(t, errors.Is(err, ErrGrantFailure), "revoke-all by the canonical subject ends the lineage: %v", err)
+}
+
+// A local login's events carry the vouched subject, as the OIDC path's do and
+// as the session's refresh and logout events will, with the typed name
+// beside it, so a hook keying on subject sees one identity per session and
+// an enforcing gate decides on the identity that is minted.
+func TestLoginLocal_EventsCarryTheVouchedSubjectAndTheTypedName(t *testing.T) {
+	bodies := make(chan EventPayload, 1)
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p EventPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		bodies <- p
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer gate.Close()
+	d := NewEventDispatcher("h", []*httpEventHook{hookTo(t, "gate", gate.URL, "login", "enforcing", nil)}, logr.Discard())
+	ex := newLoginTestExchangerFor(t, d, canonicalizingProvider{})
+
+	_, err := ex.LoginLocal(context.Background(), "Alice@X.com ", "pw", "", "client", AuthMethodLocal)
+	require.NoError(t, err)
+
+	p := <-bodies
+	assert.Equal(t, "alice@x.com", p.Subject)
+	assert.Equal(t, "Alice@X.com ", p.LoginName)
 }

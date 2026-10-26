@@ -158,7 +158,8 @@ Body envelope:
   "event": "login",              // login | logout | login-failed | session-refresh
   "timestamp": 1699999999999,    // unix millis, matches the signature timestamp
   "host": "acme.example",        // the KDexHost identity
-  "subject": "alice",            // sub; may be "" for logout when no token could be decoded
+  "subject": "alice",            // sub (the vouched subject; the typed name only for a login-failed before any credential matched); may be "" for logout when no token could be decoded
+  "login_name": "Alice ",        // local logins only: the name as typed, which can differ from subject
   "auth_method": "local",        // local | oidc | ... (omitted when unknown)
   "client_id": "…",              // omitted when not applicable
   "scope": "openid profile …",   // omitted when not applicable

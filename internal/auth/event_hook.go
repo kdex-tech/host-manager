@@ -57,10 +57,14 @@ const (
 // EventPayload is the JSON envelope POSTed to a hook. Field presence varies by
 // event (see the design spec); omitempty keeps absent context out of the body.
 type EventPayload struct {
-	Event        EventType      `json:"event"`
-	Timestamp    int64          `json:"timestamp"`
-	Host         string         `json:"host"`
-	Subject      string         `json:"subject"`
+	Event     EventType `json:"event"`
+	Timestamp int64     `json:"timestamp"`
+	Host      string    `json:"host"`
+	Subject   string    `json:"subject"`
+	// LoginName is the name a local login typed, which can differ from the
+	// Subject the credential store vouched for (case, whitespace, an alias).
+	// Set on local-login events only.
+	LoginName    string         `json:"login_name,omitempty"`
 	AuthMethod   string         `json:"auth_method,omitempty"`
 	ClientID     string         `json:"client_id,omitempty"`
 	Scope        string         `json:"scope,omitempty"`

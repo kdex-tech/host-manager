@@ -1202,6 +1202,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 			Event:      EventLoginFailed,
 			Subject:    username,
+			LoginName:  username,
 			AuthMethod: string(authMethod),
 			Reason:     err.Error(),
 		})
@@ -1222,23 +1223,21 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// It is ErrServerError because it is one: no password the caller could
 	// type would make a Secret grow a `sub` key. See
 	// sign.ErrSubjectlessCredential for the two sources that produce this.
-	if sub, serr := signingContext.GetSubject(); serr != nil || sub == "" {
+	sub, serr := signingContext.GetSubject()
+	if serr != nil || sub == "" {
 		logf.FromContext(ctx).Error(sign.ErrSubjectlessCredential,
 			"the credential source vouched for this login but named no subject; "+sign.SubjectlessRemedy,
 			"username", username, "authMethod", string(authMethod))
+		// No subject was vouched for, so the typed name is all there is.
 		return TokenSet{Subject: username},
 			fmt.Errorf("%w: %w", ErrServerError, sign.ErrSubjectlessCredential)
 	}
 
-	// The credential store has vouched for this identity, so from here the
-	// subject is the one it vouched for, `sub`, which can differ from the
-	// typed `username` (case, whitespace, an alias). The success path and the
-	// refresh lineage it mints carry `sub`, so the same request reports the
-	// same subject whether it succeeds or fails (kdex-tech/host-manager#158),
-	// and every refresh re-signs, re-resolves roles for, and is revoked
-	// (#257) under that subject, not the spelling of one login. Events keep
-	// `username` as typed; their claims carry `sub`.
-	sub, _ := signingContext.GetSubject()
+	// From here the subject is the one the credential store vouched for,
+	// `sub`, which can differ from the typed `username` (case, whitespace, an
+	// alias). Everything this login mints, its refresh lineage, its results
+	// and its events carry `sub`, as the OIDC path does, so one session has
+	// one subject (#158, #257); events carry the typed name as login_name.
 	failed := func(format string, args ...any) (TokenSet, error) {
 		return TokenSet{Subject: sub}, fmt.Errorf(format, args...)
 	}
@@ -1246,7 +1245,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	if err := e.refuseClientNamedIdentity(sub, username); err != nil {
 		logf.FromContext(ctx).Error(err, "refusing a login whose subject names a client", "username", username)
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
-			Event: EventLoginFailed, Subject: username, AuthMethod: string(authMethod), Reason: err.Error(),
+			Event: EventLoginFailed, Subject: sub, LoginName: username, AuthMethod: string(authMethod), Reason: err.Error(),
 		})
 		return failed("%w", err)
 	}
@@ -1278,6 +1277,11 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// full identity set when the client requested no scope (local-login default).
 	grantedScopes := applyScopeFilter(signingContext, scope, defaultSessionScopes)
 	grantedScopeStr := strings.Join(grantedScopes, " ")
+	payload := func() EventPayload {
+		p := loginPayload(EventLogin, signingContext, sub, clientID, grantedScopeStr, string(authMethod))
+		p.LoginName = username
+		return p
+	}
 
 	// A subject Secret (KDexSubject) is a static, operator-authored account --
 	// typically the break-glass admin -- and is exempt from enforcing login
@@ -1287,7 +1291,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// subjects either: whoever can author a subject Secret can author the
 	// hook Secret too. See kdex-tech/host-manager#226.
 	if source == LookupTypeSecret {
-		e.eventDispatcher.NoteGateExempt(loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)), "subject Secret")
+		e.eventDispatcher.NoteGateExempt(payload(), "subject Secret")
 	} else {
 		// Enforcing login hooks get a say before anything is minted. A deny
 		// here is a client-visible refusal of THIS login attempt -- not a
@@ -1299,10 +1303,11 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		// the login was refused. See oautherr.go's ErrServerError/
 		// ErrGrantFailure doc comments; there is no third sentinel (an
 		// "ErrAccessDenied" does not exist in this codebase).
-		if gerr := e.eventDispatcher.GateLogin(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod))); gerr != nil {
+		if gerr := e.eventDispatcher.GateLogin(ctx, payload()); gerr != nil {
 			e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
 				Event:      EventLoginFailed,
-				Subject:    username,
+				Subject:    sub,
+				LoginName:  username,
 				AuthMethod: string(authMethod),
 				Reason:     gerr.Error(),
 			})
@@ -1317,7 +1322,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		// No-op unless an enforcing login hook is configured. Skipped with the
 		// gate: no gate, no gate-time provisioning to pick up. See
 		// kdex-tech/host-manager#206.
-		e.enrichAfterGate(signingContext, username)
+		e.enrichAfterGate(signingContext, sub)
 	}
 
 	accessToken, err := e.config.Signer.SignScoped(signingContext, grantedScopes)
@@ -1356,7 +1361,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		}
 	}
 
-	e.eventDispatcher.NotifyLoginSuccess(ctx, loginPayload(EventLogin, signingContext, username, clientID, grantedScopeStr, string(authMethod)))
+	e.eventDispatcher.NotifyLoginSuccess(ctx, payload())
 	return ts, nil
 }
 
