@@ -2,7 +2,7 @@ module github.com/kdex-tech/host-manager
 
 go 1.26.0
 
-replace kdex.dev/crds => github.com/kdex-tech/kdex-crds v0.14.259
+replace kdex.dev/crds => github.com/kdex-tech/kdex-crds v0.14.260-0.20261106143811-14f9706c424e
 
 require (
 	aidanwoods.dev/go-paseto v1.6.0

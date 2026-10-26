@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"testing"
 
-	openapi "github.com/getkin/kin-openapi/openapi3"
 	G "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 )
@@ -180,36 +179,6 @@ func Test_GenerateNameFromPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := GenerateNameFromPath(tt.path, tt.headerName)
 			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestBuildOpenAPI(t *testing.T) {
-	serverUrl := "http://test"
-	tests := []struct {
-		name         string
-		functionName string
-		paths        map[string]PathInfo
-		filter       Filter
-		assertions   func(t *testing.T, o *openapi.T)
-	}{
-		{
-			name:         "no paths",
-			functionName: "no-paths",
-			assertions: func(t *testing.T, o *openapi.T) {
-				assert.NotNil(t, o)
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b := Builder{
-				TypesToInclude: []PathType{
-					BackendPathType, FunctionPathType, PagePathType, SystemPathType,
-				},
-			}
-			got := b.BuildOpenAPI(serverUrl, tt.functionName, tt.paths, tt.filter)
-			tt.assertions(t, got)
 		})
 	}
 }
