@@ -27,6 +27,7 @@ import (
 	"golang.org/x/text/message"
 	"k8s.io/apimachinery/pkg/api/meta"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	crdsopenapi "kdex.dev/crds/openapi"
 	"kdex.dev/crds/render"
 )
 
@@ -791,87 +792,15 @@ func (hh *HostHandler) RemoveUtilityPage(name string) {
 // generated document. The three flows advertise the same set, so it is built
 // once -- three verbatim copies could drift a description without anything
 // noticing.
-func oauthFlowScopes() map[string]string {
-	return map[string]string{
-		"openid":  "standard oidc scope",
-		"profile": "user profile info",
-	}
-}
-
+// SecuritySchemes is the registry of schemes this host defines: the shared
+// kdex.dev/crds/openapi registry when auth is enabled, none otherwise. Client-side
+// codegen renders a function's one-off document from the same registry.
 func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
-	req := &openapi.SecuritySchemes{}
-
 	if !hh.IsAuthEnabled() {
-		return req
+		return &openapi.SecuritySchemes{}
 	}
 
-	(*req)["apiKeyCookie"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'X-API-TOKEN' cookie",
-			Type:        "apiKey",
-			In:          "cookie",
-			Name:        "X-API-TOKEN",
-		},
-	}
-
-	(*req)["apiKeyHeader"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'X-API-TOKEN' header",
-			Type:        "apiKey",
-			In:          "header",
-			Name:        "X-API-TOKEN",
-		},
-	}
-
-	(*req)["apiKeyQuery"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'api_token' query parameter",
-			Type:        "apiKey",
-			In:          "query",
-			Name:        "api_token",
-		},
-	}
-
-	(*req)["bearer"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description:  "Bearer Token - This is the default scheme",
-			Type:         "http",
-			Scheme:       "bearer",
-			BearerFormat: "JWT",
-		},
-	}
-
-	(*req)["oauth2"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description: "OAuth2 authentication using Password, Authorization Code, or Client Credentials Flow",
-			Flows: &openapi.OAuthFlows{
-				AuthorizationCode: &openapi.OAuthFlow{
-					AuthorizationURL: auth.OAuthAuthorizePath,
-					Scopes:           oauthFlowScopes(),
-					TokenURL:         "/-/token",
-				},
-				ClientCredentials: &openapi.OAuthFlow{
-					Scopes:   oauthFlowScopes(),
-					TokenURL: "/-/token",
-				},
-				Password: &openapi.OAuthFlow{
-					Scopes:   oauthFlowScopes(),
-					TokenURL: "/-/token",
-				},
-			},
-			Type: "oauth2",
-		},
-	}
-
-	(*req)["oidc"] = &openapi.SecuritySchemeRef{
-		Value: &openapi.SecurityScheme{
-			Description:      "OpenID Connect discovery",
-			OpenIdConnectUrl: "/.well-known/openid-configuration",
-			Type:             "openIdConnect",
-		},
-	}
-
-	return req
+	return crdsopenapi.SecuritySchemes()
 }
 
 func (hh *HostHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
