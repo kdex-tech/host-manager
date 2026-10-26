@@ -846,7 +846,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 												Properties: openapi.Schemas{
 													"act": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													revokeAllField: &openapi.SchemaRef{Value: &openapi.Schema{
-														Description: "Revoke sub on this host as of now: every API token issued for it on any audience, whatever its act, including keys that were never recorded; a refresh token or session that authenticated before it can no longer mint or refresh. Takes sub only. A credential from a later authentication (a re-signup) is valid. Authorized like a metadata revoke: your own subject, or apitokens:<sub>:revoke-any. Enforced by host-manager v0.28.0 or later; a replica on an earlier version ignores it.",
+														Description: "Revoke sub on this host as of now: every API token issued for it on any audience, whatever its act, including keys that were never recorded; a refresh token or session that authenticated before it can no longer mint or refresh. Takes sub only. A credential from a later authentication (a re-signup, or a re-login, including a silent one through the upstream IdP, whose session this does not end) is valid. Authorized like a metadata revoke: your own subject, or apitokens:<sub>:revoke-any. Enforced by host-manager v0.28.0 or later; a replica on an earlier version ignores it.",
 														Type:        &openapi.Types{openapi.TypeBoolean},
 													}},
 													"aud":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},

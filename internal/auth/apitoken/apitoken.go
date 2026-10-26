@@ -374,7 +374,9 @@ func (tm *TokenManager) RevokeByMetadata(ctx context.Context, aud, sub, act stri
 // sub on any audience, whatever its act, so it reaches keys nobody recorded.
 // SubjectRevokedSince lets the paths that issue new credentials refuse one
 // whose authentication predates it. A token minted afterwards from a fresh
-// authentication (a re-signup under the same address) is valid. Like a
+// authentication (a re-signup under the same address, or a re-login,
+// including a silent one through an upstream IdP, whose session this does
+// not end) is valid. Like a
 // per-token revocation it lasts at least RevocationTTL and never moves back.
 //
 // It is written only to the revocation store: a replica on v0.27.x or earlier

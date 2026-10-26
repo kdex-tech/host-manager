@@ -605,6 +605,24 @@ func TestEnrichAuthContext(t *testing.T) {
 		EnrichAuthContext(ac, setter)
 		assert.NotContains(t, ac, "auth_method")
 	})
+
+	// The subject-revocation cutoff compares iat, so a mapping must not move
+	// a credential to after a revocation (#257).
+	t.Run("a mapping cannot change, add or remove iat", func(t *testing.T) {
+		setter, err := dmapper.NewMapper([]dmapper.MappingRule{{
+			SourceExpression: `4102444800.0`,
+			TargetPropPath:   ClaimIssuedAt,
+		}})
+		require.NoError(t, err)
+
+		ac := AuthContext{"sub": "alice", ClaimIssuedAt: float64(1)}
+		EnrichAuthContext(ac, setter)
+		assert.Equal(t, float64(1), ac[ClaimIssuedAt])
+
+		ac = AuthContext{"sub": "alice"}
+		EnrichAuthContext(ac, setter)
+		assert.NotContains(t, ac, ClaimIssuedAt)
+	})
 }
 
 // authCookieCleared reports whether the response clears the named cookie

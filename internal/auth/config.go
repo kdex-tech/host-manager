@@ -153,9 +153,8 @@ type Config struct {
 // attenuation-safe (only ADDS mapped output, never removes a claim, and a
 // downscoped capability token carries no source claims to re-expand); fail-safe
 // (a mapping error leaves the context unchanged). ClaimMappings are the generic
-// enrichment mechanism; the one exception is auth_method, which the mint
-// decides and a mapping can neither change, add nor remove (as in
-// sign.Signer.Project): the proxy projects the FAT from this context.
+// enrichment mechanism; the exceptions are mintDecidedClaims, which a mapping
+// can neither change, add nor remove.
 func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if mapper == nil || ac == nil {
 		return
@@ -164,14 +163,29 @@ func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if err != nil {
 		return
 	}
-	method, hadMethod := ac["auth_method"]
+	kept := map[string]any{}
+	for _, claim := range mintDecidedClaims {
+		if v, had := ac[claim]; had {
+			kept[claim] = v
+		}
+	}
 	maps.Copy(ac, extra)
-	if hadMethod {
-		ac["auth_method"] = method
-	} else {
-		delete(ac, "auth_method")
+	for _, claim := range mintDecidedClaims {
+		if v, had := kept[claim]; had {
+			ac[claim] = v
+		} else {
+			delete(ac, claim)
+		}
 	}
 }
+
+// mintDecidedClaims are the context claims the credential decides, not a
+// mapping:
+//   - auth_method, as in sign.Signer.Project: the proxy projects the FAT
+//     from this context;
+//   - ClaimIssuedAt, which the subject-revocation cutoff compares
+//     (CredentialPredatesRevocation, kdex-tech/host-manager#257).
+var mintDecidedClaims = []string{"auth_method", ClaimIssuedAt}
 
 type ConfigBuilder struct {
 	APITokenManagerLoader  func() (*apitoken.TokenManager, error)
