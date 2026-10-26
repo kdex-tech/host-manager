@@ -568,7 +568,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 								// The token's static scope rides along under its own
 								// key; the structured entitlements above are the
 								// authoritative authz model.
-								"scp": data.Scope,
+								"scp":              data.Scope,
+								auth.ClaimIssuedAt: float64(data.IssuedAt),
 								// Mark this identity as PAT-bridge-originated. A PAT
 								// minted through the authorization-code (oauth2) flow
 								// IS an oauth2 authentication, so GetParsedEntitlements

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -56,9 +57,10 @@ func TestRedeemRefreshToken_EndsALineageFromBeforeTheSubjectWasRevoked(t *testin
 }
 
 // A browser session from before the subject's revocation cannot open a new
-// lineage through /-/oauth/authorize: the code would redeem to credentials
-// that pass every later cutoff check.
-func TestAuthorize_RefusedForASessionFromBeforeTheSubjectWasRevoked(t *testing.T) {
+// lineage through /-/oauth/authorize: it is treated as signed out, so a
+// re-login recovers it. A code it issued before the revocation cannot be
+// redeemed after it either.
+func TestAuthorize_ASessionFromBeforeTheSubjectWasRevokedMustSignInAgain(t *testing.T) {
 	f := newConsentFixture(t)
 	cm, err := cache.NewCacheManager("", "authorize-revocation-test", nil)
 	require.NoError(t, err)
@@ -73,13 +75,28 @@ func TestAuthorize_RefusedForASessionFromBeforeTheSubjectWasRevoked(t *testing.T
 		}
 		return s
 	}
+	stale := session(time.Now().Add(-time.Minute))
 
 	codeFrom(t, f.allow(t, f.query(appRedirect, nil))) // consent is held, so authorize issues a code
+	early := codeFrom(t, f.authorize(f.query(appRedirect, nil), stale, COOKIE))
 	require.NoError(t, tm.RevokeSubject(context.Background(), "alice", 0))
 
-	w := f.authorize(f.query(appRedirect, nil), session(time.Now().Add(-time.Minute)), COOKIE)
-	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	w := f.authorize(f.query(appRedirect, nil), stale, COOKIE)
+	require.Equal(t, http.StatusSeeOther, w.Code, w.Body.String())
+	loc, err := w.Result().Location()
+	require.NoError(t, err)
+	assert.Equal(t, "/-/login", loc.Path)
+	assert.Equal(t, "login", loc.Query().Get("prompt"), "a forced login, or the cookie sends the browser straight back")
 
-	w = f.authorize(f.query(appRedirect, nil), session(time.Now().Add(2*time.Second)), COOKIE)
-	assert.Equal(t, http.StatusFound, w.Code, "a session from after the revocation is redirected with a code: %s", w.Body.String())
+	w = f.authorize(f.query(appRedirect, url.Values{"prompt": {"none"}}), stale, COOKIE)
+	require.Equal(t, http.StatusFound, w.Code, w.Body.String())
+	loc, err = w.Result().Location()
+	require.NoError(t, err)
+	assert.Equal(t, "login_required", loc.Query().Get("error"))
+
+	_, err = f.ex.RedeemAuthorizationCode(context.Background(), early, f.clientID, appRedirect, f.verifier)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrGrantFailure), "a code from before the revocation: %v", err)
+
+	codeFrom(t, f.authorize(f.query(appRedirect, nil), session(time.Now().Add(2*time.Second)), COOKIE))
 }

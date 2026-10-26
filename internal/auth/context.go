@@ -39,8 +39,11 @@ func GetAuthContext(ctx context.Context) (AuthContext, bool) {
 	return claims, ok
 }
 
-// claimIssuedAt is the issue-time claim, which GetIssuedAt reads.
-const claimIssuedAt = "iat"
+// ClaimIssuedAt is the issue-time claim, which GetIssuedAt reads. A context
+// built from an API token sets it to the token's iat, as a JWT-parsed claim
+// carries it (seconds, float64), so a mint can tell a credential from before
+// a subject revocation from one after it (#257).
+const ClaimIssuedAt = "iat"
 
 // SetAuthContext sets the auth context in the context.
 func SetAuthContext(ctx context.Context, ac AuthContext) context.Context {

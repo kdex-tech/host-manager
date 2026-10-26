@@ -296,6 +296,10 @@ func (tm *TokenManager) recordRevocation(ctx context.Context, store cache.Cache,
 // the untimed one when the key was re-revoked (recordRevocation), and
 // re-imposing the untimed one would revoke a key legitimately re-minted
 // since. Between two untimed values, a is kept.
+//
+// This assumes nothing that writes untimed values (host-manager v0.25.x or
+// earlier) still runs beside a later version: the fleet has been on v0.26.0
+// or later since 2026-10-20, and a rollback below v0.26.0 is not supported.
 func latestRevocation(a, b string) string {
 	at, aerr := time.Parse(time.RFC3339Nano, a)
 	bt, berr := time.Parse(time.RFC3339Nano, b)

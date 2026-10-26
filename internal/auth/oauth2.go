@@ -227,21 +227,6 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A session from before the subject's revocation must not open a new
-	// lineage: the code it would issue redeems to fresh credentials that
-	// pass every later cutoff check (kdex-tech/host-manager#257).
-	if revoked, rerr := o.AuthExchanger.config.CredentialPredatesRevocation(ctx, authCtx); rerr != nil {
-		log.Error(rerr, "could not check the subject's revocation", "client_id", clientId)
-		err = fmt.Errorf("authorize: subject revocation check failed")
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		return
-	} else if revoked {
-		log.V(1).Info("authorize refused: the subject was revoked after this session authenticated", "client_id", clientId)
-		err = fmt.Errorf("authorize: session predates the subject's revocation")
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-
 	areq := parseAuthorizeRequest(r.URL.Query())
 	covered := true
 	if authClient.RequireConsent {
@@ -266,6 +251,29 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Redirect(w, r, authorizeLoginURL(r, prompt, loginHint), http.StatusSeeOther)
+		return
+	}
+
+	// A session from before the subject's revocation must not open a new
+	// lineage: the code it would issue redeems to fresh credentials that
+	// pass every later cutoff check (kdex-tech/host-manager#257). It is
+	// treated as signed out, after the prompt and hint handling above, so
+	// a re-login recovers: prompt=none gets login_required, anything else
+	// a forced login (a plain one would see the still-valid cookie and
+	// come straight back).
+	if revoked, rerr := o.AuthExchanger.config.CredentialPredatesRevocation(ctx, authCtx); rerr != nil {
+		log.Error(rerr, "could not check the subject's revocation", "client_id", clientId)
+		err = fmt.Errorf("authorize: subject revocation check failed")
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	} else if revoked {
+		log.V(1).Info("authorize: the subject was revoked after this session authenticated; signing in again", "client_id", clientId)
+		err = fmt.Errorf("authorize: session predates the subject's revocation")
+		if slices.Contains(prompt, "none") {
+			redirectAuthorizeError(w, r, callbackURL, state, "login_required")
+			return
+		}
+		http.Redirect(w, r, authorizeLoginURL(r, append(slices.Clone(prompt), "login"), loginHint), http.StatusSeeOther)
 		return
 	}
 
@@ -297,6 +305,9 @@ func (o *OAuth2) AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		Resource:            resource,
 		Scope:               scope,
 		Subject:             subject,
+	}
+	if iat, ierr := authCtx.GetIssuedAt(); ierr == nil && iat != nil {
+		claims.AuthenticatedAt = iat.Unix()
 	}
 
 	code, err = o.AuthExchanger.CreateAuthorizationCode(r.Context(), claims)

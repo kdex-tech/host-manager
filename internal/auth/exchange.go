@@ -1461,6 +1461,10 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 		return grantFailed("redirect_uri mismatch")
 	}
 
+	if err := e.refuseRevokedAuthentication(ctx, claims.Subject, claims.AuthenticatedAt); err != nil {
+		return failed("%w", err)
+	}
+
 	client, ok, lerr := e.LookupClient(ctx, clientID)
 	if lerr != nil {
 		return failed("%w: client lookup failed: %v", ErrServerError, lerr)
@@ -1529,17 +1533,18 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 // then returns a fresh TokenSet including a rotated refresh token.
 // The results are NAMED so the #172 compensating restore can inspect the
 // error this call is actually returning. Nothing else depends on the names.
-// refuseRevokedLineage ends a refresh lineage whose subject was revoked
-// (/-/apitokens/revoke with all) since it authenticated, or the lineage would
-// keep minting credentials, resource PATs included, past the cutoff. The
-// error is a grant failure, or a server error when the revocation store
+// refuseRevokedAuthentication refuses a grant (a refresh lineage, an
+// authorization code) for sub that authenticated at authenticatedAt (Unix
+// seconds), at or before sub was revoked (/-/apitokens/revoke with all): it
+// would otherwise mint credentials, resource PATs included, past the cutoff.
+// The error is a grant failure, or a server error when the revocation store
 // cannot be read. kdex-tech/host-manager#257.
-func (e *Exchanger) refuseRevokedLineage(ctx context.Context, claims RefreshTokenClaims) error {
+func (e *Exchanger) refuseRevokedAuthentication(ctx context.Context, sub string, authenticatedAt int64) error {
 	tm := e.config.TokenManager
 	if tm == nil {
 		return nil
 	}
-	revoked, err := tm.SubjectRevokedSince(ctx, claims.Subject, time.Unix(claims.OriginalIssuedAt, 0))
+	revoked, err := tm.SubjectRevokedSince(ctx, sub, time.Unix(authenticatedAt, 0))
 	if err != nil {
 		return fmt.Errorf("%w: subject revocation check failed: %v", ErrServerError, err)
 	}
@@ -1695,7 +1700,7 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 		return grantFailed("session absolute timeout reached")
 	}
 
-	if err := e.refuseRevokedLineage(ctx, claims); err != nil {
+	if err := e.refuseRevokedAuthentication(ctx, claims.Subject, claims.OriginalIssuedAt); err != nil {
 		return failed("%w", err)
 	}
 
@@ -1892,6 +1897,12 @@ type AuthorizationCodeClaims struct {
 	Resource string `json:"resource,omitempty"`
 	Scope    string `json:"scp"`
 	Subject  string `json:"sub"`
+	// AuthenticatedAt is when the session that authorized the code
+	// authenticated (its iat, Unix seconds), so redeeming the code after
+	// the subject's revocation is refused like the session itself would
+	// be (kdex-tech/host-manager#257). Zero on a code from an older
+	// replica, which counts as authenticated before any revocation.
+	AuthenticatedAt int64 `json:"auth_at,omitempty"`
 }
 
 func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims AuthorizationCodeClaims) (string, error) {

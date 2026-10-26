@@ -2,13 +2,17 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -144,4 +148,51 @@ func TestCapabilityMint_RefusedForACredentialFromBeforeTheSubjectWasRevoked(t *t
 	hh.writeMintTokenRPC(rw, r, json.RawMessage(`1`), "alice", held, MintTokenRequest{Entitlements: held})
 	assert.Contains(t, rw.Body.String(), `"isError":true`, "MCP stale")
 	assert.Contains(t, rw.Body.String(), "revoked")
+}
+
+// contextRecordingChecker keeps the auth context that reaches the gate.
+type contextRecordingChecker struct {
+	mockAuthChecker
+	seen auth.AuthContext
+}
+
+func (c *contextRecordingChecker) GetParsedEntitlements(ctx context.Context) entitlements.ParsedEntitlements {
+	if ac, ok := auth.GetAuthContext(ctx); ok {
+		c.seen = ac
+	}
+	return c.mockAuthChecker.GetParsedEntitlements(ctx)
+}
+
+// The proxy's API-token identity carries the token's iat, like the host's, so
+// a key minted after a subject revocation (a re-signup's MCP client) is not
+// taken for a credential from before it by mint_token.
+func TestProxy_APITokenIdentityCarriesIssuedAt(t *testing.T) {
+	fn := apiKeySecuredFunction("/v1/api", true)
+	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
+	rec := &contextRecordingChecker{}
+	handler, tm, _, _ := apitokenBridgeFixture(t, fn, idp, rec)
+
+	// A revocation of api-bob well before the key below is minted.
+	cm, err := cache.NewCacheManager("", "proxy-iat-test", nil)
+	require.NoError(t, err)
+	store, _ := apitoken.RevocationCaches(cm)
+	cutoffTM, err := apitoken.NewTokenManager("issuer", apitoken.GenerateDevmodeKeyPair(), store)
+	require.NoError(t, err)
+	require.NoError(t, cutoffTM.RevokeSubject(t.Context(), "api-bob", 0))
+	time.Sleep(1100 * time.Millisecond) // iat is whole seconds
+
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	require.NoError(t, err)
+	req := httptest.NewRequest("GET", "/v1/api", nil)
+	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: token})
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.NotNil(t, rec.seen)
+	data, err := tm.ValidateToken(t.Context(), token, apitokenBridgeHostAudience)
+	require.NoError(t, err)
+	assert.Equal(t, float64(data.IssuedAt), rec.seen[auth.ClaimIssuedAt])
+
+	predates, err := (&auth.Config{TokenManager: cutoffTM}).CredentialPredatesRevocation(t.Context(), rec.seen)
+	require.NoError(t, err)
+	assert.False(t, predates, "a key minted after the revocation is not refused")
 }
