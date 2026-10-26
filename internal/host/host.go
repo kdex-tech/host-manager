@@ -984,13 +984,11 @@ func (hh *HostHandler) SetHost(
 	hh.themeAssets = themeAssets
 
 	// force=false: rotate cycled caches (rendered pages, navigation,
-	// importmap) with a prevPrefix transition window for graceful cutover,
-	// but DO NOT touch Uncycled caches. The refresh-tokens cache is
-	// registered Uncycled because it holds user-session state that must
-	// survive routine config-change reconciles — force=true here would
-	// silently evict every active refresh token on every CR apply,
-	// surfacing as "refresh token not found or expired" errors right when
-	// a user's JWT is about to expire. See kdex-tech/host-manager#42.
+	// importmap) with a prevPrefix transition window for graceful cutover.
+	// Uncycled caches (sessions, revocations, registered clients) are in the
+	// surviving scope, which no cycle moves (kdex-tech/host-manager#42,
+	// #245); force=true would still drop the cycled caches' transition
+	// window on every CR apply.
 	if err := hh.cacheManager.Cycle(hh.Checksum(), false); err != nil {
 		hh.log.Error(err, "failed to cycle cache manager")
 	}

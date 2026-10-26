@@ -1529,6 +1529,26 @@ func (e *Exchanger) RedeemAuthorizationCode(ctx context.Context, code, clientID,
 // then returns a fresh TokenSet including a rotated refresh token.
 // The results are NAMED so the #172 compensating restore can inspect the
 // error this call is actually returning. Nothing else depends on the names.
+// refuseRevokedLineage ends a refresh lineage whose subject was revoked
+// (/-/apitokens/revoke with all) since it authenticated, or the lineage would
+// keep minting credentials, resource PATs included, past the cutoff. The
+// error is a grant failure, or a server error when the revocation store
+// cannot be read. kdex-tech/host-manager#257.
+func (e *Exchanger) refuseRevokedLineage(ctx context.Context, claims RefreshTokenClaims) error {
+	tm := e.config.TokenManager
+	if tm == nil {
+		return nil
+	}
+	revoked, err := tm.SubjectRevokedSince(ctx, claims.Subject, time.Unix(claims.OriginalIssuedAt, 0))
+	if err != nil {
+		return fmt.Errorf("%w: subject revocation check failed: %v", ErrServerError, err)
+	}
+	if revoked {
+		return grantFailuref("session revoked")
+	}
+	return nil
+}
+
 func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID string) (_ TokenSet, err error) {
 	if !e.IsRefreshTokenEnabled() {
 		// This is a server misconfiguration (refresh tokens were never set
@@ -1673,6 +1693,10 @@ func (e *Exchanger) RedeemRefreshToken(ctx context.Context, tokenID, clientID st
 	// Validate absolute session timeout
 	if e.maxSessionAge > 0 && time.Since(time.Unix(claims.OriginalIssuedAt, 0)) > e.maxSessionAge {
 		return grantFailed("session absolute timeout reached")
+	}
+
+	if err := e.refuseRevokedLineage(ctx, claims); err != nil {
+		return failed("%w", err)
 	}
 
 	// Validate the client matches what was issued.

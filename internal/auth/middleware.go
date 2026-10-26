@@ -114,6 +114,10 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 		// The token's static scope rides along under its own key; the
 		// structured entitlements above are the authoritative authz model.
 		"scp": data.Scope,
+		// When the token was issued, as a JWT-parsed claim carries it, so
+		// a mint can tell a credential from before a subject revocation
+		// from one after it (#257).
+		claimIssuedAt: float64(data.IssuedAt),
 	}
 
 	// Deliberately NOT PATBridgeClaim. That marker exists so a PAT can satisfy

@@ -39,6 +39,9 @@ func GetAuthContext(ctx context.Context) (AuthContext, bool) {
 	return claims, ok
 }
 
+// claimIssuedAt is the issue-time claim, which GetIssuedAt reads.
+const claimIssuedAt = "iat"
+
 // SetAuthContext sets the auth context in the context.
 func SetAuthContext(ctx context.Context, ac AuthContext) context.Context {
 	return context.WithValue(ctx, authContextKey, ac)

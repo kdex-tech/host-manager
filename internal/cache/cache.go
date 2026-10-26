@@ -30,34 +30,53 @@ type Cache interface {
 	DecrementIfPositive(ctx context.Context, key string) (remaining int64, ok bool, err error)
 	Host() string
 	Set(ctx context.Context, key string, value string, opts ...SetOption) error
-	// SetIfAbsent stores value only when key has no entry in the current
-	// generation, reporting whether it did. It never overwrites, so it can
-	// seed an entry without racing a concurrent Set of a newer value.
-	SetIfAbsent(ctx context.Context, key string, value string, opts ...SetOption) (bool, error)
+	// Update atomically replaces key's entry in the current generation with
+	// what fn returns for the entry it holds, and reports whether it wrote.
+	// fn returning write=false leaves the entry alone. A concurrent write to
+	// key makes fn run again on the new value, so no update is lost; fn must
+	// therefore have no side effects.
+	Update(ctx context.Context, key string, fn UpdateFunc, opts ...SetOption) (bool, error)
 	TTL() time.Duration
 	Uncycled() bool
 }
 
-// SurvivingGeneration is the one generation of every Uncycled cache. It is
-// fixed, so a replica that first creates the class after a host
-// reconfiguration reads what its peers wrote. It is "0", the checksum every
-// manager starts at, so entries written before the generation was fixed are
-// where they always were.
-const SurvivingGeneration = "0"
+// UpdateFunc computes an entry's next value from its current one (found is
+// false when there is none). write=false leaves the entry as it is.
+type UpdateFunc func(current string, found bool) (next string, write bool)
+
+// initialGeneration is the generation every manager starts at, before the
+// host's first Cycle.
+const initialGeneration = "0"
+
+// SurvivingGeneration is the one generation of the surviving scope (every
+// Uncycled cache). It is fixed, so a replica that first creates the cache
+// after a host reconfiguration reads what its peers wrote.
+//
+// It is initialGeneration because, before it was fixed, an Uncycled cache
+// took whatever generation the manager was at when the cache was created:
+// "0" for every cache created before the process's first Cycle, which is
+// where the auth caches (sessions, codes, registered clients, consent, use
+// counters) were found. A cache first created after a Cycle, such as the
+// proxy's token cache, starts empty once; every such cache fails closed.
+//
+// The key shape {host:class:SurvivingGeneration} holds security state (token
+// revocations). Changing it strands that state, which un-revokes tokens:
+// move the entries with ScanGenerations, never orphan them.
+const SurvivingGeneration = initialGeneration
 
 type CacheOptions struct {
 	MaxItems *int
 	TTL      *time.Duration
-	// Uncycled puts the class in the one class that survives host
-	// generations. Anything a request creates and a later request must find
-	// again (a revocation, a session, a registered client, a use counter)
-	// belongs there. Leaving it false keys the class on the host's
+	// Uncycled puts the cache in the surviving scope, the one that survives
+	// host generations. Anything a request creates and a later request must
+	// find again (a revocation, a session, a registered client, a use
+	// counter) belongs there. Leaving it false keys the cache on the host's
 	// generation, which suits only data that can be rebuilt from the CRs,
 	// such as a rendered page: every reconfiguration abandons it.
 	//
-	// Toward kdex-tech/host-manager#124: a class will name the value its
+	// Toward kdex-tech/host-manager#124: a cache will name the scope its
 	// generation is keyed on (the whole host, the auth config, ...), and
-	// Uncycled is the class keyed on nothing.
+	// Uncycled is the scope keyed on nothing.
 	Uncycled bool
 }
 
@@ -77,6 +96,23 @@ type SetOptions struct {
 	TTL *time.Duration
 }
 
+func applySetOptions(opts []SetOption) SetOptions {
+	options := SetOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return options
+}
+
+// generationFor is the generation a cache starts at: the fixed one for the
+// surviving scope, the host's current one otherwise.
+func generationFor(uncycled bool, current string) string {
+	if uncycled {
+		return SurvivingGeneration
+	}
+	return current
+}
+
 func WithTTL(ttl time.Duration) SetOption {
 	return func(o *SetOptions) {
 		o.TTL = &ttl
@@ -92,6 +128,8 @@ type CacheManager interface {
 	// ScanGenerations calls fn for every entry this host's class holds under
 	// any generation, including generations no Get can reach any more. It is
 	// for recovering state a misclassified cache stranded, not for serving.
+	// On Valkey it assumes a standalone server: a cluster's SCAN reaches one
+	// node.
 	ScanGenerations(ctx context.Context, class string, fn func(Entry) error) error
 }
 
@@ -103,7 +141,7 @@ func NewCacheManager(addr, host string, ttl *time.Duration) (CacheManager, error
 	if addr == "" {
 		return &InMemoryCacheManager{
 			caches:          make(map[string]Cache),
-			currentChecksum: "0",
+			currentChecksum: initialGeneration,
 			host:            host,
 			ttl:             *ttl,
 		}, nil
@@ -119,7 +157,7 @@ func NewCacheManager(addr, host string, ttl *time.Duration) (CacheManager, error
 	return &ValkeyCacheManager{
 		caches:          make(map[string]Cache),
 		client:          client,
-		currentChecksum: "0",
+		currentChecksum: initialGeneration,
 		host:            host,
 		ttl:             *ttl,
 	}, nil

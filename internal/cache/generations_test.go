@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"sort"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,64 +56,81 @@ func TestCycle_UnchangedChecksumKeepsThePreviousGeneration(t *testing.T) {
 	})
 }
 
-// The surviving class has one generation, whatever the host's checksum was
-// when a replica first created it: a cache created after a cycle (a lazily
-// created class, or a pod started after a reconfiguration) reads what its
-// peers wrote.
+// The surviving scope has one generation, whatever the host's checksum was
+// when a replica first created the cache: one created after a cycle (a
+// lazily created cache, or a pod started after a reconfiguration) reads what
+// its peers wrote. Valkey only: process memory is not shared between managers.
 func TestUncycled_GenerationDoesNotDependOnWhenTheCacheWasCreated(t *testing.T) {
-	eachBackend(t, func(t *testing.T, newManager func() CacheManager) {
-		ctx := context.Background()
-		early := newManager()
-		require.NoError(t, early.GetCache("state", CacheOptions{Uncycled: true}).Set(ctx, "k", "v"))
-
-		late := newManager()
-		require.NoError(t, late.Cycle("abc", false))
-		c := late.GetCache("state", CacheOptions{Uncycled: true})
-		assert.Equal(t, SurvivingGeneration, c.Checksum())
-
-		if _, isMemory := late.(*InMemoryCacheManager); isMemory {
-			return // process memory is not shared between managers
-		}
-		val, found, _, err := c.Get(ctx, "k")
+	ctx := context.Background()
+	s := miniredis.RunT(t)
+	newManager := func() CacheManager {
+		m, err := NewCacheManager(s.Addr(), "foo", new(time.Minute))
 		require.NoError(t, err)
-		assert.True(t, found)
-		assert.Equal(t, "v", val)
-	})
+		return m
+	}
+	require.NoError(t, newManager().GetCache("state", CacheOptions{Uncycled: true}).Set(ctx, "k", "v"))
+
+	late := newManager()
+	require.NoError(t, late.Cycle("abc", false))
+	c := late.GetCache("state", CacheOptions{Uncycled: true})
+	assert.Equal(t, SurvivingGeneration, c.Checksum())
+
+	val, found, _, err := c.Get(ctx, "k")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "v", val)
 }
 
-func TestUncycled_SurvivesAForcedCycle(t *testing.T) {
+// A cache asked for under the other scope moves to that scope's generation
+// and leaves the old one behind, on both backends alike.
+func TestGetCache_ChangingScopeLeavesTheOldGeneration(t *testing.T) {
 	eachBackend(t, func(t *testing.T, newManager func() CacheManager) {
 		ctx := context.Background()
 		m := newManager()
-		c := m.GetCache("state", CacheOptions{Uncycled: true})
-		require.NoError(t, c.Set(ctx, "k", "v"))
+		require.NoError(t, m.Cycle("1", false))
+		cycled := m.GetCache("c", CacheOptions{})
+		require.NoError(t, cycled.Set(ctx, "k", "cycled"))
 
-		require.NoError(t, m.Cycle("1", true))
-
-		assert.Equal(t, SurvivingGeneration, c.Checksum())
-		val, found, _, err := c.Get(ctx, "k")
+		surviving := m.GetCache("c", CacheOptions{Uncycled: true})
+		assert.Equal(t, SurvivingGeneration, surviving.Checksum())
+		_, found, _, err := surviving.Get(ctx, "k")
 		require.NoError(t, err)
-		assert.True(t, found)
-		assert.Equal(t, "v", val)
+		assert.False(t, found)
 	})
 }
 
-func TestSetIfAbsent(t *testing.T) {
+func TestUpdate(t *testing.T) {
 	eachBackend(t, func(t *testing.T, newManager func() CacheManager) {
 		ctx := context.Background()
 		c := newManager().GetCache("state", CacheOptions{Uncycled: true})
+		keep := func(string, bool) (string, bool) { return "", false }
 
-		set, err := c.SetIfAbsent(ctx, "k", "first", WithTTL(time.Hour))
+		wrote, err := c.Update(ctx, "k", keep)
 		require.NoError(t, err)
-		assert.True(t, set)
+		assert.False(t, wrote)
+		_, found, _, err := c.Get(ctx, "k")
+		require.NoError(t, err)
+		assert.False(t, found, "write=false writes nothing")
 
-		set, err = c.SetIfAbsent(ctx, "k", "second", WithTTL(time.Hour))
+		// Concurrent increments: every one lands, so none read a stale value.
+		increment := func(current string, found bool) (string, bool) {
+			n := 0
+			if found {
+				n, _ = strconv.Atoi(current)
+			}
+			return strconv.Itoa(n + 1), true
+		}
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				_, err := c.Update(ctx, "n", increment, WithTTL(time.Hour))
+				assert.NoError(t, err)
+			})
+		}
+		wg.Wait()
+		val, _, _, err := c.Get(ctx, "n")
 		require.NoError(t, err)
-		assert.False(t, set, "an existing entry is never overwritten")
-
-		val, _, _, err := c.Get(ctx, "k")
-		require.NoError(t, err)
-		assert.Equal(t, "first", val)
+		assert.Equal(t, "8", val)
 	})
 }
 
@@ -122,8 +141,11 @@ func TestScanGenerations(t *testing.T) {
 		ctx := context.Background()
 		m := newManager()
 		c := m.GetCache("revocations", CacheOptions{})
-		other := m.GetCache("revocations-v2", CacheOptions{Uncycled: true})
-		require.NoError(t, other.Set(ctx, "not-this-class", "x"))
+		// Neither a class whose name extends this one's, nor one that
+		// extends it past a ":", is this class.
+		for _, other := range []string{"revocations-v2", "revocations:sub"} {
+			require.NoError(t, m.GetCache(other, CacheOptions{Uncycled: true}).Set(ctx, "not-this-class", "x"))
+		}
 
 		require.NoError(t, m.Cycle("1", false))
 		require.NoError(t, c.Set(ctx, "a", "a1", WithTTL(time.Hour)))
@@ -135,10 +157,10 @@ func TestScanGenerations(t *testing.T) {
 		require.NoError(t, m.ScanGenerations(ctx, "revocations", func(e Entry) error {
 			assert.Positive(t, e.TTL, e.Key)
 			assert.LessOrEqual(t, e.TTL, time.Hour, e.Key)
-			got = append(got, e.Key+"="+e.Value)
+			got = append(got, e.Generation+"/"+e.Key+"="+e.Value)
 			return nil
 		}))
 		sort.Strings(got)
-		assert.Equal(t, []string{"a=a1", "a=a2", "b=b2"}, got)
+		assert.Equal(t, []string{"1/a=a1", "2/a=a2", "2/b=b2"}, got)
 	})
 }

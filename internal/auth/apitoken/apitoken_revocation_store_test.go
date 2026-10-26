@@ -11,21 +11,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Revocations are state a request created, so they live in the class that
+// Revocations are state a request created, so they live in the scope that
 // survives host generations; until v0.28.0 they lived in a cycled class and
 // were abandoned by a reconfiguration. See kdex-tech/host-manager#245.
 
-// valkeyTokenManager wires a TokenManager the way the controller does: the
-// surviving store plus the legacy cycled class it replaced.
+// valkeyTokenManager wires a TokenManager the way the controller does, from
+// RevocationCaches.
 func valkeyTokenManager(t *testing.T) (*TokenManager, cache.CacheManager) {
 	t.Helper()
 	s := miniredis.RunT(t)
 	cm, err := cache.NewCacheManager(s.Addr(), "host-a", nil)
 	require.NoError(t, err)
-	tm, err := NewTokenManager("test-issuer", GenerateDevmodeKeyPair(),
-		cm.GetCache(RevocationClass, RevocationCacheOptions()))
+	store, legacy := RevocationCaches(cm)
+	tm, err := NewTokenManager("test-issuer", GenerateDevmodeKeyPair(), store)
 	require.NoError(t, err)
-	tm.WithLegacyRevocationCache(cm.GetCache(LegacyRevocationClass, cache.CacheOptions{}))
+	tm.WithLegacyRevocationCache(legacy)
 	return tm, cm
 }
 
@@ -46,6 +46,7 @@ func TestRevocation_SurvivesHostReconfigurations(t *testing.T) {
 
 // During a rolling upgrade a replica still on v0.27.x writes only the legacy
 // class, and a rollback reads only it; both directions must see a revocation.
+// LEGACY(#259).
 func TestRevocation_LegacyClassIsReadAndWritten(t *testing.T) {
 	ctx := context.Background()
 	tm, cm := valkeyTokenManager(t)
@@ -81,45 +82,82 @@ func TestRevokeSubject_RevokesEveryTokenIssuedUpToIt(t *testing.T) {
 	}
 	laptop := mint("aud", "alice", "laptop")
 	unrecorded := mint("aud", "alice", "never-recorded")
-	otherAudience := mint("other-aud", "alice", "laptop")
+	resource := mint("https://host/mcp", "alice", "mcp")
 	otherSubject := mint("aud", "bob", "laptop")
 
-	require.NoError(t, tm.RevokeSubject(ctx, "aud", "alice", 0))
+	require.NoError(t, tm.RevokeSubject(ctx, "alice", 0))
 	time.Sleep(time.Millisecond)
 	resignup := mint("aud", "alice", "laptop")
 
-	for name, token := range map[string]string{"laptop": laptop, "unrecorded act": unrecorded} {
-		_, err := tm.ValidateToken(ctx, token, "aud")
+	for name, tc := range map[string]struct{ token, aud string }{
+		"recorded act":      {laptop, "aud"},
+		"unrecorded act":    {unrecorded, "aud"},
+		"resource audience": {resource, "https://host/mcp"},
+	} {
+		_, err := tm.ValidateToken(ctx, tc.token, tc.aud)
 		assert.Error(t, err, name)
 	}
-	_, err := tm.ValidateToken(ctx, otherAudience, "other-aud")
-	assert.NoError(t, err, "a subject is revoked per audience")
-	_, err = tm.ValidateToken(ctx, otherSubject, "aud")
+	_, err := tm.ValidateToken(ctx, otherSubject, "aud")
 	assert.NoError(t, err, "another subject is untouched")
 	_, err = tm.ValidateToken(ctx, resignup, "aud")
 	assert.NoError(t, err, "a token minted after the cutoff (a re-signup) is valid")
 }
 
-func TestRevokeSubject_CannotBeShortenedOrMovedBack(t *testing.T) {
+// The paths that issue new credentials ask whether the authentication behind
+// a request predates the subject's revocation.
+func TestSubjectRevokedSince(t *testing.T) {
 	ctx := context.Background()
 	tm, _ := valkeyTokenManager(t)
-	key := subjectRevocationKey("aud", "alice")
-	later := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
-	require.NoError(t, tm.revocationCache.Set(ctx, key, later))
+	before := time.Now()
 
-	require.NoError(t, tm.RevokeSubject(ctx, "aud", "alice", time.Millisecond))
+	revoked, err := tm.SubjectRevokedSince(ctx, "alice", before)
+	require.NoError(t, err)
+	assert.False(t, revoked, "never revoked")
+
+	require.NoError(t, tm.RevokeSubject(ctx, "alice", 0))
+	revoked, err = tm.SubjectRevokedSince(ctx, "alice", before)
+	require.NoError(t, err)
+	assert.True(t, revoked, "authenticated before the cutoff")
+
+	revoked, err = tm.SubjectRevokedSince(ctx, "alice", time.Now().Add(time.Second))
+	require.NoError(t, err)
+	assert.False(t, revoked, "authenticated after the cutoff")
+
+	revoked, err = tm.SubjectRevokedSince(ctx, "bob", before)
+	require.NoError(t, err)
+	assert.False(t, revoked)
+}
+
+func TestRevokeSubject_CannotBeShortenedOrMovedBack(t *testing.T) {
+	ctx := context.Background()
+	s := miniredis.RunT(t)
+	cm, err := cache.NewCacheManager(s.Addr(), "host-a", nil)
+	require.NoError(t, err)
+	store, _ := RevocationCaches(cm)
+	tm, err := NewTokenManager("test-issuer", GenerateDevmodeKeyPair(), store)
+	require.NoError(t, err)
+	key := subjectRevocationKey("alice")
+	later := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, tm.revocationCache.Set(ctx, key, later, cache.WithTTL(time.Minute)))
+
+	require.NoError(t, tm.RevokeSubject(ctx, "alice", time.Millisecond))
 
 	stored, found, _, err := tm.revocationCache.Get(ctx, key)
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, later, stored)
+	full := ""
+	for _, k := range s.Keys() {
+		if len(k) > 3 && k[len(k)-len(key):] == key {
+			full = k
+		}
+	}
+	assert.Greater(t, s.TTL(full), RevocationHorizon/2, "the ttl is raised to the revocation lifetime")
 }
 
-// The subject key cannot be produced by any (aud, sub, act), and an aud or
-// sub containing the separator cannot impersonate another pair.
-func TestSubjectRevocationKey_IsUnambiguous(t *testing.T) {
-	assert.NotEqual(t, subjectRevocationKey("a:b", "c"), subjectRevocationKey("a", "b:c"))
-	assert.NotEqual(t, subjectRevocationKey("aud", "alice"), GenerateJTI("aud", "alice", ""))
+func TestSubjectRevocationKey_CannotCollideWithAJTI(t *testing.T) {
+	assert.NotEqual(t, subjectRevocationKey("alice"), GenerateJTI("", "alice", ""))
+	assert.Regexp(t, `^sub:[0-9a-f]{64}$`, subjectRevocationKey("alice"))
 }
 
 // The one-time sweep recovers the revocations earlier generations stranded.
@@ -142,23 +180,33 @@ func TestAdoptStrandedRevocations(t *testing.T) {
 	require.NoError(t, cm.Cycle("g3", false))
 	require.NoError(t, cm.Cycle("g4", false))
 
-	// A revocation already in the surviving store is never overwritten.
+	// A newer revocation already in the store is kept; an older one gives way
+	// to the newer one a v0.27.x replica stranded (revoke, re-mint, revoke).
 	current := at(2 * time.Hour)
-	require.NoError(t, tm.revocationCache.Set(ctx, GenerateJTI("aud", "dave", "ci"), current))
+	require.NoError(t, tm.revocationCache.Set(ctx, GenerateJTI("aud", "erin", "ci"), current))
+	require.NoError(t, legacy.Set(ctx, GenerateJTI("aud", "erin", "ci"), at(time.Hour), cache.WithTTL(time.Hour)))
+	require.NoError(t, tm.revocationCache.Set(ctx, GenerateJTI("aud", "frank", "ci"), at(-2*time.Hour)))
+	require.NoError(t, legacy.Set(ctx, GenerateJTI("aud", "frank", "ci"), at(time.Hour), cache.WithTTL(time.Hour)))
 
 	_, err = tm.ValidateToken(ctx, stranded, "aud")
 	require.NoError(t, err, "precondition: four generations later the revocation is unreachable")
 
 	adopted, err := tm.AdoptStrandedRevocations(ctx, cm)
 	require.NoError(t, err)
-	assert.Equal(t, 1, adopted)
+	assert.Equal(t, 3, adopted, "alice and dave adopted, frank strengthened, erin kept")
 
 	_, err = tm.ValidateToken(ctx, stranded, "aud")
 	assert.Error(t, err, "the stranded revocation is in force again")
 
-	stored, _, _, err := tm.revocationCache.Get(ctx, GenerateJTI("aud", "dave", "ci"))
+	stored, _, _, err := tm.revocationCache.Get(ctx, GenerateJTI("aud", "erin", "ci"))
 	require.NoError(t, err)
 	assert.Equal(t, current, stored)
+	stored, _, _, err = tm.revocationCache.Get(ctx, GenerateJTI("aud", "frank", "ci"))
+	require.NoError(t, err)
+	assert.Equal(t, at(time.Hour)[:16], stored[:16], "the newer stranded revocation wins")
+	stored, _, _, err = tm.revocationCache.Get(ctx, GenerateJTI("aud", "dave", "ci"))
+	require.NoError(t, err)
+	assert.Equal(t, "revoked", stored, "an outright legacy revocation is adopted as is")
 
 	again, err := tm.AdoptStrandedRevocations(ctx, cm)
 	require.NoError(t, err)

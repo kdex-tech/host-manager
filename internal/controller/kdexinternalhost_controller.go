@@ -23,14 +23,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
-	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/host"
 	"github.com/kdex-tech/host-manager/internal/keys"
 
@@ -80,9 +78,14 @@ type KDexInternalHostReconciler struct {
 	memoizedIngress    *networkingv1.IngressSpec
 	memoizedService    *corev1.ServiceSpec
 
-	// revocationsAdopted is set once this process has adopted the
-	// revocations LegacyRevocationClass stranded (adoptStrandedRevocations).
-	revocationsAdopted atomic.Bool
+	// revocationSweep tracks adoptStrandedRevocationsInBackground.
+	// LEGACY(#259).
+	revocationSweep struct {
+		mu      sync.Mutex
+		running bool
+		// adopted is the legacy class generation last swept successfully.
+		adopted string
+	}
 }
 
 // nolint:gocyclo
@@ -529,11 +532,11 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		},
 	).WithAPITokenManagerLoader(
 		func() (*apitoken.TokenManager, error) {
-			cacheManager := r.HostHandler.GetCacheManager()
+			revocations, legacyRevocations := apitoken.RevocationCaches(r.HostHandler.GetCacheManager())
 			tm, err := apitoken.APITokenManagerLoader(
 				issuer,
 				secrets,
-				cacheManager.GetCache(apitoken.RevocationClass, apitoken.RevocationCacheOptions()),
+				revocations,
 				internalHost.Spec.DevMode,
 			)
 			if err != nil {
@@ -541,7 +544,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 			if tm != nil {
 				tm.WithTokenPrefix(apiTokenPrefix).WithMaxTTL(apiTokenMaxTTL).
-					WithLegacyRevocationCache(cacheManager.GetCache(apitoken.LegacyRevocationClass, cache.CacheOptions{}))
+					WithLegacyRevocationCache(legacyRevocations) // LEGACY(#259)
 			}
 			return tm, nil
 		},
@@ -564,7 +567,6 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
-	r.adoptStrandedRevocations(ctx, authConfig.TokenManager)
 
 	authLookups := []auth.Lookup{
 		auth.NewSecretLookup(secrets),
@@ -697,6 +699,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		snif,
 		reconcileTime,
 	)
+	r.adoptStrandedRevocationsInBackground(ctx, authConfig.TokenManager) // LEGACY(#259)
 
 	log.V(3).Info("host has been set")
 
@@ -2207,24 +2210,53 @@ func listedUtilityPage(items []kdexv1alpha1.KDexInternalUtilityPage, t kdexv1alp
 	return first
 }
 
-// adoptStrandedRevocations puts back in force, once per process, the API-token
+// adoptStrandedRevocationsInBackground puts back in force the API-token
 // revocations that host reconfigurations stranded in LegacyRevocationClass
-// (kdex-tech/host-manager#245). It scans the cache's whole keyspace, so it is
-// bounded in time; a failure leaves the tokens as they already were and is
-// retried on the next reconcile. Remove it with LegacyRevocationClass.
-func (r *KDexInternalHostReconciler) adoptStrandedRevocations(ctx context.Context, tm *apitoken.TokenManager) {
-	if tm == nil || r.revocationsAdopted.Load() {
+// (kdex-tech/host-manager#245), off the reconcile path: the sweep scans the
+// whole cache keyspace. It runs at startup and again whenever the legacy
+// class moves to a new generation, so a revocation a v0.27.x replica writes
+// during a rolling upgrade is adopted while its generation is still the
+// previous one, before the next reconfiguration strands it. A failed sweep is
+// retried on the next reconcile.
+//
+// LEGACY(#259): remove with LegacyRevocationClass.
+func (r *KDexInternalHostReconciler) adoptStrandedRevocationsInBackground(ctx context.Context, tm *apitoken.TokenManager) {
+	if tm == nil {
 		return
 	}
-	log := logf.FromContext(ctx)
+	_, legacy := apitoken.RevocationCaches(r.HostHandler.GetCacheManager())
+	generation := legacy.Checksum()
 
-	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	r.revocationSweep.mu.Lock()
+	defer r.revocationSweep.mu.Unlock()
+	if r.revocationSweep.running || r.revocationSweep.adopted == generation {
+		return
+	}
+	r.revocationSweep.running = true
+
+	sweepCtx := logf.IntoContext(context.WithoutCancel(ctx), logf.FromContext(ctx))
+	go func() {
+		adopted := r.adoptStrandedRevocations(sweepCtx, tm)
+		r.revocationSweep.mu.Lock()
+		defer r.revocationSweep.mu.Unlock()
+		r.revocationSweep.running = false
+		if adopted {
+			r.revocationSweep.adopted = generation
+		}
+	}()
+}
+
+// adoptStrandedRevocations runs one sweep, bounded by a 10-minute timeout,
+// and reports whether it completed. LEGACY(#259).
+func (r *KDexInternalHostReconciler) adoptStrandedRevocations(ctx context.Context, tm *apitoken.TokenManager) bool {
+	log := logf.FromContext(ctx)
+	sweepCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	adopted, err := tm.AdoptStrandedRevocations(sweepCtx, r.HostHandler.GetCacheManager())
 	if err != nil {
 		log.Error(err, "could not adopt stranded API-token revocations; retrying on the next reconcile", "adopted", adopted)
-		return
+		return false
 	}
-	r.revocationsAdopted.Store(true)
 	log.Info("adopted stranded API-token revocations", "adopted", adopted)
+	return true
 }

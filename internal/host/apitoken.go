@@ -88,9 +88,10 @@ const revokeAllField = "all"
 type RevokeRequest struct {
 	// Action is the action of the tokens to revoke (metadata-based revocation).
 	Action string `json:"act"`
-	// All revokes every token for Sub on Audience issued up to now, whatever
-	// its act, including keys nobody recorded. It takes aud and sub and
-	// nothing else. See kdex-tech/host-manager#257.
+	// All revokes Sub on this host as of now: every API token issued for it
+	// on any audience, whatever its act, including keys nobody recorded, and
+	// every credential that authenticated before it can no longer mint
+	// another. It takes sub and nothing else. See kdex-tech/host-manager#257.
 	All bool `json:"all"`
 	// Audience is the audience of the tokens to revoke (metadata-based revocation).
 	Audience string `json:"aud"`
@@ -154,9 +155,10 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 
 	targetSub := ""
 	if req.All {
-		if req.Audience == "" || req.Sub == "" || req.Action != "" || req.Token != "" {
-			log.V(1).Info("revoke-all refused: it takes aud and sub only")
-			http.Error(w, "all takes aud and sub, and neither act nor token", http.StatusBadRequest)
+		// An aud would read as "this audience only", which all is not.
+		if req.Sub == "" || req.Audience != "" || req.Action != "" || req.Token != "" {
+			log.V(1).Info("revoke-all refused: it takes sub only")
+			http.Error(w, "all takes sub, and none of aud, act or token: it revokes every audience", http.StatusBadRequest)
 			return
 		}
 		targetSub = req.Sub
@@ -245,7 +247,7 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 
 		var err error
 		if req.All {
-			err = hh.authConfig.TokenManager.RevokeSubject(r.Context(), req.Audience, req.Sub, ttl)
+			err = hh.authConfig.TokenManager.RevokeSubject(r.Context(), req.Sub, ttl)
 		} else {
 			err = hh.authConfig.TokenManager.RevokeByMetadata(r.Context(), req.Audience, req.Sub, req.Action, ttl)
 		}
@@ -473,6 +475,19 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// A subject revoked on this host (revoke with all) cannot mint itself a
+	// key with a credential that authenticated before the revocation: a live
+	// session would otherwise outlast the cutoff and hand its keys to a
+	// re-signup. Minting for another subject is that principal's own act and
+	// is decided above. kdex-tech/host-manager#257.
+	if subject == requestingSub {
+		if refused, status := hh.mintFromRevokedCredential(r.Context(), ac, subject); refused {
+			log.V(1).Info("mint refused: the subject was revoked after this credential authenticated", "subject", subject)
+			http.Error(w, http.StatusText(status), status)
+			return
+		}
+	}
+
 	// An absent ttl defaults to 24h, capped at the host's maximum. A ttl that
 	// is unreadable, non-positive, or above the maximum is refused rather than
 	// replaced, so the caller never holds a token that expires sooner than it
@@ -505,6 +520,27 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
+}
+
+// mintFromRevokedCredential reports whether ac authenticated subject at or
+// before subject's revocation, and the status to refuse with. A credential
+// with no issue time counts as authenticated before it. A revocation store
+// that cannot be read refuses with 503 rather than minting. Caller holds
+// hh.mu.RLock.
+func (hh *HostHandler) mintFromRevokedCredential(ctx context.Context, ac auth.AuthContext, subject string) (bool, int) {
+	issuedAt := time.Time{}
+	if iat, err := ac.GetIssuedAt(); err == nil && iat != nil {
+		issuedAt = iat.Time
+	}
+	revoked, err := hh.authConfig.TokenManager.SubjectRevokedSince(ctx, subject, issuedAt)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "could not check the subject's revocation", "subject", subject)
+		return true, http.StatusServiceUnavailable
+	}
+	if revoked {
+		return true, http.StatusForbidden
+	}
+	return false, 0
 }
 
 func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Request) {
@@ -815,7 +851,7 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 												Properties: openapi.Schemas{
 													"act": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													revokeAllField: &openapi.SchemaRef{Value: &openapi.Schema{
-														Description: "Revoke every token for sub on aud issued up to now, whatever its act, including keys that were never recorded. Takes aud and sub only; a token minted afterwards is valid. Authorized like a metadata revoke: your own subject, or apitokens:<sub>:revoke-any.",
+														Description: "Revoke sub on this host as of now: every API token issued for it on any audience, whatever its act, including keys that were never recorded; a refresh token or session that authenticated before it can no longer mint or refresh. Takes sub only. A credential from a later authentication (a re-signup) is valid. Authorized like a metadata revoke: your own subject, or apitokens:<sub>:revoke-any. Enforced by host-manager v0.28.0 or later; a replica on an earlier version ignores it.",
 														Type:        &openapi.Types{openapi.TypeBoolean},
 													}},
 													"aud":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},

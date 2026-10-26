@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -161,40 +162,66 @@ func (s *ValkeyCache) DecrementIfPositive(ctx context.Context, key string) (int6
 }
 
 func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
-	options := SetOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
-
-	s.mu.RLock()
-	prefix := s.prefix
-	ttl := s.ttl
-	if options.TTL != nil {
-		ttl = *options.TTL
-	}
-	s.mu.RUnlock()
+	prefix, ttl := s.target(opts)
 	cmd := s.client.B().Set().Key(prefix + key).Value(value).Px(ttl).Build()
 	return s.client.Do(ctx, cmd).Error()
 }
 
-func (s *ValkeyCache) SetIfAbsent(ctx context.Context, key string, value string, opts ...SetOption) (bool, error) {
-	options := SetOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
+// updateAttempts bounds Update's optimistic retries under contention.
+const updateAttempts = 16
 
+// errUpdateContended is Update's answer when every attempt lost a race.
+var errUpdateContended = errors.New("cache update: key kept changing under contention")
+
+// Update is an optimistic transaction: WATCH the key, read it, and write the
+// new value in a MULTI/EXEC that Valkey aborts if anyone wrote the key since
+// the WATCH; an aborted attempt runs fn again on the newer value.
+func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opts ...SetOption) (bool, error) {
+	prefix, ttl := s.target(opts)
+	fullKey := prefix + key
+
+	var wrote bool
+	err := s.client.Dedicated(func(c valkey.DedicatedClient) error {
+		for range updateAttempts {
+			if err := c.Do(ctx, c.B().Watch().Key(fullKey).Build()).Error(); err != nil {
+				return err
+			}
+			current, err := c.Do(ctx, c.B().Get().Key(fullKey).Build()).ToString()
+			found := err == nil
+			if err != nil && !valkey.IsValkeyNil(err) {
+				return err
+			}
+			next, write := fn(current, found)
+			if !write {
+				return c.Do(ctx, c.B().Unwatch().Build()).Error()
+			}
+			replies := c.DoMulti(ctx,
+				c.B().Multi().Build(),
+				c.B().Set().Key(fullKey).Value(next).Px(ttl).Build(),
+				c.B().Exec().Build())
+			exec := replies[len(replies)-1]
+			if _, err := exec.ToArray(); valkey.IsValkeyNil(err) {
+				continue // a concurrent write aborted the transaction
+			} else if err != nil {
+				return err
+			}
+			wrote = true
+			return nil
+		}
+		return errUpdateContended
+	})
+	return wrote, err
+}
+
+// target is the prefix and ttl a write with opts goes to.
+func (s *ValkeyCache) target(opts []SetOption) (string, time.Duration) {
+	options := applySetOptions(opts)
 	s.mu.RLock()
-	prefix := s.prefix
-	ttl := s.ttl
+	defer s.mu.RUnlock()
 	if options.TTL != nil {
-		ttl = *options.TTL
+		return s.prefix, *options.TTL
 	}
-	s.mu.RUnlock()
-	err := s.client.Do(ctx, s.client.B().Set().Key(prefix+key).Value(value).Nx().Px(ttl).Build()).Error()
-	if valkey.IsValkeyNil(err) {
-		return false, nil
-	}
-	return err == nil, err
+	return s.prefix, s.ttl
 }
 
 func (s *ValkeyCache) getValue(ctx context.Context, fullKey string) (string, bool, error) {
@@ -228,7 +255,7 @@ func (m *ValkeyCacheManager) Cycle(checksum string, force bool) error {
 			vCache.mu.Lock()
 			switch {
 			case vCache.uncycled:
-				// The surviving class has one generation.
+				// The surviving scope has one generation.
 			case force:
 				vCache.prevPrefix = ""
 				vCache.currentChecksum = checksum
@@ -248,15 +275,6 @@ func (m *ValkeyCacheManager) Cycle(checksum string, force bool) error {
 
 func (m *ValkeyCacheManager) prefix(class, generation string) string {
 	return fmt.Sprintf("{%s:%s:%s}:", m.host, class, generation)
-}
-
-// generationFor is the generation a class starts at: the fixed one for the
-// surviving class, the host's current one otherwise. Caller holds m.mu.
-func (m *ValkeyCacheManager) generationFor(uncycled bool) string {
-	if uncycled {
-		return SurvivingGeneration
-	}
-	return m.currentChecksum
 }
 
 // ScanGenerations walks the keyspace with SCAN, so it costs a pass over every
@@ -338,7 +356,7 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		vCache.mu.Lock()
 		if vCache.uncycled != opts.Uncycled {
 			vCache.uncycled = opts.Uncycled
-			vCache.currentChecksum = m.generationFor(opts.Uncycled)
+			vCache.currentChecksum = generationFor(opts.Uncycled, m.currentChecksum)
 			vCache.prefix = m.prefix(class, vCache.currentChecksum)
 			vCache.prevPrefix = ""
 		}
@@ -367,11 +385,11 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	cache := &ValkeyCache{
 		client:          m.client,
 		class:           class,
-		currentChecksum: m.generationFor(opts.Uncycled),
+		currentChecksum: generationFor(opts.Uncycled, m.currentChecksum),
 		host:            m.host,
 		maxItems:        maxItems,
 		uncycled:        opts.Uncycled,
-		prefix:          m.prefix(class, m.generationFor(opts.Uncycled)),
+		prefix:          m.prefix(class, generationFor(opts.Uncycled, m.currentChecksum)),
 		ttl:             ttl,
 	}
 	m.caches[class] = cache
