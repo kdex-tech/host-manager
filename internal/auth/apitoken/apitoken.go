@@ -290,16 +290,23 @@ func (tm *TokenManager) recordRevocation(ctx context.Context, store cache.Cache,
 	return err
 }
 
-// latestRevocation is the stronger of two stored revocations: the later time,
-// or a value with no readable time, which revokes outright (issuedNoLaterThan).
+// latestRevocation is the later of two stored revocations of one key. Two
+// times compare as times. A value with no readable time was written before
+// revocations carried one, so a timed value is the later write: it replaced
+// the untimed one when the key was re-revoked (recordRevocation), and
+// re-imposing the untimed one would revoke a key legitimately re-minted
+// since. Between two untimed values, a is kept.
 func latestRevocation(a, b string) string {
 	at, aerr := time.Parse(time.RFC3339Nano, a)
 	bt, berr := time.Parse(time.RFC3339Nano, b)
 	switch {
 	case aerr != nil:
-		return a
-	case berr != nil:
+		if berr != nil {
+			return a
+		}
 		return b
+	case berr != nil:
+		return a
 	case bt.After(at):
 		return b
 	default:
@@ -402,8 +409,8 @@ func subjectRevocationKey(sub string) string {
 
 // AdoptStrandedRevocations merges into the revocation store every revocation
 // LegacyRevocationClass holds under any host generation, so the ones host
-// reconfigurations stranded are in force again. Each key keeps the stronger
-// of what the store has and the latest any generation holds, atomically
+// reconfigurations stranded are in force again. Each key keeps the later
+// (latestRevocation) of what the store has and what any generation holds, atomically
 // against concurrent revocations, so nothing moves back in time. It returns
 // how many entries it strengthened, and is idempotent and safe to run on
 // every replica at once. See kdex-tech/host-manager#245.
@@ -429,6 +436,12 @@ func (tm *TokenManager) AdoptStrandedRevocations(ctx context.Context, cm cache.C
 
 	adopted := 0
 	for jti, e := range stranded {
+		// A plain read first: the dual write keeps the two classes equal
+		// for nearly every key, and Update's transaction costs three round
+		// trips.
+		if current, found, _, err := tm.revocationCache.Get(ctx, jti); err == nil && found && latestRevocation(current, e.Value) == current {
+			continue
+		}
 		ttl := e.TTL
 		if ttl <= 0 {
 			ttl = tm.RevocationTTL()

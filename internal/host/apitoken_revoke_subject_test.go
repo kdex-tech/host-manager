@@ -110,3 +110,38 @@ func TestApitokenMint_RefusedForACredentialFromBeforeTheSubjectWasRevoked(t *tes
 	rr = mintAs(t, hh, "ops", []any{"apitokens:alice:impersonate"}, "alice")
 	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 }
+
+// A capability carries the caller's subject and a fresh iat, so minting one
+// from a credential that predates the subject's revocation would launder the
+// credential past the cutoff: the REST and MCP surfaces both refuse it.
+func TestCapabilityMint_RefusedForACredentialFromBeforeTheSubjectWasRevoked(t *testing.T) {
+	hh := urlMintHandler(t)
+	_, tm := crossSubjectHost(t)
+	hh.authConfig.TokenManager = tm
+	require.NoError(t, tm.RevokeSubject(t.Context(), "alice", 0))
+	held := []string{"functions:/api/v1/files:read"}
+	withIAT := func(r *http.Request, iat time.Time) *http.Request {
+		return r.WithContext(auth.SetAuthContext(r.Context(), auth.AuthContext{
+			"sub": "alice", "entitlements": held, "iat": float64(iat.Unix()),
+		}))
+	}
+
+	for name, tc := range map[string]struct {
+		iat  time.Time
+		want int
+	}{
+		"stale": {time.Now().Add(-time.Minute), http.StatusForbidden},
+		"fresh": {time.Now().Add(2 * time.Second), http.StatusOK},
+	} {
+		r := httptest.NewRequest(http.MethodPost, capabilitiesMintPath, mintReq(t, MintTokenRequest{Entitlements: held}))
+		rw := httptest.NewRecorder()
+		hh.capabilityMintHandler(rw, withIAT(r, tc.iat))
+		assert.Equal(t, tc.want, rw.Code, "REST %s: %s", name, rw.Body.String())
+	}
+
+	rw := httptest.NewRecorder()
+	r := withIAT(httptest.NewRequest(http.MethodPost, "/mcp", nil), time.Now().Add(-time.Minute))
+	hh.writeMintTokenRPC(rw, r, json.RawMessage(`1`), "alice", held, MintTokenRequest{Entitlements: held})
+	assert.Contains(t, rw.Body.String(), `"isError":true`, "MCP stale")
+	assert.Contains(t, rw.Body.String(), "revoked")
+}

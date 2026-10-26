@@ -481,7 +481,7 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	// re-signup. Minting for another subject is that principal's own act and
 	// is decided above. kdex-tech/host-manager#257.
 	if subject == requestingSub {
-		if refused, status := hh.mintFromRevokedCredential(r.Context(), ac, subject); refused {
+		if refused, status := hh.mintFromRevokedCredential(r.Context(), ac); refused {
 			log.V(1).Info("mint refused: the subject was revoked after this credential authenticated", "subject", subject)
 			http.Error(w, http.StatusText(status), status)
 			return
@@ -522,19 +522,14 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// mintFromRevokedCredential reports whether ac authenticated subject at or
-// before subject's revocation, and the status to refuse with. A credential
-// with no issue time counts as authenticated before it. A revocation store
-// that cannot be read refuses with 503 rather than minting. Caller holds
-// hh.mu.RLock.
-func (hh *HostHandler) mintFromRevokedCredential(ctx context.Context, ac auth.AuthContext, subject string) (bool, int) {
-	issuedAt := time.Time{}
-	if iat, err := ac.GetIssuedAt(); err == nil && iat != nil {
-		issuedAt = iat.Time
-	}
-	revoked, err := hh.authConfig.TokenManager.SubjectRevokedSince(ctx, subject, issuedAt)
+// mintFromRevokedCredential reports whether ac's credential predates its
+// subject's revocation (auth.Config.CredentialPredatesRevocation), and the
+// status to refuse with: 403, or 503 when the revocation store cannot be
+// read. Caller holds hh.mu.RLock or otherwise owns hh.authConfig.
+func (hh *HostHandler) mintFromRevokedCredential(ctx context.Context, ac auth.AuthContext) (bool, int) {
+	revoked, err := hh.authConfig.CredentialPredatesRevocation(ctx, ac)
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "could not check the subject's revocation", "subject", subject)
+		logf.FromContext(ctx).Error(err, "could not check the subject's revocation")
 		return true, http.StatusServiceUnavailable
 	}
 	if revoked {

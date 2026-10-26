@@ -207,6 +207,15 @@ func (hh *HostHandler) capabilityMintHandler(w http.ResponseWriter, r *http.Requ
 	}
 	held := stringSliceFromClaim(ac["entitlements"])
 
+	// A capability carries the caller's subject and a fresh iat, so one from
+	// a credential that predates the subject's revocation would launder it
+	// past the cutoff (kdex-tech/host-manager#257).
+	if refused, status := hh.mintFromRevokedCredential(r.Context(), ac); refused {
+		log.V(1).Info("capability mint refused: the subject was revoked after this credential authenticated", "subject", sub)
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+
 	// The REST surface uses its own ttl ceiling. applyMintTokenPolicy already
 	// bakes the unset⇒ttlCap fallback for CR-derived configs; repeat it here so a
 	// hand-constructed Config that sets only MintTokenTTLCap can't yield a

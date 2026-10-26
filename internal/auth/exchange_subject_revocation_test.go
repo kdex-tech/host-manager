@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -52,4 +53,33 @@ func TestRedeemRefreshToken_EndsALineageFromBeforeTheSubjectWasRevoked(t *testin
 	assert.NoError(t, err, "another subject is untouched")
 	_, err = ex.RedeemRefreshToken(ctx, fresh, "app")
 	assert.NoError(t, err, "a lineage from after the revocation is valid")
+}
+
+// A browser session from before the subject's revocation cannot open a new
+// lineage through /-/oauth/authorize: the code would redeem to credentials
+// that pass every later cutoff check.
+func TestAuthorize_RefusedForASessionFromBeforeTheSubjectWasRevoked(t *testing.T) {
+	f := newConsentFixture(t)
+	cm, err := cache.NewCacheManager("", "authorize-revocation-test", nil)
+	require.NoError(t, err)
+	store, _ := apitoken.RevocationCaches(cm)
+	tm, err := apitoken.NewTokenManager(consentIssuer, apitoken.GenerateDevmodeKeyPair(), store)
+	require.NoError(t, err)
+	f.ex.config.TokenManager = tm
+	session := func(iat time.Time) map[string]any {
+		s := map[string]any{"iat": float64(iat.Unix())}
+		for k, v := range aliceSession {
+			s[k] = v
+		}
+		return s
+	}
+
+	codeFrom(t, f.allow(t, f.query(appRedirect, nil))) // consent is held, so authorize issues a code
+	require.NoError(t, tm.RevokeSubject(context.Background(), "alice", 0))
+
+	w := f.authorize(f.query(appRedirect, nil), session(time.Now().Add(-time.Minute)), COOKIE)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+
+	w = f.authorize(f.query(appRedirect, nil), session(time.Now().Add(2*time.Second)), COOKIE)
+	assert.Equal(t, http.StatusFound, w.Code, "a session from after the revocation is redirected with a code: %s", w.Body.String())
 }

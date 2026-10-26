@@ -213,12 +213,38 @@ func TestAdoptStrandedRevocations(t *testing.T) {
 	assert.Zero(t, again, "the sweep is idempotent")
 }
 
-// A legacy entry with no timestamp revokes outright, so it outranks any time.
+// Two times compare as times; a timed value is a later write than an untimed
+// one, which predates revocation timestamps, whichever argument holds it.
 func TestLatestRevocation(t *testing.T) {
 	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
 	t2 := time.Date(2026, 1, 1, 0, 0, 0, 5, time.UTC).Format(time.RFC3339Nano)
 	assert.Equal(t, t2, latestRevocation(t1, t2))
 	assert.Equal(t, t2, latestRevocation(t2, t1))
-	assert.Equal(t, "revoked", latestRevocation(t2, "revoked"))
-	assert.Equal(t, "revoked", latestRevocation("revoked", t1))
+	assert.Equal(t, t1, latestRevocation(t1, "revoked"))
+	assert.Equal(t, t1, latestRevocation("revoked", t1))
+	assert.Equal(t, "revoked", latestRevocation("revoked", "also-untimed"))
+}
+
+// A key revoked before revocations carried a time, then re-revoked (which
+// replaced the untimed value with a time) and re-minted, must not be revoked
+// outright again by the sweep finding the untimed value in an old generation.
+func TestAdoptStrandedRevocations_DoesNotReimposeAnUntimedRevocation(t *testing.T) {
+	ctx := context.Background()
+	tm, cm := valkeyTokenManager(t)
+	legacy := cm.GetCache(LegacyRevocationClass, cache.CacheOptions{})
+	jti := GenerateJTI("aud", "alice", "laptop")
+
+	require.NoError(t, cm.Cycle("g1", false))
+	require.NoError(t, legacy.Set(ctx, jti, "revoked", cache.WithTTL(time.Hour)))
+	require.NoError(t, cm.Cycle("g2", false))
+	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
+	time.Sleep(time.Millisecond)
+	reminted, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	require.NoError(t, err)
+
+	_, err = tm.AdoptStrandedRevocations(ctx, cm)
+	require.NoError(t, err)
+
+	_, err = tm.ValidateToken(ctx, reminted, "aud")
+	assert.NoError(t, err)
 }

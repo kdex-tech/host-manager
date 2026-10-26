@@ -2225,23 +2225,33 @@ func (r *KDexInternalHostReconciler) adoptStrandedRevocationsInBackground(ctx co
 		return
 	}
 	_, legacy := apitoken.RevocationCaches(r.HostHandler.GetCacheManager())
-	generation := legacy.Checksum()
 
 	r.revocationSweep.mu.Lock()
 	defer r.revocationSweep.mu.Unlock()
-	if r.revocationSweep.running || r.revocationSweep.adopted == generation {
+	if r.revocationSweep.running || r.revocationSweep.adopted == legacy.Checksum() {
 		return
 	}
 	r.revocationSweep.running = true
 
 	sweepCtx := logf.IntoContext(context.WithoutCancel(ctx), logf.FromContext(ctx))
 	go func() {
-		adopted := r.adoptStrandedRevocations(sweepCtx, tm)
-		r.revocationSweep.mu.Lock()
-		defer r.revocationSweep.mu.Unlock()
-		r.revocationSweep.running = false
-		if adopted {
-			r.revocationSweep.adopted = generation
+		// Sweep until a pass completes for the generation the class is still
+		// at, so a generation change during a pass is not left for a
+		// reconcile that may not come.
+		for {
+			generation := legacy.Checksum()
+			adopted := r.adoptStrandedRevocations(sweepCtx, tm)
+
+			r.revocationSweep.mu.Lock()
+			if adopted {
+				r.revocationSweep.adopted = generation
+			}
+			if !adopted || legacy.Checksum() == generation {
+				r.revocationSweep.running = false
+				r.revocationSweep.mu.Unlock()
+				return
+			}
+			r.revocationSweep.mu.Unlock()
 		}
 	}()
 }

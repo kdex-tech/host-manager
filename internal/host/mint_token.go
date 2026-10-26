@@ -456,6 +456,16 @@ func mustJSON(v any) string {
 // HTTP 200, matching how MCP tools surface domain errors.
 func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage, sub string, held []string, args MintTokenRequest) {
 	w.Header().Set("Content-Type", "application/json")
+	// Same cutoff as capabilityMintHandler (kdex-tech/host-manager#257).
+	if ac, _ := auth.GetAuthContext(r.Context()); ac != nil {
+		if refused, _ := hh.mintFromRevokedCredential(r.Context(), ac); refused {
+			_ = json.NewEncoder(w).Encode(jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "mint_token refused: the subject was revoked after this credential authenticated"}},
+				"isError": true,
+			}})
+			return
+		}
+	}
 	res, err := hh.mintCapabilityToken(context.Background(), sub, held, args, transferBaseURL(r))
 	var payload jsonRPCResponse
 	if err != nil {

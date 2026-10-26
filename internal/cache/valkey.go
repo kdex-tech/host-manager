@@ -182,18 +182,23 @@ func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opt
 
 	var wrote bool
 	err := s.client.Dedicated(func(c valkey.DedicatedClient) error {
+		// A failure between WATCH and EXEC must not hand the pooled
+		// connection back still watching, or its next user's EXEC aborts.
+		unwatch := func(cause error) error {
+			return errors.Join(cause, c.Do(ctx, c.B().Unwatch().Build()).Error())
+		}
 		for range updateAttempts {
 			if err := c.Do(ctx, c.B().Watch().Key(fullKey).Build()).Error(); err != nil {
-				return err
+				return unwatch(err)
 			}
 			current, err := c.Do(ctx, c.B().Get().Key(fullKey).Build()).ToString()
 			found := err == nil
 			if err != nil && !valkey.IsValkeyNil(err) {
-				return err
+				return unwatch(err)
 			}
 			next, write := fn(current, found)
 			if !write {
-				return c.Do(ctx, c.B().Unwatch().Build()).Error()
+				return unwatch(nil)
 			}
 			replies := c.DoMulti(ctx,
 				c.B().Multi().Build(),
@@ -203,7 +208,7 @@ func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opt
 			if _, err := exec.ToArray(); valkey.IsValkeyNil(err) {
 				continue // a concurrent write aborted the transaction
 			} else if err != nil {
-				return err
+				return unwatch(err) // EXEC never ran: still watching
 			}
 			wrote = true
 			return nil
