@@ -5,8 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
@@ -99,4 +102,44 @@ func TestAuthorize_ASessionFromBeforeTheSubjectWasRevokedMustSignInAgain(t *test
 	assert.True(t, errors.Is(err, ErrGrantFailure), "a code from before the revocation: %v", err)
 
 	codeFrom(t, f.authorize(f.query(appRedirect, nil), session(time.Now().Add(2*time.Second)), COOKIE))
+}
+
+// canonicalizingProvider is a credential store that vouches for a login under
+// its canonical subject, whatever spelling the user typed.
+type canonicalizingProvider struct{ rotationStubIdentityProvider }
+
+func (canonicalizingProvider) FindInternal(username, _ string) (jwt.MapClaims, error) {
+	return jwt.MapClaims{"sub": strings.ToLower(strings.TrimSpace(username))}, nil
+}
+
+// A local login's session carries the subject the credential store vouched
+// for, not the spelling the user typed: on its first refresh it would
+// otherwise re-sign under the typed name, out of reach of a revocation (and
+// a role binding) written for the canonical one.
+func TestLoginLocal_SessionCarriesTheVouchedSubjectNotTheTypedOne(t *testing.T) {
+	ctx := context.Background()
+	ex := newRotationTestExchanger(t)
+	ex.sp = canonicalizingProvider{}
+	cm, err := cache.NewCacheManager("", "login-subject-test", nil)
+	require.NoError(t, err)
+	store, _ := apitoken.RevocationCaches(cm)
+	tm, err := apitoken.NewTokenManager("test-iss", apitoken.GenerateDevmodeKeyPair(), store)
+	require.NoError(t, err)
+	ex.config.TokenManager = tm
+
+	ts, err := ex.LoginLocal(ctx, "Alice@X.com ", "pw", "", "app", AuthMethodLocal)
+	require.NoError(t, err)
+	assert.Equal(t, "alice@x.com", ts.Subject)
+
+	refreshed, err := ex.RedeemRefreshToken(ctx, ts.RefreshToken, "app")
+	require.NoError(t, err)
+	parsed, _, err := jwt.NewParser().ParseUnverified(refreshed.AccessToken, jwt.MapClaims{})
+	require.NoError(t, err)
+	sub, err := parsed.Claims.GetSubject()
+	require.NoError(t, err)
+	assert.Equal(t, "alice@x.com", sub, "the refreshed token keeps the vouched subject")
+
+	require.NoError(t, tm.RevokeSubject(ctx, "alice@x.com", 0))
+	_, err = ex.RedeemRefreshToken(ctx, refreshed.RefreshToken, "app")
+	assert.True(t, errors.Is(err, ErrGrantFailure), "revoke-all by the canonical subject ends the lineage: %v", err)
 }

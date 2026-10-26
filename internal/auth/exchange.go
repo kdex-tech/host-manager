@@ -1231,15 +1231,18 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	}
 
 	// The credential store has vouched for this identity, so from here the
-	// subject is known. Use `username` to match this function's success path
-	// (and the refresh-token claims it mints), so the same request reports
-	// the same subject whether it succeeds or fails.
-	// See kdex-tech/host-manager#158.
+	// subject is the one it vouched for, `sub`, which can differ from the
+	// typed `username` (case, whitespace, an alias). The success path and the
+	// refresh lineage it mints carry `sub`, so the same request reports the
+	// same subject whether it succeeds or fails (kdex-tech/host-manager#158),
+	// and every refresh re-signs, re-resolves roles for, and is revoked
+	// (#257) under that subject, not the spelling of one login. Events keep
+	// `username` as typed; their claims carry `sub`.
+	sub, _ := signingContext.GetSubject()
 	failed := func(format string, args ...any) (TokenSet, error) {
-		return TokenSet{Subject: username}, fmt.Errorf(format, args...)
+		return TokenSet{Subject: sub}, fmt.Errorf(format, args...)
 	}
 
-	sub, _ := signingContext.GetSubject()
 	if err := e.refuseClientNamedIdentity(sub, username); err != nil {
 		logf.FromContext(ctx).Error(err, "refusing a login whose subject names a client", "username", username)
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
@@ -1303,7 +1306,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 				AuthMethod: string(authMethod),
 				Reason:     gerr.Error(),
 			})
-			return TokenSet{Subject: username}, grantFailuref("login denied: %v", gerr)
+			return TokenSet{Subject: sub}, grantFailuref("login denied: %v", gerr)
 		}
 
 		// The enforcing gate may have JIT-provisioned this subject; re-resolve
@@ -1338,7 +1341,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 		AccessToken: accessToken,
 		IDToken:     idToken,
 		Scope:       grantedScopeStr,
-		Subject:     username,
+		Subject:     sub,
 	}
 
 	if e.IsRefreshTokenEnabled() {
@@ -1346,7 +1349,7 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 			AuthMethod: authMethod,
 			ClientID:   clientID,
 			Scope:      grantedScopeStr,
-			Subject:    username,
+			Subject:    sub,
 		})
 		if err != nil {
 			return TokenSet{}, fmt.Errorf("%w: failed to create refresh token: %v", ErrServerError, err)
