@@ -770,6 +770,9 @@ func TestIsBrowserSession_RealMintedTokens(t *testing.T) {
 type clientStoreDown struct{}
 
 func (clientStoreDown) Cycle(string, bool) error { return nil }
+func (clientStoreDown) ScanGenerations(context.Context, string, func(cache.Entry) error) error {
+	return nil
+}
 func (clientStoreDown) GetCache(string, cache.CacheOptions) cache.Cache {
 	return consentStoreDown{}
 }

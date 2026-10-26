@@ -212,14 +212,15 @@ func TestInMemoryCacheManager_GetCache(t *testing.T) {
 				assert.True(t, isCurrent)
 				assert.Equal(t, "test", val)
 
-				// Cycle with force clears an uncycled cache
+				// Not even a forced cycle moves the class that survives host
+				// generations (kdex-tech/host-manager#245)
 				cacheManager.Cycle("1", true)
-				assert.Equal(t, "1", got.Checksum())
+				assert.Equal(t, SurvivingGeneration, got.Checksum())
 				val, ok, isCurrent, err = got.Get(ctx, "test")
 				assert.NoError(t, err)
-				assert.False(t, ok)
+				assert.True(t, ok)
 				assert.True(t, isCurrent)
-				assert.Equal(t, "", val)
+				assert.Equal(t, "test", val)
 			},
 		},
 		{

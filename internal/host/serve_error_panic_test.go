@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 type panickingCacheManager struct{}
 
 func (panickingCacheManager) Cycle(string, bool) error { return nil }
+func (panickingCacheManager) ScanGenerations(context.Context, string, func(cache.Entry) error) error {
+	return nil
+}
 func (panickingCacheManager) GetCache(string, cache.CacheOptions) cache.Cache {
 	panic("simulated render-path panic (kdex-tech/host-manager#51)")
 }

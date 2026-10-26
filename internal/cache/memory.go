@@ -205,7 +205,27 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value string, opts 
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setLocked(key, value, options)
+	return nil
+}
 
+func (c *InMemoryCache) SetIfAbsent(ctx context.Context, key string, value string, opts ...SetOption) (bool, error) {
+	options := SetOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, found := c.segments[c.currentChecksum][key]; found && !time.Now().After(entry.expiry) {
+		return false, nil
+	}
+	c.setLocked(key, value, options)
+	return true, nil
+}
+
+// setLocked stores key in the current generation. Caller holds c.mu.Lock().
+func (c *InMemoryCache) setLocked(key string, value string, options SetOptions) {
 	if c.segments[c.currentChecksum] == nil {
 		c.segments[c.currentChecksum] = make(map[string]memoryCacheEntry)
 	}
@@ -244,7 +264,6 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value string, opts 
 			value:   value,
 		}
 	}
-	return nil
 }
 
 func (c *InMemoryCache) reap() {
@@ -298,15 +317,18 @@ func (m *InMemoryCacheManager) Cycle(checksum string, force bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	oldChecksum := m.currentChecksum
 	m.currentChecksum = checksum
 
 	for _, cache := range m.caches {
 		if mCache, ok := cache.(*InMemoryCache); ok {
-			if mCache.uncycled && !force {
+			mCache.mu.Lock()
+			// The surviving class has one generation, and a reconcile that
+			// changed nothing keeps the previous generation's grace window.
+			if mCache.uncycled || (!force && mCache.currentChecksum == checksum) {
+				mCache.mu.Unlock()
 				continue
 			}
-			mCache.mu.Lock()
+			oldChecksum := mCache.currentChecksum
 			mCache.currentChecksum = checksum
 
 			// Ensure the new generation map exists
@@ -335,6 +357,48 @@ func (m *InMemoryCacheManager) Cycle(checksum string, force bool) error {
 	return nil
 }
 
+// generationFor is the generation a class starts at: the fixed one for the
+// surviving class, the host's current one otherwise. Caller holds m.mu.
+func (m *InMemoryCacheManager) generationFor(uncycled bool) string {
+	if uncycled {
+		return SurvivingGeneration
+	}
+	return m.currentChecksum
+}
+
+// ScanGenerations reports what this process still holds: memory keeps only
+// the current and previous generation, so nothing older is left to recover.
+func (m *InMemoryCacheManager) ScanGenerations(ctx context.Context, class string, fn func(Entry) error) error {
+	m.mu.RLock()
+	cache, ok := m.caches[class]
+	m.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	mCache := cache.(*InMemoryCache)
+
+	mCache.mu.RLock()
+	now := time.Now()
+	var entries []Entry
+	for generation, seg := range mCache.segments {
+		for key, entry := range seg {
+			if now.After(entry.expiry) {
+				continue
+			}
+			entries = append(entries, Entry{Generation: generation, Key: key, TTL: entry.expiry.Sub(now), Value: entry.value})
+		}
+	}
+	mCache.mu.RUnlock()
+
+	// fn runs unlocked: it may write to this or another cache.
+	for _, entry := range entries {
+		if err := fn(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	m.mu.RLock()
 	cache, ok := m.caches[class]
@@ -346,7 +410,10 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 		if mCache.lru == nil {
 			mCache.lru = list.New()
 		}
-		mCache.uncycled = opts.Uncycled
+		if mCache.uncycled != opts.Uncycled {
+			mCache.uncycled = opts.Uncycled
+			mCache.currentChecksum = m.generationFor(opts.Uncycled)
+		}
 		if opts.MaxItems != nil {
 			mCache.maxItems = *opts.MaxItems
 		}
@@ -395,7 +462,7 @@ func (m *InMemoryCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	}
 	cache = &InMemoryCache{
 		class:           class,
-		currentChecksum: m.currentChecksum,
+		currentChecksum: m.generationFor(opts.Uncycled),
 		host:            m.host,
 		lru:             list.New(),
 		maxItems:        maxItems,

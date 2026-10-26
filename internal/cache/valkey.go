@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,6 +177,26 @@ func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ..
 	return s.client.Do(ctx, cmd).Error()
 }
 
+func (s *ValkeyCache) SetIfAbsent(ctx context.Context, key string, value string, opts ...SetOption) (bool, error) {
+	options := SetOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	s.mu.RLock()
+	prefix := s.prefix
+	ttl := s.ttl
+	if options.TTL != nil {
+		ttl = *options.TTL
+	}
+	s.mu.RUnlock()
+	err := s.client.Do(ctx, s.client.B().Set().Key(prefix+key).Value(value).Nx().Px(ttl).Build()).Error()
+	if valkey.IsValkeyNil(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *ValkeyCache) getValue(ctx context.Context, fullKey string) (string, bool, error) {
 	cmd := s.client.B().Get().Key(fullKey).Build()
 	val, err := s.client.Do(ctx, cmd).ToString()
@@ -204,21 +225,110 @@ func (m *ValkeyCacheManager) Cycle(checksum string, force bool) error {
 
 	for _, cache := range m.caches {
 		if vCache, ok := cache.(*ValkeyCache); ok {
-			if vCache.uncycled && !force {
-				continue
-			}
 			vCache.mu.Lock()
-			if force {
+			switch {
+			case vCache.uncycled:
+				// The surviving class has one generation.
+			case force:
 				vCache.prevPrefix = ""
-			} else {
+				vCache.currentChecksum = checksum
+				vCache.prefix = m.prefix(vCache.class, checksum)
+			case vCache.currentChecksum != checksum:
+				// Only a new generation spends the previous one's grace
+				// window; a reconcile that changed nothing keeps it.
 				vCache.prevPrefix = vCache.prefix
+				vCache.currentChecksum = checksum
+				vCache.prefix = m.prefix(vCache.class, checksum)
 			}
-			vCache.currentChecksum = checksum
-			vCache.prefix = fmt.Sprintf("{%s:%s:%s}:", m.host, vCache.class, checksum)
 			vCache.mu.Unlock()
 		}
 	}
 	return nil
+}
+
+func (m *ValkeyCacheManager) prefix(class, generation string) string {
+	return fmt.Sprintf("{%s:%s:%s}:", m.host, class, generation)
+}
+
+// generationFor is the generation a class starts at: the fixed one for the
+// surviving class, the host's current one otherwise. Caller holds m.mu.
+func (m *ValkeyCacheManager) generationFor(uncycled bool) string {
+	if uncycled {
+		return SurvivingGeneration
+	}
+	return m.currentChecksum
+}
+
+// ScanGenerations walks the keyspace with SCAN, so it costs a pass over every
+// key in the store; it is meant for a one-time recovery, not a request path.
+func (m *ValkeyCacheManager) ScanGenerations(ctx context.Context, class string, fn func(Entry) error) error {
+	pattern := globEscape(fmt.Sprintf("{%s:%s:", m.host, class)) + "*"
+	var cursor uint64
+	for {
+		scan, err := m.client.Do(ctx, m.client.B().Scan().Cursor(cursor).Match(pattern).Count(1000).Build()).AsScanEntry()
+		if err != nil {
+			return err
+		}
+		for _, fullKey := range scan.Elements {
+			entry, ok, err := m.entry(ctx, class, fullKey)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if err := fn(entry); err != nil {
+				return err
+			}
+		}
+		if cursor = scan.Cursor; cursor == 0 {
+			return nil
+		}
+	}
+}
+
+// entry reads one scanned key. ok is false for a key that expired since the
+// scan saw it, or one whose class merely starts with the scanned class's name.
+func (m *ValkeyCacheManager) entry(ctx context.Context, class, fullKey string) (Entry, bool, error) {
+	tag, key, found := strings.Cut(fullKey, "}:")
+	if !found {
+		return Entry{}, false, nil
+	}
+	generation, found := strings.CutPrefix(tag, fmt.Sprintf("{%s:%s:", m.host, class))
+	if !found || strings.Contains(generation, ":") {
+		return Entry{}, false, nil
+	}
+	replies := m.client.DoMulti(ctx,
+		m.client.B().Get().Key(fullKey).Build(),
+		m.client.B().Pttl().Key(fullKey).Build())
+	value, err := replies[0].ToString()
+	if valkey.IsValkeyNil(err) {
+		return Entry{}, false, nil
+	}
+	if err != nil {
+		return Entry{}, false, err
+	}
+	pttl, err := replies[1].AsInt64()
+	if err != nil {
+		return Entry{}, false, err
+	}
+	entry := Entry{Generation: generation, Key: key, Value: value}
+	if pttl > 0 {
+		entry.TTL = time.Duration(pttl) * time.Millisecond
+	}
+	return entry, true, nil
+}
+
+// globEscape quotes the characters SCAN's MATCH treats as a pattern.
+func globEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(`\*?[]^`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
@@ -226,7 +336,12 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	if cache, ok := m.caches[class]; ok {
 		vCache := cache.(*ValkeyCache)
 		vCache.mu.Lock()
-		vCache.uncycled = opts.Uncycled
+		if vCache.uncycled != opts.Uncycled {
+			vCache.uncycled = opts.Uncycled
+			vCache.currentChecksum = m.generationFor(opts.Uncycled)
+			vCache.prefix = m.prefix(class, vCache.currentChecksum)
+			vCache.prevPrefix = ""
+		}
 		if opts.MaxItems != nil {
 			vCache.maxItems = *opts.MaxItems
 		}
@@ -252,11 +367,11 @@ func (m *ValkeyCacheManager) GetCache(class string, opts CacheOptions) Cache {
 	cache := &ValkeyCache{
 		client:          m.client,
 		class:           class,
-		currentChecksum: m.currentChecksum,
+		currentChecksum: m.generationFor(opts.Uncycled),
 		host:            m.host,
 		maxItems:        maxItems,
 		uncycled:        opts.Uncycled,
-		prefix:          fmt.Sprintf("{%s:%s:%s}:", m.host, class, m.currentChecksum),
+		prefix:          m.prefix(class, m.generationFor(opts.Uncycled)),
 		ttl:             ttl,
 	}
 	m.caches[class] = cache
