@@ -81,10 +81,17 @@ type VerifyRequest struct {
 	Token string `json:"token"`
 }
 
+// revokeAllField is RevokeRequest.All's JSON name, for the OpenAPI schema.
+const revokeAllField = "all"
+
 // RevokeRequest is the request body for the token revocation endpoint.
 type RevokeRequest struct {
 	// Action is the action of the tokens to revoke (metadata-based revocation).
 	Action string `json:"act"`
+	// All revokes every token for Sub on Audience issued up to now, whatever
+	// its act, including keys nobody recorded. It takes aud and sub and
+	// nothing else. See kdex-tech/host-manager#257.
+	All bool `json:"all"`
 	// Audience is the audience of the tokens to revoke (metadata-based revocation).
 	Audience string `json:"aud"`
 	// Sub is the subject of the tokens to revoke (metadata-based revocation).
@@ -146,7 +153,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	targetSub := ""
-	if req.Token != "" {
+	if req.All {
+		if req.Audience == "" || req.Sub == "" || req.Action != "" || req.Token != "" {
+			log.V(1).Info("revoke-all refused: it takes aud and sub only")
+			http.Error(w, "all takes aud and sub, and neither act nor token", http.StatusBadRequest)
+			return
+		}
+		targetSub = req.Sub
+	} else if req.Token != "" {
 		// Revocation extracts subject from a token regardless of which
 		// audience it was minted for — the token is being inspected,
 		// not used for authentication on the current request. Skip the
@@ -229,8 +243,14 @@ func (hh *HostHandler) apitokenRevokeHandler(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		if err := hh.authConfig.TokenManager.RevokeByMetadata(r.Context(), req.Audience, req.Sub, req.Action, ttl); err != nil {
-			log.Error(err, "Failed to revoke tokens by metadata")
+		var err error
+		if req.All {
+			err = hh.authConfig.TokenManager.RevokeSubject(r.Context(), req.Audience, req.Sub, ttl)
+		} else {
+			err = hh.authConfig.TokenManager.RevokeByMetadata(r.Context(), req.Audience, req.Sub, req.Action, ttl)
+		}
+		if err != nil {
+			log.Error(err, "Failed to revoke tokens by metadata", "all", req.All)
 			http.Error(w, "Failed to revoke tokens by metadata", http.StatusInternalServerError)
 			return
 		}
@@ -793,7 +813,11 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 										Schema: &openapi.SchemaRef{
 											Value: &openapi.Schema{
 												Properties: openapi.Schemas{
-													"act":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													"act": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+													revokeAllField: &openapi.SchemaRef{Value: &openapi.Schema{
+														Description: "Revoke every token for sub on aud issued up to now, whatever its act, including keys that were never recorded. Takes aud and sub only; a token minted afterwards is valid. Authorized like a metadata revoke: your own subject, or apitokens:<sub>:revoke-any.",
+														Type:        &openapi.Types{openapi.TypeBoolean},
+													}},
 													"aud":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"sub":   &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 													"token": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},

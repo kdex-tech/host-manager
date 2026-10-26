@@ -46,6 +46,35 @@ const pasetoV4PublicHeader = "v4.public."
 // key minted afterwards under the same name.
 const RevocationHorizon = 10 * 365 * 24 * time.Hour
 
+// RevocationClass is the cache class revocations live in. It is in the class
+// that survives host generations: a revocation is state a request created,
+// and losing it makes a revoked token valid again. See
+// kdex-tech/host-manager#245.
+const RevocationClass = "apitoken-revocations"
+
+// LegacyRevocationClass is the cycled class revocations lived in up to
+// v0.27.x, where every host reconfiguration abandoned them. TokenManager still
+// reads and writes it (WithLegacyRevocationCache) so that, during a rolling
+// upgrade, a replica on v0.27.x and one on v0.28.0 honour each other's
+// revocations, and a rollback below v0.28.0 keeps the ones made since.
+//
+// Remove the class, WithLegacyRevocationCache and AdoptStrandedRevocations
+// together, in the first release after every host has run v0.28.0 or later
+// and a rollback below v0.28.0 is no longer supported: by then each host's
+// first v0.28.0 replica has adopted what the class held.
+const LegacyRevocationClass = "apitoken-revocation"
+
+// RevocationCacheOptions are the options RevocationClass is created with.
+// MaxItems 0 means unbounded: the in-memory backend would otherwise evict a
+// revocation to make room, which un-revokes a token.
+func RevocationCacheOptions() cache.CacheOptions {
+	return cache.CacheOptions{MaxItems: new(0), Uncycled: true}
+}
+
+// subjectRevocationPrefix namespaces subject-wide revocations. A jti is bare
+// hex, so no jti can collide with a key carrying it.
+const subjectRevocationPrefix = "sub:"
+
 // ErrTTLExceedsMax is returned when a mint asks for a lifetime longer than the
 // host's KDexHost.spec.auth.apiToken.maxTTL. See kdex-tech/host-manager#238.
 var ErrTTLExceedsMax = errors.New("ttl exceeds the host's maximum API token lifetime")
@@ -102,7 +131,9 @@ type TokenManager struct {
 	keyPairs        KeyPairs
 	maxTTL          time.Duration
 	revocationCache cache.Cache
-	tokenPrefix     string
+	// legacyRevocationCache is LegacyRevocationClass, nil when not wired.
+	legacyRevocationCache cache.Cache
+	tokenPrefix           string
 }
 
 func APITokenManagerLoader(
@@ -203,6 +234,14 @@ func (tm *TokenManager) WithMaxTTL(maxTTL time.Duration) *TokenManager {
 	return tm
 }
 
+// WithLegacyRevocationCache also reads and writes per-token revocations in
+// LegacyRevocationClass, for the rolling upgrade and rollback it describes.
+// Returns the receiver for chaining.
+func (tm *TokenManager) WithLegacyRevocationCache(legacy cache.Cache) *TokenManager {
+	tm.legacyRevocationCache = legacy
+	return tm
+}
+
 // MaxTTL returns the host's maximum API token lifetime, zero when unbounded.
 func (tm *TokenManager) MaxTTL() time.Duration {
 	return tm.maxTTL
@@ -215,23 +254,50 @@ func (tm *TokenManager) RevocationTTL() time.Duration {
 }
 
 // revoke records that every token carrying jti and issued up to now is
-// revoked, for at least RevocationTTL. A shorter ttl is raised, so no caller
-// can shorten a revocation by re-revoking with a small one.
+// revoked, for at least RevocationTTL, in the revocation store and in the
+// legacy class when one is wired.
+func (tm *TokenManager) revoke(ctx context.Context, jti string, ttl time.Duration) error {
+	if err := tm.recordRevocation(ctx, tm.revocationCache, jti, ttl); err != nil {
+		return err
+	}
+	if tm.legacyRevocationCache != nil {
+		return tm.recordRevocation(ctx, tm.legacyRevocationCache, jti, ttl)
+	}
+	return nil
+}
+
+// recordRevocation stores now as key's revocation time in store. A shorter
+// ttl than RevocationTTL is raised, so no caller can shorten a revocation by
+// re-revoking with a small one.
 //
 // The stored time never moves backwards: a re-revocation on a replica whose
 // clock lags keeps the later time, or the tokens issued in between would
 // validate again. Replicas are assumed NTP-synced; a token minted on one
 // replica within the clock skew of its revocation on another can fall on
-// either side of it.
-func (tm *TokenManager) revoke(ctx context.Context, jti string, ttl time.Duration) error {
-	revokedAt := time.Now().UTC()
-	if stored, found, _, err := tm.revocationCache.Get(ctx, jti); err == nil && found {
-		if at, perr := time.Parse(time.RFC3339Nano, stored); perr == nil && at.After(revokedAt) {
-			revokedAt = at
-		}
+// either side of it (kdex-tech/host-manager#250).
+func (tm *TokenManager) recordRevocation(ctx context.Context, store cache.Cache, key string, ttl time.Duration) error {
+	revokedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if stored, found, _, err := store.Get(ctx, key); err == nil && found {
+		revokedAt = latestRevocation(stored, revokedAt)
 	}
-	return tm.revocationCache.Set(ctx, jti, revokedAt.Format(time.RFC3339Nano),
-		cache.WithTTL(max(ttl, tm.RevocationTTL())))
+	return store.Set(ctx, key, revokedAt, cache.WithTTL(max(ttl, tm.RevocationTTL())))
+}
+
+// latestRevocation is the stronger of two stored revocations: the later time,
+// or a value with no readable time, which revokes outright (issuedNoLaterThan).
+func latestRevocation(a, b string) string {
+	at, aerr := time.Parse(time.RFC3339Nano, a)
+	bt, berr := time.Parse(time.RFC3339Nano, b)
+	switch {
+	case aerr != nil:
+		return a
+	case berr != nil:
+		return b
+	case bt.After(at):
+		return b
+	default:
+		return a
+	}
 }
 
 // CapTTL shortens ttl to the host's maximum. It is for lifetimes the server
@@ -284,6 +350,73 @@ func (tm *TokenManager) RevokeByMetadata(ctx context.Context, aud, sub, act stri
 	}
 
 	return tm.revoke(ctx, GenerateJTI(aud, sub, act), ttl)
+}
+
+// RevokeSubject revokes every token for sub on audience aud issued up to now,
+// whatever its act, so it reaches keys nobody recorded. A token minted
+// afterwards (a re-signup under the same address) is valid. Like a per-token
+// revocation it lasts at least RevocationTTL and never moves back in time.
+//
+// It is written only to the revocation store: a replica on v0.27.x or earlier
+// cannot read it, so it takes effect host-wide once every replica runs
+// v0.28.0. See kdex-tech/host-manager#257.
+func (tm *TokenManager) RevokeSubject(ctx context.Context, aud, sub string, ttl time.Duration) error {
+	if tm.revocationCache == nil {
+		return fmt.Errorf("revocation cache not configured")
+	}
+
+	return tm.recordRevocation(ctx, tm.revocationCache, subjectRevocationKey(aud, sub), ttl)
+}
+
+// subjectRevocationKey is the revocation-store key of (aud, sub). The pair is
+// JSON-encoded before hashing, so no aud or sub containing a separator can
+// stand for another pair.
+func subjectRevocationKey(aud, sub string) string {
+	pair, _ := json.Marshal([]string{aud, sub}) // a []string always encodes
+	hash := sha256.Sum256(pair)
+	return subjectRevocationPrefix + hex.EncodeToString(hash[:])
+}
+
+// AdoptStrandedRevocations copies into the revocation store every revocation
+// LegacyRevocationClass holds under any host generation, so the ones earlier
+// reconfigurations stranded are in force again. Where generations disagree it
+// keeps the latest; it never overwrites an entry the store already has, which
+// is newer than anything stranded. It returns how many it copied, and is
+// idempotent and safe to run on every replica at once. See
+// kdex-tech/host-manager#245, and LegacyRevocationClass for when to remove it.
+func (tm *TokenManager) AdoptStrandedRevocations(ctx context.Context, cm cache.CacheManager) (int, error) {
+	if tm.revocationCache == nil {
+		return 0, fmt.Errorf("revocation cache not configured")
+	}
+
+	stranded := map[string]cache.Entry{}
+	err := cm.ScanGenerations(ctx, LegacyRevocationClass, func(e cache.Entry) error {
+		if prev, seen := stranded[e.Key]; seen {
+			e.Value = latestRevocation(prev.Value, e.Value)
+			e.TTL = max(prev.TTL, e.TTL)
+		}
+		stranded[e.Key] = e
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	adopted := 0
+	for jti, e := range stranded {
+		ttl := e.TTL
+		if ttl <= 0 {
+			ttl = tm.RevocationTTL()
+		}
+		set, err := tm.revocationCache.SetIfAbsent(ctx, jti, e.Value, cache.WithTTL(ttl))
+		if err != nil {
+			return adopted, err
+		}
+		if set {
+			adopted++
+		}
+	}
+	return adopted, nil
 }
 
 func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
@@ -339,6 +472,43 @@ func (tm *TokenManager) RevokeToken(ctx context.Context, signed string) error {
 	}
 
 	return tm.revoke(ctx, jti, ttl)
+}
+
+// revoked reports whether a revocation covers token: one of its jti, in the
+// revocation store or the legacy class, or one of its (aud, sub). A store that
+// cannot be read fails the check rather than admitting the token.
+func (tm *TokenManager) revoked(ctx context.Context, token *paseto.Token) (bool, error) {
+	jti, err := token.GetJti()
+	if err != nil {
+		return false, err
+	}
+	aud, err := token.GetAudience()
+	if err != nil {
+		return false, err
+	}
+	sub, err := token.GetSubject()
+	if err != nil {
+		return false, err
+	}
+
+	type lookup struct {
+		store cache.Cache
+		key   string
+	}
+	lookups := []lookup{{tm.revocationCache, jti}, {tm.revocationCache, subjectRevocationKey(aud, sub)}}
+	if tm.legacyRevocationCache != nil {
+		lookups = append(lookups, lookup{tm.legacyRevocationCache, jti})
+	}
+	for _, l := range lookups {
+		revokedAt, found, _, err := l.store.Get(ctx, l.key)
+		if err != nil {
+			return false, fmt.Errorf("failed to check revocation status: %w", err)
+		}
+		if found && issuedNoLaterThan(token, revokedAt) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // issuedNoLaterThan reports whether token was issued at or before a revocation stored
@@ -467,16 +637,11 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 
 	// 4. Revocation check
 	if tm.revocationCache != nil {
-		jti, err := token.GetJti()
+		revoked, err := tm.revoked(ctx, token)
 		if err != nil {
 			return nil, err
 		}
-
-		revokedAt, found, _, err := tm.revocationCache.Get(ctx, jti)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check revocation status: %w", err)
-		}
-		if found && issuedNoLaterThan(token, revokedAt) {
+		if revoked {
 			return nil, fmt.Errorf("token revoked")
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
@@ -78,6 +79,10 @@ type KDexInternalHostReconciler struct {
 	memoizedHTTPRoute  *gatewayv1.HTTPRouteSpec
 	memoizedIngress    *networkingv1.IngressSpec
 	memoizedService    *corev1.ServiceSpec
+
+	// revocationsAdopted is set once this process has adopted the
+	// revocations LegacyRevocationClass stranded (adoptStrandedRevocations).
+	revocationsAdopted atomic.Bool
 }
 
 // nolint:gocyclo
@@ -524,17 +529,19 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		},
 	).WithAPITokenManagerLoader(
 		func() (*apitoken.TokenManager, error) {
+			cacheManager := r.HostHandler.GetCacheManager()
 			tm, err := apitoken.APITokenManagerLoader(
 				issuer,
 				secrets,
-				r.HostHandler.GetCacheManager().GetCache("apitoken-revocation", cache.CacheOptions{}),
+				cacheManager.GetCache(apitoken.RevocationClass, apitoken.RevocationCacheOptions()),
 				internalHost.Spec.DevMode,
 			)
 			if err != nil {
 				return nil, err
 			}
 			if tm != nil {
-				tm.WithTokenPrefix(apiTokenPrefix).WithMaxTTL(apiTokenMaxTTL)
+				tm.WithTokenPrefix(apiTokenPrefix).WithMaxTTL(apiTokenMaxTTL).
+					WithLegacyRevocationCache(cacheManager.GetCache(apitoken.LegacyRevocationClass, cache.CacheOptions{}))
 			}
 			return tm, nil
 		},
@@ -557,6 +564,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, r.returnDegraged(&internalHost, err)
 	}
+	r.adoptStrandedRevocations(ctx, authConfig.TokenManager)
 
 	authLookups := []auth.Lookup{
 		auth.NewSecretLookup(secrets),
@@ -2197,4 +2205,26 @@ func listedUtilityPage(items []kdexv1alpha1.KDexInternalUtilityPage, t kdexv1alp
 		}
 	}
 	return first
+}
+
+// adoptStrandedRevocations puts back in force, once per process, the API-token
+// revocations that host reconfigurations stranded in LegacyRevocationClass
+// (kdex-tech/host-manager#245). It scans the cache's whole keyspace, so it is
+// bounded in time; a failure leaves the tokens as they already were and is
+// retried on the next reconcile. Remove it with LegacyRevocationClass.
+func (r *KDexInternalHostReconciler) adoptStrandedRevocations(ctx context.Context, tm *apitoken.TokenManager) {
+	if tm == nil || r.revocationsAdopted.Load() {
+		return
+	}
+	log := logf.FromContext(ctx)
+
+	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	adopted, err := tm.AdoptStrandedRevocations(sweepCtx, r.HostHandler.GetCacheManager())
+	if err != nil {
+		log.Error(err, "could not adopt stranded API-token revocations; retrying on the next reconcile", "adopted", adopted)
+		return
+	}
+	r.revocationsAdopted.Store(true)
+	log.Info("adopted stranded API-token revocations", "adopted", adopted)
 }
