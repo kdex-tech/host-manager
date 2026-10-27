@@ -98,6 +98,40 @@ func withUserNavigation(h map[string]string) map[string]string {
 	return out
 }
 
+const (
+	uaSafariMac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15"
+	uaChromeIOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0.0.0 Mobile/15E148 Safari/604.1"
+	uaChromeMac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+	uaEdgeWin   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+	uaFirefox   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0"
+)
+
+// safariNavigation adds the fetch metadata WebKit sends when the user submits
+// a form in a top-level page: no Sec-Fetch-User (bugs.webkit.org 247697);
+// explicit keys in h win.
+func safariNavigation(h map[string]string) map[string]string {
+	out := map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
+}
+
+func TestWebKitLacksFetchUser(t *testing.T) {
+	for ua, want := range map[string]bool{
+		uaSafariMac: true,
+		uaChromeIOS: true,
+		uaChromeMac: false,
+		uaEdgeWin:   false,
+		uaFirefox:   false,
+		"":          false,
+	} {
+		if got := webKitLacksFetchUser(ua); got != want {
+			t.Errorf("webKitLacksFetchUser(%q) = %v, want %v", ua, got, want)
+		}
+	}
+}
+
 func TestConsentOriginAllowed(t *testing.T) {
 	domains := []string{"app.example"}
 	mk := func(h map[string]string) *http.Request {
@@ -147,6 +181,26 @@ func TestConsentOriginAllowed(t *testing.T) {
 			"Origin": "https://app.example", "Sec-Fetch-Site": "cross-site"}), false},
 		"user navigation does not rescue a foreign Origin": {withUserNavigation(map[string]string{
 			"Origin": "https://evil.example", "Sec-Fetch-Site": "same-origin"}), false},
+		"Chrome scripted form.submit() stays refused": {map[string]string{
+			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin",
+			"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "User-Agent": uaChromeMac}, false},
+		"Safari form submit (no Sec-Fetch-User)": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaSafariMac}), true},
+		"iOS Chrome form submit (WebKit, no Sec-Fetch-User)": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaChromeIOS}), true},
+		"Safari with Referer only": {safariNavigation(map[string]string{
+			"Referer": "https://app.example/-/oauth/authorize", "User-Agent": uaSafariMac}), true},
+		"Safari user activation ?0": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-User": "?0"}), false},
+		"Safari fetch()": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaSafariMac,
+			"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}), false},
+		"Safari form into an iframe": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-Dest": "iframe"}), false},
+		"Safari cross-site": {safariNavigation(map[string]string{
+			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-Site": "cross-site"}), false},
+		"Safari foreign Origin": {safariNavigation(map[string]string{
+			"Origin": "https://evil.example", "User-Agent": uaSafariMac}), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := consentOriginAllowed(mk(tt.headers), "https", domains); got != tt.want {

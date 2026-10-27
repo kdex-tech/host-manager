@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/kdex-tech/host-manager/internal/auth"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
@@ -284,12 +285,28 @@ func (hh *HostHandler) isSameOrigin(raw string) bool {
 // same-origin fetch(), a form posted into an iframe and a scripted
 // form.submit(), so a script on another page of this origin cannot click
 // Allow either. A browser without fetch metadata keeps the Origin rule alone.
+//
+// WebKit sends Sec-Fetch-Site/Mode/Dest but has never shipped
+// Sec-Fetch-User (https://bugs.webkit.org/show_bug.cgi?id=247697, open as of
+// 2026-10-27), so every Safari consent was refused. A browser that does ship
+// it omits the header for a navigation the user did not activate, so its
+// absence cannot be waived in general without dropping the user-activation
+// check for every browser. It is waived only for WebKit (webKitLacksFetchUser):
+// the User-Agent of a top-level navigation is the browser's own, and a script
+// on this origin cannot rewrite it. Safari users therefore keep every check
+// but user activation. Delete the waiver once WebKit sends Sec-Fetch-User.
 func consentOriginAllowed(r *http.Request, scheme string, domains []string) bool {
 	if s := r.Header.Get("Sec-Fetch-Site"); s != "" {
 		if s != "same-origin" ||
 			r.Header.Get("Sec-Fetch-Mode") != "navigate" ||
-			r.Header.Get("Sec-Fetch-Dest") != "document" ||
-			r.Header.Get("Sec-Fetch-User") != "?1" {
+			r.Header.Get("Sec-Fetch-Dest") != "document" {
+			return false
+		}
+		user, sent := r.Header["Sec-Fetch-User"]
+		if sent && (len(user) != 1 || user[0] != "?1") {
+			return false
+		}
+		if !sent && !webKitLacksFetchUser(r.UserAgent()) {
 			return false
 		}
 	}
@@ -300,4 +317,16 @@ func consentOriginAllowed(r *http.Request, scheme string, domains []string) bool
 		return kdexhttp.SameOrigin(ref, scheme, domains)
 	}
 	return false
+}
+
+// webKitLacksFetchUser reports whether ua is a WebKit browser, which sends
+// fetch metadata without Sec-Fetch-User: Safari, and every iOS browser
+// (CriOS, FxiOS, EdgiOS), since iOS requires WebKit. Blink browsers also
+// carry AppleWebKit in their User-Agent, so they are excluded by their
+// Chrome/ token, which Edge, Opera, Samsung Internet and Android WebView all
+// carry too. Firefox on the desktop is Gecko and never matches.
+func webKitLacksFetchUser(ua string) bool {
+	return strings.Contains(ua, "AppleWebKit/") &&
+		!strings.Contains(ua, "Chrome/") &&
+		!strings.Contains(ua, "Chromium/")
 }
