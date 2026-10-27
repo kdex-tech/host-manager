@@ -294,7 +294,9 @@ func (hh *HostHandler) isSameOrigin(raw string) bool {
 // check for every browser. It is waived only for WebKit (webKitLacksFetchUser):
 // the User-Agent of a top-level navigation is the browser's own, and a script
 // on this origin cannot rewrite it. Safari users therefore keep every check
-// but user activation. Delete the waiver once WebKit sends Sec-Fetch-User.
+// but user activation. Delete the waiver once the Safari/iOS versions without
+// Sec-Fetch-User fall below the browsers we support. WebKit landing the fix is
+// not enough: Safari ships with the OS. See kdex-tech/host-manager#264.
 func consentOriginAllowed(r *http.Request, scheme string, domains []string) bool {
 	if s := r.Header.Get("Sec-Fetch-Site"); s != "" {
 		if s != "same-origin" ||

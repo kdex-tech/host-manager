@@ -91,7 +91,10 @@ Refuse with **403** and no state change unless all hold:
   scheme **and port**; a request with neither header, or `Origin: null`, is refused. Where present,
   `Sec-Fetch-Site` must be `same-origin`, together with `Sec-Fetch-Mode: navigate`,
   `Sec-Fetch-Dest: document` and `Sec-Fetch-User: ?1` (a user submitting the form in a top-level
-  page, not a same-origin `fetch`, iframe or scripted submit). The comparison is extracted from `login.go` into
+  page, not a same-origin `fetch`, iframe or scripted submit). WebKit never sends `Sec-Fetch-User`
+  (bugs.webkit.org 247697), so its absence is waived for WebKit User-Agents only. Safari and every
+  iOS browser therefore keep every check except user activation (v0.28.2, kdex-tech/host-manager#264).
+  The comparison is extracted from `login.go` into
   `kdexhttp.SameOrigin(raw, scheme, domains)`; `/-/login` keeps its lenient wrapper, consent uses a
   strict one, passed into `OAuth2` as a func field.
 - **A browser session** (the §3 definition: `isBrowserSession`) whose subject equals the sealed request's subject.

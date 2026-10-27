@@ -134,6 +134,21 @@ func (h *consentFlowHost) post(sealed string, headers map[string]string) *httpte
 var consentFlowSealed = regexp.MustCompile(`name="request" value="([^"]+)"`)
 
 func TestHostConsentFlow_PageAllowThenCode(t *testing.T) {
+	consentFlowAllowThenCode(t, withUserNavigation(map[string]string{
+		"Origin": consentFlowIssuer, "Sec-Fetch-Site": "same-origin"}))
+}
+
+// Safari sends no Sec-Fetch-User (bugs.webkit.org 247697), so its Allow must
+// pass the wired gate on the WebKit waiver alone (kdex-tech/host-manager#264).
+func TestHostConsentFlow_SafariAllowThenCode(t *testing.T) {
+	consentFlowAllowThenCode(t, webKitNavigation(map[string]string{
+		"Origin": consentFlowIssuer, "User-Agent": uaSafariMac}))
+}
+
+// consentFlowAllowThenCode drives page -> refused POSTs -> Allow (submitted
+// with userSubmit) -> code through the real host handler.
+func consentFlowAllowThenCode(t *testing.T, userSubmit map[string]string) {
+	t.Helper()
 	h := newConsentFlowHost(t)
 	_, challenge := pkcePair(t)
 	authorize := auth.OAuthAuthorizePath + "?" + url.Values{
@@ -153,16 +168,11 @@ func TestHostConsentFlow_PageAllowThenCode(t *testing.T) {
 	require.Len(t, m, 2, "the consent page carries a sealed request")
 	sealed := m[1]
 
-	userSubmit := map[string]string{
-		"Origin":         consentFlowIssuer,
-		"Sec-Fetch-Site": "same-origin",
-		"Sec-Fetch-Mode": "navigate",
-		"Sec-Fetch-Dest": "document",
-		"Sec-Fetch-User": "?1",
-	}
 	for name, headers := range map[string]map[string]string{
 		"cross-origin":        {"Origin": "https://evil.example"},
 		"same-origin fetch()": {"Origin": consentFlowIssuer, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"},
+		"Chrome scripted submit, no Sec-Fetch-User": webKitNavigation(map[string]string{
+			"Origin": consentFlowIssuer, "User-Agent": uaChromeMac}),
 	} {
 		w := h.post(sealed, headers)
 		assert.Equal(t, http.StatusForbidden, w.Code, name)
