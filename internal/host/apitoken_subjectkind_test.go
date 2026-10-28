@@ -201,6 +201,28 @@ func TestSelfMint_RecordsCallerKind(t *testing.T) {
 	t.Run("a kind-less user context", func(t *testing.T) { // LEGACY(#268)
 		assert.Equal(t, kdexv1alpha1.SubjectKindUser, mintedKind(t, hh, withGrant(map[string]any{"sub": "alice"}), "alice"))
 	})
+
+	// The cases above agree with the classifier; these two do not, so they
+	// are what pins that a self-mint takes the caller's own kind rather than
+	// SubjectKindOf(sub).
+	t.Run("a kind-less client_credentials context for a client no longer configured", func(t *testing.T) { // LEGACY(#268)
+		// The classifier calls removed-client a User, but its credential
+		// is a client_credentials token, so the PAT records Client. Reachable
+		// only through the LEGACY path, ahead of the auth gate's veto of a
+		// Client credential whose client is not configured; the test drives
+		// the mint handler with a constructed context, so it stays valid.
+		caller := withGrant(map[string]any{"sub": "removed-client", "grant_type": auth.GRANT_TYPE_CLIENT_CREDENTIALS})
+		require.Equal(t, kdexv1alpha1.SubjectKindUser, hh.authExchanger.SubjectKindOf("removed-client"),
+			"precondition: the classifier disagrees")
+		assert.Equal(t, kdexv1alpha1.SubjectKindClient, mintedKind(t, hh, caller, "removed-client"))
+	})
+
+	t.Run("a carried kind contradicting its sub", func(t *testing.T) {
+		caller := withGrant(map[string]any{"sub": orchestrator, auth.ClaimSubjectKind: "User"})
+		require.Equal(t, kdexv1alpha1.SubjectKindClient, hh.authExchanger.SubjectKindOf(orchestrator),
+			"precondition: the classifier disagrees")
+		assert.Equal(t, kdexv1alpha1.SubjectKindUser, mintedKind(t, hh, caller, orchestrator))
+	})
 }
 
 // provisioningRoleProvider resolves roles through the real role provider and
