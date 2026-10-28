@@ -15,6 +15,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/utils"
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	crdsopenapi "kdex.dev/crds/openapi"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -1439,7 +1440,7 @@ func (hh *HostHandler) tokenHandler(mux *http.ServeMux, registeredPaths map[stri
 	}
 
 	oauth2 := hh.newOAuth2()
-	const path = "/-/token"
+	const path = crdsopenapi.TokenPath
 	mux.HandleFunc("POST "+path, oauth2.OAuth2TokenHandler)
 	hh.registerPath(path, ko.PathInfo{
 		API: ko.OpenAPI{
