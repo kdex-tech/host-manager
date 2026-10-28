@@ -44,8 +44,12 @@ type CompiledMappingRule struct {
 }
 
 type Exchanger struct {
-	config       Config
-	oauth2Config *oauth2.Config
+	config Config
+	// formerClients is every client id this host has ever had configured (the
+	// client registry). Built once in NewExchanger, never written afterwards, so
+	// NamesClient reads it without a lock. See kdex-tech/host-manager#255.
+	formerClients map[string]struct{}
+	oauth2Config  *oauth2.Config
 	// oidcAuthCodeOptions are the extra authorization-URL parameters this
 	// host sends the IdP -- non-empty only when offline access was requested.
 	// See kdex-tech/host-manager#190.
@@ -247,6 +251,11 @@ func NewExchanger(
 	} else {
 		ex.grantGenNonce = hex.EncodeToString(nonce[:])
 	}
+	registry, err := loadClientRegistry(ctx, cacheManager, cfg.Clients)
+	if err != nil {
+		return nil, err
+	}
+	ex.formerClients = registry
 	if cacheManager != nil {
 		ex.refreshTokenCache = newUncycledCache(cacheManager, "refresh-tokens", ex.refreshTokenTTL)
 		// Single-use tracking for authorization codes. See #65.
@@ -2463,15 +2472,22 @@ func (e *Exchanger) refreshUpstreamClaims(
 // key names a client. See kdex-tech/host-manager#243.
 var ErrSubjectNamesClient = errors.New("subject names a client")
 
-// NamesClient reports whether key names a client: a configured client id
-// exactly (in memory), or any key carrying the reserved dcr_ prefix of a
-// dynamically registered one, so the check never waits on the DCR store.
+// NamesClient reports whether key names a client: a configured client id, an
+// id in the client registry (every client this host has ever had configured,
+// so a removed client's credentials never classify as a user; #255), or any
+// key carrying the reserved dcr_ prefix of a dynamically registered one, so
+// the check never waits on the DCR store.
 func (e *Exchanger) NamesClient(key string) bool {
 	if e == nil || key == "" {
 		return false
 	}
-	_, configured := e.config.Clients[key]
-	return configured || strings.HasPrefix(key, dcr.ClientIDPrefix)
+	if _, ok := e.config.Clients[key]; ok {
+		return true
+	}
+	if _, ok := e.formerClients[key]; ok {
+		return true
+	}
+	return strings.HasPrefix(key, dcr.ClientIDPrefix)
 }
 
 // SubjectKindOf classifies sub when nothing better is known about its kind:
