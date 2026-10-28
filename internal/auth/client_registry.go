@@ -44,12 +44,18 @@ func loadClientRegistry(
 	}
 
 	store := cm.GetCache(clientRegistryClass, cache.CacheOptions{MaxItems: new(0), Uncycled: true})
+	// fnErr is the closure's failure. An unreadable stored value must fail the
+	// build, never be replaced by a partial registry: that would forget the
+	// removed clients it held and fail open.
+	var fnErr error
 	if _, err := store.Update(ctx, clientRegistryKey, func(current string, found bool) (string, bool) {
+		fnErr = nil
 		var have []string
 		if found {
-			// An unreadable value is rewritten from the configured ids rather
-			// than blocking startup; the next build re-merges.
-			_ = json.Unmarshal([]byte(current), &have)
+			if err := json.Unmarshal([]byte(current), &have); err != nil {
+				fnErr = fmt.Errorf("decode stored ids: %w", err)
+				return "", false
+			}
 		}
 		merged := toSet(have)
 		grew := !found
@@ -69,11 +75,17 @@ func loadClientRegistry(
 		slices.Sort(out)
 		b, err := json.Marshal(out)
 		if err != nil {
+			fnErr = fmt.Errorf("encode ids: %w", err)
 			return "", false
 		}
 		return string(b), true
-	}); err != nil {
+		// No expiry: a nil TTL means the manager default (24h), after which
+		// the registry would vanish and rebuild from current config only.
+	}, cache.WithoutExpiry()); err != nil {
 		return nil, fmt.Errorf("client registry: update: %w", err)
+	}
+	if fnErr != nil {
+		return nil, fmt.Errorf("client registry: %w", fnErr)
 	}
 
 	value, found, _, err := store.Get(ctx, clientRegistryKey)

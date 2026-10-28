@@ -162,9 +162,8 @@ func (s *ValkeyCache) DecrementIfPositive(ctx context.Context, key string) (int6
 }
 
 func (s *ValkeyCache) Set(ctx context.Context, key string, value string, opts ...SetOption) error {
-	prefix, ttl := s.target(opts)
-	cmd := s.client.B().Set().Key(prefix + key).Value(value).Px(ttl).Build()
-	return s.client.Do(ctx, cmd).Error()
+	prefix, ttl, noExpiry := s.target(opts)
+	return s.client.Do(ctx, s.setCmd(prefix+key, value, ttl, noExpiry)).Error()
 }
 
 // updateAttempts bounds Update's optimistic retries under contention.
@@ -177,7 +176,7 @@ var errUpdateContended = errors.New("cache update: key kept changing under conte
 // new value in a MULTI/EXEC that Valkey aborts if anyone wrote the key since
 // the WATCH; an aborted attempt runs fn again on the newer value.
 func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opts ...SetOption) (bool, error) {
-	prefix, ttl := s.target(opts)
+	prefix, ttl, noExpiry := s.target(opts)
 	fullKey := prefix + key
 
 	var wrote bool
@@ -202,7 +201,7 @@ func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opt
 			}
 			replies := c.DoMulti(ctx,
 				c.B().Multi().Build(),
-				c.B().Set().Key(fullKey).Value(next).Px(ttl).Build(),
+				s.setCmd(fullKey, next, ttl, noExpiry),
 				c.B().Exec().Build())
 			exec := replies[len(replies)-1]
 			if _, err := exec.ToArray(); valkey.IsValkeyNil(err) {
@@ -218,15 +217,24 @@ func (s *ValkeyCache) Update(ctx context.Context, key string, fn UpdateFunc, opt
 	return wrote, err
 }
 
-// target is the prefix and ttl a write with opts goes to.
-func (s *ValkeyCache) target(opts []SetOption) (string, time.Duration) {
+// target is the prefix, ttl and no-expiry flag a write with opts goes to.
+func (s *ValkeyCache) target(opts []SetOption) (string, time.Duration, bool) {
 	options := applySetOptions(opts)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if options.TTL != nil {
-		return s.prefix, *options.TTL
+		return s.prefix, *options.TTL, options.NoExpiry
 	}
-	return s.prefix, s.ttl
+	return s.prefix, s.ttl, options.NoExpiry
+}
+
+// setCmd is the SET for a write: with PX ttl, or with no expiry at all.
+func (s *ValkeyCache) setCmd(fullKey, value string, ttl time.Duration, noExpiry bool) valkey.Completed {
+	set := s.client.B().Set().Key(fullKey).Value(value)
+	if noExpiry {
+		return set.Build()
+	}
+	return set.Px(ttl).Build()
 }
 
 func (s *ValkeyCache) getValue(ctx context.Context, fullKey string) (string, bool, error) {

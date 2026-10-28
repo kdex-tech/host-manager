@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCacheLifecycle(t *testing.T) {
@@ -527,4 +528,26 @@ func TestDecrementIfPositive_Memory_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int64(100), success) // never over-spend
+}
+
+func TestInMemoryCache_WithoutExpiry(t *testing.T) {
+	ctx := context.Background()
+	ttl := 50 * time.Millisecond
+	mgr, err := NewCacheManager("", "noexpiry", &ttl)
+	require.NoError(t, err)
+	c := mgr.GetCache("ne", CacheOptions{})
+
+	require.NoError(t, c.Set(ctx, "plain", "v"))
+	require.NoError(t, c.Set(ctx, "forever", "v", WithoutExpiry()))
+	_, err = c.Update(ctx, "forever-update", func(string, bool) (string, bool) { return "v", true }, WithoutExpiry())
+	require.NoError(t, err)
+
+	time.Sleep(200 * time.Millisecond) // several TTLs and reaper ticks
+
+	_, ok, _, _ := c.Get(ctx, "plain")
+	assert.False(t, ok, "a default-TTL entry expires")
+	for _, k := range []string{"forever", "forever-update"} {
+		_, ok, _, _ = c.Get(ctx, k)
+		assert.True(t, ok, k)
+	}
 }

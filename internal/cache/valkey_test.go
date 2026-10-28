@@ -7,6 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValkeyCacheManager_GetCache(t *testing.T) {
@@ -327,4 +328,29 @@ func TestDecrementIfPositive_Valkey(t *testing.T) {
 	rem, ok, _ = c.DecrementIfPositive(ctx, "j1") // exhausted
 	assert.False(t, ok)
 	assert.Equal(t, int64(-1), rem)
+}
+
+func TestValkeyCache_WithoutExpiry(t *testing.T) {
+	s, err := miniredis.Run()
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	ttl := 1 * time.Hour
+	mgr, _ := NewCacheManager(s.Addr(), "foo", &ttl)
+	c := mgr.GetCache("ne", CacheOptions{})
+
+	require.NoError(t, c.Set(ctx, "plain", "v"))
+	require.NoError(t, c.Set(ctx, "forever", "v", WithoutExpiry()))
+	_, err = c.Update(ctx, "forever-update", func(string, bool) (string, bool) { return "v", true }, WithoutExpiry())
+	require.NoError(t, err)
+
+	s.FastForward(48 * time.Hour)
+
+	_, ok, _, _ := c.Get(ctx, "plain")
+	assert.False(t, ok, "a default-TTL entry expires")
+	for _, k := range []string{"forever", "forever-update"} {
+		_, ok, _, _ = c.Get(ctx, k)
+		assert.True(t, ok, k)
+	}
 }

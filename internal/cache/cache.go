@@ -94,6 +94,9 @@ type SetOption func(*SetOptions)
 
 type SetOptions struct {
 	TTL *time.Duration
+	// NoExpiry stores the entry with no expiry at all, instead of the
+	// cache's default TTL. It wins over TTL.
+	NoExpiry bool
 }
 
 func applySetOptions(opts []SetOption) SetOptions {
@@ -116,6 +119,15 @@ func generationFor(uncycled bool, current string) string {
 func WithTTL(ttl time.Duration) SetOption {
 	return func(o *SetOptions) {
 		o.TTL = &ttl
+	}
+}
+
+// WithoutExpiry stores the entry with no expiry: not the manager's default
+// TTL (a nil TTL falls back to it), and nothing sweeps it. For state that must
+// outlive any TTL, such as the client registry.
+func WithoutExpiry() SetOption {
+	return func(o *SetOptions) {
+		o.NoExpiry = true
 	}
 }
 

@@ -219,6 +219,10 @@ func (c *InMemoryCache) Update(ctx context.Context, key string, fn UpdateFunc, o
 	return write, nil
 }
 
+// neverExpires is the expiry of an entry written WithoutExpiry: far enough out
+// that every expiry check and the reaper treat it as live.
+var neverExpires = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 // setLocked stores key in the current generation. Caller holds c.mu.Lock().
 func (c *InMemoryCache) setLocked(key string, value string, options SetOptions) {
 	if c.segments[c.currentChecksum] == nil {
@@ -229,11 +233,15 @@ func (c *InMemoryCache) setLocked(key string, value string, options SetOptions) 
 	if options.TTL != nil {
 		ttl = *options.TTL
 	}
+	expiry := time.Now().Add(ttl)
+	if options.NoExpiry {
+		expiry = neverExpires
+	}
 
 	// LRU logic
 	if entry, found := c.segments[c.currentChecksum][key]; found {
 		entry.value = value
-		entry.expiry = time.Now().Add(ttl)
+		entry.expiry = expiry
 		if entry.element != nil {
 			c.lru.MoveToFront(entry.element)
 		}
@@ -254,7 +262,7 @@ func (c *InMemoryCache) setLocked(key string, value string, options SetOptions) 
 		element := c.lru.PushFront(key)
 		c.segments[c.currentChecksum][key] = memoryCacheEntry{
 			element: element,
-			expiry:  time.Now().Add(ttl),
+			expiry:  expiry,
 			key:     key,
 			value:   value,
 		}

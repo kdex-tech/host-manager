@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/cache"
@@ -107,7 +108,7 @@ func TestNewExchanger_RegistryFailureFails(t *testing.T) {
 	require.NoError(t, err)
 
 	ex, err := newRegistryExchanger(t, registryFailingManager{cm}, "a")
-	require.Error(t, err)
+	require.ErrorContains(t, err, "client registry")
 	assert.Nil(t, ex)
 }
 
@@ -127,4 +128,65 @@ func TestClientRegistry_SkipsDCR(t *testing.T) {
 	ex, err := newRegistryExchanger(t, cm, "a")
 	require.NoError(t, err)
 	assert.True(t, ex.NamesClient("dcr_x"))
+}
+
+// A nil TTL falls back to the manager default, so a registry that took it
+// would vanish and rebuild from current config, forgetting removed clients.
+func TestClientRegistry_SurvivesManagerTTL(t *testing.T) {
+	ttl := 50 * time.Millisecond
+	cm, err := cache.NewCacheManager("", "registry-ttl", &ttl)
+	require.NoError(t, err)
+
+	_, err = newRegistryExchanger(t, cm, "a")
+	require.NoError(t, err)
+	time.Sleep(200 * time.Millisecond)
+	ex, err := newRegistryExchanger(t, cm, "b")
+	require.NoError(t, err)
+
+	assert.True(t, ex.NamesClient("a"), "a removed client outlives the manager TTL")
+}
+
+func seedRegistry(t *testing.T, cm cache.CacheManager, value string) cache.Cache {
+	t.Helper()
+	store := cm.GetCache(clientRegistryClass, cache.CacheOptions{MaxItems: new(0), Uncycled: true})
+	require.NoError(t, store.Set(context.Background(), clientRegistryKey, value, cache.WithoutExpiry()))
+	return store
+}
+
+// A corrupt stored value must fail the build and stay as it was: replacing it
+// with a partial registry would forget every removed client.
+func TestClientRegistry_CorruptValueFailsClosed(t *testing.T) {
+	cm, err := cache.NewCacheManager("", "registry-corrupt", nil)
+	require.NoError(t, err)
+	store := seedRegistry(t, cm, "not json")
+
+	ex, err := newRegistryExchanger(t, cm, "a")
+	require.ErrorContains(t, err, "client registry")
+	assert.Nil(t, ex)
+
+	v, _, _, _ := store.Get(context.Background(), clientRegistryKey)
+	assert.Equal(t, "not json", v)
+}
+
+type failingGetCache struct{ cache.Cache }
+
+func (failingGetCache) Get(context.Context, string) (string, bool, bool, error) {
+	return "", false, false, errors.New("read failed")
+}
+
+type getFailingManager struct{ cache.CacheManager }
+
+func (m getFailingManager) GetCache(class string, opts cache.CacheOptions) cache.Cache {
+	c := m.CacheManager.GetCache(class, opts)
+	if class == clientRegistryClass {
+		return failingGetCache{c}
+	}
+	return c
+}
+
+func TestClientRegistry_ReadFailureFails(t *testing.T) {
+	cm, err := cache.NewCacheManager("", "registry-getfail", nil)
+	require.NoError(t, err)
+	_, err = newRegistryExchanger(t, getFailingManager{cm}, "a")
+	require.ErrorContains(t, err, "client registry")
 }
