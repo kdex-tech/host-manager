@@ -560,7 +560,11 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 						// get identical structured entitlements.
 						ac, rerr := authExchanger.PATAuthContext(r.Context(), data, auth.SiteProxyPAT)
 						if rerr != nil {
-							log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
+							// A vetoed PAT (#255) is an invalid one, already
+							// logged by the veto without its sub.
+							if !errors.Is(rerr, auth.ErrCredentialKindRefused) {
+								log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
+							}
 						} else {
 							// Mark this identity as PAT-bridge-originated. A PAT
 							// minted through the authorization-code (oauth2) flow IS

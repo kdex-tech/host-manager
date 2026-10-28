@@ -47,26 +47,37 @@ const (
 // `*` binding narrowed to each kind, so every result depends on the matcher.
 func kindsRoleProvider(t *testing.T) auth.InternalIdentityProvider {
 	t.Helper()
+	return roleProviderFor(t,
+		roleGrant{name: "people", subject: "*", role: kindsUserRole, kinds: []kdexv1alpha1.SubjectKind{kdexv1alpha1.SubjectKindUser}},
+		roleGrant{name: "machines", subject: "*", role: kindsCliRole, kinds: []kdexv1alpha1.SubjectKind{kdexv1alpha1.SubjectKindClient}},
+	)
+}
+
+// roleGrant is one KDexRoleBinding granting role to subject, narrowed to
+// kinds when any are given.
+type roleGrant struct {
+	name, subject, role string
+	kinds               []kdexv1alpha1.SubjectKind
+}
+
+// roleProviderFor is the REAL role provider over a fake client holding each
+// grant's binding, and one KDexRole per role granting read on itself.
+func roleProviderFor(t *testing.T, grants ...roleGrant) auth.InternalIdentityProvider {
+	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(s))
 	require.NoError(t, kdexv1alpha1.AddToScheme(s))
 
 	var objs []client.Object
-	for name, grant := range map[string]struct {
-		role string
-		kind kdexv1alpha1.SubjectKind
-	}{
-		"people":   {kindsUserRole, kdexv1alpha1.SubjectKindUser},
-		"machines": {kindsCliRole, kdexv1alpha1.SubjectKindClient},
-	} {
+	for _, grant := range grants {
 		objs = append(objs,
 			&kdexv1alpha1.KDexRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: kindsNamespace},
+				ObjectMeta: metav1.ObjectMeta{Name: grant.name, Namespace: kindsNamespace},
 				Spec: kdexv1alpha1.KDexRoleBindingSpec{
 					HostRef:      corev1.LocalObjectReference{Name: kindsHost},
-					Subject:      "*",
+					Subject:      grant.subject,
 					Roles:        []string{grant.role},
-					SubjectKinds: []kdexv1alpha1.SubjectKind{grant.kind},
+					SubjectKinds: grant.kinds,
 				},
 			},
 			&kdexv1alpha1.KDexRole{
@@ -218,6 +229,9 @@ func TestSelfMint_RecordsCallerKind(t *testing.T) {
 	})
 
 	t.Run("a carried kind contradicting its sub", func(t *testing.T) {
+		// The gate vetoes such a credential (a User named like a client,
+		// #255); the test drives the mint handler with a constructed
+		// context, so it stays valid.
 		caller := withGrant(map[string]any{"sub": orchestrator, auth.ClaimSubjectKind: "User"})
 		require.Equal(t, kdexv1alpha1.SubjectKindClient, hh.authExchanger.SubjectKindOf(orchestrator),
 			"precondition: the classifier disagrees")
@@ -374,24 +388,28 @@ func TestVerify_OmitsEmptyKind(t *testing.T) {
 	})
 
 	t.Run("a kind-less token", func(t *testing.T) { // LEGACY(#268)
-		// Signed with the dev key pair the manager validates with, carrying
-		// every claim a mint writes except knd.
-		pair := (*apitoken.GenerateDevmodeKeyPair())[0]
-		now := time.Now()
-		tok := paseto.NewToken()
-		tok.SetAudience("aud")
-		tok.SetExpiration(now.Add(time.Hour))
-		tok.SetIssuedAt(now)
-		tok.SetIssuer("issuer")
-		tok.SetJti(apitoken.GenerateJTI("aud", "alice", "read"))
-		tok.SetNotBefore(now)
-		tok.SetSubject("alice")
-		tok.SetString("act", "read")
-		tok.SetString("scp", "")
-		tok.SetFooter([]byte(`{"kid":"` + pair.KeyId + `"}`))
-
-		got := verify(t, tok.V4Sign(*pair.SecretKey, nil))
+		got := verify(t, kindlessPAT("issuer", "aud", "alice"))
 		assert.Equal(t, "alice", got["sub"])
 		assert.NotContains(t, got, "knd")
 	})
+}
+
+// kindlessPAT is a PAT as a release before #255 minted it: signed with the
+// dev key pair a test TokenManager validates with, carrying every claim a
+// mint writes except knd. LEGACY(#268).
+func kindlessPAT(issuer, aud, sub string) string {
+	pair := (*apitoken.GenerateDevmodeKeyPair())[0]
+	now := time.Now()
+	tok := paseto.NewToken()
+	tok.SetAudience(aud)
+	tok.SetExpiration(now.Add(time.Hour))
+	tok.SetIssuedAt(now)
+	tok.SetIssuer(issuer)
+	tok.SetJti(apitoken.GenerateJTI(aud, sub, "read"))
+	tok.SetNotBefore(now)
+	tok.SetSubject(sub)
+	tok.SetString("act", "read")
+	tok.SetString("scp", "")
+	tok.SetFooter([]byte(`{"kid":"` + pair.KeyId + `"}`))
+	return tok.V4Sign(*pair.SecretKey, nil)
 }

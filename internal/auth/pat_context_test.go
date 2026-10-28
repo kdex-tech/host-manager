@@ -54,11 +54,6 @@ func TestPATAuthContext_Kind(t *testing.T) {
 			data:     apitoken.TokenData{Subject: "alice"},
 			wantKind: v1alpha1.SubjectKindUser, wantRole: "user-role",
 		},
-		{
-			name:     "a recorded kind wins over the classifier",
-			data:     apitoken.TokenData{Subject: "alice", SubjectKind: v1alpha1.SubjectKindClient},
-			wantKind: v1alpha1.SubjectKindClient, wantRole: "client-role",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ac, err := ex.PATAuthContext(context.Background(), &tc.data, SiteHostPAT)
@@ -68,6 +63,21 @@ func TestPATAuthContext_Kind(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, []string{tc.wantRole}, roles)
 			assert.Equal(t, tc.data.Subject, ac["sub"])
+		})
+	}
+
+	// A recorded known kind the classifier contradicts is what the veto
+	// refuses (#255): it once won over the classifier, and is now refused
+	// before anything resolves. A recorded kind still wins where the veto
+	// lets it through: an unknown one, below.
+	for _, data := range []apitoken.TokenData{
+		{Subject: "alice", SubjectKind: v1alpha1.SubjectKindClient},
+		{Subject: kindsClientID, SubjectKind: v1alpha1.SubjectKindUser},
+	} {
+		t.Run("a recorded "+string(data.SubjectKind)+" its sub contradicts is vetoed", func(t *testing.T) {
+			ac, err := ex.PATAuthContext(context.Background(), &data, SiteHostPAT)
+			require.ErrorIs(t, err, ErrCredentialKindRefused)
+			assert.Nil(t, ac)
 		})
 	}
 

@@ -192,8 +192,12 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 	})
 
 	// The FAT and PAT sites resolve with the kind the credential carries, so
-	// each is driven with a Client, a User, and a carried kind the classifier
-	// would contradict (alice recorded as a Client), which must win.
+	// each is driven with a Client and a User. A known kind the classifier
+	// would contradict is exactly what the veto refuses (#255), so those are
+	// pinned as refused, resolving nothing. Where the veto lets a carried kind
+	// through, it still wins over the classifier: a kind this release does not
+	// know (token exchange only; a PAT cannot be minted with one, and
+	// TestPATAuthContext_Kind pins the PAT helper's half).
 	carried := []struct {
 		name string
 		sub  string
@@ -201,41 +205,75 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 	}{
 		{"a Client", kindsClientID, cl},
 		{"a User", "alice", user},
-		{"a carried kind wins over the classifier", "alice", cl},
+	}
+	contradicted := []struct {
+		name string
+		sub  string
+		kind v1alpha1.SubjectKind
+	}{
+		{"a Client kind on a user's sub is vetoed", "alice", cl},
+		{"a User kind on a client's sub is vetoed", kindsClientID, user},
 	}
 
 	t.Run("token exchange", func(t *testing.T) {
 		fatSigner, err := sign.NewSigner("https://fn-a.example", time.Hour, "test-iss", &cs, "test-kid", nil)
 		require.NoError(t, err)
+		exchange := func(t *testing.T, claims jwt.MapClaims) (TokenSet, error) {
+			t.Helper()
+			fat, err := fatSigner.Sign(claims)
+			require.NoError(t, err)
+			return ex.ExchangeSubjectToken(fat, "https://fn-b.example")
+		}
 		for _, tc := range carried {
 			t.Run(tc.name, func(t *testing.T) {
-				fat, err := fatSigner.Sign(jwt.MapClaims{"sub": tc.sub, ClaimSubjectKind: string(tc.kind)})
-				require.NoError(t, err)
-				ts, err := ex.ExchangeSubjectToken(fat, "https://fn-b.example")
+				ts, err := exchange(t, jwt.MapClaims{"sub": tc.sub, ClaimSubjectKind: string(tc.kind)})
 				require.NoError(t, err)
 				expect(t, p.take(), SiteTokenExchange, tc.kind)
 				assert.Equal(t, string(tc.kind), claimsOf(t, ts.AccessToken)[ClaimSubjectKind],
 					"the exchanged token carries the kind on")
 			})
 		}
-		t.Run("a kind-less FAT falls back to the classifier", func(t *testing.T) { // LEGACY(#268)
-			fat, err := fatSigner.Sign(jwt.MapClaims{"sub": kindsClientID})
+		for _, tc := range contradicted {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := exchange(t, jwt.MapClaims{"sub": tc.sub, ClaimSubjectKind: string(tc.kind)})
+				require.ErrorIs(t, err, ErrCredentialKindRefused)
+				assert.Empty(t, p.take(), "a vetoed FAT resolves nothing")
+			})
+		}
+		t.Run("a carried unknown kind wins over the classifier", func(t *testing.T) {
+			const sa = v1alpha1.SubjectKind("ServiceAccount")
+			ts, err := exchange(t, jwt.MapClaims{"sub": "alice", ClaimSubjectKind: string(sa)})
 			require.NoError(t, err)
-			_, err = ex.ExchangeSubjectToken(fat, "https://fn-b.example")
+			expect(t, p.take(), SiteTokenExchange, sa)
+			assert.Equal(t, string(sa), claimsOf(t, ts.AccessToken)[ClaimSubjectKind])
+		})
+		t.Run("a kind-less FAT falls back to the classifier", func(t *testing.T) { // LEGACY(#268)
+			_, err := exchange(t, jwt.MapClaims{"sub": kindsClientID})
 			require.NoError(t, err)
 			expect(t, p.take(), SiteTokenExchange, cl)
 		})
 	})
 
 	t.Run("host pat", func(t *testing.T) {
+		hostPAT := func(t *testing.T, sub string, kind v1alpha1.SubjectKind) (AuthContext, bool) {
+			t.Helper()
+			pat, err := tm.MintStatelessKey(cfg.Audience, sub, kind, "read", "", time.Hour)
+			require.NoError(t, err)
+			return cfg.hostPATIdentity(ctx, pat, ex)
+		}
 		for _, tc := range carried {
 			t.Run(tc.name, func(t *testing.T) {
-				pat, err := tm.MintStatelessKey(cfg.Audience, tc.sub, tc.kind, "read", "", time.Hour)
-				require.NoError(t, err)
-				ac, ok := cfg.hostPATIdentity(ctx, pat, ex)
+				ac, ok := hostPAT(t, tc.sub, tc.kind)
 				require.True(t, ok)
 				expect(t, p.take(), SiteHostPAT, tc.kind)
 				assert.Equal(t, string(tc.kind), ac[ClaimSubjectKind])
+			})
+		}
+		for _, tc := range contradicted {
+			t.Run(tc.name, func(t *testing.T) {
+				_, ok := hostPAT(t, tc.sub, tc.kind)
+				assert.False(t, ok)
+				assert.Empty(t, p.take(), "a vetoed PAT resolves nothing")
 			})
 		}
 	})

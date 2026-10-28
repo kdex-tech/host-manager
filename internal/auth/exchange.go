@@ -518,6 +518,12 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// and its behavior is unchanged. The kind is the one the FAT carries, and
 	// the exchanged token carries it on (#255).
 	kind := e.ContextSubjectKind(AuthContext(claims))
+	// The veto (#255): a FAT whose kind current config contradicts (its
+	// client since removed, or a User named like a client) is an invalid
+	// subject_token, answered as one: not an ErrServerError.
+	if err := e.vetoCredential(sub, kind, SiteTokenExchange); err != nil {
+		return TokenSet{}, fmt.Errorf("invalid subject_token: %w", err)
+	}
 	roles, ents, backend, rerr := e.subjectSigningContext(sub, BindingSubject{Key: sub, Kind: kind, Site: SiteTokenExchange})
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
@@ -2558,12 +2564,20 @@ func (e *Exchanger) ContextSubjectKind(ac AuthContext) kdexv1alpha1.SubjectKind 
 // not know it, as in ContextSubjectKind. LEGACY(#268): a PAT minted before
 // PATs recorded their kind falls back to the kind of its sub.
 //
-// The resolution's role-binding line is written under site. The context is
-// the request's; nothing reads it yet.
+// A PAT whose kind current config contradicts is refused before anything is
+// resolved, with ErrCredentialKindRefused (VetoSubjectKind); the refusal is
+// logged here, so a caller answers it as an invalid PAT and logs nothing
+// more. This is the veto for both PAT paths.
+//
+// The resolution's role-binding line, and a refusal's line, are written
+// under site. The context is the request's; nothing reads it yet.
 func (e *Exchanger) PATAuthContext(_ context.Context, data *apitoken.TokenData, site string) (AuthContext, error) {
 	kind := data.SubjectKind
 	if kind == "" { // LEGACY(#268)
 		kind = e.SubjectKindOf(data.Subject)
+	}
+	if err := e.vetoCredential(data.Subject, kind, site); err != nil {
+		return nil, err
 	}
 	roles, ents, err := e.ResolveInternalRolesAndEntitlements(BindingSubject{Key: data.Subject, Kind: kind, Site: site})
 	if err != nil {
@@ -2583,6 +2597,61 @@ func (e *Exchanger) PATAuthContext(_ context.Context, data *apitoken.TokenData, 
 	// applies (#138).
 	mergeBackendClaims(jwt.MapClaims(ac), e.ResolveSubjectClaims(data.Subject))
 	return ac, nil
+}
+
+// ErrCredentialKindRefused is returned for a credential whose kind current
+// config contradicts. See VetoSubjectKind.
+var ErrCredentialKindRefused = errors.New("credential kind refused by current config")
+
+// vetoLog writes the veto's refusals. Mirrors bindingKeyLog so it needs no ctx.
+var vetoLog = logf.Log.WithName("subject-kind-veto")
+
+// SiteHostJWT names the host JWT gate (Config.WithAuthentication) in the
+// veto's line. It resolves no roles, so it is not one of the role-resolution
+// sites; the veto's other sites are (SiteHostPAT, SiteProxyPAT,
+// SiteTokenExchange).
+const SiteHostJWT = "host jwt"
+
+// VetoSubjectKind is the veto (#255): current config is a veto on a
+// credential's kind, never its source. It refuses, with
+// ErrCredentialKindRefused:
+//
+//   - a Client credential whose sub is not a configured client
+//     (IsConfiguredClient), so removing a client stops every live credential
+//     it holds, without anyone remembering a revocation step;
+//   - a User credential whose sub names a client (NamesClient, which covers
+//     the registry): #243's rule, the client keeps the name.
+//
+// Any other kind passes, including one this release does not know: it can
+// match only bindings without subjectKinds. kind is the credential's resolved
+// kind (ContextSubjectKind, or the kind a PAT records), never empty. The
+// error names the rule, never the sub, which may be an email under
+// RoleBindingClaim (#215).
+func (e *Exchanger) VetoSubjectKind(sub string, kind kdexv1alpha1.SubjectKind) error {
+	switch kind {
+	case kdexv1alpha1.SubjectKindClient:
+		if !e.IsConfiguredClient(sub) {
+			return fmt.Errorf("%w: a Client credential whose client is not configured", ErrCredentialKindRefused)
+		}
+	case kdexv1alpha1.SubjectKindUser:
+		if e.NamesClient(sub) {
+			return fmt.Errorf("%w: a User credential whose sub names a client", ErrCredentialKindRefused)
+		}
+	}
+	return nil
+}
+
+// vetoCredential applies VetoSubjectKind where a credential is accepted, and
+// logs a refusal's one V(0) line, naming the rule and site but never the sub.
+// The caller answers a refusal as it answers an invalid credential, and logs
+// nothing more about it.
+func (e *Exchanger) vetoCredential(sub string, kind kdexv1alpha1.SubjectKind, site string) error {
+	err := e.VetoSubjectKind(sub, kind)
+	if err != nil {
+		vetoLog.Info("refusing a credential whose kind current config contradicts",
+			"rule", err.Error(), "site", site, "kind", string(kind))
+	}
+	return err
 }
 
 // clientBindingSubject is the binding subject of an authenticated

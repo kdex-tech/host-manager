@@ -74,8 +74,8 @@ func (c *Config) WithAPITokenIdentity(exchanger *Exchanger) func(http.Handler) h
 // on success, inflates it into an AuthContext. Used only by
 // WithAPITokenIdentity. Reports false for every token that is
 // not usable as a host identity -- wrong audience, malformed, expired, revoked,
-// or an unresolvable subject -- and the caller then leaves the request
-// anonymous. See kdex-tech/host-manager#175.
+// an unresolvable subject, or a kind current config vetoes (#255) -- and the
+// caller then leaves the request anonymous. See kdex-tech/host-manager#175.
 //
 // ONLY c.Audience is accepted. A PAT minted for a function resource keeps its
 // own audience and is rejected here by design: that binding belongs to the
@@ -105,7 +105,11 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 	// with the kind the PAT records.
 	ac, err := exchanger.PATAuthContext(ctx, data, SiteHostPAT)
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "failed to resolve api token subject", "subject", data.Subject)
+		// A vetoed PAT (#255) is an invalid one, already logged by the veto
+		// without its sub.
+		if !errors.Is(err, ErrCredentialKindRefused) {
+			logf.FromContext(ctx).Error(err, "failed to resolve api token subject", "subject", data.Subject)
+		}
 		return nil, false
 	}
 
@@ -375,6 +379,17 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				}
 			}
 
+			// The veto (#255), folded into `err` for the same reason: a
+			// credential whose kind current config contradicts -- a Client
+			// whose client was removed, a User named like a client -- is an
+			// invalid one. A bearer gets the 401 + challenge; a cookie is
+			// cleared and the request continues anonymously, so neither
+			// /-/oauth/authorize nor the session-grant refresh below ever
+			// sees it, and /-/apitokens/mint answers it as anonymous.
+			if err == nil {
+				err = vetoGateCredential(exchanger, authContext)
+			}
+
 			if err != nil {
 				// NOT an error. With jwt.tokenTTL at an hour, every session
 				// crosses expiry hourly by design, and both branches below
@@ -475,7 +490,8 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 							// in-request authContext. See #100.
 							// If the fresh token somehow fails to verify, the
 							// current (still-valid) token stays the identity.
-							if refreshed, err := parseGate(ts.AccessToken, exchanger.config.Issuer); err == nil {
+							if refreshed, err := parseGate(ts.AccessToken, exchanger.config.Issuer); err == nil &&
+								vetoGateCredential(exchanger, refreshed) == nil {
 								authContext = refreshed
 								log.Info("Token refreshed")
 							}
@@ -516,6 +532,16 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// vetoGateCredential is the veto (#255) over a host JWT the gate verified: its
+// sub with the kind it carries (ContextSubjectKind, whose LEGACY(#268)
+// fallback classifies a kind-less token). A nil exchanger knows no
+// configured client, so it refuses every Client credential, as the veto
+// reads no config as configuring none.
+func vetoGateCredential(exchanger *Exchanger, ac AuthContext) error {
+	sub, _ := ac.GetSubject()
+	return exchanger.vetoCredential(sub, exchanger.ContextSubjectKind(ac), SiteHostJWT)
 }
 
 // gateParserOptions are the validation options for every host-audience JWT the

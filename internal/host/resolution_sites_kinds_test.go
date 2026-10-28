@@ -51,9 +51,11 @@ func (p *kindRecordingIDP) take() []auth.BindingSubject {
 
 // TestResolutionSites_PassKinds_HostSites is the internal/host half of
 // auth.TestResolutionSites_PassKinds: the proxy PAT bridge and whoami hand
-// the resolver the kind the credential carries. Each runs with a Client, a
-// User, and a carried kind the classifier would contradict (alice carried as
-// a Client), which must win (#255).
+// the resolver the kind the credential carries. Each runs with a Client and a
+// User (#255). A known kind its sub contradicts is what the veto refuses: the
+// proxy bridge pins it refused, resolving nothing. whoami reads a context the
+// gate already accepted, so it pins instead that a carried kind still wins
+// over the classifier where the veto lets one through: an unknown kind.
 func TestResolutionSites_PassKinds_HostSites(t *testing.T) {
 	cl, user := kdexv1alpha1.SubjectKindClient, kdexv1alpha1.SubjectKindUser
 	expect := func(t *testing.T, seen []auth.BindingSubject, site string, kind kdexv1alpha1.SubjectKind) {
@@ -71,7 +73,6 @@ func TestResolutionSites_PassKinds_HostSites(t *testing.T) {
 	}{
 		{"a Client", kindsHostClientID, cl},
 		{"a User", "alice", user},
-		{"a carried kind wins over the classifier", "alice", cl},
 	}
 
 	t.Run("proxy pat", func(t *testing.T) {
@@ -91,6 +92,24 @@ func TestResolutionSites_PassKinds_HostSites(t *testing.T) {
 				expect(t, idp.take(), auth.SiteProxyPAT, tc.kind)
 			})
 		}
+		for _, tc := range []struct {
+			name string
+			sub  string
+			kind kdexv1alpha1.SubjectKind
+		}{
+			{"a Client kind on a user's sub is vetoed", "alice", cl},
+			{"a User kind on a client's sub is vetoed", kindsHostClientID, user},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, tc.sub, tc.kind, "act", "s", time.Hour)
+				require.NoError(t, err)
+
+				req := httptest.NewRequest(http.MethodGet, "/v1/api", nil)
+				req.Header.Set("X-API-TOKEN", token)
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+				assert.Empty(t, idp.take(), "a vetoed PAT resolves nothing")
+			})
+		}
 	})
 
 	t.Run("whoami", func(t *testing.T) {
@@ -108,6 +127,11 @@ func TestResolutionSites_PassKinds_HostSites(t *testing.T) {
 				expect(t, idp.take(), auth.SiteWhoami, tc.kind)
 			})
 		}
+		t.Run("a carried unknown kind wins over the classifier", func(t *testing.T) {
+			const sa = kdexv1alpha1.SubjectKind("ServiceAccount")
+			whoami(auth.AuthContext{"sub": "alice", auth.ClaimSubjectKind: string(sa)})
+			expect(t, idp.take(), auth.SiteWhoami, sa)
+		})
 		t.Run("a kind-less context falls back to the classifier", func(t *testing.T) { // LEGACY(#268)
 			whoami(auth.AuthContext{"sub": kindsHostClientID})
 			expect(t, idp.take(), auth.SiteWhoami, cl)
