@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func subjectlessTokenManager(t *testing.T) *TokenManager {
+func subjectlessTokenManager(t testing.TB) *TokenManager {
 	t.Helper()
 	cm, err := cache.NewCacheManager("", "apitoken-subjectless-test", nil)
 	require.NoError(t, err)

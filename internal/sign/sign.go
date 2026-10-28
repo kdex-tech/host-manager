@@ -89,7 +89,17 @@ const ClaimSubjectKind = "knd"
 //     pass as one;
 //   - ClaimSubjectKind: roles are resolved with it, so a rule that wrote
 //     "User" into a client's token would hand it every [User] binding.
+//
+// internal/auth's context list is this one plus the context's issue time
+// (MintDecidedClaims), so a claim added here is mint-decided on both paths.
 var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
+
+// MintDecidedClaims returns a copy of the claims the mint decides, for the
+// auth context's own list to build on; the copy keeps the signer's list out
+// of any caller's reach.
+func MintDecidedClaims() []string {
+	return slices.Clone(mintDecidedClaims)
+}
 
 type Signer struct {
 	audience   string

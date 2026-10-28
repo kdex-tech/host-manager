@@ -40,7 +40,7 @@ func TestMintCapabilityToken_AttenuatesAndSignsHostAudience(t *testing.T) {
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
 	held := []string{"functions:/api/v1/files:write", "functions:/api/v1/files:read"}
 
-	res, err := hh.mintCapabilityToken(context.Background(), "alice", held, MintTokenRequest{
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, held, MintTokenRequest{
 		Entitlements: []string{"functions:/api/v1/files:write"},
 		TTLSeconds:   30,
 	}, "")
@@ -63,7 +63,7 @@ func TestMintCapabilityToken_RejectsOverBroad(t *testing.T) {
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
 	held := []string{"functions:/api/v1/files:write"}
 
-	_, err := hh.mintCapabilityToken(context.Background(), "alice", held, MintTokenRequest{
+	_, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, held, MintTokenRequest{
 		Entitlements: []string{"functions:/api/v1/files:*"},
 	}, "")
 	g.Expect(err).To(MatchError(ContainSubstring("functions:/api/v1/files:*")))
@@ -72,7 +72,7 @@ func TestMintCapabilityToken_RejectsOverBroad(t *testing.T) {
 func TestMintCapabilityToken_ClampsTTL(t *testing.T) {
 	g := NewWithT(t)
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"pages:/:read"}, MintTokenRequest{Entitlements: []string{"pages:/:read"}, TTLSeconds: 99999}, "")
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(61*time.Second).Unix()))
@@ -84,7 +84,7 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 
 	// Explicit destructive verb: forced to uses=1 and ttl<=10s even though
 	// the caller asked for uses=5 and a 60s ttl.
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"vector_stores:X:delete"},
 		MintTokenRequest{Entitlements: []string{"vector_stores:X:delete"}, Uses: 5, TTLSeconds: 60}, "")
 	g.Expect(err).ToNot(HaveOccurred())
@@ -92,7 +92,7 @@ func TestMintCapabilityToken_DestructiveVerbForcing(t *testing.T) {
 	g.Expect(res.ExpiresAt).To(BeNumerically("<=", time.Now().Add(11*time.Second).Unix()))
 
 	// Wildcard verb encompasses destructive verbs -> same forcing.
-	res2, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res2, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"vector_stores:X:all"},
 		MintTokenRequest{Entitlements: []string{"vector_stores:X:all"}, Uses: 5, TTLSeconds: 60}, "")
 	g.Expect(err).ToNot(HaveOccurred())
@@ -106,7 +106,7 @@ func TestMintCapabilityToken_ProvisionsCounter(t *testing.T) {
 	mgr, _ := cache.NewCacheManager("", "", &ttl)
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t), cacheManager: mgr}
 
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:write"},
 		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, Uses: 3}, "")
 	g.Expect(err).ToNot(HaveOccurred())
@@ -461,7 +461,7 @@ func TestMintCapabilityToken_URLDelivery(t *testing.T) {
 	mgr, _ := cache.NewCacheManager("", "", &ttl)
 	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr}
 
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:read"},
 		MintTokenRequest{
 			Entitlements: []string{"functions:/api/v1/files:read"},
@@ -500,7 +500,7 @@ func TestMintCapabilityToken_URLDelivery_HonorsUses(t *testing.T) {
 	})
 	hh := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr, Mux: mux}
 
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:read"},
 		MintTokenRequest{
 			Entitlements: []string{"functions:/api/v1/files:read"},
@@ -536,18 +536,18 @@ func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {
 
 	// Feature off.
 	off := &HostHandler{authConfig: testAuthConfigForMint(t), cacheManager: mgr}
-	_, err := off.mintCapabilityToken(context.Background(), "alice", ent,
+	_, err := off.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, ent,
 		MintTokenRequest{Entitlements: ent, Delivery: "url",
 			Target: &TransferTarget{Method: "GET", Path: "/api/v1/files/x"}}, "https://dev.example")
 	g.Expect(err).To(HaveOccurred())
 
 	on := &HostHandler{authConfig: testURLAuthConfig(t), cacheManager: mgr}
 	// Missing target.
-	_, err = on.mintCapabilityToken(context.Background(), "alice", ent,
+	_, err = on.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, ent,
 		MintTokenRequest{Entitlements: ent, Delivery: "url"}, "https://dev.example")
 	g.Expect(err).To(HaveOccurred())
 	// Reserved /-/ target.
-	_, err = on.mintCapabilityToken(context.Background(), "alice", ent,
+	_, err = on.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, ent,
 		MintTokenRequest{Entitlements: ent, Delivery: "url",
 			Target: &TransferTarget{Method: "GET", Path: "/-/state/"}}, "https://dev.example")
 	g.Expect(err).To(HaveOccurred())
@@ -556,7 +556,7 @@ func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {
 	// never carry more than the caller holds (regression for the URL branch;
 	// TestMintCapabilityToken_RejectsOverBroad only covers the bearer path).
 	var overBroad MintTokenResult
-	overBroad, err = on.mintCapabilityToken(context.Background(), "alice",
+	overBroad, err = on.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		ent, // held: files:read
 		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:write"}, // requested: not held
 			Delivery: "url",
@@ -566,7 +566,7 @@ func TestMintCapabilityToken_URLDelivery_Rejections(t *testing.T) {
 
 	// Feature on + valid target but NO cache manager -> errNoCache precondition.
 	noCache := &HostHandler{authConfig: testURLAuthConfig(t)} // cacheManager nil
-	_, err = noCache.mintCapabilityToken(context.Background(), "alice", ent,
+	_, err = noCache.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, ent,
 		MintTokenRequest{Entitlements: ent, Delivery: "url",
 			Target: &TransferTarget{Method: "GET", Path: "/api/v1/files/x"}}, "https://dev.example")
 	g.Expect(err).To(HaveOccurred())

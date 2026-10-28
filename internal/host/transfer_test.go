@@ -178,7 +178,7 @@ func TestURLDelivery_EndToEnd(t *testing.T) {
 	hh.transferHandler(mux, map[string]ko.PathInfo{}) // register /-/transfer on the same mux
 
 	// Mint a URL capability.
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:read"},
 		MintTokenRequest{
 			Entitlements: []string{"functions:/api/v1/files:read"},
@@ -205,7 +205,7 @@ func TestURLDelivery_EndToEnd(t *testing.T) {
 func TestBearerDelivery_Unchanged(t *testing.T) {
 	g := NewWithT(t)
 	hh := &HostHandler{authConfig: testAuthConfigForMint(t)}
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:read"},
 		MintTokenRequest{Entitlements: []string{"functions:/api/v1/files:read"}}, "")
 	g.Expect(err).ToNot(HaveOccurred())
@@ -321,7 +321,7 @@ func TestURLDelivery_ThroughRealProxy(t *testing.T) {
 	hh.transferHandler(mux, map[string]ko.PathInfo{})
 
 	held := []string{"functions:/api/v1/files:read"}
-	res, err := hh.mintCapabilityToken(context.Background(), "alice", held,
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser, held,
 		MintTokenRequest{
 			Entitlements: held,
 			Delivery:     "url",

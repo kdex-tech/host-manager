@@ -13,6 +13,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // transferKeyPrefix namespaces URL-delivery records in the shared "cap" cache
@@ -24,10 +25,15 @@ const transferKeyPrefix = "transfer:"
 // the unguessable handle plus this record IS the credential, and downstream
 // enforcement re-checks the entitlements.
 type transferRecord struct {
-	JTI          string         `json:"jti"`
-	Sub          string         `json:"sub"`
-	Entitlements []string       `json:"entitlements"`
-	Target       TransferTarget `json:"target"`
+	JTI string `json:"jti"`
+	Sub string `json:"sub"`
+	// Kind is the minting credential's kind, injected with Sub on redemption
+	// (#255). LEGACY(#268): a record stored before records carried it has
+	// none, and its redemption's kind falls back as a kind-less context's
+	// does (auth.Exchanger.ContextSubjectKind).
+	Kind         kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
+	Entitlements []string                 `json:"entitlements"`
+	Target       TransferTarget           `json:"target"`
 }
 
 // newTransferHandle returns a 256-bit unguessable, URL-safe handle.
@@ -203,6 +209,9 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ac := auth.AuthContext{"sub": rec.Sub, "entitlements": rec.Entitlements}
+	if rec.Kind != "" { // LEGACY(#268): else the context is kind-less
+		ac[auth.ClaimSubjectKind] = string(rec.Kind)
+	}
 	r2 := r.Clone(auth.SetAuthContext(ctx, ac))
 	r2.Method = rec.Target.Method
 	r2.URL.Path = rec.Target.Path

@@ -32,6 +32,17 @@ const (
 	SiteWhoami              = "whoami"
 )
 
+// The veto's sites that resolve no roles, so are not role-resolution sites,
+// as the veto's line names them. The veto's other sites are (SiteHostPAT,
+// SiteProxyPAT, SiteTokenExchange). See VetoSubjectKind.
+const (
+	// SiteHostJWT is the host JWT gate (Config.WithAuthentication).
+	SiteHostJWT = "host jwt"
+	// SiteAPITokenVerify is /-/apitokens/verify: how a consumer decides a
+	// PAT is live, so a veto site (Ruling 14).
+	SiteAPITokenVerify = "apitokens verify"
+)
+
 // bindingLogLevel is the role-binding verbosity of a site's resolution line:
 // V(3) for the sites that resolve on every request, V(2) for the issue-time
 // ones, as the signer splits V(2)/V(3). See kdex-tech/host-manager#255.

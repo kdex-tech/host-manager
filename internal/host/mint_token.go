@@ -17,6 +17,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // toolNameMintToken is the MCP tool name the AS answers locally on the
@@ -189,27 +190,32 @@ func hasDestructiveVerb(requested, destructive []string) bool {
 // (cfg.MintTokenCapabilityTTLCap) so the two surfaces can carry different ttl
 // caps for their different callers. See kdex-tech/host-manager and the
 // capabilityTtlCapSeconds field on KDexHost.spec.auth.mintToken.
-func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
+func (hh *HostHandler) mintCapabilityToken(ctx context.Context, sub string, kind kdexv1alpha1.SubjectKind, held []string, req MintTokenRequest, baseURL string) (MintTokenResult, error) {
 	// A nil config is handled inside the core; guard the deref for the cap read.
 	var ttlCap time.Duration
 	if hh.authConfig != nil {
 		ttlCap = hh.authConfig.MintTokenTTLCap
 	}
-	return hh.mintCapabilityTokenWithCap(ctx, sub, held, req, baseURL, ttlCap)
+	return hh.mintCapabilityTokenWithCap(ctx, sub, kind, held, req, baseURL, ttlCap)
 }
 
 // mintCapabilityTokenWithCap is the shared core: it verifies requested ⊆ held
 // (directional attenuation), clamps ttl to the supplied ttlCap and uses to the
 // host policy, and signs a short-lived HOST-AUDIENCE JWT whose entitlements
 // claim is exactly the requested (attenuated) set. The caller supplies both the
-// request auth context (sub + held) and the surface's ttl ceiling.
+// request auth context (sub, its kind and held) and the surface's ttl ceiling.
+//
+// kind is the caller's credential's kind (auth.Exchanger.ContextSubjectKind).
+// The capability carries it with the sub -- the bearer token as its knd
+// claim, a transfer link in its record -- so, like every other credential
+// the host issues, it is never classified by name later (#255).
 //
 // Phase 1: the token is a stateless windowed JWT. `Uses` is clamped and
 // reflected in UsesRemaining but no counter is provisioned yet (Phase 2 adds
 // the jti-keyed Valkey counter and the middleware decrement). The
 // auth.CapUsesClaim marker is always set so Phase 2 activates without
 // re-minting semantics.
-func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub string, held []string, req MintTokenRequest, baseURL string, ttlCap time.Duration) (MintTokenResult, error) {
+func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub string, kind kdexv1alpha1.SubjectKind, held []string, req MintTokenRequest, baseURL string, ttlCap time.Duration) (MintTokenResult, error) {
 	cfg := hh.authConfig
 	if cfg == nil || !cfg.MintTokenEnabled {
 		return MintTokenResult{}, mintErrf(mintRefused, "mint_token is not enabled on this host")
@@ -270,7 +276,7 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 	// a JWT and never verified, so signing a token just to throw it away is
 	// wasted work; mintTokenOrJTI generates the jti directly instead. See
 	// kdex-tech/host-manager#151.
-	token, jti, err := hh.mintTokenOrJTI(cfg, isURL, sub, req.Entitlements, ttl)
+	token, jti, err := hh.mintTokenOrJTI(cfg, isURL, sub, kind, req.Entitlements, ttl)
 	if err != nil {
 		return MintTokenResult{}, err
 	}
@@ -304,6 +310,7 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 		if serr := hh.storeTransferRecord(ctx, handle, transferRecord{
 			JTI:          jti,
 			Sub:          sub,
+			Kind:         kind,
 			Entitlements: req.Entitlements,
 			Target:       *req.Target,
 		}, ttl); serr != nil {
@@ -328,7 +335,7 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 // (uses:<jti>) and a transferRecord.JTI field, never a JWT and never
 // verified — so signing a token just to throw it away is wasted work; a
 // directly-generated random id is sufficient. See kdex-tech/host-manager#151.
-func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, reqEntitlements []string, ttl time.Duration) (token, jti string, err error) {
+func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, kind kdexv1alpha1.SubjectKind, reqEntitlements []string, ttl time.Duration) (token, jti string, err error) {
 	if isURL {
 		return "", rand.Text(), nil
 	}
@@ -338,14 +345,19 @@ func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, 
 		return "", "", fmt.Errorf("mint signer: %w", err)
 	}
 
-	// signer.Project runs the claim allowlist (which passes "entitlements" and
-	// "sub" but NOT auth.CapUsesClaim). Inject the capability marker into the
-	// PROJECTED claims so it survives into the signed token — SignProjected
-	// gives the projection the last word. (signer.Sign would drop auth.CapUsesClaim.)
-	projected, err := signer.Project(jwt.MapClaims{
+	// signer.Project runs the claim allowlist (which passes "entitlements",
+	// "sub" and the kind, but NOT auth.CapUsesClaim). Inject the capability
+	// marker into the PROJECTED claims so it survives into the signed token —
+	// SignProjected gives the projection the last word. (signer.Sign would
+	// drop auth.CapUsesClaim.)
+	signingContext := jwt.MapClaims{
 		"sub":          sub,
 		"entitlements": reqEntitlements,
-	})
+	}
+	if kind != "" {
+		signingContext[auth.ClaimSubjectKind] = string(kind)
+	}
+	projected, err := signer.Project(signingContext)
 	if err != nil {
 		return "", "", fmt.Errorf("mint project: %w", err)
 	}
@@ -454,7 +466,7 @@ func mustJSON(v any) string {
 // writeMintTokenRPC executes the mint and writes a JSON-RPC response. Attenuation
 // / policy failures are returned as an MCP tool error result (isError=true) with
 // HTTP 200, matching how MCP tools surface domain errors.
-func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage, sub string, held []string, args MintTokenRequest) {
+func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request, id json.RawMessage, sub string, kind kdexv1alpha1.SubjectKind, held []string, args MintTokenRequest) {
 	w.Header().Set("Content-Type", "application/json")
 	// Same cutoff as capabilityMintHandler (kdex-tech/host-manager#257).
 	if ac, _ := auth.GetAuthContext(r.Context()); ac != nil {
@@ -470,7 +482,7 @@ func (hh *HostHandler) writeMintTokenRPC(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	res, err := hh.mintCapabilityToken(context.Background(), sub, held, args, transferBaseURL(r))
+	res, err := hh.mintCapabilityToken(context.Background(), sub, kind, held, args, transferBaseURL(r))
 	var payload jsonRPCResponse
 	if err != nil {
 		payload = jsonRPCResponse{JSONRPC: "2.0", ID: id, Result: map[string]any{

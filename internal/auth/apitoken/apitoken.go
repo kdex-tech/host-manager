@@ -789,11 +789,19 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 	// and decodes with SubjectKind "" for the caller to classify. Once #268's
 	// condition is met, a missing knd is refused like any missing claim. A
 	// present knd that is not a string is malformed, and refused now.
-	var kind string
-	if _, recorded := token.Claims()[sign.ClaimSubjectKind]; recorded {
-		if kind, err = token.GetString(sign.ClaimSubjectKind); err != nil {
+	//
+	// GetString answers both of the common cases, a recorded kind and an
+	// absent one, without decoding anything else. Only its error path asks
+	// whether knd is present: go-paseto has no presence check, and Claims()
+	// decodes every claim (~12x the time and allocations of GetString), which
+	// would be paid on every validated PAT. Pinned at go-paseto v1.6.0, the
+	// latest release; none adds one, so no upgrade removes this branch.
+	kind, err := token.GetString(sign.ClaimSubjectKind)
+	if err != nil {
+		if _, recorded := token.Claims()[sign.ClaimSubjectKind]; recorded {
 			return nil, err
 		}
+		kind = "" // LEGACY(#268)
 	}
 
 	return &TokenData{

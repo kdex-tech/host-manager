@@ -761,7 +761,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					ac, _ := auth.GetAuthContext(r.Context())
 					sub, _ := ac["sub"].(string)
 					held := stringSliceFromClaim(ac["entitlements"])
-					hh.writeMintTokenRPC(w, r, id, sub, held, args)
+					// authExchanger was snapshotted under hh.mu.RLock above.
+					hh.writeMintTokenRPC(w, r, id, sub, authExchanger.ContextSubjectKind(ac), held, args)
 					return
 				}
 				// whoami is a peer of mint_token: answered by the AS and never

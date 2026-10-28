@@ -18,6 +18,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
+	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
@@ -215,7 +216,13 @@ func (h *vetoHost) fatFor(pat string) string {
 
 // mint self-mints a PAT through /-/apitokens/mint with the bearer jwt.
 func (h *vetoHost) mint(jwt string) *httptest.ResponseRecorder {
-	body, _ := json.Marshal(MintRequest{Audience: vetoIssuer, Sub: vetoClient, Action: "key-1", TTL: "1h"})
+	return h.mintFor(jwt, vetoClient)
+}
+
+// mintFor mints a PAT for sub through /-/apitokens/mint with the bearer jwt:
+// a self-mint when jwt is sub's own, else an impersonating one.
+func (h *vetoHost) mintFor(jwt, sub string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(MintRequest{Audience: vetoIssuer, Sub: sub, Action: "key-1", TTL: "1h"})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/mint", bytes.NewBuffer(body))
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	return h.serve(req)
@@ -357,6 +364,47 @@ func TestVeto_RemovedClientSelfMintRefused(t *testing.T) {
 	var resp MintResponse
 	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
 	assert.Empty(t, resp.Token, "a PAT was minted")
+}
+
+// TestVeto_ImpersonatingMintForDeadClientRefused: an impersonating mint
+// whose target classifies as a Client that is not configured -- a removed
+// client the registry remembers, or a dcr_ id -- would hand back a PAT every
+// site vetoes. The mint refuses it with a 400 that does not name the target,
+// and mints nothing. The controls mint for a configured client and a user.
+func TestVeto_ImpersonatingMintForDeadClientRefused(t *testing.T) {
+	const removed = "removed-client"
+	h := newVetoHost(t)
+	h.setClient(removed, true)
+	h.setClient(removed, false)
+	jwt := h.clientJWT()
+
+	for name, sub := range map[string]string{
+		"a removed client":            removed,
+		"a dynamically registered id": dcr.ClientIDPrefix + "0123abcd",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, kdexv1alpha1.SubjectKindClient, h.hh.authExchanger.SubjectKindOf(sub),
+				"precondition: the target classifies as a Client")
+			rr := h.mintFor(jwt, sub)
+			assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			assert.NotContains(t, rr.Body.String(), sub, "the refusal names the target")
+			var resp MintResponse
+			_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+			assert.Empty(t, resp.Token, "a PAT was minted")
+		})
+	}
+	for name, sub := range map[string]string{
+		"control: a configured client": vetoApp,
+		"control: a user":              vetoUser,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := h.mintFor(jwt, sub)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var resp MintResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			assert.NotEmpty(t, resp.Token)
+		})
+	}
 }
 
 func TestVeto_RemovedClientAuthorizeRefused(t *testing.T) {

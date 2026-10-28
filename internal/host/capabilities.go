@@ -225,7 +225,14 @@ func (hh *HostHandler) capabilityMintHandler(w http.ResponseWriter, r *http.Requ
 		capTTLCap = hh.authConfig.MintTokenTTLCap
 	}
 
-	res, err := hh.mintCapabilityTokenWithCap(r.Context(), sub, held, req, transferBaseURL(r), capTTLCap)
+	// The capability carries the caller's kind with its sub (#255). The
+	// exchanger is written under hh.mu by SetHost, so it is read under RLock.
+	hh.mu.RLock()
+	exchanger := hh.authExchanger
+	hh.mu.RUnlock()
+	kind := exchanger.ContextSubjectKind(ac)
+
+	res, err := hh.mintCapabilityTokenWithCap(r.Context(), sub, kind, held, req, transferBaseURL(r), capTTLCap)
 	if err != nil {
 		status := mintStatus(err)
 		if status == http.StatusInternalServerError {

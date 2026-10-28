@@ -16,6 +16,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	. "github.com/onsi/gomega"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // mintReq is the JSON body a REST caller posts to /-/capabilities/mint.
@@ -374,7 +375,7 @@ func TestCapabilityMint_RESTAndMCPAgree(t *testing.T) {
 		Target:       &TransferTarget{Method: "GET", Path: "/api/v1/files/abc/content"},
 	}
 
-	viaCore, err := hh.mintCapabilityToken(context.Background(), "alice",
+	viaCore, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"functions:/api/v1/files:read"}, req, "https://dev.example")
 	g.Expect(err).ToNot(HaveOccurred())
 

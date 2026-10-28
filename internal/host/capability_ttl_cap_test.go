@@ -10,6 +10,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	. "github.com/onsi/gomega"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // twoCapConfig builds a mint-enabled config whose REST capability ceiling
@@ -74,7 +75,7 @@ func TestMintCapabilityToken_MCPSurfaceIgnoresCapabilityCap(t *testing.T) {
 	g := NewWithT(t)
 	hh := &HostHandler{authConfig: twoCapConfig(t, 60*time.Second, 600*time.Second)}
 
-	res, err := hh.mintCapabilityToken(context.Background(), "alice",
+	res, err := hh.mintCapabilityToken(context.Background(), "alice", kdexv1alpha1.SubjectKindUser,
 		[]string{"pages:/:read"},
 		MintTokenRequest{Entitlements: []string{"pages:/:read"}, TTLSeconds: 300}, "")
 	g.Expect(err).ToNot(HaveOccurred())

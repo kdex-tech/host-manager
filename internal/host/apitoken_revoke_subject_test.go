@@ -15,6 +15,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // POST /-/apitokens/revoke {sub, all: true} revokes the subject on this host
@@ -145,7 +146,7 @@ func TestCapabilityMint_RefusedForACredentialFromBeforeTheSubjectWasRevoked(t *t
 
 	rw := httptest.NewRecorder()
 	r := withIAT(httptest.NewRequest(http.MethodPost, "/mcp", nil), time.Now().Add(-time.Minute))
-	hh.writeMintTokenRPC(rw, r, json.RawMessage(`1`), "alice", held, MintTokenRequest{Entitlements: held})
+	hh.writeMintTokenRPC(rw, r, json.RawMessage(`1`), "alice", kdexv1alpha1.SubjectKindUser, held, MintTokenRequest{Entitlements: held})
 	assert.Contains(t, rw.Body.String(), `"isError":true`, "MCP stale")
 	assert.Contains(t, rw.Body.String(), "revoked")
 }

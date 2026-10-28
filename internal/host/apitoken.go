@@ -503,15 +503,28 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	// The PAT records its subject's kind (#255). A self-mint's subject is the
-	// caller, whose credential carries its kind. Another subject's kind is
-	// what it is now: a provisioned subject is never named like a client
+	// caller, whose credential carries its kind and passed the veto
+	// (VetoSubjectKind) at the gate that accepted it. Another subject's kind
+	// is what it is now: a provisioned subject is never named like a client
 	// (checkProvisioned), so it is a User, and an impersonated one is
 	// classified.
+	//
+	// An impersonated subject is vetoed here, before anything is minted: a
+	// PAT whose kind current config contradicts is refused at every site that
+	// accepts one, so minting it would hand back a dead credential. That is a
+	// mint for a removed client the registry remembers, or for a dcr_ id:
+	// each classifies as a Client that is not configured. The answer names
+	// the rule, never the sub (#215).
 	var kind kdexv1alpha1.SubjectKind
 	if subject == requestingSub {
 		kind = hh.authExchanger.ContextSubjectKind(ac)
 	} else {
 		kind = hh.authExchanger.SubjectKindOf(subject)
+		if verr := hh.authExchanger.VetoSubjectKind(subject, kind); verr != nil {
+			log.V(1).Info("mint refused: the target's kind contradicts current config", "rule", verr.Error())
+			http.Error(w, "sub cannot hold an API token on this host: it names a client that is not configured", http.StatusBadRequest)
+			return
+		}
 	}
 
 	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, kind, req.Action, req.Scope, ttl)

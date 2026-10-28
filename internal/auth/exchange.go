@@ -2603,17 +2603,6 @@ var ErrCredentialKindRefused = errors.New("credential kind refused by current co
 // vetoLog writes the veto's refusals. Mirrors bindingKeyLog so it needs no ctx.
 var vetoLog = logf.Log.WithName("subject-kind-veto")
 
-// SiteHostJWT names the host JWT gate (Config.WithAuthentication) in the
-// veto's line. Like SiteAPITokenVerify it resolves no roles, so neither is
-// one of the role-resolution sites; the veto's other sites are (SiteHostPAT,
-// SiteProxyPAT, SiteTokenExchange).
-const SiteHostJWT = "host jwt"
-
-// SiteAPITokenVerify names /-/apitokens/verify in the veto's line. Verify is
-// how a consumer decides a PAT is live, so it is a veto site (Ruling 14),
-// though it resolves no roles.
-const SiteAPITokenVerify = "apitokens verify"
-
 // VetoSubjectKind is the veto (#255): current config is a veto on a
 // credential's kind, never its source. It refuses, with
 // ErrCredentialKindRefused:
