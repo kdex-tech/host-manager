@@ -48,7 +48,7 @@ func (refreshEventsStubProvider) FindInternal(subject, _ string) (jwt.MapClaims,
 	return jwt.MapClaims{"sub": subject}, nil
 }
 
-func (refreshEventsStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (refreshEventsStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return []string{"member"}, []string{"functions:/api/v1/ingest:read"}, nil
 }
 

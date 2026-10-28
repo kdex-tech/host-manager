@@ -371,7 +371,7 @@ func (a httpLookupIdentityAdapter) FindInternal(subject, password string) (jwt.M
 	return claims, nil
 }
 
-func (httpLookupIdentityAdapter) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (httpLookupIdentityAdapter) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

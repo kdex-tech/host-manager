@@ -50,7 +50,7 @@ func (subjectlessStubProvider) FindInternal(string, string) (jwt.MapClaims, erro
 	return jwt.MapClaims{"email": "nobody@example.test"}, nil
 }
 
-func (subjectlessStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (subjectlessStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

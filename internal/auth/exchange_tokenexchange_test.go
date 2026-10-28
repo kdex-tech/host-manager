@@ -40,8 +40,8 @@ func (s tokenExchangeStubIdentityProvider) FindInternal(string, string) (jwt.Map
 	return jwt.MapClaims{}, nil
 }
 
-func (s tokenExchangeStubIdentityProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	if subject != s.subject {
+func (s tokenExchangeStubIdentityProvider) FindInternalRolesAndEntitlements(bs BindingSubject, _ *BindingNames) ([]string, []string, error) {
+	if bs.Key != s.subject {
 		return nil, nil, nil
 	}
 	return s.roles, s.entitlements, nil

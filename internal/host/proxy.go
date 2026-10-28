@@ -557,7 +557,11 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					} else {
 						// Reuse the JWT-mint path's subject resolver so PASETO and
 						// JWT callers get identical structured entitlements.
-						roles, ents, rerr := authExchanger.ResolveInternalRolesAndEntitlements(data.Subject)
+						roles, ents, rerr := authExchanger.ResolveInternalRolesAndEntitlements(auth.BindingSubject{
+							Key:  data.Subject,
+							Kind: authExchanger.SubjectKindOf(data.Subject),
+							Site: auth.SiteProxyPAT,
+						})
 						if rerr != nil {
 							log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
 						} else {

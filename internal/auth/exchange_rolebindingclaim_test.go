@@ -51,29 +51,7 @@ const (
 func newRoleBindingScopeProvider(t *testing.T, boundSubject string) InternalIdentityProvider {
 	t.Helper()
 
-	s := runtime.NewScheme()
-	require.NoError(t, v1.AddToScheme(s))
-	require.NoError(t, v1alpha1.AddToScheme(s))
-
-	c := fake.NewClientBuilder().WithScheme(s).WithIndex(
-		&v1alpha1.KDexRoleBinding{},
-		"spec.hostRef.name", func(rawObj client.Object) []string {
-			rb := rawObj.(*v1alpha1.KDexRoleBinding)
-			if rb.Spec.HostRef.Name == "" {
-				return nil
-			}
-			return []string{rb.Spec.HostRef.Name}
-		},
-	).WithIndex(
-		&v1alpha1.KDexRole{},
-		"spec.hostRef.name", func(rawObj client.Object) []string {
-			role := rawObj.(*v1alpha1.KDexRole)
-			if role.Spec.HostRef.Name == "" {
-				return nil
-			}
-			return []string{role.Spec.HostRef.Name}
-		},
-	).WithObjects(
+	c := newRBCClient(t,
 		&v1alpha1.KDexRole{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "acme-admin",
@@ -97,11 +75,42 @@ func newRoleBindingScopeProvider(t *testing.T, boundSubject string) InternalIden
 				Roles:   []string{"acme-admin"},
 			},
 		},
-	).Build()
+	)
 
 	sp, err := NewRoleProvider(context.Background(), c, rbcFocalHost, rbcNamespace, nil)
 	require.NoError(t, err)
 	return sp
+}
+
+// newRBCClient is the fake controller-runtime client a real scopeProvider
+// lists KDexRoles and KDexRoleBindings from, indexed on spec.hostRef.name as
+// the manager's cache is.
+func newRBCClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+
+	s := runtime.NewScheme()
+	require.NoError(t, v1.AddToScheme(s))
+	require.NoError(t, v1alpha1.AddToScheme(s))
+
+	return fake.NewClientBuilder().WithScheme(s).WithIndex(
+		&v1alpha1.KDexRoleBinding{},
+		"spec.hostRef.name", func(rawObj client.Object) []string {
+			rb := rawObj.(*v1alpha1.KDexRoleBinding)
+			if rb.Spec.HostRef.Name == "" {
+				return nil
+			}
+			return []string{rb.Spec.HostRef.Name}
+		},
+	).WithIndex(
+		&v1alpha1.KDexRole{},
+		"spec.hostRef.name", func(rawObj client.Object) []string {
+			role := rawObj.(*v1alpha1.KDexRole)
+			if role.Spec.HostRef.Name == "" {
+				return nil
+			}
+			return []string{role.Spec.HostRef.Name}
+		},
+	).WithObjects(objs...).Build()
 }
 
 // accessTokenRoles decodes the (unverified) `roles` claim of a minted access

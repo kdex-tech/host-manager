@@ -1055,8 +1055,8 @@ func (m *mockScopeProvider) FindInternal(subject string, password string) (jwt.M
 	return m.resolveIdentity(subject, password)
 }
 
-func (m *mockScopeProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	return m.resolveRolesAndEntitlements(subject)
+func (m *mockScopeProvider) FindInternalRolesAndEntitlements(bs BindingSubject, _ *BindingNames) ([]string, []string, error) {
+	return m.resolveRolesAndEntitlements(bs.Key)
 }
 
 // ResolveClaims implements the optional password-less subject->backend-claims

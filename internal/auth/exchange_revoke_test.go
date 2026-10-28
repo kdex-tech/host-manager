@@ -33,7 +33,7 @@ type revokeStubIdentityProvider struct{}
 func (revokeStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (revokeStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (revokeStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

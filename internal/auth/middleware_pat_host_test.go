@@ -26,7 +26,7 @@ type patHostIdentityProvider struct{}
 func (patHostIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (patHostIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (patHostIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return []string{"reader"}, []string{"vector_stores:vs_abc:read"}, nil
 }
 

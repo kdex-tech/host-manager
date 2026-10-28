@@ -76,8 +76,8 @@ func (e2ePerSubjectIDP) FindInternal(string, string) (jwt.MapClaims, error) {
 	return nil, nil
 }
 
-func (p e2ePerSubjectIDP) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	return p.roles[subject], p.ents[subject], nil
+func (p e2ePerSubjectIDP) FindInternalRolesAndEntitlements(bs auth.BindingSubject, _ *auth.BindingNames) ([]string, []string, error) {
+	return p.roles[bs.Key], p.ents[bs.Key], nil
 }
 
 // e2eEntitlementGateChecker drives the proxy gate through the REAL entitlements

@@ -37,7 +37,7 @@ type stubIdentityProvider struct{}
 func (stubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (stubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (stubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

@@ -40,7 +40,7 @@ func (logoutEventsStubProvider) FindInternal(subject string, _ string) (jwt.MapC
 	return jwt.MapClaims{"sub": subject}, nil
 }
 
-func (logoutEventsStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (logoutEventsStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

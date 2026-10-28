@@ -118,7 +118,7 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	// It runs before the grant cache: a session named like a client keeps none
 	// of that client's grants, cached or not (#243). Unlike a resolve failure
 	// this is not an outage, so it fails closed.
-	bindingKey, err := e.userBindingKey(jwt.MapClaims(ac), subject, "session-grant refresh")
+	bs, err := e.userBindingKey(jwt.MapClaims(ac), subject, SiteSessionGrantRefresh)
 	if err != nil {
 		logf.FromContext(reqCtx).V(1).Info("dropping the grants of a session whose subject names a client",
 			"sub", subject, "reason", err.Error())
@@ -146,7 +146,7 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	// resolve; each caller still overlays onto its own ac/scope below.
 
 	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
-		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bindingKey)
+		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bs)
 		if rerr != nil {
 			return nil, rerr // fail open — leave ac as the frozen token carried it
 		}

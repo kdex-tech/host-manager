@@ -34,7 +34,7 @@ type autoExtendStubIdentityProvider struct{}
 func (autoExtendStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (autoExtendStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (autoExtendStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

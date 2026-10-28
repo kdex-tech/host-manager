@@ -26,6 +26,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/singleflight"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -338,19 +339,20 @@ func NewExchanger(
 	return ex, nil
 }
 
-// ResolveInternalRolesAndEntitlements maps a subject (e.g. the `sub` of a
-// validated PASETO API token) to its internal roles and entitlements using the
-// same KDexRole/KDexRoleBinding resolution the JWT login path uses
-// (scopeProvider.FindInternalRolesAndEntitlements). It exists so the proxy's
-// PASETO->authContext bridge can derive a structured authorization context for
-// API-token callers without duplicating role resolution. Returns empty slices
+// ResolveInternalRolesAndEntitlements maps a binding subject (its key, kind
+// and site) to its internal roles and entitlements through the
+// KDexRole/KDexRoleBinding resolution (scopeProvider.FindInternalRolesAndEntitlements).
+// It is the single entry point every site but local password login resolves
+// through (that one resolves inside the provider, through the same
+// resolveBindings), so it is where an empty or unknown kind is logged at V(0)
+// and where the site's role-binding line is written. Returns empty slices
 // (fail-closed) when no identity provider is wired. See
-// kdex-tech/host-manager#103.
-func (e *Exchanger) ResolveInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
+// kdex-tech/host-manager#103 and #255.
+func (e *Exchanger) ResolveInternalRolesAndEntitlements(bs BindingSubject) ([]string, []string, error) {
 	if e == nil || e.sp == nil {
 		return nil, nil, nil
 	}
-	return e.sp.FindInternalRolesAndEntitlements(subject)
+	return resolveBindings(e.sp, bs)
 }
 
 // EmitLogout dispatches the logout event to any configured event hooks.
@@ -503,8 +505,12 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// `email`. RoleBindingClaim v1 is scoped to login/refresh/auth-code (the
 	// paths that replay a login-time IdP-claims snapshot); token-exchange
 	// keeps resolving roles by `sub` regardless, so this call stays (sub, sub)
-	// and its behavior is unchanged.
-	roles, ents, backend, rerr := e.subjectSigningContext(sub, sub)
+	// and its behavior is unchanged. The kind is classified from sub (#255).
+	roles, ents, backend, rerr := e.subjectSigningContext(sub, BindingSubject{
+		Key:  sub,
+		Kind: e.SubjectKindOf(sub),
+		Site: SiteTokenExchange,
+	})
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
 	}
@@ -726,7 +732,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// human-authorable claim (e.g. email) instead of the IdP's opaque
 	// subject. Identity (idpClaims, GateLogin, enrichAfterGate, and the
 	// signed token below) still keys on `sub` unconditionally.
-	bindingKey, err := e.userBindingKey(signingContext, sub, "oidc login")
+	bs, err := e.userBindingKey(signingContext, sub, SiteOIDCLogin)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "refusing an OIDC login whose subject names a client", "sub", sub)
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
@@ -734,7 +740,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		})
 		return TokenSet{Subject: sub}, err
 	}
-	roles, entitlements, err := e.sp.FindInternalRolesAndEntitlements(bindingKey)
+	roles, entitlements, err := e.ResolveInternalRolesAndEntitlements(bs)
 	if err != nil {
 		return TokenSet{}, err
 	}
@@ -1068,17 +1074,19 @@ func (e *Exchanger) buildClientSigningContext(ctx context.Context, clientID, cli
 	}
 
 	// Resolve the client's roles/entitlements via the same resolver every other
-	// grant type already uses (password -> FindInternal; authorization_code,
-	// refresh_token and OIDC token-exchange -> FindInternalRolesAndEntitlements),
-	// so a client_credentials token carries an authorization context the proxy
-	// identity gate can evaluate. Without this the token verifies cleanly but
-	// 404s on every secured function path. Gated on requested scope; when no
-	// scope is requested, default to including both (mirrors LoginLocal's
+	// grant type already uses (password -> FindInternal; OIDC login,
+	// authorization_code, refresh_token and token exchange ->
+	// ResolveInternalRolesAndEntitlements), so a client_credentials token
+	// carries an authorization context the proxy identity gate can evaluate.
+	// Without this the token verifies cleanly but 404s on every secured
+	// function path. The client resolves as a Client, so a binding narrowed to
+	// [User] grants it nothing (#255). Gated on requested scope; when no scope
+	// is requested, default to including both (mirrors LoginLocal's
 	// default-scope set). See kdex-tech/host-manager#105.
 	wantRoles := len(grantedScopes) == 0 || slices.Contains(grantedScopes, "roles")
 	wantEntitlements := len(grantedScopes) == 0 || slices.Contains(grantedScopes, "entitlements")
 	if wantRoles || wantEntitlements {
-		roles, entitlements, rerr := e.ResolveInternalRolesAndEntitlements(clientID)
+		roles, entitlements, rerr := e.ResolveInternalRolesAndEntitlements(clientBindingSubject(clientID))
 		if rerr != nil {
 			// Resolver failure, not a fact about the presented client
 			// credentials (already verified above). See #168 round 2.
@@ -1957,10 +1965,10 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 // the static KDexRole-derived roles/entitlements PLUS the fresh data-driven
 // backend claims that only the credential backend knows.
 //
-// Roles/entitlements resolve on bindingKey -- not necessarily subject --
-// because RoleBindingClaim lets a KDexRoleBinding name a human-authorable
-// claim (e.g. email) instead of the IdP's opaque sub, exactly as the OIDC
-// login path (ExchangeToken) already resolves them. Backend claims always
+// Roles/entitlements resolve on bs (its Key not necessarily subject, and its
+// Kind, #255) because RoleBindingClaim lets a KDexRoleBinding name a
+// human-authorable claim (e.g. email) instead of the IdP's opaque sub, exactly
+// as the OIDC login path (ExchangeToken) already resolves them. Backend claims always
 // resolve on subject: identity (and the credential backend's own Lookup key)
 // never moves off sub.
 //
@@ -1970,8 +1978,8 @@ func (e *Exchanger) CreateAuthorizationCode(ctx context.Context, claims Authoriz
 // grants. Password login (LoginLocal) receives the same set for free from
 // FindInternal's credential Lookup, so it does not use this. A nil/failed
 // resolve degrades to role-only (never more). See kdex-tech/host-manager#140.
-func (e *Exchanger) subjectSigningContext(subject, bindingKey string) (roles, entitlements []string, backend jwt.MapClaims, err error) {
-	roles, entitlements, err = e.sp.FindInternalRolesAndEntitlements(bindingKey)
+func (e *Exchanger) subjectSigningContext(subject string, bs BindingSubject) (roles, entitlements []string, backend jwt.MapClaims, err error) {
+	roles, entitlements, err = e.ResolveInternalRolesAndEntitlements(bs)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -2129,11 +2137,11 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	// claims.IDPClaims is nil for non-OIDC grants, for which resolveBindingKey
 	// degrades to claims.Subject (its historical behavior). See
 	// kdex-tech/host-manager#189.
-	bindingKey, err := e.userBindingKey(claims.IDPClaims, claims.Subject, "auth-code redeem")
+	bs, err := e.userBindingKey(claims.IDPClaims, claims.Subject, SiteAuthCode)
 	if err != nil {
 		return failed("%w", err)
 	}
-	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bindingKey)
+	roles, entitlements, backend, err := e.subjectSigningContext(claims.Subject, bs)
 	if err != nil {
 		// The subject is already known/vouched (decrypted from our own
 		// auth code); this is a role-resolver failure, not anything the
@@ -2224,11 +2232,11 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	// every refresh instead of silently falling back to sub. idpClaims is nil
 	// for every non-OIDC grant, for which resolveBindingKey degrades to
 	// subject (its historical behavior). See kdex-tech/host-manager#189.
-	bindingKey, err := e.userBindingKey(idpClaims, subject, "refresh")
+	bs, err := e.userBindingKey(idpClaims, subject, SiteRefresh)
 	if err != nil {
 		return failed("%w", err)
 	}
-	roles, entitlements, backend, err := e.subjectSigningContext(subject, bindingKey)
+	roles, entitlements, backend, err := e.subjectSigningContext(subject, bs)
 	if err != nil {
 		return failed("%w: failed to resolve roles: %v", ErrServerError, err)
 	}
@@ -2466,6 +2474,24 @@ func (e *Exchanger) NamesClient(key string) bool {
 	return configured || strings.HasPrefix(key, dcr.ClientIDPrefix)
 }
 
+// SubjectKindOf classifies sub when nothing better is known about its kind:
+// SubjectKindClient if it names a client (NamesClient), else SubjectKindUser.
+// It is sound because #243 refuses every user identity named like a client. A
+// future ServiceAccount kind slots in here as one more branch, ahead of the
+// User default. See kdex-tech/host-manager#255.
+func (e *Exchanger) SubjectKindOf(sub string) kdexv1alpha1.SubjectKind {
+	if e.NamesClient(sub) {
+		return kdexv1alpha1.SubjectKindClient
+	}
+	return kdexv1alpha1.SubjectKindUser
+}
+
+// clientBindingSubject is the binding subject of an authenticated
+// client_credentials client: its id, as a Client.
+func clientBindingSubject(id string) BindingSubject {
+	return BindingSubject{Key: id, Kind: kdexv1alpha1.SubjectKindClient, Site: SiteClientCredentials}
+}
+
 // IsConfiguredClient reports whether id is an operator-configured client: the
 // only kind that can authenticate with client_credentials (a dynamically
 // registered client is public).
@@ -2477,16 +2503,18 @@ func (e *Exchanger) IsConfiguredClient(id string) bool {
 	return ok
 }
 
-// userBindingKey resolves the role-binding key of a user identity (the
-// RoleBindingClaim, e.g. email, else sub; #189), logs it under site, and
+// userBindingKey resolves the binding subject of a user identity: the
+// role-binding key (the RoleBindingClaim, e.g. email, else sub; #189), the
+// kind User (#255) and site. It logs the key's resolution under site, and
 // refuses an identity named like a client (#243). Every site that issues or
 // re-resolves a user identity goes through it, so none can resolve bindings
-// without the guard.
-func (e *Exchanger) userBindingKey(claims jwt.MapClaims, sub, site string) (string, error) {
+// without the guard, or with a kind other than User.
+func (e *Exchanger) userBindingKey(claims jwt.MapClaims, sub, site string) (BindingSubject, error) {
 	bindingKey := resolveBindingKey(claims, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
 	bindingKeyLog.V(2).Info("role-binding key resolved ("+site+")",
 		bindingKeyLogKV(claims, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-	return bindingKey, e.refuseClientNamedIdentity(sub, bindingKey)
+	bs := BindingSubject{Key: bindingKey, Kind: kdexv1alpha1.SubjectKindUser, Site: site}
+	return bs, e.refuseClientNamedIdentity(sub, bindingKey)
 }
 
 // refuseClientNamedIdentity refuses a user identity whose sub or role-binding
@@ -2495,8 +2523,8 @@ func (e *Exchanger) userBindingKey(claims jwt.MapClaims, sub, site string) (stri
 // written for the client. It runs wherever a user identity is issued or
 // re-resolved, so on a collision the client keeps its name and the user is
 // refused, whichever was created first. Exact names only: a /regex/ or `*`
-// binding matches users and clients alike, by design of the matcher. See
-// kdex-tech/host-manager#243.
+// binding matches users and clients alike, by design of the matcher, unless
+// the binding sets subjectKinds (#255). See kdex-tech/host-manager#243.
 func (e *Exchanger) refuseClientNamedIdentity(keys ...string) error {
 	for _, key := range keys {
 		if e.NamesClient(key) {

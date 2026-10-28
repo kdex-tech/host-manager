@@ -54,8 +54,8 @@ func (texStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, erro
 	return jwt.MapClaims{}, nil
 }
 
-func (texStubIdentityProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	if subject != texE2ESubject {
+func (texStubIdentityProvider) FindInternalRolesAndEntitlements(bs auth.BindingSubject, _ *auth.BindingNames) ([]string, []string, error) {
+	if bs.Key != texE2ESubject {
 		return nil, nil, nil
 	}
 	return []string{"internal-reader"}, []string{"functions:/v1/internal:read"}, nil

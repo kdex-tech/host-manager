@@ -32,8 +32,8 @@ type provisioningLookup struct {
 func (p provisioningLookup) FindInternal(string, string) (jwt.MapClaims, error) { return nil, nil }
 
 // The orchestrator client's own KDexRoleBinding grants it the class scope.
-func (p provisioningLookup) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	if subject == orchestrator {
+func (p provisioningLookup) FindInternalRolesAndEntitlements(bs auth.BindingSubject, _ *auth.BindingNames) ([]string, []string, error) {
+	if bs.Key == orchestrator {
 		return []string{"provisioner"}, []string{provisionedMintScope}, nil
 	}
 	return nil, nil, nil
@@ -146,7 +146,7 @@ func TestProvisionedMint_AcceptsARealClientCredentialsToken(t *testing.T) {
 }
 
 // Minting for a subject named like a client would hand the token that client's
-// KDexRoleBindings: the PAT paths resolve roles by sub (#243).
+// KDexRoleBindings: the PAT paths resolve roles by sub, as a Client (#243, #255).
 func TestProvisionedMint_RefusesATargetNamedLikeAClient(t *testing.T) {
 	for _, target := range []string{"billing-svc", "dcr_0a1b2c"} {
 		t.Run(target, func(t *testing.T) {

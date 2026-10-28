@@ -44,7 +44,7 @@ func (s clientCredsStubIdentityProvider) FindInternal(subject, _ string) (jwt.Ma
 	}, nil
 }
 
-func (s clientCredsStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (s clientCredsStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return s.roles, s.ents, nil
 }
 

@@ -280,7 +280,7 @@ func TestNewRoleProvider(t *testing.T) {
 			controllerNamespace: "foo",
 			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
-				_, entitlements, err := got.FindInternalRolesAndEntitlements("")
+				_, entitlements, err := got.FindInternalRolesAndEntitlements(BindingSubject{Key: "", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, []string{}, entitlements)
 			},
@@ -323,7 +323,7 @@ func TestNewRoleProvider(t *testing.T) {
 			controllerNamespace: "foo",
 			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
-				_, entitlements, err := got.FindInternalRolesAndEntitlements("username")
+				_, entitlements, err := got.FindInternalRolesAndEntitlements(BindingSubject{Key: "username", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Nil(t, err)
 				assert.Equal(t, []string{"page::read", "page::write"}, entitlements)
 			},
@@ -357,9 +357,9 @@ func TestNewRoleProvider(t *testing.T) {
 			controllerNamespace: "foo",
 			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
-				roles, _, _ := got.FindInternalRolesAndEntitlements("admin-user")
+				roles, _, _ := got.FindInternalRolesAndEntitlements(BindingSubject{Key: "admin-user", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Equal(t, []string{"admin-role"}, roles)
-				roles, _, _ = got.FindInternalRolesAndEntitlements("other-user")
+				roles, _, _ = got.FindInternalRolesAndEntitlements(BindingSubject{Key: "other-user", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Empty(t, roles)
 			},
 		},
@@ -392,7 +392,7 @@ func TestNewRoleProvider(t *testing.T) {
 			controllerNamespace: "foo",
 			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
-				roles, _, _ := got.FindInternalRolesAndEntitlements("any-user")
+				roles, _, _ := got.FindInternalRolesAndEntitlements(BindingSubject{Key: "any-user", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Equal(t, []string{"public-role"}, roles)
 			},
 		},
@@ -422,7 +422,7 @@ func TestNewRoleProvider(t *testing.T) {
 			controllerNamespace: "foo",
 			assertions: func(t *testing.T, got InternalIdentityProvider, gotErr error) {
 				assert.Nil(t, gotErr)
-				_, entitlements, err := got.FindInternalRolesAndEntitlements("alice")
+				_, entitlements, err := got.FindInternalRolesAndEntitlements(BindingSubject{Key: "alice", Kind: kdexv1alpha1.SubjectKindUser}, nil)
 				assert.Nil(t, err)
 				// opaque scope is verbatim (no colons injected); structured stays colon-joined.
 				assert.Equal(t, []string{"vector_stores_create", "vector_stores:vs_alice:read"}, entitlements)

@@ -101,7 +101,11 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 		return nil, false
 	}
 
-	roles, ents, err := exchanger.ResolveInternalRolesAndEntitlements(data.Subject)
+	roles, ents, err := exchanger.ResolveInternalRolesAndEntitlements(BindingSubject{
+		Key:  data.Subject,
+		Kind: exchanger.SubjectKindOf(data.Subject),
+		Site: SiteHostPAT,
+	})
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to resolve api token subject", "subject", data.Subject)
 		return nil, false

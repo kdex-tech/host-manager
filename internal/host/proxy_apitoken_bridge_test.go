@@ -49,7 +49,7 @@ func (s stubInternalIdentityProvider) FindInternal(string, string) (jwt.MapClaim
 	return nil, nil
 }
 
-func (s stubInternalIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (s stubInternalIdentityProvider) FindInternalRolesAndEntitlements(auth.BindingSubject, *auth.BindingNames) ([]string, []string, error) {
 	return s.roles, s.ents, nil
 }
 
@@ -74,6 +74,13 @@ func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth
 // supplied by the caller (e.g. an EffectiveAuth composition, or none).
 func apitokenBridgeFixtureWith(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, mappings []dmapper.MappingRule, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
 	t.Helper()
+	return apitokenBridgeFixtureFor(t, fn, idp, auth.Config{}, mappings, checker...)
+}
+
+// apitokenBridgeFixtureFor is apitokenBridgeFixtureWith with the Exchanger
+// built from exCfg (e.g. one configuring auth clients).
+func apitokenBridgeFixtureFor(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, exCfg auth.Config, mappings []dmapper.MappingRule, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
+	t.Helper()
 	logf.SetLogger(logr.Discard())
 
 	fatHeader := new(string)
@@ -96,7 +103,7 @@ func apitokenBridgeFixtureWith(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp 
 	tm, err := apitoken.NewTokenManager("api-token-issuer", apitoken.GenerateDevmodeKeyPair(), nil)
 	require.NoError(t, err)
 
-	ex, err := auth.NewExchanger(t.Context(), auth.Config{}, cacheManager, idp, nil)
+	ex, err := auth.NewExchanger(t.Context(), exCfg, cacheManager, idp, nil)
 	require.NoError(t, err)
 
 	// Permissive gate by default (this suite isolates the PASETO->authContext

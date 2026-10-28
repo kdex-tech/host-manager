@@ -203,7 +203,11 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 		// call. It is the same resolution the PAT bridge already performs per
 		// request.
 		sub, _ := ac["sub"].(string)
-		_, effective, rerr := exchanger.ResolveInternalRolesAndEntitlements(sub)
+		_, effective, rerr := exchanger.ResolveInternalRolesAndEntitlements(auth.BindingSubject{
+			Key:  sub,
+			Kind: exchanger.SubjectKindOf(sub),
+			Site: auth.SiteWhoami,
+		})
 		if rerr == nil {
 			res = applyEffectiveEntitlements(res, effective)
 		}

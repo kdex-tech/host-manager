@@ -33,7 +33,7 @@ type mintScopeStubIdentityProvider struct{}
 func (mintScopeStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (mintScopeStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (mintScopeStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return []string{"admin", "billing-write"}, []string{"pages:write", "billing:*"}, nil
 }
 

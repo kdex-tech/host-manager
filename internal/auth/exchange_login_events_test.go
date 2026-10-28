@@ -42,7 +42,7 @@ func (loginEventsStubProvider) FindInternal(subject, _ string) (jwt.MapClaims, e
 	return jwt.MapClaims{"sub": subject}, nil
 }
 
-func (loginEventsStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (loginEventsStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 
@@ -64,7 +64,7 @@ func (p sourcedLoginStubProvider) FindInternalWithSource(subject, _ string) (jwt
 	return jwt.MapClaims{"sub": subject}, source, nil
 }
 
-func (sourcedLoginStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (sourcedLoginStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

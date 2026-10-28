@@ -35,8 +35,8 @@ type texHardeningProvider struct{}
 func (texHardeningProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (texHardeningProvider) FindInternalRolesAndEntitlements(sub string) ([]string, []string, error) {
-	if sub != "alice" {
+func (texHardeningProvider) FindInternalRolesAndEntitlements(bs BindingSubject, _ *BindingNames) ([]string, []string, error) {
+	if bs.Key != "alice" {
 		return nil, nil, nil
 	}
 	return []string{"internal-reader"}, []string{"functions:/v1/internal:read"}, nil

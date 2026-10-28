@@ -61,7 +61,7 @@ type changingGrantProvider struct {
 func (p *changingGrantProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (p *changingGrantProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (p *changingGrantProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return p.roles, p.ents, p.err
 }
 
@@ -95,12 +95,12 @@ type countingGrantProvider struct {
 	delay time.Duration
 }
 
-func (p *countingGrantProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
+func (p *countingGrantProvider) FindInternalRolesAndEntitlements(bs BindingSubject, names *BindingNames) ([]string, []string, error) {
 	p.calls.Add(1)
 	if p.delay > 0 {
 		time.Sleep(p.delay)
 	}
-	return p.changingGrantProvider.FindInternalRolesAndEntitlements(subject)
+	return p.changingGrantProvider.FindInternalRolesAndEntitlements(bs, names)
 }
 
 // buildGrantTestConfig builds the shared session-signing Config used by every
@@ -396,7 +396,7 @@ type backendOverrideProvider struct {
 func (p *backendOverrideProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (p *backendOverrideProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (p *backendOverrideProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return p.roles, p.ents, nil
 }
 func (p *backendOverrideProvider) ResolveClaimsWithError(string) (jwt.MapClaims, error) {

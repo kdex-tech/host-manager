@@ -54,7 +54,13 @@ type Lookup interface {
 
 type InternalIdentityProvider interface {
 	FindInternal(subject string, password string) (jwt.MapClaims, error)
-	FindInternalRolesAndEntitlements(subject string) ([]string, []string, error)
+	// FindInternalRolesAndEntitlements resolves the roles of the
+	// KDexRoleBindings matching bs, and their entitlements. When names is
+	// non-nil the matcher records in it which bindings contributed and which
+	// were skipped for bs.Kind; nil collects nothing. Callers go through
+	// resolveBindings (Exchanger.ResolveInternalRolesAndEntitlements), which
+	// writes the role-binding line.
+	FindInternalRolesAndEntitlements(bs BindingSubject, names *BindingNames) ([]string, []string, error)
 }
 
 type scopeProvider struct {
@@ -63,16 +69,37 @@ type scopeProvider struct {
 	ControllerNamespace string
 	FocalHost           string
 
-	lookups       []Lookup
-	roles         []RoleInfo
-	rolesMap      map[string][]string
-	exactBindings map[string][]string
-	regexBindings []bindingMatcher
+	lookups         []Lookup
+	roles           []RoleInfo
+	rolesMap        map[string][]string
+	exactBindings   map[string][]compiledBinding
+	patternBindings []patternBinding
 }
 
-type bindingMatcher struct {
-	re    *regexp.Regexp
-	roles []string
+// compiledBinding is one KDexRoleBinding as the matcher holds it. "Any kind"
+// is narrowed == false, never an empty kinds slice: a binding listing only
+// kinds this release does not know stays narrowed and so matches nothing,
+// instead of collapsing into "any". Unknown entries are kept as written; no
+// subject's kind can equal one, so they are dead without being dropped. See
+// kdex-tech/host-manager#255.
+type compiledBinding struct {
+	name     string
+	roles    []string
+	narrowed bool
+	kinds    []kdexv1alpha1.SubjectKind
+}
+
+// admits reports whether the binding may bind a subject of kind, its subject
+// having matched. An unknown kind (including "") is admitted only by a binding
+// without subjectKinds, even one that lists that same unknown value.
+func (cb *compiledBinding) admits(kind kdexv1alpha1.SubjectKind) bool {
+	return !cb.narrowed || (kind.Known() && slices.Contains(cb.kinds, kind))
+}
+
+// patternBinding is a `*` or /regex/ binding: its subject is matched by re.
+type patternBinding struct {
+	re *regexp.Regexp
+	compiledBinding
 }
 
 var _ InternalIdentityProvider = (*scopeProvider)(nil)
@@ -90,7 +117,7 @@ func NewRoleProvider(
 		ControllerNamespace: controllerNamespace,
 		FocalHost:           focalHost,
 		lookups:             lookups,
-		exactBindings:       make(map[string][]string),
+		exactBindings:       make(map[string][]compiledBinding),
 	}
 
 	roles, err := rc.collectRoles()
@@ -111,24 +138,35 @@ func NewRoleProvider(
 	// 2. Wildcard Match: "*" matches any subject.
 	// 3. Regex Match: Subjects enclosed in slashes (e.g., "/^admin-.*$/") are
 	//    treated as Go-style regular expressions.
+	// Whatever the form, a binding with subjectKinds binds only subjects of
+	// the listed kinds; without it, a subject of any kind (#255).
 	for _, b := range bindings.Items {
+		cb := compiledBinding{
+			name:  b.Name,
+			roles: b.Spec.Roles,
+			// Absent is the only "any kind". An empty list is refused by the
+			// CRD (MinItems=1), and read here as narrowed to nothing.
+			narrowed: b.Spec.SubjectKinds != nil,
+			kinds:    b.Spec.SubjectKinds,
+		}
 		sub := b.Spec.Subject
 		if sub == "*" {
 			// Wildcard match
 			re := regexp.MustCompile(".*")
-			rc.regexBindings = append(rc.regexBindings, bindingMatcher{re: re, roles: b.Spec.Roles})
+			rc.patternBindings = append(rc.patternBindings, patternBinding{re: re, compiledBinding: cb})
 		} else if strings.HasPrefix(sub, "/") && strings.HasSuffix(sub, "/") && len(sub) > 2 {
 			// Regex match
 			re, err := regexp.Compile(sub[1 : len(sub)-1])
 			if err != nil {
-				// Log error but continue with other bindings
-				fmt.Printf("failed to compile regex for binding %s: %v\n", b.Name, err)
+				// Skip this binding but keep the others.
+				bindingKeyLog.Error(err, "skipping a KDexRoleBinding whose subject regex does not compile",
+					"binding", b.Name)
 				continue
 			}
-			rc.regexBindings = append(rc.regexBindings, bindingMatcher{re: re, roles: b.Spec.Roles})
+			rc.patternBindings = append(rc.patternBindings, patternBinding{re: re, compiledBinding: cb})
 		} else {
 			// Exact match
-			rc.exactBindings[sub] = append(rc.exactBindings[sub], b.Spec.Roles...)
+			rc.exactBindings[sub] = append(rc.exactBindings[sub], cb)
 		}
 	}
 
@@ -185,7 +223,14 @@ func (rp *scopeProvider) FindInternalWithSource(subject string, password string)
 		subjectForRoles = sub
 	}
 
-	roles, entitlements, err := rp.FindInternalRolesAndEntitlements(subjectForRoles)
+	// Local login has no Exchanger, so it resolves here, through the same
+	// helper (and role-binding line) as every other site. A password login is
+	// always a User (#255).
+	roles, entitlements, err := resolveBindings(rp, BindingSubject{
+		Key:  subjectForRoles,
+		Kind: kdexv1alpha1.SubjectKindUser,
+		Site: SiteLocalLogin,
+	})
 	if err != nil {
 		// Unambiguously ours: the credential already passed, and this is our
 		// own role/entitlement resolution failing. UNREACHABLE today —
@@ -201,8 +246,8 @@ func (rp *scopeProvider) FindInternalWithSource(subject string, password string)
 	return localIdentity, source, nil
 }
 
-func (rp *scopeProvider) FindInternalRolesAndEntitlements(subject string) ([]string, []string, error) {
-	roles := rp.resolveRoles(subject)
+func (rp *scopeProvider) FindInternalRolesAndEntitlements(bs BindingSubject, names *BindingNames) ([]string, []string, error) {
+	roles := rp.resolveRoles(bs, names)
 	return roles, rp.collectEntitlements(roles), nil
 }
 
@@ -367,18 +412,33 @@ func (rp *scopeProvider) collectBindings() (*kdexv1alpha1.KDexRoleBindingList, e
 	return &roleBindings, nil
 }
 
-func (rp *scopeProvider) resolveRoles(subject string) []string {
+// resolveRoles returns the roles of every binding whose subject matches bs.Key
+// and which admits bs.Kind. When names is non-nil it records each subject
+// match as contributed or skipped for kind; nil allocates nothing for that.
+func (rp *scopeProvider) resolveRoles(bs BindingSubject, names *BindingNames) []string {
 	var roles []string
+	match := func(cb *compiledBinding) {
+		if !cb.admits(bs.Kind) {
+			if names != nil {
+				names.SkippedForKind = append(names.SkippedForKind, cb.name)
+			}
+			return
+		}
+		roles = append(roles, cb.roles...)
+		if names != nil {
+			names.Contributed = append(names.Contributed, cb.name)
+		}
+	}
 
 	// 1. Exact matches (O(1))
-	if r, ok := rp.exactBindings[subject]; ok {
-		roles = append(roles, r...)
+	for i := range rp.exactBindings[bs.Key] {
+		match(&rp.exactBindings[bs.Key][i])
 	}
 
 	// 2. Regex/Wildcard matches (O(N))
-	for _, bm := range rp.regexBindings {
-		if bm.re.MatchString(subject) {
-			roles = append(roles, bm.roles...)
+	for i := range rp.patternBindings {
+		if rp.patternBindings[i].re.MatchString(bs.Key) {
+			match(&rp.patternBindings[i].compiledBinding)
 		}
 	}
 

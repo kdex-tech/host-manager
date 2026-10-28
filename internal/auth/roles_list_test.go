@@ -83,7 +83,7 @@ func TestRoleProvider_Roles(t *testing.T) {
 type rolelessProvider struct{}
 
 func (rolelessProvider) FindInternal(string, string) (jwt.MapClaims, error) { return nil, nil }
-func (rolelessProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (rolelessProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

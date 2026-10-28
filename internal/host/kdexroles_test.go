@@ -21,7 +21,7 @@ import (
 type roleListingProvider struct{ roles []auth.RoleInfo }
 
 func (roleListingProvider) FindInternal(string, string) (jwt.MapClaims, error) { return nil, nil }
-func (roleListingProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (roleListingProvider) FindInternalRolesAndEntitlements(auth.BindingSubject, *auth.BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 func (p roleListingProvider) Roles() []auth.RoleInfo { return p.roles }

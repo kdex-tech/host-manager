@@ -41,7 +41,7 @@ func (subjectAuditStubProvider) FindInternal(subject, _ string) (jwt.MapClaims, 
 	return jwt.MapClaims{"sub": subject}, nil
 }
 
-func (subjectAuditStubProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (subjectAuditStubProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

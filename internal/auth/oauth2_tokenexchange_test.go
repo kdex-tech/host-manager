@@ -188,7 +188,7 @@ func (erroringIdentityProvider) FindInternal(string, string) (jwt.MapClaims, err
 	return jwt.MapClaims{}, nil
 }
 
-func (erroringIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (erroringIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, errors.New("boom: role lookup unavailable")
 }
 

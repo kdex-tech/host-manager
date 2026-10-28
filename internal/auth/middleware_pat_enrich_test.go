@@ -25,7 +25,7 @@ func (patEnrichIdentityProvider) FindInternal(string, string) (jwt.MapClaims, er
 	return jwt.MapClaims{}, nil
 }
 
-func (patEnrichIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (patEnrichIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return []string{"reader"}, []string{"vector_stores:vs_static:read"}, nil
 }
 

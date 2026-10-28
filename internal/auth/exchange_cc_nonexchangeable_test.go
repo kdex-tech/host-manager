@@ -37,7 +37,7 @@ func (ccPivotStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, 
 	return jwt.MapClaims{}, nil
 }
 
-func (ccPivotStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (ccPivotStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return []string{"db-client"}, []string{"functions:/db/v1:call"}, nil
 }
 

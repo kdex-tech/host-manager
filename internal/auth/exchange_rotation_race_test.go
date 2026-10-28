@@ -34,7 +34,7 @@ type rotationStubIdentityProvider struct{}
 func (rotationStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (rotationStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (rotationStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

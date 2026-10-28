@@ -35,7 +35,7 @@ type pkceStubIdentityProvider struct{}
 func (pkceStubIdentityProvider) FindInternal(string, string) (jwt.MapClaims, error) {
 	return jwt.MapClaims{}, nil
 }
-func (pkceStubIdentityProvider) FindInternalRolesAndEntitlements(string) ([]string, []string, error) {
+func (pkceStubIdentityProvider) FindInternalRolesAndEntitlements(BindingSubject, *BindingNames) ([]string, []string, error) {
 	return nil, nil, nil
 }
 

@@ -285,7 +285,8 @@ const (
 //     client_credentials. Because #243 refuses every user identity named
 //     like a client, no user session can pass, even one holding the scope.
 //   - The target must not itself name a client, or the token would carry that
-//     client's KDexRoleBindings (the PAT paths resolve roles by sub, #243).
+//     client's KDexRoleBindings: the PAT paths resolve roles by sub, and
+//     classify a sub naming a client as a Client (#243, #255).
 //   - Ownership is the target's provisionedByClaim, resolved live so that
 //     claiming the account ends the client's right on the next mint.
 //
