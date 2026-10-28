@@ -146,7 +146,7 @@ func TestApitokenMint_AnonymousCallerIsRejectedEvenWithAnonymousGrant(t *testing
 
 func TestApitokenRevoke_SelfServiceGrantCannotRevokeAnotherSubjectsToken(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	victim, _ := tm.MintStatelessKey("aud", "bob", "key-1", "", time.Hour)
+	victim, _ := tm.MintStatelessKey("aud", "bob", "User", "key-1", "", time.Hour)
 
 	rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Token: victim})
 
@@ -169,7 +169,7 @@ func TestApitokenRevoke_SelfServiceGrantCannotRevokeAnotherSubjectByMetadata(t *
 // scoped to the caller's own name satisfied it for any target.
 func TestApitokenRevoke_CallerScopedGrantCannotRevokeAnotherSubjectsToken(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	victim, _ := tm.MintStatelessKey("aud", "bob", "key-1", "", time.Hour)
+	victim, _ := tm.MintStatelessKey("aud", "bob", "User", "key-1", "", time.Hour)
 
 	rr := revokeAs(t, hh, "alice", []any{"apitokens:alice:revoke", "apitokens:alice:revoke-any"}, RevokeRequest{Token: victim})
 
@@ -180,7 +180,7 @@ func TestApitokenRevoke_CallerScopedGrantCannotRevokeAnotherSubjectsToken(t *tes
 
 func TestApitokenRevoke_SelfServiceGrantRevokesOwnToken(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	own, _ := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+	own, _ := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour)
 
 	rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Token: own})
 
@@ -191,7 +191,7 @@ func TestApitokenRevoke_SelfServiceGrantRevokesOwnToken(t *testing.T) {
 
 func TestApitokenRevoke_RevokeAnyGrantRevokesAnotherSubjectsToken(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	victim, _ := tm.MintStatelessKey("aud", "bob", "key-1", "", time.Hour)
+	victim, _ := tm.MintStatelessKey("aud", "bob", "User", "key-1", "", time.Hour)
 
 	rr := revokeAs(t, hh, "ops", []any{"apitokens:bob:revoke-any"}, RevokeRequest{Token: victim})
 

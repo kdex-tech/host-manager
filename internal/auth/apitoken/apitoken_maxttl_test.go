@@ -15,7 +15,7 @@ import (
 func TestMintStatelessKey_RefusesALifetimeAboveMaxTTL(t *testing.T) {
 	tm := subjectlessTokenManager(t).WithMaxTTL(time.Hour)
 
-	token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour+time.Second)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour+time.Second)
 
 	require.ErrorIs(t, err, ErrTTLExceedsMax)
 	assert.Contains(t, err.Error(), "1h0m0s", "the refusal names the maximum")
@@ -25,7 +25,7 @@ func TestMintStatelessKey_RefusesALifetimeAboveMaxTTL(t *testing.T) {
 func TestMintStatelessKey_MintsAtExactlyMaxTTL(t *testing.T) {
 	tm := subjectlessTokenManager(t).WithMaxTTL(time.Hour)
 
-	token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour)
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
@@ -34,7 +34,7 @@ func TestMintStatelessKey_MintsAtExactlyMaxTTL(t *testing.T) {
 func TestMintStatelessKey_UnsetMaxTTLIsUnbounded(t *testing.T) {
 	tm := subjectlessTokenManager(t)
 
-	token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", 100*365*24*time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", 100*365*24*time.Hour)
 
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)

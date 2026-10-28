@@ -1007,6 +1007,16 @@ func TokenHandler(cfg Config) http.HandlerFunc {
 				"iss":            cfg.OIDC.ProviderURL,
 				"aud":            []string{clientID},
 			})
+		} else if rest, ok := strings.CutPrefix(code, "knd:"); ok {
+			// A `knd:<sub>|<kind>` code yields an id_token asserting a `knd`
+			// claim, which a login must never take from the IdP (#255).
+			sub, kind, _ := strings.Cut(rest, "|")
+			idToken, err = cfg.Signer.SignProjected(jwt.MapClaims{
+				"sub": sub,
+				"knd": kind,
+				"iss": cfg.OIDC.ProviderURL,
+				"aud": []string{clientID},
+			})
 		} else {
 			idToken, err = cfg.Signer.Sign(jwt.MapClaims{
 				"sub":   code,

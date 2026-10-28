@@ -83,7 +83,7 @@ func TestProxy_PATBridge_EnrichesFATFromResolvedClaim(t *testing.T) {
 	}
 	handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil)
@@ -120,7 +120,7 @@ func TestProxy_PATBridge_DoesNotReinflateAttenuatedToken(t *testing.T) {
 		"sub":          "api-bob",
 		"entitlements": []any{"resource:r1:read"},
 	})
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil).WithContext(attenuatedCtx)
@@ -162,7 +162,7 @@ func TestProxy_PATBridge_EnrichmentAccumulatesHostAndFunctionMappings(t *testing
 	rec := &recordingAuthChecker{}
 	handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp, rec)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil)

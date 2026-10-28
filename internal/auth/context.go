@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/kdex-tech/host-manager/internal/sign"
 )
 
 // ContextKey is a custom type for context keys to avoid collisions.
@@ -44,6 +45,14 @@ func GetAuthContext(ctx context.Context) (AuthContext, bool) {
 // carries it (seconds, float64), so a mint can tell a credential from before
 // a subject revocation from one after it (#257).
 const ClaimIssuedAt = "iat"
+
+// ClaimSubjectKind is the claim recording the kind of the credential's
+// subject (kdexv1alpha1.SubjectKind), set when the credential is issued and
+// carried from then on. Only a mint sets it: it is in mintDecidedClaims and
+// reservedMintClaims, stripped from an upstream id_token, and re-asserted by
+// the signer after claimMappings. Exchanger.ContextSubjectKind reads it. See
+// kdex-tech/host-manager#255.
+const ClaimSubjectKind = sign.ClaimSubjectKind
 
 // SetAuthContext sets the auth context in the context.
 func SetAuthContext(ctx context.Context, ac AuthContext) context.Context {

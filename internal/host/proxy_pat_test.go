@@ -178,7 +178,7 @@ func TestProxyPAT_BearerResourceBound(t *testing.T) {
 
 	t.Run("resource-bound PAT reaches backend", func(t *testing.T) {
 		handler, tm, backendReached := patProxyFixture(t, idp)
-		pat, err := tm.MintStatelessKey(patProxyResource, "mcp-bob", "act", "scope:x", time.Hour)
+		pat, err := tm.MintStatelessKey(patProxyResource, "mcp-bob", "User", "act", "scope:x", time.Hour)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", patProxyBasePath, nil)
@@ -193,7 +193,7 @@ func TestProxyPAT_BearerResourceBound(t *testing.T) {
 	t.Run("wrong-audience PAT does not reach backend", func(t *testing.T) {
 		handler, tm, backendReached := patProxyFixture(t, idp)
 		// Minted for a DIFFERENT resource (another function's audience).
-		pat, err := tm.MintStatelessKey(patProxyIssuer+"/api/v1/other", "mcp-eve", "act", "scope:x", time.Hour)
+		pat, err := tm.MintStatelessKey(patProxyIssuer+"/api/v1/other", "mcp-eve", "User", "act", "scope:x", time.Hour)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", patProxyBasePath, nil)
@@ -232,7 +232,7 @@ func TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction(t *testing.T) {
 		handler, tm, backendReached := patProxyFixtureFor(t, idp,
 			newReadyFunctionWithOAuth2AndAPIKey(t, patProxyBasePath, scopes))
 		// What the developer-keys UI mints: aud = the host origin.
-		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-bob", "act", "scope:x", time.Hour)
+		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-bob", "User", "act", "scope:x", time.Hour)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", patProxyBasePath, nil)
@@ -248,7 +248,7 @@ func TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction(t *testing.T) {
 		handler, tm, backendReached := patProxyFixtureFor(t, idp,
 			newReadyFunctionWithOAuth2AndAPIKey(t, patProxyBasePath, scopes))
 		// What the DCR/authorization-code flow mints: aud = the resource URI.
-		pat, err := tm.MintStatelessKey(patProxyResource, "mcp-bob", "act", "scope:x", time.Hour)
+		pat, err := tm.MintStatelessKey(patProxyResource, "mcp-bob", "User", "act", "scope:x", time.Hour)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", patProxyBasePath, nil)
@@ -265,7 +265,7 @@ func TestProxyPAT_HostAudienceOnOAuth2APIKeyFunction(t *testing.T) {
 		// audience stays the only acceptable one.
 		handler, tm, backendReached := patProxyFixtureFor(t, idp,
 			newReadyFunctionWithOAuth2(t, patProxyBasePath, scopes))
-		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-eve", "act", "scope:x", time.Hour)
+		pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-eve", "User", "act", "scope:x", time.Hour)
 		require.NoError(t, err)
 
 		req := httptest.NewRequest("POST", patProxyBasePath, nil)

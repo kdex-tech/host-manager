@@ -27,7 +27,7 @@ func TestProxy_FATCarriesHostExtensionGrant(t *testing.T) {
 		resolved: jwt.MapClaims{"extra_grants": []any{"resource:r1:all"}}}
 	handler, tm, fatHeader, _ := apitokenBridgeFixtureWith(t, fn, idp, spec.EffectiveAuth().ClaimMappings)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 	req := httptest.NewRequest("GET", "/v1/api", nil)
 	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: token})
@@ -47,7 +47,7 @@ func TestProxy_FATProjectedWithNoMappings(t *testing.T) {
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
 	handler, tm, fatHeader, _ := apitokenBridgeFixtureWith(t, fn, idp, nil)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 	req := httptest.NewRequest("GET", "/v1/api", nil)
 	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: token})

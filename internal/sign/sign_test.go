@@ -523,6 +523,37 @@ func TestSigner_Project_CarriesAuthMethod(t *testing.T) {
 	assert.NotContains(t, p, "auth_method", "no method in, no method out")
 }
 
+// TestSigner_Project_CarriesSubjectKind pins that knd, the kind of the
+// subject the mint recorded, is a signed claim: the FAT and every exchange
+// built from a token resolve its roles with it (kdex-tech/host-manager#255).
+func TestSigner_Project_CarriesSubjectKind(t *testing.T) {
+	p, err := testSigner(t).Project(jwt.MapClaims{"sub": "svc", sign.ClaimSubjectKind: "Client"})
+	require.NoError(t, err)
+	assert.Equal(t, "Client", p[sign.ClaimSubjectKind])
+
+	p, err = testSigner(t).Project(jwt.MapClaims{"sub": "svc"})
+	require.NoError(t, err)
+	assert.NotContains(t, p, sign.ClaimSubjectKind, "no kind in, no kind out")
+}
+
+// TestSigner_Project_ClaimMappingCannotSetSubjectKind pins that a host
+// claimMappings rule cannot change, add or remove knd: a rule that wrote
+// "User" into a client's token would hand it every [User] binding.
+func TestSigner_Project_ClaimMappingCannotSetSubjectKind(t *testing.T) {
+	s := testSignerWithMapper(t, []dmapper.MappingRule{{
+		SourceExpression: `"User"`,
+		TargetPropPath:   sign.ClaimSubjectKind,
+	}})
+
+	p, err := s.Project(jwt.MapClaims{"sub": "svc", sign.ClaimSubjectKind: "Client"})
+	require.NoError(t, err)
+	assert.Equal(t, "Client", p[sign.ClaimSubjectKind], "the mapper cannot change the mint's kind")
+
+	p, err = s.Project(jwt.MapClaims{"sub": "svc"})
+	require.NoError(t, err)
+	assert.NotContains(t, p, sign.ClaimSubjectKind, "the mapper cannot add a kind the mint did not set")
+}
+
 // TestSigner_Project_ClaimMappingCannotSetAuthMethod pins that a host
 // claimMappings rule cannot change, add or remove auth_method: the mint
 // decides it, and the consent gate trusts it.

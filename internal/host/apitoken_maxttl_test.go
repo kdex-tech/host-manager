@@ -131,7 +131,7 @@ func TestApitokenRevoke_IgnoresAnUnusableTTL(t *testing.T) {
 	for _, ttl := range []string{"90d", "0s", "-1h"} {
 		t.Run(ttl, func(t *testing.T) {
 			hh, tm := crossSubjectHost(t)
-			token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+			token, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -106,7 +106,7 @@ func TestHostHandler_ApitokenRevokeHandler_Forbidden(t *testing.T) {
 	}
 
 	// Token for 'other-user'
-	token, _ := tm.MintStatelessKey("aud", "other-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "other-user", "User", "act", "scope", time.Hour)
 
 	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
@@ -151,7 +151,7 @@ func TestHostHandler_ApitokenRevokeHandler_AuthorizedOwner(t *testing.T) {
 	}
 
 	// Token for 'test-user'
-	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "test-user", "User", "act", "scope", time.Hour)
 
 	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
@@ -182,7 +182,7 @@ func TestHostHandler_ApitokenRevokeHandler_AuthorizedAdmin(t *testing.T) {
 	}
 
 	// Token for 'other-user'
-	token, _ := tm.MintStatelessKey("aud", "other-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "other-user", "User", "act", "scope", time.Hour)
 
 	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
@@ -207,7 +207,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessToken(t *testing.T) {
 	}
 
 	// Token for 'test-user'
-	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "test-user", "User", "act", "scope", time.Hour)
 
 	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
@@ -240,7 +240,7 @@ func TestHostHandler_ApitokenRevokeHandler_SuccessMetadata(t *testing.T) {
 	}
 
 	// Token for 'test-user'
-	token, _ := tm.MintStatelessKey("aud", "test-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "test-user", "User", "act", "scope", time.Hour)
 
 	reqBody, _ := json.Marshal(RevokeRequest{
 		Audience: "aud",

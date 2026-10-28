@@ -184,8 +184,11 @@ func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 //   - auth_method, as in sign.Signer.Project: the proxy projects the FAT
 //     from this context;
 //   - ClaimIssuedAt, which the subject-revocation cutoff compares
-//     (CredentialPredatesRevocation, kdex-tech/host-manager#257).
-var mintDecidedClaims = []string{"auth_method", ClaimIssuedAt}
+//     (CredentialPredatesRevocation, kdex-tech/host-manager#257);
+//   - ClaimSubjectKind, which roles are resolved with: a mapping that set it
+//     to User on a client's context would grant it every [User] binding
+//     (kdex-tech/host-manager#255).
+var mintDecidedClaims = []string{"auth_method", ClaimIssuedAt, ClaimSubjectKind}
 
 type ConfigBuilder struct {
 	APITokenManagerLoader  func() (*apitoken.TokenManager, error)

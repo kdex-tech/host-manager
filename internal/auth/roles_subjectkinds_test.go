@@ -171,7 +171,12 @@ func TestResolveRoles_UnknownBindingKindIsDeadEntry(t *testing.T) {
 
 // TestResolveRoles_UnknownSubjectKindMatchesOnlyUnnarrowed pins the other
 // half: a subject whose kind is unknown or empty gets the bindings without
-// subjectKinds and none narrowed to a kind. The entry point logs it at V(0).
+// subjectKinds and none narrowed to a kind.
+//
+// Only an EMPTY kind is logged at V(0): it marks a site that lost track of its
+// subject's kind. A non-empty unknown kind, such as a ServiceAccount a newer
+// release recorded, is a credential carrying its kind correctly, so it is
+// logged on the site's own resolution line and level.
 func TestResolveRoles_UnknownSubjectKindMatchesOnlyUnnarrowed(t *testing.T) {
 	sp := newKindsScopeProvider(t, nil,
 		kindsBinding("anyone", "*", "any-role"),
@@ -181,14 +186,29 @@ func TestResolveRoles_UnknownSubjectKindMatchesOnlyUnnarrowed(t *testing.T) {
 	ex, err := NewExchanger(context.Background(), Config{}, nil, sp, nil)
 	require.NoError(t, err)
 
-	for _, kind := range []v1alpha1.SubjectKind{"ServiceAccount", ""} {
-		out := captureRoleBindingLog(t, 0)
+	resolve := func(kind v1alpha1.SubjectKind, v int) (string, []string) {
+		out := captureRoleBindingLog(t, v)
 		roles, _, err := ex.ResolveInternalRolesAndEntitlements(BindingSubject{Key: "alice", Kind: kind, Site: SiteWhoami})
 		require.NoError(t, err)
-		assert.Equal(t, []string{"any-role"}, roles, "kind %q", kind)
-		assert.Contains(t, out.String(), `"site"="whoami"`, "an unknown kind %q is logged at V(0)", kind)
 		assert.NotContains(t, out.String(), "alice")
+		return out.String(), roles
 	}
+
+	t.Run("empty", func(t *testing.T) {
+		out, roles := resolve("", 0)
+		assert.Equal(t, []string{"any-role"}, roles)
+		assert.Contains(t, out, `"site"="whoami"`, "an empty kind is logged at V(0)")
+	})
+
+	t.Run("non-empty unknown", func(t *testing.T) {
+		out, roles := resolve("ServiceAccount", 0)
+		assert.Equal(t, []string{"any-role"}, roles)
+		assert.Empty(t, out, "a recorded unknown kind is not a V(0) event")
+
+		out, _ = resolve("ServiceAccount", bindingLogLevel(SiteWhoami))
+		assert.Contains(t, out, `"kind"="ServiceAccount"`, "it is logged on the site's own line")
+		assert.Contains(t, out, `"contributed"=["anyone"]`)
+	})
 }
 
 // TestResolveRoles_LogNeverCarriesKey pins Logging: the role-binding line

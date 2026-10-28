@@ -40,7 +40,7 @@ func subjectlessTokenManager(t *testing.T) *TokenManager {
 func TestMintStatelessKeyRefusesASubjectlessCredential(t *testing.T) {
 	tm := subjectlessTokenManager(t)
 
-	token, err := tm.MintStatelessKey("https://a.example", "", "read", "scope", time.Hour)
+	token, err := tm.MintStatelessKey("https://a.example", "", "User", "read", "scope", time.Hour)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sign.ErrSubjectlessCredential)

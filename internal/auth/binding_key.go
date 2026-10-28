@@ -70,16 +70,20 @@ type BindingNames struct {
 // Exchanger's entry point (ResolveInternalRolesAndEntitlements) and local
 // password login, which resolves inside the provider.
 //
-//   - A kind that is empty or unknown is logged at V(0): it matches only the
-//     bindings without subjectKinds, a subset of the correct answer, so it
-//     marks a site that lost track of its subject's kind.
+//   - An empty kind is logged at V(0): it matches only the bindings without
+//     subjectKinds, a subset of the correct answer, so it marks a site that
+//     lost track of its subject's kind.
+//   - A non-empty kind this release does not know, such as a ServiceAccount a
+//     newer release recorded on a credential, matches the same bindings, but
+//     it is the credential's kind carried correctly, not a site's bug. It is
+//     written on the site's own line, at the site's level.
 //   - Binding names are collected only when the site's level is enabled, so
 //     with the logger off resolution allocates nothing for them.
 //   - The line names the site, the kind and the bindings, never bs.Key.
 func resolveBindings(sp InternalIdentityProvider, bs BindingSubject) ([]string, []string, error) {
-	if !bs.Kind.Known() {
-		bindingKeyLog.Info("resolving roles without a known subject kind; only bindings without subjectKinds can match",
-			"site", bs.Site, "kind", string(bs.Kind))
+	if bs.Kind == "" {
+		bindingKeyLog.Info("resolving roles without a subject kind; only bindings without subjectKinds can match",
+			"site", bs.Site)
 	}
 	log := bindingKeyLog.V(bindingLogLevel(bs.Site))
 	if !log.Enabled() {

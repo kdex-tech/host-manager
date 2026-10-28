@@ -285,8 +285,8 @@ const (
 //     client_credentials. Because #243 refuses every user identity named
 //     like a client, no user session can pass, even one holding the scope.
 //   - The target must not itself name a client, or the token would carry that
-//     client's KDexRoleBindings: the PAT paths resolve roles by sub, and
-//     classify a sub naming a client as a Client (#243, #255).
+//     client's KDexRoleBindings: the PAT paths resolve roles by sub, and the
+//     mint records a sub naming a client as a Client (#243, #255).
 //   - Ownership is the target's provisionedByClaim, resolved live so that
 //     claiming the account ends the client's right on the next mint.
 //
@@ -502,7 +502,19 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, req.Action, req.Scope, ttl)
+	// The PAT records its subject's kind (#255). A self-mint's subject is the
+	// caller, whose credential carries its kind. Another subject's kind is
+	// what it is now: a provisioned subject is never named like a client
+	// (checkProvisioned), so it is a User, and an impersonated one is
+	// classified.
+	var kind kdexv1alpha1.SubjectKind
+	if subject == requestingSub {
+		kind = hh.authExchanger.ContextSubjectKind(ac)
+	} else {
+		kind = hh.authExchanger.SubjectKindOf(subject)
+	}
+
+	token, err := hh.authConfig.TokenManager.MintStatelessKey(audience, subject, kind, req.Action, req.Scope, ttl)
 	if errors.Is(err, apitoken.ErrTTLExceedsMax) {
 		log.V(1).Info("mint refused: ttl above the host maximum", "subject", requestingSub, "target", subject, "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -799,6 +811,10 @@ func (hh *HostHandler) apitokensHandler(mux *http.ServeMux, registeredPaths map[
 											"iss": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 											"jti": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 											"kid": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
+											"knd": &openapi.SchemaRef{Value: &openapi.Schema{
+												Description: "The kind of the token's subject (User or Client). Absent on a token minted before tokens recorded it.",
+												Type:        &openapi.Types{openapi.TypeString},
+											}},
 											"nbf": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeInteger}}},
 											"scp": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},
 											"sub": &openapi.SchemaRef{Value: &openapi.Schema{Type: &openapi.Types{openapi.TypeString}}},

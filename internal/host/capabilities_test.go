@@ -181,12 +181,12 @@ func TestCapabilitiesRoute_AcceptsHostAudienceDeveloperKey(t *testing.T) {
 		return rw.Code
 	}
 
-	hostPAT, err := tm.MintStatelessKey(issuer, "alice", "act", "scope:x", time.Hour)
+	hostPAT, err := tm.MintStatelessKey(issuer, "alice", "User", "act", "scope:x", time.Hour)
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(post(hostPAT)).ToNot(Equal(http.StatusUnauthorized),
 		"a host-audience developer key must authenticate on the REST mint route")
 
-	fnPAT, err := tm.MintStatelessKey(issuer+"/api/v1/files", "eve", "act", "scope:x", time.Hour)
+	fnPAT, err := tm.MintStatelessKey(issuer+"/api/v1/files", "eve", "User", "act", "scope:x", time.Hour)
 	g.Expect(err).ToNot(HaveOccurred())
 	g.Expect(post(fnPAT)).To(Equal(http.StatusUnauthorized),
 		"a function-bound key must NOT become a host identity here")

@@ -555,49 +555,30 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 						// leave the request anonymous and let the gate decide.
 						log.V(1).Info("api token rejected", "function", fn.Name, "err", err.Error())
 					} else {
-						// Reuse the JWT-mint path's subject resolver so PASETO and
-						// JWT callers get identical structured entitlements.
-						roles, ents, rerr := authExchanger.ResolveInternalRolesAndEntitlements(auth.BindingSubject{
-							Key:  data.Subject,
-							Kind: authExchanger.SubjectKindOf(data.Subject),
-							Site: auth.SiteProxyPAT,
-						})
+						// The same context the host PAT middleware builds, resolved
+						// with the kind the PAT records, so PASETO and JWT callers
+						// get identical structured entitlements.
+						ac, rerr := authExchanger.PATAuthContext(r.Context(), data, auth.SiteProxyPAT)
 						if rerr != nil {
 							log.Error(rerr, "failed to resolve api token subject", "function", fn.Name, "subject", data.Subject)
 						} else {
-							ac := auth.AuthContext{
-								"sub":          data.Subject,
-								"roles":        roles,
-								"entitlements": ents,
-								// The token's static scope rides along under its own
-								// key; the structured entitlements above are the
-								// authoritative authz model.
-								"scp":              data.Scope,
-								auth.ClaimIssuedAt: float64(data.IssuedAt),
-								// Mark this identity as PAT-bridge-originated. A PAT
-								// minted through the authorization-code (oauth2) flow
-								// IS an oauth2 authentication, so GetParsedEntitlements
-								// mirrors these role-resolved entitlements into the
-								// "oauth2" scheme bucket — letting this caller satisfy
-								// an operation that declares ONLY {oauth2: [...]}. This
-								// marker is read solely by GetParsedEntitlements and is
-								// scoped to the PAT path; JWT/cookie/apiKey callers
-								// never carry it. See kdex-tech/host-manager §4.
-								auth.PATBridgeClaim: true,
-							}
-							// Resolve the subject's data-driven backend claims FRESH
-							// at request time and merge them (non-conflicting) onto
-							// the authContext. Runs only on the !alreadyLoggedIn
-							// bridge path, so a JWT/cookie caller — including a
-							// downscoped capability token whose attenuated
-							// entitlements WithAuthentication already placed in the
-							// authContext — is never re-resolved or re-inflated here.
-							// See #138.
-							for k, v := range authExchanger.ResolveSubjectClaims(data.Subject) {
-								if _, exists := ac[k]; !exists {
-									ac[k] = v
-								}
-							}
+							// Mark this identity as PAT-bridge-originated. A PAT
+							// minted through the authorization-code (oauth2) flow IS
+							// an oauth2 authentication, so GetParsedEntitlements
+							// mirrors these role-resolved entitlements into the
+							// "oauth2" scheme bucket — letting this caller satisfy an
+							// operation that declares ONLY {oauth2: [...]}. This
+							// marker is read solely by GetParsedEntitlements and is
+							// scoped to the PAT path; JWT/cookie/apiKey callers never
+							// carry it. See kdex-tech/host-manager §4.
+							//
+							// The backend claims PATAuthContext merged are resolved
+							// only on this !alreadyLoggedIn bridge path, so a
+							// JWT/cookie caller — including a downscoped capability
+							// token whose attenuated entitlements WithAuthentication
+							// already placed in the authContext — is never
+							// re-resolved or re-inflated here. See #138.
+							ac[auth.PATBridgeClaim] = true
 							r = r.WithContext(auth.SetAuthContext(r.Context(), ac))
 						}
 					}

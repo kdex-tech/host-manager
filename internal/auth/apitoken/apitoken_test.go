@@ -48,7 +48,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	ttl := 1 * time.Hour
 
 	// 1. Mint a token
-	signed, err := tm.MintStatelessKey(aud, sub, act, scp, ttl)
+	signed, err := tm.MintStatelessKey(aud, sub, "User", act, scp, ttl)
 	require.NoError(t, err)
 
 	// 2. Validate token (should succeed)
@@ -67,7 +67,7 @@ func TestTokenManager_Revocation(t *testing.T) {
 	assert.Contains(t, err.Error(), "token revoked")
 
 	// 5. Mint another token with different metadata
-	signed2, err := tm.MintStatelessKey(aud, sub, "other-act", scp, ttl)
+	signed2, err := tm.MintStatelessKey(aud, sub, "User", "other-act", scp, ttl)
 	require.NoError(t, err)
 
 	// 6. Validate token 2 (should succeed)
@@ -99,7 +99,7 @@ func TestTokenManager_NoCache(t *testing.T) {
 	scp := "test-scp"
 	ttl := 1 * time.Hour
 
-	signed, err := tm.MintStatelessKey(aud, sub, act, scp, ttl)
+	signed, err := tm.MintStatelessKey(aud, sub, "User", act, scp, ttl)
 	require.NoError(t, err)
 
 	// Validate (should succeed)
@@ -152,7 +152,7 @@ func TestTokenManager_Prefix(t *testing.T) {
 		tm, err := NewTokenManager("test-issuer", keyPairs, nil)
 		require.NoError(t, err)
 
-		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		signed, err := tm.MintStatelessKey("aud", "sub", "User", "act", "scp", ttl)
 		require.NoError(t, err)
 
 		assert.True(t, strings.HasPrefix(signed, "v4.public."),
@@ -168,7 +168,7 @@ func TestTokenManager_Prefix(t *testing.T) {
 		require.NoError(t, err)
 		tm.WithTokenPrefix("acme_pat_")
 
-		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		signed, err := tm.MintStatelessKey("aud", "sub", "User", "act", "scp", ttl)
 		require.NoError(t, err)
 
 		// The brand prefix REPLACES the header — "v4.public." must be gone.
@@ -187,7 +187,7 @@ func TestTokenManager_Prefix(t *testing.T) {
 		// tokens issued before the host opted into a prefix.
 		bareTM, err := NewTokenManager("test-issuer", keyPairs, nil)
 		require.NoError(t, err)
-		bare, err := bareTM.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		bare, err := bareTM.MintStatelessKey("aud", "sub", "User", "act", "scp", ttl)
 		require.NoError(t, err)
 		assert.True(t, strings.HasPrefix(bare, "v4.public."))
 
@@ -209,7 +209,7 @@ func TestTokenManager_Prefix(t *testing.T) {
 		require.NoError(t, err)
 		tm.WithTokenPrefix("rsi_tok_")
 
-		signed, err := tm.MintStatelessKey("aud", "sub", "act", "scp", ttl)
+		signed, err := tm.MintStatelessKey("aud", "sub", "User", "act", "scp", ttl)
 		require.NoError(t, err)
 		assert.True(t, strings.HasPrefix(signed, "rsi_tok_"))
 		assert.False(t, strings.Contains(signed, "v4.public."))
@@ -237,7 +237,7 @@ func TestTokenManager_RevokeToken_Errors(t *testing.T) {
 	assert.Error(t, err)
 
 	// Token with unknown KID
-	_, _ = tm.MintStatelessKey("aud", "sub", "act", "scp", 1*time.Hour)
+	_, _ = tm.MintStatelessKey("aud", "sub", "User", "act", "scp", 1*time.Hour)
 	// Manually construct a token with wrong KID in footer? Hard to do without a lot of code.
 	// I'll skip complex token manipulation for now.
 }

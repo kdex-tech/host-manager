@@ -201,12 +201,11 @@ func (hh *HostHandler) writeWhoamiRPC(w http.ResponseWriter, r *http.Request, id
 		// In-memory only: role bindings and the roles->entitlements table are
 		// preloaded, so this is a map lookup plus a regex scan, not a backend
 		// call. It is the same resolution the PAT bridge already performs per
-		// request.
+		// request, with the kind the credential carries, the one enforcement
+		// used (#255).
 		sub, _ := ac["sub"].(string)
 		_, effective, rerr := exchanger.ResolveInternalRolesAndEntitlements(auth.BindingSubject{
-			Key:  sub,
-			Kind: exchanger.SubjectKindOf(sub),
-			Site: auth.SiteWhoami,
+			Key: sub, Kind: exchanger.ContextSubjectKind(ac), Site: auth.SiteWhoami,
 		})
 		if rerr == nil {
 			res = applyEffectiveEntitlements(res, effective)

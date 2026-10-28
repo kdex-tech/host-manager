@@ -51,7 +51,7 @@ func TestApitokenRevokeUnderEntitledGets403WithoutChallenge(t *testing.T) {
 		},
 	}
 
-	token, _ := tm.MintStatelessKey("aud", "other-user", "act", "scope", time.Hour)
+	token, _ := tm.MintStatelessKey("aud", "other-user", "User", "act", "scope", time.Hour)
 	reqBody, _ := json.Marshal(RevokeRequest{Token: token})
 	req := httptest.NewRequest(http.MethodPost, "/-/apitokens/revoke", bytes.NewBuffer(reqBody))
 	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{"sub": "test-user"}))

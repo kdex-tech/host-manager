@@ -101,24 +101,12 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 		return nil, false
 	}
 
-	roles, ents, err := exchanger.ResolveInternalRolesAndEntitlements(BindingSubject{
-		Key:  data.Subject,
-		Kind: exchanger.SubjectKindOf(data.Subject),
-		Site: SiteHostPAT,
-	})
+	// The same context the proxy PAT bridge builds (PATAuthContext), resolved
+	// with the kind the PAT records.
+	ac, err := exchanger.PATAuthContext(ctx, data, SiteHostPAT)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to resolve api token subject", "subject", data.Subject)
 		return nil, false
-	}
-
-	ac := AuthContext{
-		"sub":          data.Subject,
-		"roles":        roles,
-		"entitlements": ents,
-		// The token's static scope rides along under its own key; the
-		// structured entitlements above are the authoritative authz model.
-		"scp":         data.Scope,
-		ClaimIssuedAt: float64(data.IssuedAt),
 	}
 
 	// Deliberately NOT PATBridgeClaim. That marker exists so a PAT can satisfy
@@ -128,17 +116,10 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 	// identity stays in the default (bearer) bucket and grants nothing beyond
 	// what the subject actually holds.
 
-	// Resolve the subject's data-driven backend claims fresh and merge them
-	// non-destructively, matching the proxy bridge (#138).
-	for k, v := range exchanger.ResolveSubjectClaims(data.Subject) {
-		if _, exists := ac[k]; !exists {
-			ac[k] = v
-		}
-	}
-
-	// Fold those source claims into `entitlements` with the host's
-	// ClaimMappings -- the same mapper the session-token signer applies, per
-	// EnrichAuthContext's contract. The merge above lands each claim under its
+	// Fold the subject's backend source claims (merged by PATAuthContext,
+	// #138) into `entitlements` with the host's ClaimMappings -- the same
+	// mapper the session-token signer applies, per EnrichAuthContext's
+	// contract. The merge lands each claim under its
 	// OWN key, so without this the data-driven per-store grants stay invisible
 	// to everything that reads `entitlements`. The function proxy repaired that
 	// on its own path; nothing else did, so /-/check, the page security gate

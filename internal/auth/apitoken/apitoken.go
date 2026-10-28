@@ -79,6 +79,12 @@ const subjectRevocationPrefix = "sub:"
 // host's KDexHost.spec.auth.apiToken.maxTTL. See kdex-tech/host-manager#238.
 var ErrTTLExceedsMax = errors.New("ttl exceeds the host's maximum API token lifetime")
 
+// ErrUnknownSubjectKind is returned when a mint names no subject kind, or one
+// this release does not know: a PAT's kind decides which KDexRoleBindings it
+// gets, so it is recorded only when it can be enforced. See
+// kdex-tech/host-manager#255.
+var ErrUnknownSubjectKind = errors.New("api token subject kind is not a known kind")
+
 type TokenData struct {
 	Action     string `json:"act"`
 	Audience   string `json:"aud"`
@@ -90,6 +96,9 @@ type TokenData struct {
 	NotBefore  int64  `json:"nbf"`
 	Scope      string `json:"scp"`
 	Subject    string `json:"sub"`
+	// SubjectKind is the kind of Subject the mint recorded (sign.ClaimSubjectKind).
+	// It is "" for a PAT minted before PATs recorded one (LEGACY(#268)).
+	SubjectKind kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
 }
 
 type KeyPair struct {
@@ -585,7 +594,11 @@ func revokedNoEarlierThan(revokedAt string, issuedAt time.Time) bool {
 	return !issuedAt.After(at)
 }
 
-func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, scope string, ttl time.Duration) (string, error) {
+// MintStatelessKey mints a PASETO API token for sub, recording kind, the kind
+// of sub, in sign.ClaimSubjectKind. The PAT's roles are resolved with that
+// kind for its whole life, so a kind this release does not know (or none) is
+// refused with ErrUnknownSubjectKind rather than recorded.
+func (tm *TokenManager) MintStatelessKey(aud, sub string, kind kdexv1alpha1.SubjectKind, action, scope string, ttl time.Duration) (string, error) {
 	// FAIL CLOSED, the PASETO half of the JWT rule in sign.Signer. A PAT is a
 	// credential; a credential that names nobody is not a supported
 	// configuration. paseto.Token.SetSubject would happily write `sub: ""`,
@@ -598,6 +611,12 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 			"refusing to mint an API token for a credential that names nobody; "+sign.SubjectlessRemedy,
 			"audience", aud, "action", action)
 		return "", sign.ErrSubjectlessCredential
+	}
+
+	if !kind.Known() {
+		apitokenLog.Error(ErrUnknownSubjectKind, "refusing to mint an API token without a known subject kind",
+			"audience", aud, "action", action, "kind", string(kind))
+		return "", fmt.Errorf("%w: %q", ErrUnknownSubjectKind, kind)
 	}
 
 	// Every mint path signs here, so the host's maximum holds whichever one
@@ -635,6 +654,8 @@ func (tm *TokenManager) MintStatelessKey(aud string, sub string, action string, 
 
 	token.SetString("act", action)
 	token.SetString("scp", scope)
+	// Not part of the jti, so revocation keys do not change with it.
+	token.SetString(sign.ClaimSubjectKind, string(kind))
 
 	token.SetFooter([]byte(`{"kid":"` + tm.activeKey.KeyId + `"}`))
 
@@ -764,17 +785,29 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 		return nil, err
 	}
 
+	// LEGACY(#268): a PAT minted before PATs recorded their kind has no knd,
+	// and decodes with SubjectKind "" for the caller to classify. Once #268's
+	// condition is met, a missing knd is refused like any missing claim. A
+	// present knd that is not a string is malformed, and refused now.
+	var kind string
+	if _, recorded := token.Claims()[sign.ClaimSubjectKind]; recorded {
+		if kind, err = token.GetString(sign.ClaimSubjectKind); err != nil {
+			return nil, err
+		}
+	}
+
 	return &TokenData{
-		Audience:   audience,
-		Expiration: exp.Unix(),
-		IssuedAt:   iat.Unix(),
-		Issuer:     issuer,
-		JTI:        jti,
-		KID:        footerData.KID,
-		NotBefore:  nbf.Unix(),
-		Subject:    subject,
-		Action:     action,
-		Scope:      scope,
+		Audience:    audience,
+		Expiration:  exp.Unix(),
+		IssuedAt:    iat.Unix(),
+		Issuer:      issuer,
+		JTI:         jti,
+		KID:         footerData.KID,
+		NotBefore:   nbf.Unix(),
+		Subject:     subject,
+		Action:      action,
+		Scope:       scope,
+		SubjectKind: kdexv1alpha1.SubjectKind(kind),
 	}, nil
 }
 

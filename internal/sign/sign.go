@@ -74,6 +74,23 @@ const SubjectlessRemedy = "a credential that names nobody is not a supported con
 	"fix the credential source so it supplies a subject -- add a `sub` key to the subject Secret, " +
 	"or return a non-empty `claims.sub` from the credential-check backend"
 
+// ClaimSubjectKind is the claim recording the kind of a credential's subject
+// (kdexv1alpha1.SubjectKind: User or Client), decided once, when the
+// credential is issued, and carried from then on. It is defined here, the
+// lowest package that signs it, so the JWT signer, the PASETO mint and the
+// auth context spell it one way. See kdex-tech/host-manager#255.
+const ClaimSubjectKind = "knd"
+
+// mintDecidedClaims are the claims the mint decides and a claimMappings rule
+// can neither change, add nor remove; Project re-asserts them after the
+// mapper:
+//   - auth_method: the DCR consent gate admits only a browser session by it,
+//     so a rule that wrote "local" into an OAuth client's token would make it
+//     pass as one;
+//   - ClaimSubjectKind: roles are resolved with it, so a rule that wrote
+//     "User" into a client's token would hand it every [User] binding.
+var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
+
 type Signer struct {
 	audience   string
 	duration   time.Duration
@@ -200,7 +217,11 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// session, and a token handed to an OAuth client can be put in the session
 	// cookie, so the method has to travel in the signature. It is re-asserted
 	// after the mapper below.
-	for _, claim := range []string{"auth_method", "email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
+	//
+	// ClaimSubjectKind is the subject's kind, which every resolution of roles
+	// from this token (the FAT, a token exchange of it) uses; it is
+	// re-asserted after the mapper too (#255).
+	for _, claim := range []string{"auth_method", ClaimSubjectKind, "email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val
 		}
@@ -229,13 +250,13 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 
 		maps.Copy(projected, extra)
 
-		// The mint decides auth_method, never a claimMappings rule: a rule
-		// that wrote "local" into an OAuth client's token would make it pass
-		// as a browser session.
-		if method, ok := signingContext["auth_method"]; ok {
-			projected["auth_method"] = method
-		} else {
-			delete(projected, "auth_method")
+		// The mint decides these, never a claimMappings rule.
+		for _, claim := range mintDecidedClaims {
+			if v, ok := signingContext[claim]; ok {
+				projected[claim] = v
+			} else {
+				delete(projected, claim)
+			}
 		}
 	}
 

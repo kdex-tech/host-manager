@@ -114,7 +114,7 @@ func newGlobalOnlyPATFixture(t *testing.T) (http.Handler, *apitoken.TokenManager
 func TestWithAuthentication_HostAudiencePATStaysAnonymous(t *testing.T) {
 	h, tm, observed := newGlobalOnlyPATFixture(t)
 
-	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "read", "", time.Hour)
+	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "User", "read", "", time.Hour)
 	require.NoError(t, err)
 
 	rec := doPATRequest(t, h, pat)
@@ -145,7 +145,7 @@ func doPATRequest(t *testing.T, h http.Handler, token string) *httptest.Response
 func TestWithAPITokenIdentity_HostAudiencePATBecomesAnIdentity(t *testing.T) {
 	h, tm, observed := newHostPATFixture(t)
 
-	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "read", "", time.Hour)
+	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "User", "read", "", time.Hour)
 	require.NoError(t, err)
 
 	rec := doPATRequest(t, h, pat)
@@ -173,7 +173,7 @@ func TestWithAPITokenIdentity_HostAudiencePATBecomesAnIdentity(t *testing.T) {
 func TestWithAPITokenIdentity_FunctionBoundPATStaysAnonymous(t *testing.T) {
 	h, tm, observed := newHostPATFixture(t)
 
-	pat, err := tm.MintStatelessKey(patFunctionAud, "alice@example.com", "read", "", time.Hour)
+	pat, err := tm.MintStatelessKey(patFunctionAud, "alice@example.com", "User", "read", "", time.Hour)
 	require.NoError(t, err)
 
 	rec := doPATRequest(t, h, pat)
@@ -200,7 +200,7 @@ func TestWithAPITokenIdentity_UnusablePATStaysAnonymous(t *testing.T) {
 		{
 			name: "expired host-audience token",
 			token: func(tm *apitoken.TokenManager) string {
-				tok, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "read", "", -time.Hour)
+				tok, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "User", "read", "", -time.Hour)
 				require.NoError(t, err)
 				return tok
 			},
@@ -243,7 +243,7 @@ func TestWithAuthentication_PATCannotReachAuthorizeIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			*observed = nil
-			pat, err := tm.MintStatelessKey(tc.aud, "alice@example.com", "read", "", time.Hour)
+			pat, err := tm.MintStatelessKey(tc.aud, "alice@example.com", "User", "read", "", time.Hour)
 			require.NoError(t, err)
 
 			doPATRequest(t, h, pat)

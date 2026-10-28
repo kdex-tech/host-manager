@@ -139,7 +139,7 @@ func TestProxyPAT_HostAudiencePAT_ReachesOAuth2DeclaredFunction(t *testing.T) {
 	handler, tm, backendReached := realGateFixture(t,
 		newReadyFunctionOAuth2AndAPIKeyNoBearer(t, patProxyBasePath, scopes), idp)
 
-	pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-bob", "act", "scope:x", time.Hour)
+	pat, err := tm.MintStatelessKey(patProxyHostAud, "mcp-bob", "User", "act", "scope:x", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, patProxyBasePath, nil)

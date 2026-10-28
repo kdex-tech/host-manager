@@ -32,7 +32,7 @@ func valkeyTokenManager(t *testing.T) (*TokenManager, cache.CacheManager) {
 func TestRevocation_SurvivesHostReconfigurations(t *testing.T) {
 	ctx := context.Background()
 	tm, cm := valkeyTokenManager(t)
-	token, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
 
@@ -53,7 +53,7 @@ func TestRevocation_LegacyClassIsReadAndWritten(t *testing.T) {
 	legacy := cm.GetCache(LegacyRevocationClass, cache.CacheOptions{})
 
 	t.Run("read", func(t *testing.T) {
-		token, err := tm.MintStatelessKey("aud", "bob", "ci", "", time.Hour)
+		token, err := tm.MintStatelessKey("aud", "bob", "User", "ci", "", time.Hour)
 		require.NoError(t, err)
 		time.Sleep(time.Millisecond)
 		require.NoError(t, legacy.Set(ctx, GenerateJTI("aud", "bob", "ci"),
@@ -76,7 +76,7 @@ func TestRevokeSubject_RevokesEveryTokenIssuedUpToIt(t *testing.T) {
 	tm, _ := valkeyTokenManager(t)
 	mint := func(aud, sub, act string) string {
 		t.Helper()
-		token, err := tm.MintStatelessKey(aud, sub, act, "", time.Hour)
+		token, err := tm.MintStatelessKey(aud, sub, "User", act, "", time.Hour)
 		require.NoError(t, err)
 		return token
 	}
@@ -167,7 +167,7 @@ func TestAdoptStrandedRevocations(t *testing.T) {
 	legacy := cm.GetCache(LegacyRevocationClass, cache.CacheOptions{})
 	at := func(d time.Duration) string { return time.Now().Add(d).UTC().Format(time.RFC3339Nano) }
 
-	stranded, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	stranded, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 
 	require.NoError(t, cm.Cycle("g1", false))
@@ -239,7 +239,7 @@ func TestAdoptStrandedRevocations_DoesNotReimposeAnUntimedRevocation(t *testing.
 	require.NoError(t, cm.Cycle("g2", false))
 	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
 	time.Sleep(time.Millisecond)
-	reminted, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	reminted, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 
 	_, err = tm.AdoptStrandedRevocations(ctx, cm)

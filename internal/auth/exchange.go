@@ -21,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/cel-go/cel"
 	"github.com/kdex-tech/dmapper"
+	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
@@ -353,8 +354,8 @@ func NewExchanger(
 // KDexRole/KDexRoleBinding resolution (scopeProvider.FindInternalRolesAndEntitlements).
 // It is the single entry point every site but local password login resolves
 // through (that one resolves inside the provider, through the same
-// resolveBindings), so it is where an empty or unknown kind is logged at V(0)
-// and where the site's role-binding line is written. Returns empty slices
+// resolveBindings), so it is where an empty kind is logged at V(0) and where
+// the site's role-binding line is written. Returns empty slices
 // (fail-closed) when no identity provider is wired. See
 // kdex-tech/host-manager#103 and #255.
 func (e *Exchanger) ResolveInternalRolesAndEntitlements(bs BindingSubject) ([]string, []string, error) {
@@ -514,12 +515,10 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// `email`. RoleBindingClaim v1 is scoped to login/refresh/auth-code (the
 	// paths that replay a login-time IdP-claims snapshot); token-exchange
 	// keeps resolving roles by `sub` regardless, so this call stays (sub, sub)
-	// and its behavior is unchanged. The kind is classified from sub (#255).
-	roles, ents, backend, rerr := e.subjectSigningContext(sub, BindingSubject{
-		Key:  sub,
-		Kind: e.SubjectKindOf(sub),
-		Site: SiteTokenExchange,
-	})
+	// and its behavior is unchanged. The kind is the one the FAT carries, and
+	// the exchanged token carries it on (#255).
+	kind := e.ContextSubjectKind(AuthContext(claims))
+	roles, ents, backend, rerr := e.subjectSigningContext(sub, BindingSubject{Key: sub, Kind: kind, Site: SiteTokenExchange})
 	if rerr != nil {
 		return TokenSet{}, fmt.Errorf("%w: failed to resolve entitlements for %s: %v", ErrServerError, sub, rerr)
 	}
@@ -537,9 +536,10 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	}
 
 	signingContext := jwt.MapClaims{
-		"sub":          sub,
-		"roles":        roles,
-		"entitlements": ents,
+		"sub":            sub,
+		"roles":          roles,
+		"entitlements":   ents,
+		ClaimSubjectKind: string(kind),
 	}
 	if actorAud != "" {
 		signingContext["act"] = map[string]any{"sub": actorAud}
@@ -610,7 +610,9 @@ func (e *Exchanger) Roles() []RoleInfo {
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
 // resource. The PAT's aud is the resource URI (RFC 8707); the subject's
 // entitlements are NOT baked in — the proxy re-resolves them from the
-// subject's KDexRoleBindings at request time.
+// subject's KDexRoleBindings at request time. Its subject is the person who
+// authorized the resource (an authorization_code or refresh_token grant), so
+// it records the kind User (#255).
 //
 // ttl is the server's choice, not a caller's, so it is capped at the host's
 // maximum API token lifetime rather than refused; the returned duration is the
@@ -620,7 +622,7 @@ func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Du
 		return "", 0, fmt.Errorf("no token manager configured")
 	}
 	ttl = e.config.TokenManager.CapTTL(ttl)
-	pat, err := e.config.TokenManager.MintStatelessKey(resource, subject, "mcp", scope, ttl)
+	pat, err := e.config.TokenManager.MintStatelessKey(resource, subject, kdexv1alpha1.SubjectKindUser, "mcp", scope, ttl)
 	return pat, ttl, err
 }
 
@@ -712,6 +714,10 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// browser session, which the DCR consent gate admits (isBrowserSession).
 	// The refresh record below carries the same method, so rotation keeps it.
 	signingContext["auth_method"] = string(AuthMethodOIDC)
+	// The kind is this host's to record, never the IdP's: an id_token
+	// asserting `knd: Client` must not get a person a client's bindings. It
+	// is set below, from the binding subject (#255).
+	delete(signingContext, ClaimSubjectKind)
 
 	sub, err := signingContext.GetSubject()
 	// `err != nil` alone never fired for the case this check was written for.
@@ -754,6 +760,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 		return TokenSet{}, err
 	}
 
+	signingContext[ClaimSubjectKind] = string(bs.Kind)
 	signingContext["roles"] = mergeIDPList(signingContext["roles"], roles)
 	signingContext["entitlements"] = mergeIDPList(signingContext["entitlements"], entitlements)
 
@@ -1059,10 +1066,11 @@ func (e *Exchanger) buildClientSigningContext(ctx context.Context, clientID, cli
 	}
 
 	signingContext := jwt.MapClaims{
-		"sub":         clientID,
-		"azp":         clientID,
-		"auth_method": string(AuthMethodOAuth2),
-		"grant_type":  GRANT_TYPE_CLIENT_CREDENTIALS,
+		"sub":            clientID,
+		"azp":            clientID,
+		"auth_method":    string(AuthMethodOAuth2),
+		"grant_type":     GRANT_TYPE_CLIENT_CREDENTIALS,
+		ClaimSubjectKind: string(clientBindingSubject(clientID).Kind),
 	}
 
 	// Determine granted scopes, filtered by the client's AllowedScopes if configured.
@@ -1286,6 +1294,10 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	default:
 		return failed("unsupported local login auth method: %s", authMethod)
 	}
+	// A password login is a person's, whatever the credential store said:
+	// the strip above removed any knd it supplied, and a sub naming a client
+	// was refused (#243, #255).
+	signingContext[ClaimSubjectKind] = string(kdexv1alpha1.SubjectKindUser)
 
 	// Determine granted scopes; claim confinement of the scope-controlled
 	// families (email/profile/entitlements/roles) happens post-mapper in
@@ -2013,10 +2025,14 @@ var reservedMintClaims = map[string]struct{}{
 	// applies the mapper output last and does not consult reservedMintClaims (the
 	// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
 	// the mapper output against reserved claims in Project is tracked separately;
-	// auth_method alone is already re-asserted there, since the DCR consent gate
-	// trusts it.
+	// auth_method and ClaimSubjectKind are already re-asserted there, since the
+	// DCR consent gate and role resolution trust them.
 	// See the #206 quad (SEC-2) and its re-review (RR-2).
 	"act": {},
+	// The subject's kind is decided by the mint (#255): a backend, an IdP
+	// snapshot or a stored claim that set it would choose which
+	// KDexRoleBindings the credential gets.
+	ClaimSubjectKind: {},
 }
 
 // mergeBackendClaims folds a subject's data-driven backend claims into the
@@ -2159,10 +2175,11 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	}
 
 	signingContext := jwt.MapClaims{
-		"sub":          claims.Subject,
-		"auth_method":  string(claims.AuthMethod),
-		"roles":        roles,
-		"entitlements": entitlements,
+		"sub":            claims.Subject,
+		"auth_method":    string(claims.AuthMethod),
+		"roles":          roles,
+		"entitlements":   entitlements,
+		ClaimSubjectKind: string(bs.Kind),
 	}
 	mergeBackendClaims(signingContext, backend)
 
@@ -2251,8 +2268,9 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	}
 
 	signingContext := jwt.MapClaims{
-		"auth_method": string(authMethod),
-		"sub":         subject,
+		"auth_method":    string(authMethod),
+		"sub":            subject,
+		ClaimSubjectKind: string(bs.Kind),
 	}
 
 	// Replay what the IdP asserted at login, then union its roles/entitlements
@@ -2500,6 +2518,71 @@ func (e *Exchanger) SubjectKindOf(sub string) kdexv1alpha1.SubjectKind {
 		return kdexv1alpha1.SubjectKindClient
 	}
 	return kdexv1alpha1.SubjectKindUser
+}
+
+// ContextSubjectKind is the kind of the subject of the credential behind ac:
+// the kind the credential carries (ClaimSubjectKind), recorded when it was
+// issued. It is the one place a credential's kind is read, so enforcement,
+// a self-mint and whoami agree on it.
+//
+// A carried kind this release does not know, such as a future
+// ServiceAccount, is returned as it is: it then matches only the bindings
+// without subjectKinds, never one narrowed to a kind, which is the safe
+// answer for a kind this host cannot enforce. Reclassifying it from the sub
+// would hand it a [User] binding.
+//
+// LEGACY(#268): a credential issued before credentials carried their kind
+// carries none. It is a Client when it is a client_credentials token, whose
+// subject is the client even after the client is removed, else the kind of
+// its sub (SubjectKindOf).
+func (e *Exchanger) ContextSubjectKind(ac AuthContext) kdexv1alpha1.SubjectKind {
+	if kind, _ := ac[ClaimSubjectKind].(string); kind != "" {
+		return kdexv1alpha1.SubjectKind(kind)
+	}
+	if _, ok := ac.ClientCredentialsSubject(); ok { // LEGACY(#268)
+		return kdexv1alpha1.SubjectKindClient
+	}
+	sub, _ := ac["sub"].(string)
+	return e.SubjectKindOf(sub) // LEGACY(#268)
+}
+
+// PATAuthContext builds the auth context of a validated API token: its
+// subject, the roles and entitlements its KDexRoleBindings grant it under
+// site, its static scope (scp), its issue time and its kind, plus the
+// subject's data-driven backend claims, which never overwrite those nor set a
+// reservedMintClaim. The host PAT middleware and the proxy PAT bridge both
+// build their identity here and add only what differs: the middleware's
+// claimMappings enrichment, the bridge's PATBridgeClaim.
+//
+// The kind is the one the PAT records, carried even when this release does
+// not know it, as in ContextSubjectKind. LEGACY(#268): a PAT minted before
+// PATs recorded their kind falls back to the kind of its sub.
+//
+// The resolution's role-binding line is written under site. The context is
+// the request's; nothing reads it yet.
+func (e *Exchanger) PATAuthContext(_ context.Context, data *apitoken.TokenData, site string) (AuthContext, error) {
+	kind := data.SubjectKind
+	if kind == "" { // LEGACY(#268)
+		kind = e.SubjectKindOf(data.Subject)
+	}
+	roles, ents, err := e.ResolveInternalRolesAndEntitlements(BindingSubject{Key: data.Subject, Kind: kind, Site: site})
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve the roles of an api token's subject: %w", err)
+	}
+	ac := AuthContext{
+		"sub":          data.Subject,
+		"roles":        roles,
+		"entitlements": ents,
+		// The token's static scope rides along under its own key; the
+		// structured entitlements above are the authoritative authz model.
+		"scp":            data.Scope,
+		ClaimIssuedAt:    float64(data.IssuedAt),
+		ClaimSubjectKind: string(kind),
+	}
+	// Resolved fresh, so a backend grant made since the PAT was minted
+	// applies (#138).
+	mergeBackendClaims(jwt.MapClaims(ac), e.ResolveSubjectClaims(data.Subject))
+	return ac, nil
 }
 
 // clientBindingSubject is the binding subject of an authenticated

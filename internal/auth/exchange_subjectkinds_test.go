@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
@@ -190,23 +191,164 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 		expect(t, p.take(), SiteClientCredentials, cl)
 	})
 
+	// The FAT and PAT sites resolve with the kind the credential carries, so
+	// each is driven with a Client, a User, and a carried kind the classifier
+	// would contradict (alice recorded as a Client), which must win.
+	carried := []struct {
+		name string
+		sub  string
+		kind v1alpha1.SubjectKind
+	}{
+		{"a Client", kindsClientID, cl},
+		{"a User", "alice", user},
+		{"a carried kind wins over the classifier", "alice", cl},
+	}
+
 	t.Run("token exchange", func(t *testing.T) {
 		fatSigner, err := sign.NewSigner("https://fn-a.example", time.Hour, "test-iss", &cs, "test-kid", nil)
 		require.NoError(t, err)
-		fat, err := fatSigner.Sign(jwt.MapClaims{"sub": kindsClientID})
-		require.NoError(t, err)
-		_, err = ex.ExchangeSubjectToken(fat, "https://fn-b.example")
-		require.NoError(t, err)
-		expect(t, p.take(), SiteTokenExchange, cl)
+		for _, tc := range carried {
+			t.Run(tc.name, func(t *testing.T) {
+				fat, err := fatSigner.Sign(jwt.MapClaims{"sub": tc.sub, ClaimSubjectKind: string(tc.kind)})
+				require.NoError(t, err)
+				ts, err := ex.ExchangeSubjectToken(fat, "https://fn-b.example")
+				require.NoError(t, err)
+				expect(t, p.take(), SiteTokenExchange, tc.kind)
+				assert.Equal(t, string(tc.kind), claimsOf(t, ts.AccessToken)[ClaimSubjectKind],
+					"the exchanged token carries the kind on")
+			})
+		}
+		t.Run("a kind-less FAT falls back to the classifier", func(t *testing.T) { // LEGACY(#268)
+			fat, err := fatSigner.Sign(jwt.MapClaims{"sub": kindsClientID})
+			require.NoError(t, err)
+			_, err = ex.ExchangeSubjectToken(fat, "https://fn-b.example")
+			require.NoError(t, err)
+			expect(t, p.take(), SiteTokenExchange, cl)
+		})
 	})
 
 	t.Run("host pat", func(t *testing.T) {
-		pat, err := tm.MintStatelessKey(cfg.Audience, kindsClientID, "read", "", time.Hour)
-		require.NoError(t, err)
-		_, ok := cfg.hostPATIdentity(ctx, pat, ex)
-		require.True(t, ok)
-		expect(t, p.take(), SiteHostPAT, cl)
+		for _, tc := range carried {
+			t.Run(tc.name, func(t *testing.T) {
+				pat, err := tm.MintStatelessKey(cfg.Audience, tc.sub, tc.kind, "read", "", time.Hour)
+				require.NoError(t, err)
+				ac, ok := cfg.hostPATIdentity(ctx, pat, ex)
+				require.True(t, ok)
+				expect(t, p.take(), SiteHostPAT, tc.kind)
+				assert.Equal(t, string(tc.kind), ac[ClaimSubjectKind])
+			})
+		}
 	})
+}
+
+// TestIssuedTokens_CarryKind pins that every token a login or grant issues
+// records its subject's kind in knd: User for a person, Client for a
+// client_credentials client. See kdex-tech/host-manager#255.
+func TestIssuedTokens_CarryKind(t *testing.T) {
+	ctx := context.Background()
+	_, ex, _, _ := newKindsSiteExchanger(t, &kindRecordingProvider{})
+	kindOf := func(t *testing.T, token string) any {
+		t.Helper()
+		return claimsOf(t, token)[ClaimSubjectKind]
+	}
+
+	t.Run("local login", func(t *testing.T) {
+		ts, err := ex.LoginLocal(ctx, "alice", "pw", "", "", AuthMethodLocal)
+		require.NoError(t, err)
+		assert.Equal(t, "User", kindOf(t, ts.AccessToken))
+	})
+
+	t.Run("oidc login", func(t *testing.T) {
+		oex := newKindsOIDCExchanger(t, &kindRecordingProvider{}, "")
+		oidcTokens, err := oex.ExchangeCode(ctx, "alice")
+		require.NoError(t, err)
+		ts, err := oex.ExchangeToken(ctx, oidcTokens)
+		require.NoError(t, err)
+		assert.Equal(t, "User", kindOf(t, ts.AccessToken))
+	})
+
+	t.Run("auth-code redeem", func(t *testing.T) {
+		code, err := ex.CreateAuthorizationCode(ctx, AuthorizationCodeClaims{
+			AuthMethod: AuthMethodOAuth2, ClientID: kindsAppClientID, RedirectURI: kindsRedirectURI,
+			Subject: "alice", Exp: time.Now().Add(time.Minute).Unix(), Scope: "openid roles",
+		})
+		require.NoError(t, err)
+		ts, err := ex.RedeemAuthorizationCode(ctx, code, kindsAppClientID, kindsRedirectURI, "")
+		require.NoError(t, err)
+		assert.Equal(t, "User", kindOf(t, ts.AccessToken))
+		assert.Equal(t, "User", kindOf(t, ts.IDToken))
+	})
+
+	t.Run("refresh", func(t *testing.T) {
+		seedRefreshToken(t, ex, "kinds-issued-refresh", RefreshTokenClaims{
+			ClientID: kindsAppClientID, Subject: "alice", AuthMethod: AuthMethodLocal, Scope: "openid",
+			ExpiresAt: time.Now().Add(time.Hour).Unix(), OriginalIssuedAt: time.Now().Unix(),
+		})
+		ts, err := ex.RedeemRefreshToken(ctx, "kinds-issued-refresh", kindsAppClientID)
+		require.NoError(t, err)
+		assert.Equal(t, "User", kindOf(t, ts.AccessToken))
+	})
+
+	t.Run("client_credentials", func(t *testing.T) {
+		ts, err := ex.LoginClient(ctx, kindsClientID, "s3cret", "")
+		require.NoError(t, err)
+		// LoginClientResource builds the same signing context
+		// (buildClientSigningContext), so this covers it too.
+		assert.Equal(t, "Client", kindOf(t, ts.AccessToken))
+	})
+}
+
+// TestKindClaim_NotInjectable pins that knd is the mint's alone: neither an
+// upstream IdP nor a claimMappings rule can choose it. See
+// kdex-tech/host-manager#255.
+func TestKindClaim_NotInjectable(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an id_token's knd never reaches the session", func(t *testing.T) {
+		ex := newKindsOIDCExchanger(t, &kindRecordingProvider{}, "")
+		oidcTokens, err := ex.ExchangeCode(ctx, "knd:alice|Client")
+		require.NoError(t, err)
+		ts, err := ex.ExchangeToken(ctx, oidcTokens)
+		require.NoError(t, err)
+		assert.Equal(t, "User", claimsOf(t, ts.AccessToken)[ClaimSubjectKind])
+
+		require.NotEmpty(t, ts.RefreshToken, "precondition: the session can rotate")
+		rotated, err := ex.RedeemRefreshToken(ctx, ts.RefreshToken, "")
+		require.NoError(t, err)
+		assert.Equal(t, "User", claimsOf(t, rotated.AccessToken)[ClaimSubjectKind],
+			"the refresh record's IdP snapshot does not carry it either")
+	})
+
+	setter := []dmapper.MappingRule{{SourceExpression: `"User"`, TargetPropPath: ClaimSubjectKind}}
+
+	t.Run("a claimMapping cannot change the signed token's knd", func(t *testing.T) {
+		_, ex, _, cs := newKindsSiteExchanger(t, &kindRecordingProvider{})
+		mapped, err := sign.NewSigner("test-aud", time.Hour, "test-iss", &cs, "test-kid", mustMapper(t, setter))
+		require.NoError(t, err)
+		ex.config.Signer = *mapped
+
+		ts, err := ex.LoginClient(ctx, kindsClientID, "s3cret", "")
+		require.NoError(t, err)
+		assert.Equal(t, "Client", claimsOf(t, ts.AccessToken)[ClaimSubjectKind])
+	})
+
+	t.Run("a claimMapping cannot change, add or remove a context's knd", func(t *testing.T) {
+		mapper := mustMapper(t, setter)
+		ac := AuthContext{"sub": "svc", ClaimSubjectKind: "Client"}
+		EnrichAuthContext(ac, mapper)
+		assert.Equal(t, "Client", ac[ClaimSubjectKind])
+
+		ac = AuthContext{"sub": "svc"}
+		EnrichAuthContext(ac, mapper)
+		assert.NotContains(t, ac, ClaimSubjectKind)
+	})
+}
+
+func mustMapper(t *testing.T, rules []dmapper.MappingRule) *dmapper.Mapper {
+	t.Helper()
+	m, err := dmapper.NewMapper(rules)
+	require.NoError(t, err)
+	return m
 }
 
 // newKindsOIDCExchanger builds an Exchanger behind a mock OIDC provider, as

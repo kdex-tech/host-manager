@@ -18,13 +18,13 @@ func TestRevokeByMetadata_RevokesTokensIssuedUpToTheRevocationOnly(t *testing.T)
 	ctx := context.Background()
 	tm := subjectlessTokenManager(t)
 
-	before, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	before, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", 0))
 	// iat carries sub-second precision, so a key re-minted in the same second
 	// as the revocation is not revoked on arrival.
 	time.Sleep(time.Millisecond)
-	after, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	after, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 
 	_, err = tm.ValidateToken(ctx, before, "aud")
@@ -36,7 +36,7 @@ func TestRevokeByMetadata_RevokesTokensIssuedUpToTheRevocationOnly(t *testing.T)
 func TestRevokeByMetadata_CannotBeShortened(t *testing.T) {
 	ctx := context.Background()
 	tm := subjectlessTokenManager(t)
-	token, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 
 	require.NoError(t, tm.RevokeByMetadata(ctx, "aud", "alice", "laptop", time.Millisecond))
@@ -50,7 +50,7 @@ func TestRevokeByMetadata_CannotBeShortened(t *testing.T) {
 func TestValidateToken_LegacyRevocationStillRevokes(t *testing.T) {
 	ctx := context.Background()
 	tm := subjectlessTokenManager(t)
-	token, err := tm.MintStatelessKey("aud", "alice", "laptop", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "laptop", "", time.Hour)
 	require.NoError(t, err)
 	require.NoError(t, tm.revocationCache.Set(ctx, GenerateJTI("aud", "alice", "laptop"), "revoked"))
 

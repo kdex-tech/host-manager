@@ -39,7 +39,7 @@ func TestValidateToken_EnforcesAudience(t *testing.T) {
 	tm, err := NewTokenManager("test-issuer", GenerateDevmodeKeyPair(), cm.GetCache("revocation", cache.CacheOptions{}))
 	require.NoError(t, err)
 
-	signed, err := tm.MintStatelessKey("https://a.example", "alice", "read", "scope", time.Hour)
+	signed, err := tm.MintStatelessKey("https://a.example", "alice", "User", "read", "scope", time.Hour)
 	require.NoError(t, err)
 
 	t.Run("wrong expected audience is rejected", func(t *testing.T) {

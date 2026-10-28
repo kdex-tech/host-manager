@@ -97,7 +97,7 @@ func TestHostPAT_EntitlementsAreClaimMappingEnriched(t *testing.T) {
 	})
 	h := cfg.WithAPITokenIdentity(ex)(cfg.WithAuthentication(ex)(sink))
 
-	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "read", "", time.Hour)
+	pat, err := tm.MintStatelessKey(patHostAudience, "alice@example.com", "User", "read", "", time.Hour)
 	require.NoError(t, err)
 
 	rec := doPATRequest(t, h, pat)

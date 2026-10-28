@@ -98,6 +98,11 @@ func apitokenBridgeFixtureFor(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp a
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	var signerKey crypto.Signer = priv
+	// An exCfg with its own key pair signs the FAT with it, so the test's
+	// Exchanger can verify (and exchange) the FAT the proxy mints.
+	if exCfg.ActivePair != nil {
+		signerKey = exCfg.ActivePair.Private
+	}
 
 	cacheManager, _ := cache.NewCacheManager("", "apitoken-bridge-test", nil)
 	tm, err := apitoken.NewTokenManager("api-token-issuer", apitoken.GenerateDevmodeKeyPair(), nil)
@@ -177,7 +182,7 @@ func TestProxy_APITokenBridge_MintsFAT(t *testing.T) {
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
 	handler, tm, fatHeader, apiTokenCookie := apitokenBridgeFixture(t, fn, idp)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil)
@@ -203,7 +208,7 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 	t.Run("header", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
 		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
-		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
+		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api", nil)
 		req.Header.Set("X-API-TOKEN", token)
@@ -214,7 +219,7 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 	t.Run("query", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
 		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
-		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
+		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api?api_token="+token, nil)
 		handler.ServeHTTP(httptest.NewRecorder(), req)
@@ -230,7 +235,7 @@ func TestProxy_APITokenBridge_NoOptIn(t *testing.T) {
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
 	handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("GET", "/v1/api", nil)
@@ -262,7 +267,7 @@ func TestProxy_APITokenBridge_JWTWins(t *testing.T) {
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
 	handler, tm, fatHeader, apiTokenCookie := apitokenBridgeFixture(t, fn, idp)
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "s", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 	require.NoError(t, err)
 
 	jwtCtx := auth.SetAuthContext(t.Context(), auth.AuthContext{

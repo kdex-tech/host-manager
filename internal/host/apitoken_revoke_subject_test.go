@@ -25,9 +25,9 @@ import (
 
 func TestApitokenRevoke_AllRevokesEveryTokenForTheSubject(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	recorded, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+	recorded, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour)
 	require.NoError(t, err)
-	unrecorded, err := tm.MintStatelessKey("other-aud", "alice", "minted-directly", "", time.Hour)
+	unrecorded, err := tm.MintStatelessKey("other-aud", "alice", "User", "minted-directly", "", time.Hour)
 	require.NoError(t, err)
 
 	rr := revokeAs(t, hh, "purger", []any{"apitokens:alice:revoke-any"}, RevokeRequest{Sub: "alice", All: true})
@@ -41,7 +41,7 @@ func TestApitokenRevoke_AllRevokesEveryTokenForTheSubject(t *testing.T) {
 
 func TestApitokenRevoke_AllForYourselfNeedsOnlyTheSelfServiceGrant(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	token, err := tm.MintStatelessKey("aud", "alice", "key-1", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "alice", "User", "key-1", "", time.Hour)
 	require.NoError(t, err)
 
 	rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Sub: "alice", All: true})
@@ -53,7 +53,7 @@ func TestApitokenRevoke_AllForYourselfNeedsOnlyTheSelfServiceGrant(t *testing.T)
 
 func TestApitokenRevoke_AllForAnotherSubjectNeedsRevokeAny(t *testing.T) {
 	hh, tm := crossSubjectHost(t)
-	token, err := tm.MintStatelessKey("aud", "admin", "key-1", "", time.Hour)
+	token, err := tm.MintStatelessKey("aud", "admin", "User", "key-1", "", time.Hour)
 	require.NoError(t, err)
 
 	rr := revokeAs(t, hh, "alice", selfServiceGrant, RevokeRequest{Sub: "admin", All: true})
@@ -181,7 +181,7 @@ func TestProxy_APITokenIdentityCarriesIssuedAt(t *testing.T) {
 	require.NoError(t, cutoffTM.RevokeSubject(t.Context(), "api-bob", 0))
 	time.Sleep(1100 * time.Millisecond) // iat is whole seconds
 
-	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "act", "scope:abc", time.Hour)
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
 	require.NoError(t, err)
 	req := httptest.NewRequest("GET", "/v1/api", nil)
 	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: token})

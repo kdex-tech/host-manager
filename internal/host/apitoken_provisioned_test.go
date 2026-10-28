@@ -46,7 +46,9 @@ func (p provisioningLookup) ResolveClaimsWithError(subject string) (jwt.MapClaim
 	return p.claims[subject], nil
 }
 
-func provisioningHost(t *testing.T, lookup provisioningLookup) *HostHandler {
+// provisioningHost is a host whose exchanger resolves through lookup: a
+// provisioningLookup, or any provider that also resolves claims.
+func provisioningHost(t *testing.T, lookup auth.InternalIdentityProvider) *HostHandler {
 	t.Helper()
 	hh, _ := crossSubjectHost(t)
 	cm, err := cache.NewCacheManager("", "provisioned-mint-237", nil)
