@@ -2572,13 +2572,10 @@ func (e *Exchanger) ContextSubjectKind(ac AuthContext) kdexv1alpha1.SubjectKind 
 // The resolution's role-binding line, and a refusal's line, are written
 // under site. The context is the request's; nothing reads it yet.
 func (e *Exchanger) PATAuthContext(_ context.Context, data *apitoken.TokenData, site string) (AuthContext, error) {
-	kind := data.SubjectKind
-	if kind == "" { // LEGACY(#268)
-		kind = e.SubjectKindOf(data.Subject)
-	}
-	if err := e.vetoCredential(data.Subject, kind, site); err != nil {
+	if err := e.VetoPAT(data, site); err != nil {
 		return nil, err
 	}
+	kind := e.patSubjectKind(data)
 	roles, ents, err := e.ResolveInternalRolesAndEntitlements(BindingSubject{Key: data.Subject, Kind: kind, Site: site})
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve the roles of an api token's subject: %w", err)
@@ -2607,10 +2604,15 @@ var ErrCredentialKindRefused = errors.New("credential kind refused by current co
 var vetoLog = logf.Log.WithName("subject-kind-veto")
 
 // SiteHostJWT names the host JWT gate (Config.WithAuthentication) in the
-// veto's line. It resolves no roles, so it is not one of the role-resolution
-// sites; the veto's other sites are (SiteHostPAT, SiteProxyPAT,
-// SiteTokenExchange).
+// veto's line. Like SiteAPITokenVerify it resolves no roles, so neither is
+// one of the role-resolution sites; the veto's other sites are (SiteHostPAT,
+// SiteProxyPAT, SiteTokenExchange).
 const SiteHostJWT = "host jwt"
+
+// SiteAPITokenVerify names /-/apitokens/verify in the veto's line. Verify is
+// how a consumer decides a PAT is live, so it is a veto site (Ruling 14),
+// though it resolves no roles.
+const SiteAPITokenVerify = "apitokens verify"
 
 // VetoSubjectKind is the veto (#255): current config is a veto on a
 // credential's kind, never its source. It refuses, with
@@ -2652,6 +2654,26 @@ func (e *Exchanger) vetoCredential(sub string, kind kdexv1alpha1.SubjectKind, si
 			"rule", err.Error(), "site", site, "kind", string(kind))
 	}
 	return err
+}
+
+// patSubjectKind is the kind of a validated PAT's subject: the kind it
+// records, carried even when this release does not know it.
+// LEGACY(#268): a PAT minted before PATs recorded their kind falls back to the
+// kind of its sub.
+func (e *Exchanger) patSubjectKind(data *apitoken.TokenData) kdexv1alpha1.SubjectKind {
+	if data.SubjectKind == "" { // LEGACY(#268)
+		return e.SubjectKindOf(data.Subject)
+	}
+	return data.SubjectKind
+}
+
+// VetoPAT is the veto (#255) over a validated PAT, with the kind
+// patSubjectKind resolves: the one entry point for every PAT acceptance
+// site, PATAuthContext (both PAT identity paths) and /-/apitokens/verify. A
+// refusal is ErrCredentialKindRefused, already logged under site without the
+// sub; the caller answers it as an invalid PAT and logs nothing more.
+func (e *Exchanger) VetoPAT(data *apitoken.TokenData, site string) error {
+	return e.vetoCredential(data.Subject, e.patSubjectKind(data), site)
 }
 
 // clientBindingSubject is the binding subject of an authenticated

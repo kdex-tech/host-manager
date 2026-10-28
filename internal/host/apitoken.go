@@ -587,6 +587,14 @@ func (hh *HostHandler) apitokenVerifyHandler(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
+	// The veto (#255, Ruling 14): a PAT whose kind current config contradicts
+	// -- its client since removed, or a User named like a client -- is not
+	// live, and verifies exactly as an invalid or revoked one does. The veto
+	// logs the refusal without the sub.
+	if hh.authExchanger.VetoPAT(data, auth.SiteAPITokenVerify) != nil {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(data)

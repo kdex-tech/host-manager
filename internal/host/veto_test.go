@@ -50,7 +50,8 @@ const (
 
 // vetoHost serves the credential-accepting surfaces through their real
 // wiring: /-/check (the JWT gate, the session-grant refresh and the host PAT
-// middleware), /-/apitokens/mint, /-/oauth/authorize and an apiKey function
+// middleware), /-/apitokens/mint and /-/apitokens/verify,
+// /-/oauth/authorize and an apiKey function
 // behind the proxy PAT bridge. Roles come from the real role provider, with
 // an exact binding for vetoClient and a `*` binding narrowed to [User].
 type vetoHost struct {
@@ -77,7 +78,8 @@ func newVetoHost(t *testing.T) *vetoHost {
 
 	cm, err := cache.NewCacheManager("", "veto-host-test", nil)
 	require.NoError(t, err)
-	tm, err := apitoken.NewTokenManager(vetoIssuer, apitoken.GenerateDevmodeKeyPair(), nil)
+	tm, err := apitoken.NewTokenManager(vetoIssuer, apitoken.GenerateDevmodeKeyPair(),
+		cm.GetCache("revocation", cache.CacheOptions{}))
 	require.NoError(t, err)
 	signer, err := sign.NewSigner(vetoIssuer, ttl, vetoIssuer, &cs, "kid", nil)
 	require.NoError(t, err)
@@ -233,6 +235,26 @@ func (h *vetoHost) authorize(present func(*http.Request)) *httptest.ResponseReco
 	return h.serve(req)
 }
 
+// verify asks /-/apitokens/verify about pat.
+func (h *vetoHost) verify(pat string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(VerifyRequest{Token: pat})
+	return h.serve(httptest.NewRequest(http.MethodPost, "/-/apitokens/verify", bytes.NewBuffer(body)))
+}
+
+// assertVerifiesAsRevoked: verify answers pat exactly as it answers a
+// revoked PAT, so a consumer deciding liveness through it refuses pat too.
+func (h *vetoHost) assertVerifiesAsRevoked(t *testing.T, pat string) {
+	t.Helper()
+	revoked := h.pat("someone-revoked", kdexv1alpha1.SubjectKindUser)
+	require.NoError(t, h.tm.RevokeToken(t.Context(), revoked))
+	want := h.verify(revoked)
+	require.Equal(t, http.StatusUnauthorized, want.Code, "precondition: verify refuses a revoked PAT")
+
+	got := h.verify(pat)
+	assert.Equal(t, want.Code, got.Code)
+	assert.Equal(t, want.Body.String(), got.Body.String())
+}
+
 func bearer(token string) func(*http.Request) {
 	return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token) }
 }
@@ -371,6 +393,26 @@ func TestVeto_UserPATNamingClientRefused(t *testing.T) {
 	h.setClient(vetoUser, true)
 
 	h.assertPATRefused(t, pat)
+	t.Run("at /-/apitokens/verify", func(t *testing.T) {
+		h.assertVerifiesAsRevoked(t, pat)
+	})
+}
+
+// TestVeto_RemovedClientVerifyRefused: verify is how a consumer decides a
+// PAT is live, so a removed client's PAT verifies as a revoked one does
+// (Ruling 14).
+func TestVeto_RemovedClientVerifyRefused(t *testing.T) {
+	h := newVetoHost(t)
+	clientPAT := h.pat(vetoClient, kdexv1alpha1.SubjectKindClient)
+	kindless := kindlessPAT(vetoIssuer, vetoIssuer, vetoClient)
+	h.setClient(vetoClient, false)
+
+	t.Run("a Client PAT", func(t *testing.T) {
+		h.assertVerifiesAsRevoked(t, clientPAT)
+	})
+	t.Run("a kind-less PAT", func(t *testing.T) { // LEGACY(#268)
+		h.assertVerifiesAsRevoked(t, kindless)
+	})
 }
 
 // TestVeto_ConfiguredClientAccepted is the control: every credential the
@@ -394,6 +436,24 @@ func TestVeto_ConfiguredClientAccepted(t *testing.T) {
 	t.Run("a User PAT for a user", func(t *testing.T) {
 		h.assertPATAccepted(t, userPAT, kindsUserRole)
 	})
+	for name, tc := range map[string]struct {
+		pat  string
+		sub  string
+		kind kdexv1alpha1.SubjectKind
+	}{
+		"verify: a Client PAT":    {clientPAT, vetoClient, kdexv1alpha1.SubjectKindClient},
+		"verify: a kind-less PAT": {kindless, vetoClient, ""}, // LEGACY(#268)
+		"verify: a User PAT":      {userPAT, vetoUser, kdexv1alpha1.SubjectKindUser},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := h.verify(tc.pat)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var data apitoken.TokenData
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &data))
+			assert.Equal(t, tc.sub, data.Subject)
+			assert.Equal(t, tc.kind, data.SubjectKind, "verify reports the kind the PAT records")
+		})
+	}
 	t.Run("a client_credentials JWT", func(t *testing.T) {
 		rr, ac := h.check(bearer(jwt))
 		assert.Equal(t, http.StatusOK, rr.Code)
