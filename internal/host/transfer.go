@@ -31,9 +31,14 @@ type transferRecord struct {
 	// (#255). LEGACY(#268): a record stored before records carried it has
 	// none, and its redemption's kind falls back as a kind-less context's
 	// does (auth.Exchanger.ContextSubjectKind).
-	Kind         kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
-	Entitlements []string                 `json:"entitlements"`
-	Target       TransferTarget           `json:"target"`
+	Kind kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
+	// IssuedAt is when the link was minted (unix seconds): the link's iat,
+	// which the veto compares with its client's last removal on redemption
+	// (#255, quad 2026-10-28). A record without one is refused whenever its
+	// client was ever removed.
+	IssuedAt     int64          `json:"iat,omitempty"`
+	Entitlements []string       `json:"entitlements"`
+	Target       TransferTarget `json:"target"`
 }
 
 // newTransferHandle returns a 256-bit unguessable, URL-safe handle.
@@ -170,10 +175,10 @@ func (hh *HostHandler) transferHandler(mux *http.ServeMux, registeredPaths map[s
 }
 
 // TransferGet redeems a /-/transfer/<handle> capability: resolve the handle,
-// spend one budget unit, inject the stored identity, and re-dispatch the bound
-// target through the mux (which runs the proxy identity gate + per-op security
-// against the injected entitlements). All non-redeemable cases return an
-// identical 410 to preserve anti-enumeration.
+// veto the stored identity, spend one budget unit, inject the identity, and
+// re-dispatch the bound target through the mux (which runs the proxy identity
+// gate + per-op security against the injected entitlements). All
+// non-redeemable cases return an identical 410 to preserve anti-enumeration.
 func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 	gone := func() { http.Error(w, "This transfer link is no longer valid.", http.StatusGone) }
 
@@ -198,8 +203,22 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 	// (record, method, cache, mux) are checked ahead of the decrement.
 	hh.mu.RLock()
 	mux := hh.Mux
+	exchanger := hh.authExchanger
 	hh.mu.RUnlock()
 	if mux == nil {
+		gone()
+		return
+	}
+
+	ac := auth.AuthContext{"sub": rec.Sub, "entitlements": rec.Entitlements}
+	if rec.Kind != "" { // LEGACY(#268): else the context is kind-less
+		ac[auth.ClaimSubjectKind] = string(rec.Kind)
+	}
+	// The link is a credential, so it is vetoed (#255) like every other: the
+	// kind its context resolves to and its issue time, before a use is spent,
+	// so a refused link keeps its budget. The answer is the same 410; the
+	// veto logs the refusal.
+	if exchanger.VetoCredential(rec.Sub, exchanger.ContextSubjectKind(ac), rec.IssuedAt, auth.SiteTransferRedeem) != nil {
 		gone()
 		return
 	}
@@ -208,10 +227,6 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ac := auth.AuthContext{"sub": rec.Sub, "entitlements": rec.Entitlements}
-	if rec.Kind != "" { // LEGACY(#268): else the context is kind-less
-		ac[auth.ClaimSubjectKind] = string(rec.Kind)
-	}
 	r2 := r.Clone(auth.SetAuthContext(ctx, ac))
 	r2.Method = rec.Target.Method
 	r2.URL.Path = rec.Target.Path

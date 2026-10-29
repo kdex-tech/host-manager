@@ -112,15 +112,27 @@ func TestSubjectKindOf(t *testing.T) {
 }
 
 // TestResolutionSites_PassKinds is the structural guard: every role
-// resolution site hands the resolver a kind, and the right one. The proxy PAT
-// bridge and whoami live in internal/host and are pinned there
-// (TestResolutionSites_PassKinds_HostSites).
+// resolution site hands the resolver a kind, and the right one. It ranges
+// over the one site list (allSites), so a site added there without being
+// driven here fails. The proxy PAT bridge and whoami live in internal/host
+// and are pinned there (TestResolutionSites_PassKinds_HostSites).
 func TestResolutionSites_PassKinds(t *testing.T) {
 	user, cl := v1alpha1.SubjectKindUser, v1alpha1.SubjectKindClient
 	ctx := context.Background()
 
+	covered := map[string]bool{}
+	t.Cleanup(func() {
+		pinnedInHost := map[string]bool{SiteProxyPAT: true, SiteWhoami: true}
+		for _, s := range allSites {
+			if s.resolvesRoles {
+				assert.True(t, covered[s.name] || pinnedInHost[s.name],
+					"site %q resolves roles, but no structural test drives it", s.name)
+			}
+		}
+	})
 	expect := func(t *testing.T, seen []BindingSubject, site string, kind v1alpha1.SubjectKind) {
 		t.Helper()
+		covered[site] = true
 		require.NotEmpty(t, seen, "site %q resolved no roles", site)
 		for _, bs := range seen {
 			assert.Equal(t, site, bs.Site)
@@ -141,6 +153,7 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, out.String(), `"site"="local login"`)
 		assert.Contains(t, out.String(), `"kind"="User"`)
+		covered[SiteLocalLogin] = true
 	})
 
 	t.Run("oidc login", func(t *testing.T) {

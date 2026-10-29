@@ -788,21 +788,25 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 	// LEGACY(#268): a PAT minted before PATs recorded their kind has no knd,
 	// and decodes with SubjectKind "" for the caller to classify. Once #268's
 	// condition is met, a missing knd is refused like any missing claim. A
-	// present knd that is not a string is malformed, and refused now.
+	// present knd that is not a string (null included) is malformed, and
+	// refused now.
 	//
-	// GetString answers both of the common cases, a recorded kind and an
-	// absent one, without decoding anything else. Only its error path asks
-	// whether knd is present: go-paseto has no presence check, and Claims()
-	// decodes every claim (~12x the time and allocations of GetString), which
-	// would be paid on every validated PAT. Pinned at go-paseto v1.6.0, the
-	// latest release; none adds one, so no upgrade removes this branch.
-	kind, err := token.GetString(sign.ClaimSubjectKind)
-	if err != nil {
-		if _, recorded := token.Claims()[sign.ClaimSubjectKind]; recorded {
-			return nil, err
+	// Every live PAT is kind-less on the day this ships, so the absent case
+	// must be as cheap as the present one. Token.Get into a json.RawMessage
+	// is the presence check: it fails only when the claim is absent (every
+	// stored claim is valid JSON), and copies just that claim's bytes, never
+	// decoding any other. go-paseto has no dedicated presence check; it is
+	// pinned at v1.6.0, its latest release, and this needs none.
+	var rawKind json.RawMessage
+	var kind string
+	if token.Get(sign.ClaimSubjectKind, &rawKind) == nil {
+		if string(rawKind) == "null" {
+			return nil, fmt.Errorf("api token claim %s is null", sign.ClaimSubjectKind)
 		}
-		kind = "" // LEGACY(#268)
-	}
+		if err := json.Unmarshal(rawKind, &kind); err != nil {
+			return nil, fmt.Errorf("api token claim %s is not a string: %w", sign.ClaimSubjectKind, err)
+		}
+	} // else LEGACY(#268): absent, kind stays ""
 
 	return &TokenData{
 		Audience:    audience,

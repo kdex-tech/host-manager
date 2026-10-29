@@ -32,27 +32,74 @@ const (
 	SiteWhoami              = "whoami"
 )
 
-// The veto's sites that resolve no roles, so are not role-resolution sites,
-// as the veto's line names them. The veto's other sites are (SiteHostPAT,
-// SiteProxyPAT, SiteTokenExchange). See VetoSubjectKind.
+// The veto's sites that resolve no roles, as the veto's line names them.
+// See VetoCredential.
 const (
 	// SiteHostJWT is the host JWT gate (Config.WithAuthentication).
 	SiteHostJWT = "host jwt"
 	// SiteAPITokenVerify is /-/apitokens/verify: how a consumer decides a
 	// PAT is live, so a veto site (Ruling 14).
 	SiteAPITokenVerify = "apitokens verify"
+	// SiteAPITokenMint is /-/apitokens/mint for another subject: the PAT
+	// about to be issued is vetoed before it is minted.
+	SiteAPITokenMint = "apitokens mint"
+	// SiteTransferRedeem is a /-/transfer/ link's redemption.
+	SiteTransferRedeem = "transfer redeem"
 )
 
-// bindingLogLevel is the role-binding verbosity of a site's resolution line:
-// V(3) for the sites that resolve on every request, V(2) for the issue-time
-// ones, as the signer splits V(2)/V(3). See kdex-tech/host-manager#255.
-func bindingLogLevel(site string) int {
-	switch site {
-	case SiteHostPAT, SiteProxyPAT, SiteWhoami, SiteSessionGrantRefresh:
-		return 3
-	default:
-		return 2
+// siteSpec is what is known of one site.
+type siteSpec struct {
+	name string
+	// resolvesRoles: the site resolves KDexRoleBinding roles, so the
+	// structural test drives it and it writes a role-binding line. A site
+	// that does not is a veto site only.
+	resolvesRoles bool
+	// perRequest: the site runs on every request rather than at issue time,
+	// so its role-binding lines are written at V(3) rather than V(2), as the
+	// signer splits V(2)/V(3).
+	perRequest bool
+}
+
+// allSites is every site, the one list of them: the structural test ranges
+// over it, and bindingLogLevel is derived from it. See
+// kdex-tech/host-manager#255.
+var allSites = []siteSpec{
+	{name: SiteLocalLogin, resolvesRoles: true},
+	{name: SiteOIDCLogin, resolvesRoles: true},
+	{name: SiteAuthCode, resolvesRoles: true},
+	{name: SiteRefresh, resolvesRoles: true},
+	{name: SiteSessionGrantRefresh, resolvesRoles: true, perRequest: true},
+	{name: SiteClientCredentials, resolvesRoles: true},
+	{name: SiteTokenExchange, resolvesRoles: true},
+	{name: SiteHostPAT, resolvesRoles: true, perRequest: true},
+	{name: SiteProxyPAT, resolvesRoles: true, perRequest: true},
+	{name: SiteWhoami, resolvesRoles: true, perRequest: true},
+	{name: SiteHostJWT, perRequest: true},
+	{name: SiteAPITokenVerify, perRequest: true},
+	{name: SiteAPITokenMint},
+	{name: SiteTransferRedeem, perRequest: true},
+}
+
+// siteLogLevels is each site's role-binding verbosity, from allSites.
+var siteLogLevels = func() map[string]int {
+	levels := make(map[string]int, len(allSites))
+	for _, s := range allSites {
+		levels[s.name] = 2
+		if s.perRequest {
+			levels[s.name] = 3
+		}
 	}
+	return levels
+}()
+
+// bindingLogLevel is the role-binding verbosity of a site's lines: V(3) for
+// the sites that run on every request, V(2) for the issue-time ones and for
+// a name allSites does not list.
+func bindingLogLevel(site string) int {
+	if level, ok := siteLogLevels[site]; ok {
+		return level
+	}
+	return 2
 }
 
 // BindingSubject is what one role resolution matches KDexRoleBindings

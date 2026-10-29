@@ -56,7 +56,7 @@ func TestPATAuthContext_Kind(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ac, err := ex.PATAuthContext(context.Background(), &tc.data, SiteHostPAT)
+			ac, err := ex.PATAuthContext(&tc.data, SiteHostPAT)
 			require.NoError(t, err)
 			assert.Equal(t, string(tc.wantKind), ac[ClaimSubjectKind])
 			roles, err := ac.GetRoles()
@@ -75,14 +75,14 @@ func TestPATAuthContext_Kind(t *testing.T) {
 		{Subject: kindsClientID, SubjectKind: v1alpha1.SubjectKindUser},
 	} {
 		t.Run("a recorded "+string(data.SubjectKind)+" its sub contradicts is vetoed", func(t *testing.T) {
-			ac, err := ex.PATAuthContext(context.Background(), &data, SiteHostPAT)
+			ac, err := ex.PATAuthContext(&data, SiteHostPAT)
 			require.ErrorIs(t, err, ErrCredentialKindRefused)
 			assert.Nil(t, ac)
 		})
 	}
 
 	t.Run("a recorded unknown kind is carried, and matches only unnarrowed bindings", func(t *testing.T) {
-		ac, err := ex.PATAuthContext(context.Background(),
+		ac, err := ex.PATAuthContext(
 			&apitoken.TokenData{Subject: "robot", SubjectKind: "ServiceAccount"}, SiteHostPAT)
 		require.NoError(t, err)
 		assert.Equal(t, "ServiceAccount", ac[ClaimSubjectKind])

@@ -21,7 +21,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/cel-go/cel"
 	"github.com/kdex-tech/dmapper"
-	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
@@ -46,11 +45,13 @@ type CompiledMappingRule struct {
 
 type Exchanger struct {
 	config Config
-	// formerClients is every client id this host has ever had configured (the
-	// client registry). Built once in NewExchanger, never written afterwards, so
-	// NamesClient reads it without a lock. See kdex-tech/host-manager#255.
-	formerClients map[string]struct{}
-	oauth2Config  *oauth2.Config
+	// clientRegistry is the client registry as this build merged it: a
+	// record of every client id this host has ever had configured, present
+	// or removed, with when it was last removed (clientRecord). Built once at
+	// the end of NewExchanger, never written afterwards, so NamesClient and
+	// the veto read it without a lock. See kdex-tech/host-manager#255.
+	clientRegistry map[string]clientRecord
+	oauth2Config   *oauth2.Config
 	// oidcAuthCodeOptions are the extra authorization-URL parameters this
 	// host sends the IdP -- non-empty only when offline access was requested.
 	// See kdex-tech/host-manager#190.
@@ -252,11 +253,6 @@ func NewExchanger(
 	} else {
 		ex.grantGenNonce = hex.EncodeToString(nonce[:])
 	}
-	registry, err := loadClientRegistry(ctx, cacheManager, cfg.Clients)
-	if err != nil {
-		return nil, err
-	}
-	ex.formerClients = registry
 	if cacheManager != nil {
 		ex.refreshTokenCache = newUncycledCache(cacheManager, "refresh-tokens", ex.refreshTokenTTL)
 		// Single-use tracking for authorization codes. See #65.
@@ -345,6 +341,15 @@ func NewExchanger(
 			ex.oidcPrompt = []string{"consent"}
 		}
 	}
+
+	// Last, after everything that can fail: a configuration whose Exchanger
+	// never builds never takes effect, so it must not reserve a client id in
+	// the registry, where a reservation is forever (#255, quad 2026-10-28).
+	registry, err := loadClientRegistry(ctx, cacheManager, cfg.Clients)
+	if err != nil {
+		return nil, err
+	}
+	ex.clientRegistry = registry
 
 	return ex, nil
 }
@@ -510,18 +515,17 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	// through the host ClaimMappings mapper (below) then folds a backend/mapper
 	// grant into entitlements exactly as the proxy FAT and refresh mints do.
 	// See kdex-tech/host-manager#206 quad (DI-2).
-	// bindingKey == sub here (not a RoleBindingClaim resolution): this is a
-	// DELIBERATE scope limit, not a claim-availability gap -- a FAT can carry
-	// `email`. RoleBindingClaim v1 is scoped to login/refresh/auth-code (the
-	// paths that replay a login-time IdP-claims snapshot); token-exchange
-	// keeps resolving roles by `sub` regardless, so this call stays (sub, sub)
-	// and its behavior is unchanged. The kind is the one the FAT carries, and
-	// the exchanged token carries it on (#255).
+	// The binding key is the sub here, never a RoleBindingClaim resolution:
+	// a DELIBERATE scope limit, not a claim-availability gap -- a FAT can
+	// carry `email`. RoleBindingClaim v1 is scoped to login/refresh/auth-code
+	// (the paths that replay a login-time IdP-claims snapshot). The kind is
+	// the one the FAT carries, and the exchanged token carries it on (#255).
 	kind := e.ContextSubjectKind(AuthContext(claims))
 	// The veto (#255): a FAT whose kind current config contradicts (its
-	// client since removed, or a User named like a client) is an invalid
-	// subject_token, answered as one: not an ErrServerError.
-	if err := e.vetoCredential(sub, kind, SiteTokenExchange); err != nil {
+	// client since removed, or a User named like a client), or issued before
+	// its client was last removed, is an invalid subject_token, answered as
+	// one: not an ErrServerError.
+	if err := e.VetoCredential(sub, kind, issuedAtOf(AuthContext(claims)), SiteTokenExchange); err != nil {
 		return TokenSet{}, fmt.Errorf("invalid subject_token: %w", err)
 	}
 	roles, ents, backend, rerr := e.subjectSigningContext(sub, BindingSubject{Key: sub, Kind: kind, Site: SiteTokenExchange})
@@ -753,7 +757,7 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// human-authorable claim (e.g. email) instead of the IdP's opaque
 	// subject. Identity (idpClaims, GateLogin, enrichAfterGate, and the
 	// signed token below) still keys on `sub` unconditionally.
-	bs, err := e.userBindingKey(signingContext, sub, SiteOIDCLogin)
+	bs, err := e.userBindingSubject(signingContext, sub, SiteOIDCLogin)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "refusing an OIDC login whose subject names a client", "sub", sub)
 		e.eventDispatcher.NotifyLoginFailed(ctx, EventPayload{
@@ -2020,26 +2024,33 @@ func (e *Exchanger) subjectSigningContext(subject string, bs BindingSubject) (ro
 // auth-flow / identity claims (a backend-supplied `scope` would hijack scope
 // confinement, `sub`/`idp` would rebind identity) and server-controlled mint-time
 // values (`iat`/`exp`/`jti`/…). See kdex-tech/host-manager#140 (review hardening).
-var reservedMintClaims = map[string]struct{}{
-	"scope": {}, "scp": {}, "sub": {}, "grant_type": {}, "auth_method": {}, "idp": {},
-	"iat": {}, "exp": {}, "jti": {}, "iss": {}, "aud": {}, "nbf": {},
-	// `act` is the RFC 8693 delegation-actor claim, set authoritatively by the
-	// token-exchange mint. Reserving it stops a data-driven backend Lookup response
-	// (the attacker-influenceable path, e.g. via JIT provisioning) from stamping a
-	// delegation actor onto a token, since mergeBackendClaims skips reserved claims.
-	// NOTE: this does NOT constrain a host ClaimMappings rule -- sign.Signer.Project
-	// applies the mapper output last and does not consult reservedMintClaims (the
-	// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
-	// the mapper output against reserved claims in Project is tracked separately;
-	// auth_method and ClaimSubjectKind are already re-asserted there, since the
-	// DCR consent gate and role resolution trust them.
-	// See the #206 quad (SEC-2) and its re-review (RR-2).
-	"act": {},
-	// The subject's kind is decided by the mint (#255): a backend, an IdP
-	// snapshot or a stored claim that set it would choose which
-	// KDexRoleBindings the credential gets.
-	ClaimSubjectKind: {},
-}
+//
+// Every claim the mint decides (sign.MintDecidedClaims) is reserved too, from
+// that one list: `auth_method`, which the DCR consent gate trusts, and the
+// subject's kind (#255), which chooses the KDexRoleBindings a credential
+// gets, so a backend, an IdP snapshot or a stored claim must never set it.
+var reservedMintClaims = func() map[string]struct{} {
+	reserved := map[string]struct{}{
+		"scope": {}, "scp": {}, "sub": {}, "grant_type": {}, "idp": {},
+		"iat": {}, "exp": {}, "jti": {}, "iss": {}, "aud": {}, "nbf": {},
+		// `act` is the RFC 8693 delegation-actor claim, set authoritatively by the
+		// token-exchange mint. Reserving it stops a data-driven backend Lookup response
+		// (the attacker-influenceable path, e.g. via JIT provisioning) from stamping a
+		// delegation actor onto a token, since mergeBackendClaims skips reserved claims.
+		// NOTE: this does NOT constrain a host ClaimMappings rule -- sign.Signer.Project
+		// applies the mapper output last and does not consult reservedMintClaims (the
+		// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
+		// the mapper output against reserved claims in Project is tracked separately;
+		// the mint-decided claims are already re-asserted there, since the DCR consent
+		// gate and role resolution trust them.
+		// See the #206 quad (SEC-2) and its re-review (RR-2).
+		"act": {},
+	}
+	for _, claim := range sign.MintDecidedClaims() {
+		reserved[claim] = struct{}{}
+	}
+	return reserved
+}()
 
 // mergeBackendClaims folds a subject's data-driven backend claims into the
 // signing context, skipping reservedMintClaims and never overwriting a claim
@@ -2168,7 +2179,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 	// claims.IDPClaims is nil for non-OIDC grants, for which resolveBindingKey
 	// degrades to claims.Subject (its historical behavior). See
 	// kdex-tech/host-manager#189.
-	bs, err := e.userBindingKey(claims.IDPClaims, claims.Subject, SiteAuthCode)
+	bs, err := e.userBindingSubject(claims.IDPClaims, claims.Subject, SiteAuthCode)
 	if err != nil {
 		return failed("%w", err)
 	}
@@ -2264,7 +2275,7 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 	// every refresh instead of silently falling back to sub. idpClaims is nil
 	// for every non-OIDC grant, for which resolveBindingKey degrades to
 	// subject (its historical behavior). See kdex-tech/host-manager#189.
-	bs, err := e.userBindingKey(idpClaims, subject, SiteRefresh)
+	bs, err := e.userBindingSubject(idpClaims, subject, SiteRefresh)
 	if err != nil {
 		return failed("%w", err)
 	}
@@ -2490,225 +2501,4 @@ func (e *Exchanger) refreshUpstreamClaims(
 	}
 
 	return idpClaimSnapshot(refreshed), token.RefreshToken, nil
-}
-
-// ErrSubjectNamesClient is returned when a user identity's sub or role-binding
-// key names a client. See kdex-tech/host-manager#243.
-var ErrSubjectNamesClient = errors.New("subject names a client")
-
-// NamesClient reports whether key names a client: a configured client id, an
-// id in the client registry (every client this host has ever had configured,
-// so a removed client's credentials never classify as a user; #255), or any
-// key carrying the reserved dcr_ prefix of a dynamically registered one, so
-// the check never waits on the DCR store.
-func (e *Exchanger) NamesClient(key string) bool {
-	if e == nil || key == "" {
-		return false
-	}
-	if _, ok := e.config.Clients[key]; ok {
-		return true
-	}
-	if _, ok := e.formerClients[key]; ok {
-		return true
-	}
-	return strings.HasPrefix(key, dcr.ClientIDPrefix)
-}
-
-// SubjectKindOf classifies sub when nothing better is known about its kind:
-// SubjectKindClient if it names a client (NamesClient), else SubjectKindUser.
-// It is sound because #243 refuses every user identity named like a client. A
-// future ServiceAccount kind slots in here as one more branch, ahead of the
-// User default. See kdex-tech/host-manager#255.
-func (e *Exchanger) SubjectKindOf(sub string) kdexv1alpha1.SubjectKind {
-	if e.NamesClient(sub) {
-		return kdexv1alpha1.SubjectKindClient
-	}
-	return kdexv1alpha1.SubjectKindUser
-}
-
-// ContextSubjectKind is the kind of the subject of the credential behind ac:
-// the kind the credential carries (ClaimSubjectKind), recorded when it was
-// issued. It is the one place a credential's kind is read, so enforcement,
-// a self-mint and whoami agree on it.
-//
-// A carried kind this release does not know, such as a future
-// ServiceAccount, is returned as it is: it then matches only the bindings
-// without subjectKinds, never one narrowed to a kind, which is the safe
-// answer for a kind this host cannot enforce. Reclassifying it from the sub
-// would hand it a [User] binding.
-//
-// LEGACY(#268): a credential issued before credentials carried their kind
-// carries none. It is a Client when it is a client_credentials token, whose
-// subject is the client even after the client is removed, else the kind of
-// its sub (SubjectKindOf).
-func (e *Exchanger) ContextSubjectKind(ac AuthContext) kdexv1alpha1.SubjectKind {
-	if kind, _ := ac[ClaimSubjectKind].(string); kind != "" {
-		return kdexv1alpha1.SubjectKind(kind)
-	}
-	if _, ok := ac.ClientCredentialsSubject(); ok { // LEGACY(#268)
-		return kdexv1alpha1.SubjectKindClient
-	}
-	sub, _ := ac["sub"].(string)
-	return e.SubjectKindOf(sub) // LEGACY(#268)
-}
-
-// PATAuthContext builds the auth context of a validated API token: its
-// subject, the roles and entitlements its KDexRoleBindings grant it under
-// site, its static scope (scp), its issue time and its kind, plus the
-// subject's data-driven backend claims, which never overwrite those nor set a
-// reservedMintClaim. The host PAT middleware and the proxy PAT bridge both
-// build their identity here and add only what differs: the middleware's
-// claimMappings enrichment, the bridge's PATBridgeClaim.
-//
-// The kind is the one the PAT records, carried even when this release does
-// not know it, as in ContextSubjectKind. LEGACY(#268): a PAT minted before
-// PATs recorded their kind falls back to the kind of its sub.
-//
-// A PAT whose kind current config contradicts is refused before anything is
-// resolved, with ErrCredentialKindRefused (VetoSubjectKind); the refusal is
-// logged here, so a caller answers it as an invalid PAT and logs nothing
-// more. This is the veto for both PAT paths.
-//
-// The resolution's role-binding line, and a refusal's line, are written
-// under site. The context is the request's; nothing reads it yet.
-func (e *Exchanger) PATAuthContext(_ context.Context, data *apitoken.TokenData, site string) (AuthContext, error) {
-	if err := e.VetoPAT(data, site); err != nil {
-		return nil, err
-	}
-	kind := e.patSubjectKind(data)
-	roles, ents, err := e.ResolveInternalRolesAndEntitlements(BindingSubject{Key: data.Subject, Kind: kind, Site: site})
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve the roles of an api token's subject: %w", err)
-	}
-	ac := AuthContext{
-		"sub":          data.Subject,
-		"roles":        roles,
-		"entitlements": ents,
-		// The token's static scope rides along under its own key; the
-		// structured entitlements above are the authoritative authz model.
-		"scp":            data.Scope,
-		ClaimIssuedAt:    float64(data.IssuedAt),
-		ClaimSubjectKind: string(kind),
-	}
-	// Resolved fresh, so a backend grant made since the PAT was minted
-	// applies (#138).
-	mergeBackendClaims(jwt.MapClaims(ac), e.ResolveSubjectClaims(data.Subject))
-	return ac, nil
-}
-
-// ErrCredentialKindRefused is returned for a credential whose kind current
-// config contradicts. See VetoSubjectKind.
-var ErrCredentialKindRefused = errors.New("credential kind refused by current config")
-
-// vetoLog writes the veto's refusals. Mirrors bindingKeyLog so it needs no ctx.
-var vetoLog = logf.Log.WithName("subject-kind-veto")
-
-// VetoSubjectKind is the veto (#255): current config is a veto on a
-// credential's kind, never its source. It refuses, with
-// ErrCredentialKindRefused:
-//
-//   - a Client credential whose sub is not a configured client
-//     (IsConfiguredClient), so removing a client stops every live credential
-//     it holds, without anyone remembering a revocation step;
-//   - a User credential whose sub names a client (NamesClient, which covers
-//     the registry): #243's rule, the client keeps the name.
-//
-// Any other kind passes, including one this release does not know: it can
-// match only bindings without subjectKinds. kind is the credential's resolved
-// kind (ContextSubjectKind, or the kind a PAT records), never empty. The
-// error names the rule, never the sub, which may be an email under
-// RoleBindingClaim (#215).
-func (e *Exchanger) VetoSubjectKind(sub string, kind kdexv1alpha1.SubjectKind) error {
-	switch kind {
-	case kdexv1alpha1.SubjectKindClient:
-		if !e.IsConfiguredClient(sub) {
-			return fmt.Errorf("%w: a Client credential whose client is not configured", ErrCredentialKindRefused)
-		}
-	case kdexv1alpha1.SubjectKindUser:
-		if e.NamesClient(sub) {
-			return fmt.Errorf("%w: a User credential whose sub names a client", ErrCredentialKindRefused)
-		}
-	}
-	return nil
-}
-
-// vetoCredential applies VetoSubjectKind where a credential is accepted, and
-// logs a refusal's one V(0) line, naming the rule and site but never the sub.
-// The caller answers a refusal as it answers an invalid credential, and logs
-// nothing more about it.
-func (e *Exchanger) vetoCredential(sub string, kind kdexv1alpha1.SubjectKind, site string) error {
-	err := e.VetoSubjectKind(sub, kind)
-	if err != nil {
-		vetoLog.Info("refusing a credential whose kind current config contradicts",
-			"rule", err.Error(), "site", site, "kind", string(kind))
-	}
-	return err
-}
-
-// patSubjectKind is the kind of a validated PAT's subject: the kind it
-// records, carried even when this release does not know it.
-// LEGACY(#268): a PAT minted before PATs recorded their kind falls back to the
-// kind of its sub.
-func (e *Exchanger) patSubjectKind(data *apitoken.TokenData) kdexv1alpha1.SubjectKind {
-	if data.SubjectKind == "" { // LEGACY(#268)
-		return e.SubjectKindOf(data.Subject)
-	}
-	return data.SubjectKind
-}
-
-// VetoPAT is the veto (#255) over a validated PAT, with the kind
-// patSubjectKind resolves: the one entry point for every PAT acceptance
-// site, PATAuthContext (both PAT identity paths) and /-/apitokens/verify. A
-// refusal is ErrCredentialKindRefused, already logged under site without the
-// sub; the caller answers it as an invalid PAT and logs nothing more.
-func (e *Exchanger) VetoPAT(data *apitoken.TokenData, site string) error {
-	return e.vetoCredential(data.Subject, e.patSubjectKind(data), site)
-}
-
-// clientBindingSubject is the binding subject of an authenticated
-// client_credentials client: its id, as a Client.
-func clientBindingSubject(id string) BindingSubject {
-	return BindingSubject{Key: id, Kind: kdexv1alpha1.SubjectKindClient, Site: SiteClientCredentials}
-}
-
-// IsConfiguredClient reports whether id is an operator-configured client: the
-// only kind that can authenticate with client_credentials (a dynamically
-// registered client is public).
-func (e *Exchanger) IsConfiguredClient(id string) bool {
-	if e == nil {
-		return false
-	}
-	_, ok := e.config.Clients[id]
-	return ok
-}
-
-// userBindingKey resolves the binding subject of a user identity: the
-// role-binding key (the RoleBindingClaim, e.g. email, else sub; #189), the
-// kind User (#255) and site. It logs the key's resolution under site, and
-// refuses an identity named like a client (#243). Every site that issues or
-// re-resolves a user identity goes through it, so none can resolve bindings
-// without the guard, or with a kind other than User.
-func (e *Exchanger) userBindingKey(claims jwt.MapClaims, sub, site string) (BindingSubject, error) {
-	bindingKey := resolveBindingKey(claims, sub, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)
-	bindingKeyLog.V(2).Info("role-binding key resolved ("+site+")",
-		bindingKeyLogKV(claims, sub, bindingKey, e.config.OIDC.RoleBindingClaim, e.config.OIDC.RequireEmailVerified)...)
-	bs := BindingSubject{Key: bindingKey, Kind: kdexv1alpha1.SubjectKindUser, Site: site}
-	return bs, e.refuseClientNamedIdentity(sub, bindingKey)
-}
-
-// refuseClientNamedIdentity refuses a user identity whose sub or role-binding
-// key names a client (NamesClient). KDexRoleBinding.subject is one namespace
-// shared by users and clients, so such a user would inherit every binding
-// written for the client. It runs wherever a user identity is issued or
-// re-resolved, so on a collision the client keeps its name and the user is
-// refused, whichever was created first. Exact names only: a /regex/ or `*`
-// binding matches users and clients alike, by design of the matcher, unless
-// the binding sets subjectKinds (#255). See kdex-tech/host-manager#243.
-func (e *Exchanger) refuseClientNamedIdentity(keys ...string) error {
-	for _, key := range keys {
-		if e.NamesClient(key) {
-			return fmt.Errorf("%w: %q; rename the user or the client", ErrSubjectNamesClient, key)
-		}
-	}
-	return nil
 }

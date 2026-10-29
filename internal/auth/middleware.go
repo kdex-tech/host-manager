@@ -103,7 +103,7 @@ func (c *Config) hostPATIdentity(ctx context.Context, token string, exchanger *E
 
 	// The same context the proxy PAT bridge builds (PATAuthContext), resolved
 	// with the kind the PAT records.
-	ac, err := exchanger.PATAuthContext(ctx, data, SiteHostPAT)
+	ac, err := exchanger.PATAuthContext(data, SiteHostPAT)
 	if err != nil {
 		// A vetoed PAT (#255) is an invalid one, already logged by the veto
 		// without its sub.
@@ -399,8 +399,13 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 				// a dead token kept every error-severity alert on the
 				// deployment permanently lit (~5,700 lines/day, measured).
 				// See kdex-tech/host-manager#181.
-				log.V(1).Info("token is not valid; rejecting the credential",
-					"source", authSource, "cause", err.Error())
+				//
+				// A veto refusal is already logged, at the same V(1), by the
+				// veto itself (VetoCredential), so one refusal is one line.
+				if !errors.Is(err, ErrCredentialKindRefused) {
+					log.V(1).Info("token is not valid; rejecting the credential",
+						"source", authSource, "cause", err.Error())
+				}
 
 				if authSource == COOKIE {
 					// Clear the cookie
@@ -534,14 +539,14 @@ func (c *Config) WithAuthentication(exchanger *Exchanger) func(http.Handler) htt
 	}
 }
 
-// vetoGateCredential is the veto (#255) over a host JWT the gate verified: its
-// sub with the kind it carries (ContextSubjectKind, whose LEGACY(#268)
-// fallback classifies a kind-less token). A nil exchanger knows no
-// configured client, so it refuses every Client credential, as the veto
-// reads no config as configuring none.
+// vetoGateCredential is the veto (VetoCredential, #255) over a host JWT the
+// gate verified, a capability token included: its sub, the kind it carries
+// (ContextSubjectKind) and its iat. A nil exchanger knows no configured
+// client, so it refuses every Client credential, as the veto reads no config
+// as configuring none.
 func vetoGateCredential(exchanger *Exchanger, ac AuthContext) error {
 	sub, _ := ac.GetSubject()
-	return exchanger.vetoCredential(sub, exchanger.ContextSubjectKind(ac), SiteHostJWT)
+	return exchanger.VetoCredential(sub, exchanger.ContextSubjectKind(ac), issuedAtOf(ac), SiteHostJWT)
 }
 
 // gateParserOptions are the validation options for every host-audience JWT the

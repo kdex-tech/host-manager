@@ -416,7 +416,13 @@ func (rp *scopeProvider) collectBindings() (*kdexv1alpha1.KDexRoleBindingList, e
 // and which admits bs.Kind. When names is non-nil it records each subject
 // match as contributed or skipped for kind; nil allocates nothing for that.
 func (rp *scopeProvider) resolveRoles(bs BindingSubject, names *BindingNames) []string {
-	var roles []string
+	exact := rp.exactBindings[bs.Key]
+	// Sized for the exact matches, the common case; a pattern match grows it.
+	size := 0
+	for i := range exact {
+		size += len(exact[i].roles)
+	}
+	roles := make([]string, 0, size)
 	match := func(cb *compiledBinding) {
 		if !cb.admits(bs.Kind) {
 			if names != nil {
@@ -431,14 +437,20 @@ func (rp *scopeProvider) resolveRoles(bs BindingSubject, names *BindingNames) []
 	}
 
 	// 1. Exact matches (O(1))
-	for i := range rp.exactBindings[bs.Key] {
-		match(&rp.exactBindings[bs.Key][i])
+	for i := range exact {
+		match(&exact[i])
 	}
 
-	// 2. Regex/Wildcard matches (O(N))
+	// 2. Regex/Wildcard matches (O(N)). Without a names collector a binding
+	// that does not admit the kind contributes nothing and records nothing,
+	// so its kind is checked first and its regex never runs.
 	for i := range rp.patternBindings {
-		if rp.patternBindings[i].re.MatchString(bs.Key) {
-			match(&rp.patternBindings[i].compiledBinding)
+		pb := &rp.patternBindings[i]
+		if names == nil && !pb.admits(bs.Kind) {
+			continue
+		}
+		if pb.re.MatchString(bs.Key) {
+			match(&pb.compiledBinding)
 		}
 	}
 

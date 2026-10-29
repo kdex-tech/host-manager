@@ -504,25 +504,27 @@ func (hh *HostHandler) apitokenMintHandler(w http.ResponseWriter, r *http.Reques
 
 	// The PAT records its subject's kind (#255). A self-mint's subject is the
 	// caller, whose credential carries its kind and passed the veto
-	// (VetoSubjectKind) at the gate that accepted it. Another subject's kind
+	// (VetoCredential) at the gate that accepted it. Another subject's kind
 	// is what it is now: a provisioned subject is never named like a client
 	// (checkProvisioned), so it is a User, and an impersonated one is
 	// classified.
 	//
-	// An impersonated subject is vetoed here, before anything is minted: a
-	// PAT whose kind current config contradicts is refused at every site that
-	// accepts one, so minting it would hand back a dead credential. That is a
-	// mint for a removed client the registry remembers, or for a dcr_ id:
-	// each classifies as a Client that is not configured. The answer names
-	// the rule, never the sub (#215).
+	// An impersonated subject is vetoed here, before anything is minted, as
+	// the PAT about to be issued now: a PAT the veto refuses is refused at
+	// every site that accepts one, so minting it would hand back a dead
+	// credential. That is, for instance, a mint for a removed client the
+	// registry remembers, or for a dcr_ id: each classifies as a Client that
+	// is not configured. It stays a 400, not the 401 of a refused credential:
+	// what is refused is the target, not the caller's credential. The veto
+	// logs the refusal; the answer names neither the rule's subject nor the
+	// sub (#215).
 	var kind kdexv1alpha1.SubjectKind
 	if subject == requestingSub {
 		kind = hh.authExchanger.ContextSubjectKind(ac)
 	} else {
 		kind = hh.authExchanger.SubjectKindOf(subject)
-		if verr := hh.authExchanger.VetoSubjectKind(subject, kind); verr != nil {
-			log.V(1).Info("mint refused: the target's kind contradicts current config", "rule", verr.Error())
-			http.Error(w, "sub cannot hold an API token on this host: it names a client that is not configured", http.StatusBadRequest)
+		if hh.authExchanger.VetoCredential(subject, kind, time.Now().Unix(), auth.SiteAPITokenMint) != nil {
+			http.Error(w, "sub cannot hold an API token on this host: current config refuses its kind", http.StatusBadRequest)
 			return
 		}
 	}

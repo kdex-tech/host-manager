@@ -3,112 +3,246 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	// clientRegistryClass is the surviving (Uncycled) cache class holding every
-	// client id this host has ever had configured, so a client removed from
-	// config is still recognised as a client. See kdex-tech/host-manager#255.
+	// clientRegistryClass is the surviving (Uncycled) cache class holding a
+	// record of every client id this host has ever had configured, so a
+	// client removed from config is still recognised as a client, and a
+	// client added back does not revive what it held before its removal.
+	// See kdex-tech/host-manager#255.
 	clientRegistryClass = "client-registry"
 	clientRegistryKey   = "ids"
 )
 
-// loadClientRegistry records the ids of configured in the client registry and
-// returns every id the registry holds: the configured ones plus every one a
-// previous configuration (or a peer replica) recorded.
+// clientRegistryTimeout bounds the registry's cache I/O in NewExchanger: one
+// Get, and on a change one Update, which against Valkey is up to 16
+// WATCH/GET/MULTI rounds under contention. It runs once per Exchanger build
+// on the reconcile path, never per request, so it can afford far more than
+// the session-grant refresh's 50ms. What it must not do is wait forever:
+// without a deadline a hung Valkey wedges the reconcile worker. At the
+// deadline the build fails, the previous Exchanger keeps serving and the
+// reconcile retries with backoff. A var so a test can shorten it.
+var clientRegistryTimeout = 5 * time.Second
+
+// clientRegistryNow is the registry's clock, read once per merge: the time a
+// removal is recorded at. A var so a test can place removals in time.
+var clientRegistryNow = time.Now
+
+// clientRecord is what the registry remembers of one client id.
 //
-// The merge is one atomic Update of a sorted JSON array, so concurrent builds
-// lose nothing, and only grows: an id is never removed, because the point is
-// that credentials issued to a removed client must not later classify as a
-// User. dcr_ ids are not recorded; NamesClient matches them by prefix. A nil
-// cm returns just the configured ids.
+// The stored value of the registry key is a JSON object from client id to
+// record, written with its keys sorted:
+//
+//	{"<id>": {"present": true|false, "removedAt": <unix seconds>}, ...}
+//
+// Its fields:
+//   - present: the id is in the configuration of the latest Exchanger build
+//     that merged it.
+//   - removedAt: when the id was last seen leaving the configuration, in unix
+//     seconds; 0 means it has never been removed. A re-added id keeps it, so
+//     every credential issued at or before it stays refused (the veto).
+//
+// The registry has never shipped in another shape, so there is no
+// migration: a value in any other shape (an array, an unknown field, a null
+// record, a negative removedAt) is corrupt and fails the build closed.
+type clientRecord struct {
+	Present   bool  `json:"present"`
+	RemovedAt int64 `json:"removedAt"`
+}
+
+// clientRegistryLocation names the registry's full key, the shape an
+// operator searches Valkey for (the surviving scope is
+// {<host>:<class>:<generation>}:<key>), so a registry error can be acted on.
+var clientRegistryLocation = fmt.Sprintf("client registry (Valkey key {<host>:%s:%s}:%s)",
+	clientRegistryClass, cache.SurvivingGeneration, clientRegistryKey)
+
+// loadClientRegistry merges the ids of configured into the client registry
+// and returns every record the registry holds after the merge: the
+// configured ids, present, and every id a previous configuration (or a peer
+// replica) recorded. It is called at the very end of NewExchanger, so a
+// configuration whose Exchanger never builds reserves nothing.
+//
+// The merge (mergeClientRegistry) only ever adds records or marks them
+// removed, never deletes one: credentials issued to a removed client must
+// not later classify as a User. dcr_ ids are never recorded; NamesClient
+// matches them by prefix. A nil cm returns just the configured ids.
+//
+// The common case, a build whose configuration the registry already
+// reflects, costs one Get and writes nothing. Otherwise the merge runs as
+// one atomic Update, so concurrent builds lose nothing, and its result is
+// the one the last attempt computed: there is no second read, which an
+// eviction between the two could have answered with a partial registry.
+//
+// Every id newly recorded, and every id newly marked removed, is logged at
+// V(0). Client ids are operator configuration, not a user's identity.
 func loadClientRegistry(
 	ctx context.Context,
 	cm cache.CacheManager,
 	configured map[string]AuthClient,
-) (map[string]struct{}, error) {
+) (map[string]clientRecord, error) {
 	ids := make([]string, 0, len(configured))
 	for id := range configured {
 		if id != "" && !strings.HasPrefix(id, dcr.ClientIDPrefix) {
 			ids = append(ids, id)
 		}
 	}
+	slices.Sort(ids)
 	if cm == nil {
-		return toSet(ids), nil
+		registry := make(map[string]clientRecord, len(ids))
+		for _, id := range ids {
+			registry[id] = clientRecord{Present: true}
+		}
+		return registry, nil
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, clientRegistryTimeout)
+	defer cancel()
+	now := clientRegistryNow().Unix()
 	store := cm.GetCache(clientRegistryClass, cache.CacheOptions{MaxItems: new(0), Uncycled: true})
-	// fnErr is the closure's failure. An unreadable stored value must fail the
-	// build, never be replaced by a partial registry: that would forget the
-	// removed clients it held and fail open.
-	var fnErr error
+
+	// The fast path: a stored registry that already reflects this
+	// configuration is used as it is. An unreadable one fails here, exactly
+	// as the Update below would.
+	value, found, _, err := store.Get(ctx, clientRegistryKey)
+	if err != nil {
+		return nil, fmt.Errorf("%s: read: %w", clientRegistryLocation, err)
+	}
+	if found {
+		have, err := decodeClientRegistry(value)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", clientRegistryLocation, err)
+		}
+		if m := mergeClientRegistry(have, ids, now); !m.changed {
+			return m.registry, nil
+		}
+	}
+
+	// fnErr is the closure's failure, and merged its result, both from the
+	// last attempt. An unreadable stored value must fail the build, never be
+	// replaced by a partial registry: that would forget the removed clients
+	// it held and fail open.
+	var (
+		fnErr  error
+		merged registryMerge
+	)
 	if _, err := store.Update(ctx, clientRegistryKey, func(current string, found bool) (string, bool) {
 		fnErr = nil
-		var have []string
+		have := map[string]clientRecord{}
 		if found {
-			if err := json.Unmarshal([]byte(current), &have); err != nil {
-				fnErr = fmt.Errorf("decode stored ids: %w", err)
+			if have, fnErr = decodeClientRegistry(current); fnErr != nil {
 				return "", false
 			}
 		}
-		merged := toSet(have)
-		grew := !found
-		for _, id := range ids {
-			if _, ok := merged[id]; !ok {
-				merged[id] = struct{}{}
-				grew = true
-			}
-		}
-		if !grew {
+		merged = mergeClientRegistry(have, ids, now)
+		if found && !merged.changed {
 			return "", false
 		}
-		out := make([]string, 0, len(merged))
-		for id := range merged {
-			out = append(out, id)
-		}
-		slices.Sort(out)
-		b, err := json.Marshal(out)
+		// json.Marshal writes a map's keys sorted.
+		b, err := json.Marshal(merged.registry)
 		if err != nil {
-			fnErr = fmt.Errorf("encode ids: %w", err)
+			fnErr = fmt.Errorf("encode: %w", err)
 			return "", false
 		}
 		return string(b), true
 		// No expiry: a nil TTL means the manager default (24h), after which
 		// the registry would vanish and rebuild from current config only.
 	}, cache.WithoutExpiry()); err != nil {
-		return nil, fmt.Errorf("client registry: update: %w", err)
+		return nil, fmt.Errorf("%s: update: %w", clientRegistryLocation, err)
 	}
 	if fnErr != nil {
-		return nil, fmt.Errorf("client registry: %w", fnErr)
+		return nil, fmt.Errorf("%s: %w", clientRegistryLocation, fnErr)
 	}
 
-	value, found, _, err := store.Get(ctx, clientRegistryKey)
-	if err != nil {
-		return nil, fmt.Errorf("client registry: read: %w", err)
+	log := logf.FromContext(ctx)
+	for _, id := range merged.recorded {
+		log.Info("client registry: recorded a configured client id; it stays reserved as a client's name",
+			"client_id", id, "removed_at", merged.registry[id].RemovedAt)
 	}
-	registry := toSet(ids)
-	if found {
-		var stored []string
-		if err := json.Unmarshal([]byte(value), &stored); err != nil {
-			return nil, fmt.Errorf("client registry: decode: %w", err)
-		}
-		for _, id := range stored {
-			registry[id] = struct{}{}
-		}
+	for _, id := range merged.removed {
+		log.Info("client registry: marked a client id removed; credentials it was issued until now stay refused, even if it is added back",
+			"client_id", id, "removed_at", merged.registry[id].RemovedAt)
 	}
-	return registry, nil
+	return merged.registry, nil
 }
 
-func toSet(ids []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		set[id] = struct{}{}
+// registryMerge is the outcome of one merge.
+type registryMerge struct {
+	registry map[string]clientRecord
+	// recorded are the configured ids the registry had no present record
+	// of: new ids, and removed ids added back. removed are the ids newly
+	// marked removed. Both sorted.
+	recorded, removed []string
+	changed           bool
+}
+
+// mergeClientRegistry merges the configured ids (sorted) into have, at now
+// (unix seconds), without modifying have:
+//
+//   - a configured id is present, keeping its removedAt;
+//   - an id that was present but is no longer configured is marked removed
+//     at now, or kept at a later removedAt (a peer's clock ahead of ours);
+//   - an id already absent stays as it is.
+//
+// So a later removal moves removedAt forward, and no record is ever dropped.
+func mergeClientRegistry(have map[string]clientRecord, configured []string, now int64) registryMerge {
+	m := registryMerge{registry: make(map[string]clientRecord, len(have)+len(configured))}
+	for id, rec := range have {
+		m.registry[id] = rec
 	}
-	return set
+	isConfigured := make(map[string]struct{}, len(configured))
+	for _, id := range configured {
+		isConfigured[id] = struct{}{}
+		rec := m.registry[id]
+		if !rec.Present {
+			rec.Present = true
+			m.registry[id] = rec
+			m.recorded = append(m.recorded, id)
+		}
+	}
+	for id, rec := range m.registry {
+		if _, ok := isConfigured[id]; rec.Present && !ok {
+			rec.Present = false
+			rec.RemovedAt = max(rec.RemovedAt, now)
+			m.registry[id] = rec
+			m.removed = append(m.removed, id)
+		}
+	}
+	slices.Sort(m.removed)
+	m.changed = len(m.recorded) > 0 || len(m.removed) > 0
+	return m
+}
+
+// decodeClientRegistry decodes a stored registry, refusing every value that
+// is not exactly the clientRecord format.
+func decodeClientRegistry(value string) (map[string]clientRecord, error) {
+	dec := json.NewDecoder(strings.NewReader(value))
+	dec.DisallowUnknownFields()
+	var stored map[string]*clientRecord
+	if err := dec.Decode(&stored); err != nil {
+		return nil, fmt.Errorf("decode stored records: %w", err)
+	}
+	if dec.More() {
+		return nil, errors.New("decode stored records: trailing data")
+	}
+	if stored == nil {
+		return nil, errors.New("decode stored records: not an object")
+	}
+	registry := make(map[string]clientRecord, len(stored))
+	for id, rec := range stored {
+		if rec == nil || rec.RemovedAt < 0 {
+			return nil, fmt.Errorf("decode stored records: client id %q has an invalid record", id)
+		}
+		registry[id] = *rec
+	}
+	return registry, nil
 }

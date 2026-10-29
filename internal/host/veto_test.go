@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
 	"github.com/kdex-tech/host-manager/internal/auth/dcr"
@@ -93,6 +94,13 @@ func newVetoHost(t *testing.T) *vetoHost {
 		ActivePair:   &keys.KeyPair{ActiveKey: true, KeyId: "kid", Private: cs},
 		TokenTTL:     ttl,
 		TokenManager: tm,
+		// Capabilities, both deliveries, so the veto over a capability token
+		// and a /-/transfer/ link is driven through the real wiring.
+		MintTokenEnabled:     true,
+		MintTokenURLDelivery: true,
+		MintTokenUsesCap:     5,
+		MintTokenTTLCap:      time.Minute,
+		MintCapCache:         cm.GetCache("cap", cache.CacheOptions{Uncycled: true}),
 		Clients: map[string]auth.AuthClient{
 			vetoClient: {
 				ClientID:          vetoClient,
@@ -146,7 +154,9 @@ func (h *vetoHost) rebuild() {
 	h.hh.checkHandler(h.mux, paths)
 	h.hh.apitokensHandler(h.mux, paths)
 	h.hh.authorizeHandler(h.mux, paths)
+	h.hh.transferHandler(h.mux, paths)
 	h.mux.Handle(vetoFnPath, h.hh.reverseProxyHandler(h.fn, vetoIssuer))
+	h.hh.Mux = h.mux
 }
 
 // setClient configures (or, with configured false, removes) the client id,
@@ -533,5 +543,166 @@ func TestVeto_ConfiguredClientAccepted(t *testing.T) {
 		require.NotNil(t, ac)
 		assert.Equal(t, vetoClient, ac["sub"])
 		assert.False(t, clearsSession(rr, h.cfg.CookieName))
+	})
+}
+
+// capability mints a capability for vetoClient, as a Client: a bearer token
+// when target is nil, else a /-/transfer/ link to target. It returns the
+// token or the link's handle, and the jti its use counter is keyed by.
+func (h *vetoHost) capability(target *TransferTarget) (string, string) {
+	h.t.Helper()
+	req := MintTokenRequest{Entitlements: []string{capKindEntitlement}, Uses: 3}
+	if target != nil {
+		req.Delivery = deliveryURL
+		req.Target = target
+	}
+	res, err := h.hh.mintCapabilityTokenWithCap(h.t.Context(), vetoClient, kdexv1alpha1.SubjectKindClient,
+		[]string{capKindEntitlement}, req, "https://"+vetoDomain, time.Minute)
+	require.NoError(h.t, err)
+	if target == nil {
+		return res.Token, capTokenJTI(h.t, res.Token)
+	}
+	handle := res.URL[strings.LastIndex(res.URL, "/")+1:]
+	rec, ok := h.hh.loadTransferRecord(h.t.Context(), handle)
+	require.True(h.t, ok)
+	return handle, rec.JTI
+}
+
+// capTokenJTI is a capability token's jti.
+func capTokenJTI(t *testing.T, token string) string {
+	t.Helper()
+	claims := jwt.MapClaims{}
+	_, _, err := jwt.NewParser().ParseUnverified(token, claims)
+	require.NoError(t, err)
+	jti, _ := claims["jti"].(string)
+	require.NotEmpty(t, jti)
+	return jti
+}
+
+// uses is what is left of a capability's use budget.
+func (h *vetoHost) uses(jti string) string {
+	h.t.Helper()
+	v, _, _, err := h.cm.GetCache("cap", cache.CacheOptions{Uncycled: true}).Get(h.t.Context(), "uses:"+jti)
+	require.NoError(h.t, err)
+	return v
+}
+
+// redeem presents a /-/transfer/ handle.
+func (h *vetoHost) redeem(handle string) *httptest.ResponseRecorder {
+	return h.serve(httptest.NewRequest(http.MethodGet, "/-/transfer/"+handle, nil))
+}
+
+// readdClient configures id again with the registration it had, then
+// rebuilds: the normal way to rotate a compromised secret.
+func (h *vetoHost) readdClient(id string, ac auth.AuthClient) {
+	h.t.Helper()
+	clients := maps.Clone(h.cfg.Clients)
+	clients[id] = ac
+	h.cfg.Clients = clients
+	h.rebuild()
+}
+
+// nextSecond waits until the wall clock has moved past the current second,
+// so a credential minted next has a later iat than anything recorded now.
+func nextSecond() {
+	time.Sleep(time.Until(time.Unix(time.Now().Unix()+1, 0)))
+}
+
+// TestVeto_ReaddedClientIsACleanSlate (quad 2026-10-28, A1, a user
+// decision): removing a client and adding it back, the normal way to rotate
+// a compromised secret, must not revive what it held. Every credential
+// issued before the removal stays refused; one issued after the re-add is
+// accepted.
+func TestVeto_ReaddedClientIsACleanSlate(t *testing.T) {
+	h := newVetoHost(t)
+	registration := h.cfg.Clients[vetoClient]
+	oldPAT := h.pat(vetoClient, kdexv1alpha1.SubjectKindClient)
+	oldKindless := kindlessPAT(vetoIssuer, vetoIssuer, vetoClient) // LEGACY(#268)
+	oldJWT := h.clientJWT()
+	oldCap, _ := h.capability(nil)
+	oldFAT := h.fatFor(oldPAT)
+
+	h.setClient(vetoClient, false)
+	h.readdClient(vetoClient, registration)
+
+	t.Run("a Client PAT issued before the removal", func(t *testing.T) {
+		h.assertPATRefused(t, oldPAT)
+		h.assertVerifiesAsRevoked(t, oldPAT)
+	})
+	t.Run("a kind-less PAT issued before the removal", func(t *testing.T) { // LEGACY(#268)
+		h.assertPATRefused(t, oldKindless)
+	})
+	t.Run("a client_credentials JWT issued before the removal", func(t *testing.T) {
+		rr, ac := h.check(bearer(oldJWT))
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Nil(t, ac)
+	})
+	t.Run("a capability token issued before the removal", func(t *testing.T) {
+		rr, ac := h.check(bearer(oldCap))
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Nil(t, ac)
+	})
+	t.Run("a FAT issued before the removal", func(t *testing.T) {
+		_, err := h.hh.authExchanger.ExchangeSubjectToken(oldFAT, vetoExchangeTo)
+		require.ErrorIs(t, err, auth.ErrCredentialKindRefused)
+	})
+
+	nextSecond()
+	newPAT := h.pat(vetoClient, kdexv1alpha1.SubjectKindClient)
+	newJWT := h.clientJWT()
+	newCap, _ := h.capability(nil)
+
+	t.Run("a Client PAT issued after the re-add", func(t *testing.T) {
+		h.assertPATAccepted(t, newPAT, vetoClientRole)
+	})
+	t.Run("a client_credentials JWT issued after the re-add", func(t *testing.T) {
+		rr, ac := h.check(bearer(newJWT))
+		assert.Equal(t, http.StatusOK, rr.Code)
+		require.NotNil(t, ac)
+		assert.Equal(t, vetoClient, ac["sub"])
+	})
+	t.Run("a capability token issued after the re-add", func(t *testing.T) {
+		rr, ac := h.check(bearer(newCap))
+		assert.Equal(t, http.StatusOK, rr.Code)
+		require.NotNil(t, ac)
+		assert.Equal(t, vetoClient, ac["sub"])
+	})
+}
+
+// TestVeto_RemovedClientTransferLinkRefused (quad 2026-10-28, H): a
+// /-/transfer/ link is a credential too. Its redemption is vetoed before a
+// use is spent, so a refused link answers the same 410 as a spent one and
+// keeps its budget. The control redeems a configured client's link.
+func TestVeto_RemovedClientTransferLinkRefused(t *testing.T) {
+	target := &TransferTarget{Method: http.MethodGet, Path: vetoFnPath}
+
+	t.Run("a removed client's link", func(t *testing.T) {
+		h := newVetoHost(t)
+		handle, jti := h.capability(target)
+		h.setClient(vetoClient, false)
+
+		rr := h.redeem(handle)
+		assert.Equal(t, http.StatusGone, rr.Code)
+		assert.Equal(t, "3", h.uses(jti), "a refused redemption spent a use")
+	})
+	t.Run("a re-added client's link from before the removal", func(t *testing.T) {
+		h := newVetoHost(t)
+		registration := h.cfg.Clients[vetoClient]
+		handle, jti := h.capability(target)
+		h.setClient(vetoClient, false)
+		h.readdClient(vetoClient, registration)
+
+		rr := h.redeem(handle)
+		assert.Equal(t, http.StatusGone, rr.Code)
+		assert.Equal(t, "3", h.uses(jti), "a refused redemption spent a use")
+	})
+	t.Run("control: a configured client's link", func(t *testing.T) {
+		h := newVetoHost(t)
+		handle, jti := h.capability(target)
+		h.rebuild()
+
+		rr := h.redeem(handle)
+		assert.NotEqual(t, http.StatusGone, rr.Code)
+		assert.Equal(t, "2", h.uses(jti), "the redemption spent one use")
 	})
 }

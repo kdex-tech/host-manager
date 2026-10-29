@@ -311,6 +311,7 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 			JTI:          jti,
 			Sub:          sub,
 			Kind:         kind,
+			IssuedAt:     time.Now().Unix(),
 			Entitlements: req.Entitlements,
 			Target:       *req.Target,
 		}, ttl); serr != nil {
@@ -335,7 +336,15 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 // (uses:<jti>) and a transferRecord.JTI field, never a JWT and never
 // verified — so signing a token just to throw it away is wasted work; a
 // directly-generated random id is sufficient. See kdex-tech/host-manager#151.
+//
+// kind must be one this release knows, for both deliveries: a capability is
+// resolved with it for its whole life, so a kind this release cannot
+// enforce (or none) is refused rather than recorded, as
+// apitoken.MintStatelessKey refuses it.
 func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, kind kdexv1alpha1.SubjectKind, reqEntitlements []string, ttl time.Duration) (token, jti string, err error) {
+	if !kind.Known() {
+		return "", "", mintErrf(mintRefused, "mint_token cannot record the caller's subject kind %q", kind)
+	}
 	if isURL {
 		return "", rand.Text(), nil
 	}
@@ -351,11 +360,9 @@ func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, 
 	// SignProjected gives the projection the last word. (signer.Sign would
 	// drop auth.CapUsesClaim.)
 	signingContext := jwt.MapClaims{
-		"sub":          sub,
-		"entitlements": reqEntitlements,
-	}
-	if kind != "" {
-		signingContext[auth.ClaimSubjectKind] = string(kind)
+		"sub":                 sub,
+		"entitlements":        reqEntitlements,
+		auth.ClaimSubjectKind: string(kind),
 	}
 	projected, err := signer.Project(signingContext)
 	if err != nil {

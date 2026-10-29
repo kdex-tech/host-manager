@@ -10,6 +10,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/host-manager/internal/cache"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -117,12 +118,36 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	//
 	// It runs before the grant cache: a session named like a client keeps none
 	// of that client's grants, cached or not (#243). Unlike a resolve failure
-	// this is not an outage, so it fails closed.
-	bs, err := e.userBindingKey(jwt.MapClaims(ac), subject, SiteSessionGrantRefresh)
-	if err != nil {
+	// this is not an outage, so it fails closed. The line names neither the
+	// sub nor the binding key, which may be an email (#215).
+	//
+	// This re-resolution is a User's: the session's kind (ContextSubjectKind)
+	// decides whether it runs (#255, quad 2026-10-28).
+	//   - A User session is re-resolved, as a User.
+	//   - A session that records another kind keeps the claims its token was
+	//     minted with: re-resolving it as a User would hand it every
+	//     [User]-narrowed binding, the wrong answer for a Client and for a
+	//     kind this release does not know, such as a future ServiceAccount,
+	//     which may match only bindings without subjectKinds.
+	//   - LEGACY(#268): a kind-less session classified as a Client is one
+	//     named like a client: a user session from before the client existed,
+	//     or a client's token in a cookie. Its frozen claims may be the
+	//     client's, so it keeps none (#243), as before credentials carried
+	//     their kind.
+	dropGrants := func() {
 		logf.FromContext(reqCtx).V(1).Info("dropping the grants of a session whose subject names a client",
-			"sub", subject, "reason", err.Error())
+			"reason", ErrSubjectNamesClient.Error())
 		overlayScopedClaims(ac, jwt.MapClaims{"roles": []string{}, "entitlements": []string{}}, scopes)
+	}
+	if e.ContextSubjectKind(ac) != kdexv1alpha1.SubjectKindUser {
+		if recorded, _ := ac[ClaimSubjectKind].(string); recorded == "" { // LEGACY(#268)
+			dropGrants()
+		}
+		return
+	}
+	bs, err := e.userBindingSubject(jwt.MapClaims(ac), subject, SiteSessionGrantRefresh)
+	if err != nil {
+		dropGrants()
 		return
 	}
 

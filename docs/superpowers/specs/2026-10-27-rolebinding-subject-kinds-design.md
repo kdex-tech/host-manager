@@ -2,7 +2,10 @@
 
 Issue: kdex-tech/host-manager#255. Date: 2026-10-27. Revised 2026-10-28 after
 the quad over the plan (the veto, the client registry, the kind carried by
-every credential; the one-time revocation dropped).
+every credential; the one-time revocation dropped), and again after the
+pre-release quad over the build (marked "(quad 2026-10-28)": the registry
+remembers removal times, so re-adding a client is a clean slate; veto
+refusals log at V(1); the transfer veto; the session-grant refresh's kind).
 
 ## Intent
 
@@ -132,8 +135,8 @@ caller supplies it.
 
 The key, the kind and the call-site label travel together in one named value,
 `BindingSubject{Key, Kind, Site}`, so they can't be swapped silently the way
-three positional strings can. `userBindingKey` returns one with Kind `User`,
-so no user path can pass the wrong kind. (quad)
+three positional strings can. `userBindingSubject` returns one with Kind
+`User`, so no user path can pass the wrong kind. (quad)
 
 All resolution goes through one `Exchanger` entry point. Today OIDC login and
 `subjectSigningContext` call the provider directly; they are routed through it.
@@ -146,14 +149,24 @@ That entry point is where an empty kind is logged at V(0), and where the
 | Call site | Kind |
 |---|---|
 | `LoginLocal` → `FindInternalWithSource` (`roles.go`) | `User` |
-| OIDC login, auth-code redeem, refresh, session-grant refresh (all after `userBindingKey`) | `User` |
+| OIDC login, auth-code redeem, refresh (all after `userBindingSubject`) | `User` |
+| session-grant refresh | `User`, after `userBindingSubject`, only for a session whose kind (`ContextSubjectKind`) is `User` (below) |
 | `buildClientSigningContext` (client_credentials) | `Client` |
 | FAT token exchange | the FAT's `knd`, else classified from `sub` |
 | PAT middleware, proxy PAT bridge (one shared helper) | the PAT's `knd`, else classified from `sub` |
 | whoami | the auth context's kind (below) |
 
 A structural test records the kind each site passes, so a new site can't be
-added without one. (quad)
+added without one. (quad) It ranges over the one site list, `allSites`, which
+also gives each site's log level. (quad 2026-10-28)
+
+**Session-grant refresh (quad 2026-10-28).** The refresh re-resolves a User's
+grants, so it runs only for a session whose kind is `User`. A session that
+records any other kind keeps the claims its token was minted with:
+re-resolving it as a `User` would hand a `Client`, or a future
+`ServiceAccount` from a newer release, every `[User]`-narrowed binding. A
+kind-less (pre-release) session classified as a `Client` is one named like a
+client, so it keeps none of its grants, as #243 already did.
 
 ### The classifier
 
@@ -172,23 +185,63 @@ and for credentials minted before this release.
 
 Host-manager forgets a client id once it leaves config, so a removed client's
 old credentials would classify as `User`. The registry is a record of every
-client id this host has ever had configured.
+client id this host has ever had configured, and of when each was last
+removed.
 
 - **Where.** One key in a surviving-scope cache class (the #245 scope, `MaxItems`
-  0, no TTL). Its value is the sorted set of ids.
-- **When it is written.** `NewExchanger` atomically merges the configured ids
-  into it (`Cache.Update`), then reads the merged set into memory. Lookups never
-  touch the cache. Every replica builds its Exchanger from the same config, so
-  each holds the same set.
-- **Failure.** If the merge or the read fails, `NewExchanger` fails. The
-  reconcile retries, and the previous Exchanger keeps serving. A partial
-  registry would fail open, so none is used. (my call)
+  0, no TTL): `{<host>:client-registry:0}:ids` in Valkey.
+- **What it holds (quad 2026-10-28, user decision).** A JSON object from client
+  id to record, written with sorted keys:
+  `{"<id>": {"present": true|false, "removedAt": <unix seconds>}}`.
+  `present` is whether the latest build's config has the id; `removedAt` is
+  when it was last seen leaving config, 0 for never.
+  - The registry never shipped in another shape, so there is no migration. Any
+    other value (the earlier sorted array included) is corrupt and fails the
+    build.
+- **The merge (quad 2026-10-28).** Applied atomically, inside one
+  `Cache.Update`:
+  - a configured id becomes `present`, keeping its `removedAt`;
+  - an id that was `present` and is no longer configured becomes absent, with
+    `removedAt` set to now, so each later removal moves it forward;
+  - an id already absent stays as it is;
+  - `dcr_` ids are never recorded; their prefix already covers them.
+- **When it is written.** At the very end of `NewExchanger`, after OIDC
+  provider init and everything else that can fail: a config whose Exchanger
+  never builds never takes effect, so it reserves nothing. (quad 2026-10-28)
+  - **The fast path.** One plain `Get`. If the stored registry already
+    reflects the config, it is used and nothing is written.
+  - Otherwise the `Update` runs, and the build uses the registry its own last
+    attempt computed. There is no second read, which an eviction between the
+    two could answer with a partial registry.
+  - The I/O has a 5 s deadline. It runs once per build on the reconcile path,
+    never per request, and a hung Valkey must fail the build rather than wedge
+    the reconcile.
+  - Lookups never touch the cache. Every replica builds its Exchanger from the
+    same config, so each holds the same registry.
+- **Logging (quad 2026-10-28, user decision).** Each id newly recorded, and
+  each id newly marked removed, is logged at V(0). Client ids are operator
+  configuration, so naming them is fine.
+- **Failure.** If the read, the merge or the write fails, `NewExchanger` fails.
+  The reconcile retries, and the previous Exchanger keeps serving. A partial
+  registry would fail open, so none is used. (my call) Every error names the
+  full key, so an operator can find it. (quad 2026-10-28)
 - **What it extends.**
   - `NamesClient`, so the classifier, #243's login refusal and the veto all see
-    removed clients.
+    removed clients. The registry covers every configured id, so
+    `NamesClient` reads only the registry and the `dcr_` prefix.
   - In particular, a user later named like a removed client is refused, as #243
     refuses one named like a current client: the client keeps the name.
-  - DCR ids are not recorded; their prefix already covers them.
+  - **Re-adding is a clean slate (quad 2026-10-28, user decision).** The veto
+    refuses a `Client` credential issued at or before its client's
+    `removedAt`. Re-adding a client id, the normal way to rotate a compromised
+    secret, therefore never revives what that client held before it was
+    removed.
+- **Ids stay reserved (quad 2026-10-28, user decision: docs now, issue
+  later).** A recorded id is never released. The runbook documents the record
+  format; an admin release path is a follow-up issue.
+- **Valkey eviction.** The key has no TTL, so the Valkey eviction policy must be
+  `noeviction` or `volatile-*`; an `allkeys-*` policy could evict the registry.
+  (quad 2026-10-28)
 - **The in-memory backend.** Like revocations, the registry lasts only the
   process. Production runs Valkey.
 - **Scope.** It covers clients removed after the host first runs this release.
@@ -231,7 +284,11 @@ claim `knd`.
   It falls back to `SubjectKindOf(sub)`, which with the registry stays correct
   for clients removed after the rollout.
   - The fallback, and `ValidateToken`'s tolerance of a missing `knd`, are marked
-    `LEGACY(#N)` against an issue filed for their removal.
+    `LEGACY(#268)`. The fallback is written once, in `kindOrLegacy`, which both
+    the auth-context and the PAT paths use; `PATAuthContext` computes a PAT's
+    kind once, for the veto and the resolution. `ValidateToken` checks `knd`'s
+    presence without decoding any other claim, so a kind-less PAT costs what a
+    recorded one does. (quad 2026-10-28)
   - The removal condition: once the longest PAT lifetime since the fleet ran
     this release has passed, kind-less PATs are refused outright.
 - **Unknown kinds.** A recorded kind this host-manager doesn't know, such as a
@@ -248,14 +305,35 @@ resolver change shape. (my design)
 ### The veto (user decision)
 
 Current config is a veto on a credential's kind, never its source. Wherever a
-credential is accepted (the PAT helper, host JWT validation, and the FAT
-subject of a token exchange), host-manager refuses it if:
+credential is accepted (the PAT helper, `/-/apitokens/verify`, host JWT
+validation, capability tokens among them, the FAT subject of a token exchange,
+and a `/-/transfer/` link's redemption), host-manager refuses it if:
 
 - **its kind is `Client`** and its `sub` is not a configured client
   (`IsConfiguredClient`). Removing a client stops every live credential it
   holds, without anyone remembering a revocation step.
+- **its kind is `Client`** and it was issued at or before its client's last
+  removal (the registry's `removedAt`). Every site passes the credential's
+  issue time: a PAT's `iat`, a JWT's or an auth context's `iat` claim, a FAT's
+  and a capability token's `iat`, and the issue time a transfer link's record
+  now carries. A credential with no usable `iat` is refused whenever its
+  client was ever removed. (quad 2026-10-28, user decision)
 - **its kind is `User`** and its `sub` names a client (`NamesClient`, which
   includes the registry). This is #243's rule: the client keeps the name.
+- **its kind is one this release knows but has no rule for.** The rules are a
+  table, one per kind; a test asserts every kind in `SubjectKinds` has one, so
+  a kind added to the enum without its rule fails closed. A kind this release
+  does not know still passes: it only narrows. (quad 2026-10-28)
+
+There is one entry point, `VetoCredential(sub, kind, iat, site)`, which logs;
+every other path is a thin wrapper over it. The impersonating mint calls it
+too (site `apitokens mint`), for the PAT it is about to issue, and keeps its
+400: it refuses a target, not the caller's credential. (quad 2026-10-28)
+
+**Transfer links (quad 2026-10-28).** A `/-/transfer/` redemption vetoes the
+context it builds from the record (its kind and its issue time) after loading
+the record and before spending a use, so a refused link keeps its budget. It
+answers the same 410 as every other unredeemable link.
 
 The veto closes every path the quad found by which a removed client could pass
 as a `User`:
@@ -266,7 +344,15 @@ as a `User`:
 - session-grant refresh.
 
 A refused credential gets the same answer as an invalid one. It returns 401
-and logs a V(0) line naming the rule, never the key.
+and logs one V(1) line naming the rule, the site and the kind, never the key.
+V(1), not V(0), because every other credential rejection logs there: at V(0) a
+removed client's retry loop would write one line per request, the flood #181
+removed. The gate writes no second line for the same refusal. (quad
+2026-10-28: was V(0))
+
+**Offline verifiers.** A resource server that verifies PATs offline with the
+published keys never asks host-manager, so it never sees the veto: the same
+limit revocation has. `/-/apitokens/verify` applies it.
 
 ### Clients removed before the rollout
 
@@ -360,9 +446,11 @@ are the builder's)
 
      Allow about 70 s for the session-grant cache before judging a binding
      change.
-   - **Rollback.** A rollback below this release stops the veto, and mints
-     kind-less PATs. On re-upgrade those classify through the registry, which
-     the rollback leaves intact.
+   - **Rollback.** A rollback below this release ignores every `subjectKinds`
+     narrowing, not just the veto: an older host-manager does not read the
+     field, so every binding matches any kind again. It also mints kind-less
+     PATs. On re-upgrade those classify through the registry, which the
+     rollback leaves intact. (quad 2026-10-28)
 6. **Site backfill:** tell the site session, which owns it, that the release
    landed and that its `*` / `/^.*$/` user bindings should add
    `subjectKinds: [User]`. Their clients then keep only bindings written for
@@ -396,7 +484,12 @@ today, but the narrowing isn't real until both are in place.
 - **Registry:**
   - two Exchanger builds merge their ids;
   - a removed id survives a rebuild;
-  - a merge failure fails `NewExchanger`.
+  - a merge failure fails `NewExchanger`;
+  - remove → re-add → remove → re-add moves the cutoff forward;
+  - concurrent builds lose nothing;
+  - a build that fails reserves nothing;
+  - an unchanged config writes nothing, and there is no second read.
+    (quad 2026-10-28)
 - **Integration (real role provider, not fixed-role stubs):**
   - a client_credentials token under a `*` + `[User]` binding gets none of its
     roles;
@@ -419,6 +512,12 @@ today, but the narrowing isn't real until both are in place.
   - cookie session-grant refresh is refused.
 
   A `User` PAT whose sub becomes a client id is refused.
+
+  After a client is removed and re-added, its PAT, JWT, capability token, FAT
+  and transfer link from before the removal are refused, and ones issued after
+  the re-add are accepted. A refused transfer link keeps its use count. A
+  `ServiceAccount` cookie gains no `[User]` binding at session-grant refresh.
+  (quad 2026-10-28)
 - **Logging:**
   - under `RoleBindingClaim=email`, the `role-binding` output contains no email;
   - with the logger off, resolution allocates no more than before.

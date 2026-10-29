@@ -94,6 +94,11 @@ const ClaimSubjectKind = "knd"
 // (MintDecidedClaims), so a claim added here is mint-decided on both paths.
 var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
 
+// projectedClaims are the inline claims Project copies from the signing
+// context (see Project): every mint-decided claim, plus the rest.
+var projectedClaims = append(slices.Clone(mintDecidedClaims),
+	"email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act")
+
 // MintDecidedClaims returns a copy of the claims the mint decides, for the
 // auth context's own list to build on; the copy keeps the signer's list out
 // of any caller's reach.
@@ -231,7 +236,10 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// ClaimSubjectKind is the subject's kind, which every resolution of roles
 	// from this token (the FAT, a token exchange of it) uses; it is
 	// re-asserted after the mapper too (#255).
-	for _, claim := range []string{"auth_method", ClaimSubjectKind, "email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act"} {
+	//
+	// Both are mint-decided (mintDecidedClaims), which projectedClaims is
+	// built from, so a claim the mint decides is always carried through.
+	for _, claim := range projectedClaims {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val
 		}

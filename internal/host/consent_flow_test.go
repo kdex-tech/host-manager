@@ -141,7 +141,7 @@ func TestHostConsentFlow_PageAllowThenCode(t *testing.T) {
 // Safari sends no Sec-Fetch-User (bugs.webkit.org 247697), so its Allow must
 // pass the wired gate on the WebKit waiver alone (kdex-tech/host-manager#264).
 func TestHostConsentFlow_SafariAllowThenCode(t *testing.T) {
-	consentFlowAllowThenCode(t, webKitNavigation(map[string]string{
+	consentFlowAllowThenCode(t, navigationWithoutFetchUser(map[string]string{
 		"Origin": consentFlowIssuer, "User-Agent": uaSafariMac}))
 }
 
@@ -171,7 +171,7 @@ func consentFlowAllowThenCode(t *testing.T, userSubmit map[string]string) {
 	for name, headers := range map[string]map[string]string{
 		"cross-origin":        {"Origin": "https://evil.example"},
 		"same-origin fetch()": {"Origin": consentFlowIssuer, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"},
-		"Chrome scripted submit, no Sec-Fetch-User": webKitNavigation(map[string]string{
+		"Chrome scripted submit, no Sec-Fetch-User": navigationWithoutFetchUser(map[string]string{
 			"Origin": consentFlowIssuer, "User-Agent": uaChromeMac}),
 	} {
 		w := h.post(sealed, headers)

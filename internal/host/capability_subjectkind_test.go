@@ -104,11 +104,17 @@ func TestCapabilityToken_CarriesCallerKind(t *testing.T) {
 
 // TestTransferLink_CarriesCallerKind: redeeming a /-/transfer/ link injects
 // the minting caller's kind with its sub, into the context the bound target
-// is served under.
+// is served under. The redemption is vetoed (TestVeto_RemovedClientTransferLinkRefused),
+// so the client caller's id is a configured client.
 func TestTransferLink_CarriesCallerKind(t *testing.T) {
 	for name, tc := range capKindCallers() {
 		t.Run(name, func(t *testing.T) {
 			hh := newTestHostHandlerForProxy(t, testURLAuthConfig(t))
+			ex, err := auth.NewExchanger(t.Context(), auth.Config{
+				Clients: map[string]auth.AuthClient{"svc": {ClientID: "svc"}},
+			}, hh.cacheManager, stubInternalIdentityProvider{}, nil)
+			require.NoError(t, err)
+			hh.authExchanger = ex
 			mux := http.NewServeMux()
 			var saw auth.AuthContext
 			mux.HandleFunc("GET /api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
@@ -137,5 +143,28 @@ func TestTransferLink_CarriesCallerKind(t *testing.T) {
 			assert.Equal(t, tc.ac["sub"], saw["sub"])
 			assert.Equal(t, string(tc.want), saw[auth.ClaimSubjectKind])
 		})
+	}
+}
+
+// TestCapability_RefusesAKindItCannotRecord (quad 2026-10-28, K): a
+// capability is resolved with its caller's kind for its whole life, so a
+// kind this release does not know, or none, is refused for both deliveries,
+// as an API token mint refuses it, rather than recorded.
+func TestCapability_RefusesAKindItCannotRecord(t *testing.T) {
+	for _, kind := range []kdexv1alpha1.SubjectKind{"", "ServiceAccount"} {
+		for _, delivery := range []string{"", deliveryURL} {
+			t.Run(string(kind)+"/"+delivery, func(t *testing.T) {
+				hh := newTestHostHandlerForProxy(t, testURLAuthConfig(t))
+				req := MintTokenRequest{Entitlements: []string{capKindEntitlement}, Delivery: delivery}
+				if delivery == deliveryURL {
+					req.Target = &TransferTarget{Method: http.MethodGet, Path: "/api/v1/files/abc/content"}
+				}
+				res, err := hh.mintCapabilityToken(t.Context(), "robot", kind, []string{capKindEntitlement}, req, "https://dev.example")
+				require.Error(t, err)
+				assert.Equal(t, http.StatusForbidden, mintStatus(err), err.Error())
+				assert.Empty(t, res.Token)
+				assert.Empty(t, res.URL)
+			})
+		}
 	}
 }

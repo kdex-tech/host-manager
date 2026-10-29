@@ -558,7 +558,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 						// The same context the host PAT middleware builds, resolved
 						// with the kind the PAT records, so PASETO and JWT callers
 						// get identical structured entitlements.
-						ac, rerr := authExchanger.PATAuthContext(r.Context(), data, auth.SiteProxyPAT)
+						ac, rerr := authExchanger.PATAuthContext(data, auth.SiteProxyPAT)
 						if rerr != nil {
 							// A vetoed PAT (#255) is an invalid one, already
 							// logged by the veto without its sub.

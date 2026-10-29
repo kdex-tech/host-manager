@@ -17,7 +17,9 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	"github.com/kdex-tech/host-manager/internal/sign"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"kdex.dev/crds/api/v1alpha1"
 )
 
 func newGenTestExchanger(t *testing.T) *Exchanger {
@@ -519,4 +521,31 @@ func TestBumpGrantGenerationProducesUniqueTokens(t *testing.T) {
 	f2 := bare.grantGeneration(ctx)
 	require.NotEmpty(t, f1)
 	require.NotEqual(t, f1, f2)
+}
+
+// TestRefreshSessionGrants_FutureKindGainsNoUserBinding (quad 2026-10-28, I):
+// the session-grant refresh resolves with the session's own kind
+// (ContextSubjectKind), never User by default. A cookie carrying a kind this
+// release does not know, such as a future ServiceAccount, must not gain a
+// binding narrowed to [User]; the User control does.
+func TestRefreshSessionGrants_FutureKindGainsNoUserBinding(t *testing.T) {
+	sp := newKindsScopeProvider(t, nil, kindsBinding("people", "*", "user-role", v1alpha1.SubjectKindUser))
+	cfg, ex, _, _ := newKindsSiteExchanger(t, sp)
+
+	session := func(kind string) AuthContext {
+		return AuthContext{
+			"sub": "robot", ClaimSubjectKind: kind, "scope": "openid roles entitlements",
+			"roles": []any{}, "entitlements": []any{},
+		}
+	}
+
+	future := session("ServiceAccount")
+	cfg.refreshSessionGrants(context.Background(), future, ex)
+	assert.Empty(t, future["roles"], "a ServiceAccount session gained a [User] binding")
+
+	user := session(string(v1alpha1.SubjectKindUser))
+	cfg.refreshSessionGrants(context.Background(), user, ex)
+	roles, err := user.GetRoles()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"user-role"}, roles, "control: a User session gains it")
 }

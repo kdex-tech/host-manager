@@ -272,7 +272,7 @@ func TestMint_ProvisionedUserRecordsUser(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, kdexv1alpha1.SubjectKindUser, data.SubjectKind)
 
-	ac, err := hh.authExchanger.PATAuthContext(t.Context(), data, auth.SiteHostPAT)
+	ac, err := hh.authExchanger.PATAuthContext(data, auth.SiteHostPAT)
 	require.NoError(t, err)
 	assert.Equal(t, []string{kindsUserRole}, stringSliceFromClaim(ac["roles"]))
 }
@@ -318,7 +318,7 @@ func TestWhoami_UsesContextKind(t *testing.T) {
 	idp := kindsRoleProvider(t)
 	ex, err := auth.NewExchanger(t.Context(), kindsClientConfig(), nil, idp, nil)
 	require.NoError(t, err)
-	patAC, err := ex.PATAuthContext(t.Context(),
+	patAC, err := ex.PATAuthContext(
 		&apitoken.TokenData{Subject: kindsHostClientID, SubjectKind: kdexv1alpha1.SubjectKindClient}, auth.SiteProxyPAT)
 	require.NoError(t, err)
 

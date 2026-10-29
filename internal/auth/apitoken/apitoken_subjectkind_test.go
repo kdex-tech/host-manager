@@ -2,6 +2,7 @@ package apitoken
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -59,11 +60,34 @@ func TestValidateToken_KindlessTokenDecodes(t *testing.T) {
 func TestValidateToken_RefusesNonStringKind(t *testing.T) {
 	tm := subjectlessTokenManager(t)
 
-	for name, knd := range map[string]any{"a number": 7, "an object": map[string]any{"k": "User"}, "a list": []string{"User"}} {
+	for name, knd := range map[string]any{
+		"a number": 7, "an object": map[string]any{"k": "User"}, "a list": []string{"User"},
+		"null": json.RawMessage("null"),
+	} {
 		data, err := tm.ValidateToken(context.Background(), signedPAT(tm, knd), "https://a.example")
 		assert.Error(t, err, name)
 		assert.Nil(t, data, name)
 	}
+}
+
+// TestValidateToken_KindlessCostsWhatARecordedKindCosts (quad 2026-10-28,
+// C): every live PAT is kind-less on the day this ships, so reading an
+// absent knd must cost about what reading a present one does. Decoding every
+// claim to learn knd is absent (go-paseto's Claims()) cost several times the
+// allocations of the whole validation.
+func TestValidateToken_KindlessCostsWhatARecordedKindCosts(t *testing.T) {
+	tm := subjectlessTokenManager(t)
+	allocs := func(knd any) float64 {
+		pat := signedPAT(tm, knd)
+		return testing.AllocsPerRun(50, func() {
+			if _, err := tm.ValidateToken(context.Background(), pat, "https://a.example"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	recorded, kindless := allocs("User"), allocs(nil)
+	t.Logf("allocations per validation: recorded knd %.0f, kind-less %.0f", recorded, kindless)
+	assert.LessOrEqual(t, kindless, recorded+3, "a kind-less PAT allocates far more than a recorded one")
 }
 
 // BenchmarkValidateToken_Kind is the per-PAT cost of reading knd, for a PAT

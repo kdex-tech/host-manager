@@ -25,8 +25,11 @@ import (
 
 const clientNamed = "orchestrator"
 
+// withClient configures id on an already-built e, and records it in e's
+// client registry, as NewExchanger would have.
 func withClient(e *Exchanger, id string) *Exchanger {
 	e.config.Clients = map[string]AuthClient{id: {ClientID: id, ClientSecret: "s"}}
+	e.clientRegistry = map[string]clientRecord{id: {Present: true}}
 	return e
 }
 
@@ -195,7 +198,12 @@ func TestRefreshSessionGrants_GuardPrecedesTheGrantCache(t *testing.T) {
 	key := ex.grantGeneration(context.Background()) + "|" + clientNamed
 	require.NoError(t, ex.grantCache.Set(context.Background(), key, `{"roles":["acme-admin"],"entitlements":["page::read"]}`))
 
-	ac := AuthContext{"sub": clientNamed, "scope": "openid roles entitlements", "roles": []any{}, "entitlements": []any{}}
+	// A User session: a session of any other kind keeps its frozen claims
+	// and never reaches the guard (TestRefreshSessionGrants_FutureKindGainsNoUserBinding).
+	ac := AuthContext{
+		"sub": clientNamed, ClaimSubjectKind: "User",
+		"scope": "openid roles entitlements", "roles": []any{}, "entitlements": []any{},
+	}
 	cfg.refreshSessionGrants(context.Background(), ac, ex)
 
 	assert.Empty(t, ac["roles"])

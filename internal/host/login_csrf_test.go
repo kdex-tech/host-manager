@@ -102,10 +102,11 @@ func withUserNavigation(h map[string]string) map[string]string {
 	return mergeHeaders(map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-User": "?1"}, h)
 }
 
-// webKitNavigation adds the fetch metadata WebKit sends for the same submit:
-// same-origin, navigate, document and no Sec-Fetch-User (bugs.webkit.org
-// 247697); explicit keys in h win.
-func webKitNavigation(h map[string]string) map[string]string {
+// navigationWithoutFetchUser adds the fetch metadata of a same-origin
+// top-level form submit that sends no Sec-Fetch-User, as WebKit sends it
+// (bugs.webkit.org 247697): same-origin, navigate and document; explicit
+// keys in h win.
+func navigationWithoutFetchUser(h map[string]string) map[string]string {
 	return mergeHeaders(map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}, h)
 }
 
@@ -145,7 +146,7 @@ func TestWebKitLacksFetchUser(t *testing.T) {
 func TestConsentOriginAllowed_DuplicateSecFetchUser(t *testing.T) {
 	for _, ua := range []string{uaChromeMac, uaSafariMac} {
 		r := httptest.NewRequest(http.MethodPost, "/-/oauth/consent", nil)
-		for k, v := range webKitNavigation(map[string]string{"Origin": "https://app.example", "User-Agent": ua}) {
+		for k, v := range navigationWithoutFetchUser(map[string]string{"Origin": "https://app.example", "User-Agent": ua}) {
 			r.Header.Set(k, v)
 		}
 		r.Header.Add("Sec-Fetch-User", "?1")
@@ -208,28 +209,28 @@ func TestConsentOriginAllowed(t *testing.T) {
 		"Chrome scripted form.submit() stays refused": {map[string]string{
 			"Origin": "https://app.example", "Sec-Fetch-Site": "same-origin",
 			"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "User-Agent": uaChromeMac}, false},
-		"Safari form submit (no Sec-Fetch-User)": {webKitNavigation(map[string]string{
+		"Safari form submit (no Sec-Fetch-User)": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac}), true},
-		"iOS Chrome form submit (WebKit, no Sec-Fetch-User)": {webKitNavigation(map[string]string{
+		"iOS Chrome form submit (WebKit, no Sec-Fetch-User)": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaChromeIOS}), true},
-		"Safari with Referer only": {webKitNavigation(map[string]string{
+		"Safari with Referer only": {navigationWithoutFetchUser(map[string]string{
 			"Referer": "https://app.example/-/oauth/authorize", "User-Agent": uaSafariMac}), true},
-		"Safari user activation ?0": {webKitNavigation(map[string]string{
+		"Safari user activation ?0": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-User": "?0"}), false},
-		"Safari fetch()": {webKitNavigation(map[string]string{
+		"Safari fetch()": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac,
 			"Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}), false},
-		"Safari form into an iframe": {webKitNavigation(map[string]string{
+		"Safari form into an iframe": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-Dest": "iframe"}), false},
-		"Safari cross-site": {webKitNavigation(map[string]string{
+		"Safari cross-site": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-Site": "cross-site"}), false},
-		"Safari foreign Origin": {webKitNavigation(map[string]string{
+		"Safari foreign Origin": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://evil.example", "User-Agent": uaSafariMac}), false},
-		"Safari that sends ?1": {webKitNavigation(map[string]string{
+		"Safari that sends ?1": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-User": "?1"}), true},
-		"Safari empty Sec-Fetch-User is sent, not waived": {webKitNavigation(map[string]string{
+		"Safari empty Sec-Fetch-User is sent, not waived": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaSafariMac, "Sec-Fetch-User": ""}), false},
-		"Firefox scripted form.submit() stays refused": {webKitNavigation(map[string]string{
+		"Firefox scripted form.submit() stays refused": {navigationWithoutFetchUser(map[string]string{
 			"Origin": "https://app.example", "User-Agent": uaFirefox}), false},
 	} {
 		t.Run(name, func(t *testing.T) {

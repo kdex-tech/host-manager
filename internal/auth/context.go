@@ -48,10 +48,13 @@ const ClaimIssuedAt = "iat"
 
 // ClaimSubjectKind is the claim recording the kind of the credential's
 // subject (kdexv1alpha1.SubjectKind), set when the credential is issued and
-// carried from then on. Only a mint sets it: it is in mintDecidedClaims and
-// reservedMintClaims, stripped from an upstream id_token, and re-asserted by
-// the signer after claimMappings. Exchanger.ContextSubjectKind reads it. See
-// kdex-tech/host-manager#255.
+// carried from then on. Only the host sets it: a mint, and a context built
+// from a credential the host issued, from the kind that credential records
+// (Exchanger.PATAuthContext from a PAT, TransferGet from a /-/transfer/
+// link's record). No claim from outside sets it: it is in mintDecidedClaims
+// and reservedMintClaims, stripped from an upstream id_token, and re-asserted
+// by the signer after claimMappings. Exchanger.ContextSubjectKind reads it.
+// See kdex-tech/host-manager#255.
 const ClaimSubjectKind = sign.ClaimSubjectKind
 
 // SetAuthContext sets the auth context in the context.
