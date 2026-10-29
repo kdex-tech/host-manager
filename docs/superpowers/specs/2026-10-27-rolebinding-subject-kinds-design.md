@@ -194,16 +194,21 @@ removed.
   id to record, written with sorted keys:
   `{"<id>": {"present": true|false, "removedAt": <unix seconds>}}`.
   `present` is whether the latest build's config has the id; `removedAt` is
-  when it was last seen leaving config, 0 for never.
+  the cutoff, 0 for never removed.
   - The registry never shipped in another shape, so there is no migration. Any
     other value (the earlier sorted array included) is corrupt and fails the
     build.
 - **The merge (quad 2026-10-28).** Applied atomically, inside one
   `Cache.Update`:
-  - a configured id becomes `present`, keeping its `removedAt`;
+  - a new configured id becomes `present`, with `removedAt` 0;
+  - a configured id recorded absent is re-added: `present`, with `removedAt`
+    moved forward to now (Ruling Q3, below);
+  - a configured id already `present` keeps its `removedAt`;
   - an id that was `present` and is no longer configured becomes absent, with
-    `removedAt` set to now, so each later removal moves it forward;
+    `removedAt` set to now;
   - an id already absent stays as it is;
+  - `removedAt` only moves forward, so each removal and each re-add moves the
+    cutoff;
   - `dcr_` ids are never recorded; their prefix already covers them.
 - **When it is written.** At the very end of `NewExchanger`, after OIDC
   provider init and everything else that can fail: a config whose Exchanger
@@ -217,7 +222,10 @@ removed.
     never per request, and a hung Valkey must fail the build rather than wedge
     the reconcile.
   - Lookups never touch the cache. Every replica builds its Exchanger from the
-    same config, so each holds the same registry.
+    same config, so once a config change has rolled out each holds the same
+    registry. During a rollout they can differ: a replica still on the old
+    config holds the old registry, and keeps minting for a client the new
+    config removed. The re-add cutoff below covers that. (quad 2026-10-28)
 - **Logging (quad 2026-10-28, user decision).** Each id newly recorded, and
   each id newly marked removed, is logged at V(0). Client ids are operator
   configuration, so naming them is fine.
@@ -236,6 +244,19 @@ removed.
     `removedAt`. Re-adding a client id, the normal way to rotate a compromised
     secret, therefore never revives what that client held before it was
     removed.
+  - **The cutoff is stamped at the re-add (quad 2026-10-28, Ruling Q3).** The
+    removal is recorded by the first build that sees the id gone, but an
+    Exchanger still configuring the client keeps minting for it: the old
+    Exchanger a reconcile keeps serving until the new one is set (it requeues
+    while waiting for the deployment), or a replica still on the old config
+    (there is no leader election). Stamping the cutoff only at the removal
+    would let everything those mint pass after a re-add. So the re-add moves
+    `removedAt` to the moment of the re-add, which refuses every credential
+    issued before it, whichever replica minted it. The removal stamp stays,
+    harmless: while the client is removed, `IsConfiguredClient` refuses its
+    credentials anyway. The cost is that a credential issued in the very
+    second of the re-add is refused once. A re-add is logged at V(0) with the
+    id and the cutoff.
 - **Ids stay reserved (quad 2026-10-28, user decision: docs now, issue
   later).** A recorded id is never released. The runbook documents the record
   format; an admin release path is a follow-up issue.
@@ -243,7 +264,8 @@ removed.
   `noeviction` or `volatile-*`; an `allkeys-*` policy could evict the registry.
   (quad 2026-10-28)
 - **The in-memory backend.** Like revocations, the registry lasts only the
-  process. Production runs Valkey.
+  process, so without Valkey neither the reservation nor the clean slate
+  survives a restart. Production runs Valkey. (quad 2026-10-28)
 - **Scope.** It covers clients removed after the host first runs this release.
   Clients removed earlier were never seen. See "Clients removed before the
   rollout".
@@ -312,8 +334,9 @@ and a `/-/transfer/` link's redemption), host-manager refuses it if:
 - **its kind is `Client`** and its `sub` is not a configured client
   (`IsConfiguredClient`). Removing a client stops every live credential it
   holds, without anyone remembering a revocation step.
-- **its kind is `Client`** and it was issued at or before its client's last
-  removal (the registry's `removedAt`). Every site passes the credential's
+- **its kind is `Client`** and it was issued at or before its client's cutoff
+  (the registry's `removedAt`: the later of its last removal and its last
+  re-add, Ruling Q3). Every site passes the credential's
   issue time: a PAT's `iat`, a JWT's or an auth context's `iat` claim, a FAT's
   and a capability token's `iat`, and the issue time a transfer link's record
   now carries. A credential with no usable `iat` is refused whenever its
@@ -485,7 +508,11 @@ today, but the narrowing isn't real until both are in place.
   - two Exchanger builds merge their ids;
   - a removed id survives a rebuild;
   - a merge failure fails `NewExchanger`;
-  - remove → re-add → remove → re-add moves the cutoff forward;
+  - remove → re-add → remove → re-add moves the cutoff forward each time;
+  - a credential an Exchanger still configuring the client minted after the
+    recorded removal is refused after a re-add (Q3);
+  - a stored value with any trailing data, a stray `}` or `]` included, fails
+    the build;
   - concurrent builds lose nothing;
   - a build that fails reserves nothing;
   - an unchanged config writes nothing, and there is no second read.

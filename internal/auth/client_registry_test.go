@@ -87,8 +87,8 @@ func TestClientRegistry_RecordFormat(t *testing.T) {
 }
 
 // TestClientRegistry_ReaddKeepsTheCutoff (A1, a user decision): re-adding a
-// client keeps the time of its last removal, and each later removal moves it
-// forward.
+// client stamps its cutoff again (Ruling Q3), and each later removal or
+// re-add moves it forward.
 func TestClientRegistry_ReaddKeepsTheCutoff(t *testing.T) {
 	cm, err := cache.NewCacheManager("", "registry-readd", nil)
 	require.NoError(t, err)
@@ -97,16 +97,22 @@ func TestClientRegistry_ReaddKeepsTheCutoff(t *testing.T) {
 	ex := buildAt(t, cm, 200)
 	assert.Equal(t, clientRecord{Present: false, RemovedAt: 200}, ex.clientRegistry["a"], "removed")
 	ex = buildAt(t, cm, 300, "a")
-	assert.Equal(t, clientRecord{Present: true, RemovedAt: 200}, ex.clientRegistry["a"], "re-added")
+	assert.Equal(t, clientRecord{Present: true, RemovedAt: 300}, ex.clientRegistry["a"],
+		"re-added: the cutoff moves to the re-add (Q3)")
+	ex = buildAt(t, cm, 350, "a")
+	assert.Equal(t, clientRecord{Present: true, RemovedAt: 300}, ex.clientRegistry["a"],
+		"still configured: the cutoff stays")
 	ex = buildAt(t, cm, 400)
 	assert.Equal(t, clientRecord{Present: false, RemovedAt: 400}, ex.clientRegistry["a"], "removed again")
 	ex = buildAt(t, cm, 500, "a")
-	assert.Equal(t, clientRecord{Present: true, RemovedAt: 400}, ex.clientRegistry["a"], "re-added again")
+	assert.Equal(t, clientRecord{Present: true, RemovedAt: 500}, ex.clientRegistry["a"], "re-added again")
 	ex = buildAt(t, cm, 600)
 	assert.Equal(t, clientRecord{Present: false, RemovedAt: 600}, ex.clientRegistry["a"])
 	ex = buildAt(t, cm, 700)
 	assert.Equal(t, clientRecord{Present: false, RemovedAt: 600}, ex.clientRegistry["a"],
 		"an id already absent stays as it is")
+	ex = buildAt(t, cm, 800, "a")
+	assert.Equal(t, clientRecord{Present: true, RemovedAt: 800}, ex.clientRegistry["a"])
 }
 
 // A peer whose clock runs ahead recorded a later removal; a build with an
@@ -337,6 +343,8 @@ func TestClientRegistry_CorruptValueFailsClosed(t *testing.T) {
 		"a negative removedAt":       `{"a":{"present":false,"removedAt":-1}}`,
 		"a record of the wrong type": `{"a":true}`,
 		"trailing data":              `{} {}`,
+		"a trailing brace":           `{"a":{"present":true,"removedAt":0}}}`,
+		"a trailing bracket":         `{"a":{"present":true,"removedAt":0}}]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			cm, err := cache.NewCacheManager("", "registry-corrupt", nil)
@@ -409,6 +417,15 @@ func TestClientRegistry_LogsReservations(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, "marked a client id removed"), out)
 	assert.Contains(t, out, `"client_id"="b"`)
 	assert.Contains(t, out, `"removed_at"=200`)
+
+	atRegistryTime(t, 300)
+	_, err = loadClientRegistry(ctx, cm, registryClients("a", "b"))
+	require.NoError(t, err)
+	out = take()
+	assert.Equal(t, 1, strings.Count(out, "client re-added; credentials issued before now are refused"), out)
+	assert.Contains(t, out, `"client_id"="b"`)
+	assert.Contains(t, out, `"removed_at"=300`, "the line names the cutoff")
+	assert.NotContains(t, out, "recorded a configured client id", "a re-add is not a new record")
 }
 
 // TestNewExchanger_FailedBuildReservesNothing (quad 2026-10-28, A3): a

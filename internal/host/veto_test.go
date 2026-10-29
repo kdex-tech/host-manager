@@ -706,3 +706,32 @@ func TestVeto_RemovedClientTransferLinkRefused(t *testing.T) {
 		assert.Equal(t, "2", h.uses(jti), "the redemption spent one use")
 	})
 }
+
+// TestVeto_ReaddRefusesWhatAStaleExchangerMinted (quad 2026-10-28, fix round
+// 2, Ruling Q3): the removal is recorded by the first build that sees the
+// client gone, but until the new Exchanger serves (SetHost after the
+// deployment is ready; a peer replica still on the old config) the old one
+// keeps minting for the client. The re-add stamps the cutoff again, so what
+// was minted in that window is refused after it; a login in a later second
+// than the re-add is accepted.
+func TestVeto_ReaddRefusesWhatAStaleExchangerMinted(t *testing.T) {
+	h := newVetoHost(t)
+	registration := h.cfg.Clients[vetoClient]
+	stale := h.hh.authExchanger
+
+	h.setClient(vetoClient, false) // the removal is recorded now
+	nextSecond()
+	ts, err := stale.LoginClient(t.Context(), vetoClient, vetoSecret, "")
+	require.NoError(t, err, "precondition: the stale Exchanger still configures the client")
+	h.readdClient(vetoClient, registration)
+
+	rr, ac := h.check(bearer(ts.AccessToken))
+	assert.Equal(t, http.StatusUnauthorized, rr.Code, "a token the stale Exchanger minted after the recorded removal")
+	assert.Nil(t, ac)
+
+	nextSecond()
+	rr, ac = h.check(bearer(h.clientJWT()))
+	assert.Equal(t, http.StatusOK, rr.Code, "a login in a later second than the re-add")
+	require.NotNil(t, ac)
+	assert.Equal(t, vetoClient, ac["sub"])
+}

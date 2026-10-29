@@ -121,15 +121,6 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 	ctx := context.Background()
 
 	covered := map[string]bool{}
-	t.Cleanup(func() {
-		pinnedInHost := map[string]bool{SiteProxyPAT: true, SiteWhoami: true}
-		for _, s := range allSites {
-			if s.resolvesRoles {
-				assert.True(t, covered[s.name] || pinnedInHost[s.name],
-					"site %q resolves roles, but no structural test drives it", s.name)
-			}
-		}
-	})
 	expect := func(t *testing.T, seen []BindingSubject, site string, kind v1alpha1.SubjectKind) {
 		t.Helper()
 		covered[site] = true
@@ -288,6 +279,18 @@ func TestResolutionSites_PassKinds(t *testing.T) {
 				assert.False(t, ok)
 				assert.Empty(t, p.take(), "a vetoed PAT resolves nothing")
 			})
+		}
+	})
+
+	// Last, and a subtest of its own, so it runs only when every site
+	// subtest above ran: run alone, one site's subtest does not trip it.
+	t.Run("every site that resolves roles is driven", func(t *testing.T) {
+		pinnedInHost := map[string]bool{SiteProxyPAT: true, SiteWhoami: true}
+		for _, s := range allSites {
+			if s.resolvesRoles {
+				assert.True(t, covered[s.name] || pinnedInHost[s.name],
+					"site %q resolves roles, but no structural test drives it", s.name)
+			}
 		}
 	})
 }

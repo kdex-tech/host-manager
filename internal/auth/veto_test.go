@@ -184,10 +184,11 @@ func TestVeto_RefusalIsNotLoggedAtV0(t *testing.T) {
 }
 
 // TestVeto_ReaddedClient (A1, a user decision): a client removed and added
-// back is a clean slate. Its credentials issued at or before the removal
-// stay refused; one issued after it is accepted. A credential without a
-// usable iat is refused once the client was ever removed, and accepted for
-// a client never removed. Each removal moves the cutoff forward.
+// back is a clean slate. Its credentials issued at or before the re-add
+// (Ruling Q3: the cutoff is stamped at the re-add) stay refused; one issued
+// after it is accepted. A credential without a usable iat is refused once
+// the client was ever removed, and accepted for a client never removed.
+// Each removal and re-add moves the cutoff forward.
 func TestVeto_ReaddedClient(t *testing.T) {
 	cl := v1alpha1.SubjectKindClient
 	cm, err := cache.NewCacheManager("", "veto-readd", nil)
@@ -203,7 +204,7 @@ func TestVeto_ReaddedClient(t *testing.T) {
 	for _, tc := range []struct {
 		iat     int64
 		refused bool
-	}{{0, true}, {150, true}, {200, true}, {201, false}, {300, false}} {
+	}{{0, true}, {150, true}, {200, true}, {201, true}, {300, true}, {301, false}} {
 		err := ex.vetoSubjectKind(kindsClientID, cl, tc.iat)
 		if tc.refused {
 			assert.ErrorIs(t, err, ErrCredentialKindRefused, "iat %d", tc.iat)
@@ -215,9 +216,11 @@ func TestVeto_ReaddedClient(t *testing.T) {
 
 	buildAt(t, cm, 400, "never-removed")
 	ex = buildAt(t, cm, 500, kindsClientID, "never-removed")
-	assert.ErrorIs(t, ex.vetoSubjectKind(kindsClientID, cl, 300), ErrCredentialKindRefused,
-		"issued between the two removals")
-	assert.NoError(t, ex.vetoSubjectKind(kindsClientID, cl, 401))
+	assert.ErrorIs(t, ex.vetoSubjectKind(kindsClientID, cl, 350), ErrCredentialKindRefused,
+		"issued between the first re-add and the second removal")
+	assert.ErrorIs(t, ex.vetoSubjectKind(kindsClientID, cl, 450), ErrCredentialKindRefused,
+		"issued between the second removal and the second re-add")
+	assert.NoError(t, ex.vetoSubjectKind(kindsClientID, cl, 501))
 }
 
 // TestVeto_EveryKnownKindHasARule (E): every kind this release knows has a
@@ -242,4 +245,29 @@ func TestVeto_KnownKindWithoutARuleIsRefused(t *testing.T) {
 	require.ErrorIs(t, err, ErrCredentialKindRefused)
 	assert.ErrorIs(t, err, errNoVetoRule)
 	assert.NoError(t, ex.vetoSubjectKind("alice", "ServiceAccount", 1), "an unknown kind passes")
+}
+
+// TestVeto_ReaddCutoffCoversTheRemovalLag (quad 2026-10-28, fix round 2,
+// Ruling Q3): a removal is recorded by the first build that sees the client
+// unconfigured, but an Exchanger still configuring it (a replica on the old
+// config, or the old Exchanger a reconcile keeps serving until SetHost) keeps
+// minting. The cutoff is stamped again at the re-add, so a credential minted
+// in that window, after the recorded removal, is refused once the client is
+// re-added; one minted in a later second than the re-add is accepted.
+func TestVeto_ReaddCutoffCoversTheRemovalLag(t *testing.T) {
+	cl := v1alpha1.SubjectKindClient
+	cm, err := cache.NewCacheManager("", "veto-readd-lag", nil)
+	require.NoError(t, err)
+
+	stale := buildAt(t, cm, 100, kindsClientID)
+	buildAt(t, cm, 200) // the removal is recorded at 200
+	// The stale Exchanger still configures the client, and mints at 250.
+	require.NoError(t, stale.vetoSubjectKind(kindsClientID, cl, 250), "precondition: the stale build accepts it")
+
+	ex := buildAt(t, cm, 300, kindsClientID) // the re-add
+	assert.ErrorIs(t, ex.vetoSubjectKind(kindsClientID, cl, 250), ErrCredentialKindRefused,
+		"a credential minted after the recorded removal, by a build still configuring the client")
+	assert.ErrorIs(t, ex.vetoSubjectKind(kindsClientID, cl, 300), ErrCredentialKindRefused,
+		"a credential minted in the second of the re-add is refused once")
+	assert.NoError(t, ex.vetoSubjectKind(kindsClientID, cl, 301), "minted in a later second than the re-add")
 }

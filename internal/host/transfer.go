@@ -33,7 +33,7 @@ type transferRecord struct {
 	// does (auth.Exchanger.ContextSubjectKind).
 	Kind kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
 	// IssuedAt is when the link was minted (unix seconds): the link's iat,
-	// which the veto compares with its client's last removal on redemption
+	// which the veto compares with its client's cutoff on redemption
 	// (#255, quad 2026-10-28). A record without one is refused whenever its
 	// client was ever removed.
 	IssuedAt     int64          `json:"iat,omitempty"`

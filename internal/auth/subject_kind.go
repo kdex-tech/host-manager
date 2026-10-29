@@ -168,11 +168,13 @@ var vetoRules = map[kdexv1alpha1.SubjectKind]vetoRule{
 //   - a Client credential whose sub is not a configured client
 //     (IsConfiguredClient), so removing a client stops every live credential
 //     it holds, without anyone remembering a revocation step;
-//   - a Client credential issued at or before the last time its client was
-//     removed (the registry's removedAt), so adding a client back, the normal
-//     way to rotate a compromised secret, is a clean slate rather than a
-//     revival. A credential with no usable iat (0) is refused whenever its
-//     client was ever removed;
+//   - a Client credential issued at or before its client's cutoff (the
+//     registry's removedAt, stamped at each removal and again at each re-add,
+//     Ruling Q3), so adding a client back, the normal way to rotate a
+//     compromised secret, is a clean slate rather than a revival, even for
+//     what an Exchanger still on the old config minted after the removal. A
+//     credential with no usable iat (0) is refused whenever its client was
+//     ever removed;
 //   - a User credential whose sub names a client (NamesClient, which covers
 //     the registry): #243's rule, the client keeps the name;
 //   - a kind this release knows but has no rule for (errNoVetoRule).
@@ -211,7 +213,7 @@ func (e *Exchanger) vetoClient(sub string, iat int64) error {
 		return fmt.Errorf("%w: a Client credential whose client is not configured", ErrCredentialKindRefused)
 	}
 	if removedAt := e.clientRemovedAt(sub); removedAt > 0 && iat <= removedAt {
-		return fmt.Errorf("%w: a Client credential issued before its client was last removed", ErrCredentialKindRefused)
+		return fmt.Errorf("%w: a Client credential issued before its client's last removal or re-add", ErrCredentialKindRefused)
 	}
 	return nil
 }

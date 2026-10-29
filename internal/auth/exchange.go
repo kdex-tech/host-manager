@@ -47,7 +47,7 @@ type Exchanger struct {
 	config Config
 	// clientRegistry is the client registry as this build merged it: a
 	// record of every client id this host has ever had configured, present
-	// or removed, with when it was last removed (clientRecord). Built once at
+	// or removed, with its removal cutoff (clientRecord). Built once at
 	// the end of NewExchanger, never written afterwards, so NamesClient and
 	// the veto read it without a lock. See kdex-tech/host-manager#255.
 	clientRegistry map[string]clientRecord
@@ -523,8 +523,8 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	kind := e.ContextSubjectKind(AuthContext(claims))
 	// The veto (#255): a FAT whose kind current config contradicts (its
 	// client since removed, or a User named like a client), or issued before
-	// its client was last removed, is an invalid subject_token, answered as
-	// one: not an ErrServerError.
+	// its client's last removal or re-add, is an invalid subject_token,
+	// answered as one: not an ErrServerError.
 	if err := e.VetoCredential(sub, kind, issuedAtOf(AuthContext(claims)), SiteTokenExchange); err != nil {
 		return TokenSet{}, fmt.Errorf("invalid subject_token: %w", err)
 	}

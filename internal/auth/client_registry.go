@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"time"
@@ -48,9 +49,11 @@ var clientRegistryNow = time.Now
 // Its fields:
 //   - present: the id is in the configuration of the latest Exchanger build
 //     that merged it.
-//   - removedAt: when the id was last seen leaving the configuration, in unix
-//     seconds; 0 means it has never been removed. A re-added id keeps it, so
-//     every credential issued at or before it stays refused (the veto).
+//   - removedAt: the cutoff, in unix seconds; 0 means the id has never been
+//     removed. It is stamped when a build first sees the id leave the
+//     configuration, and stamped again when a build sees it come back, so
+//     every credential issued at or before the re-add stays refused (the
+//     veto), whichever Exchanger minted it.
 //
 // The registry has never shipped in another shape, so there is no
 // migration: a value in any other shape (an array, an unknown field, a null
@@ -83,7 +86,7 @@ var clientRegistryLocation = fmt.Sprintf("client registry (Valkey key {<host>:%s
 // the one the last attempt computed: there is no second read, which an
 // eviction between the two could have answered with a partial registry.
 //
-// Every id newly recorded, and every id newly marked removed, is logged at
+// Every id newly recorded, re-added or newly marked removed is logged at
 // V(0). Client ids are operator configuration, not a user's identity.
 func loadClientRegistry(
 	ctx context.Context,
@@ -166,6 +169,10 @@ func loadClientRegistry(
 	log := logf.FromContext(ctx)
 	for _, id := range merged.recorded {
 		log.Info("client registry: recorded a configured client id; it stays reserved as a client's name",
+			"client_id", id)
+	}
+	for _, id := range merged.readded {
+		log.Info("client registry: client re-added; credentials issued before now are refused",
 			"client_id", id, "removed_at", merged.registry[id].RemovedAt)
 	}
 	for _, id := range merged.removed {
@@ -178,22 +185,34 @@ func loadClientRegistry(
 // registryMerge is the outcome of one merge.
 type registryMerge struct {
 	registry map[string]clientRecord
-	// recorded are the configured ids the registry had no present record
-	// of: new ids, and removed ids added back. removed are the ids newly
-	// marked removed. Both sorted.
-	recorded, removed []string
-	changed           bool
+	// recorded are the configured ids the registry had no record of,
+	// readded the configured ids it had recorded removed, and removed the
+	// ids newly marked removed. All sorted.
+	recorded, readded, removed []string
+	changed                    bool
 }
 
 // mergeClientRegistry merges the configured ids (sorted) into have, at now
 // (unix seconds), without modifying have:
 //
-//   - a configured id is present, keeping its removedAt;
+//   - a new configured id is present, never removed (removedAt 0);
+//   - a configured id recorded removed is re-added: present, with removedAt
+//     moved to now (Ruling Q3, quad 2026-10-28);
+//   - a configured id already present keeps its removedAt;
 //   - an id that was present but is no longer configured is marked removed
-//     at now, or kept at a later removedAt (a peer's clock ahead of ours);
+//     at now;
 //   - an id already absent stays as it is.
 //
-// So a later removal moves removedAt forward, and no record is ever dropped.
+// removedAt only ever moves forward (max, against a peer whose clock runs
+// ahead), and no record is ever dropped.
+//
+// Why the re-add stamps the cutoff again: the removal is recorded by the
+// first build that sees the id gone, but an Exchanger still configuring it
+// keeps minting for a while (the old one a reconcile keeps serving until the
+// new one is set, a peer replica still on the old config). Everything those
+// mint is issued before the re-add, so the re-add's cutoff refuses it all.
+// The cost: a credential issued in the very second of the re-add is refused
+// once.
 func mergeClientRegistry(have map[string]clientRecord, configured []string, now int64) registryMerge {
 	m := registryMerge{registry: make(map[string]clientRecord, len(have)+len(configured))}
 	for id, rec := range have {
@@ -202,11 +221,16 @@ func mergeClientRegistry(have map[string]clientRecord, configured []string, now 
 	isConfigured := make(map[string]struct{}, len(configured))
 	for _, id := range configured {
 		isConfigured[id] = struct{}{}
-		rec := m.registry[id]
-		if !rec.Present {
-			rec.Present = true
-			m.registry[id] = rec
+		rec, known := m.registry[id]
+		switch {
+		case !known:
+			m.registry[id] = clientRecord{Present: true}
 			m.recorded = append(m.recorded, id)
+		case !rec.Present:
+			rec.Present = true
+			rec.RemovedAt = max(rec.RemovedAt, now)
+			m.registry[id] = rec
+			m.readded = append(m.readded, id)
 		}
 	}
 	for id, rec := range m.registry {
@@ -218,7 +242,7 @@ func mergeClientRegistry(have map[string]clientRecord, configured []string, now 
 		}
 	}
 	slices.Sort(m.removed)
-	m.changed = len(m.recorded) > 0 || len(m.removed) > 0
+	m.changed = len(m.recorded) > 0 || len(m.readded) > 0 || len(m.removed) > 0
 	return m
 }
 
@@ -231,7 +255,9 @@ func decodeClientRegistry(value string) (map[string]clientRecord, error) {
 	if err := dec.Decode(&stored); err != nil {
 		return nil, fmt.Errorf("decode stored records: %w", err)
 	}
-	if dec.More() {
+	// Nothing may follow the object, not even a stray `}` or `]`, which
+	// dec.More() does not report.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode stored records: trailing data")
 	}
 	if stored == nil {
