@@ -210,7 +210,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.20.1
 # .github/workflows/ci.yml -- CI installs the linter from the action,
 # NOT from this variable, so a bump here alone changes nothing in CI
 # and a config key the older version rejects fails the build.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 # https://github.com/helm/helm/releases/latest
 HELM_VERSION ?= v4.1.3
 
