@@ -162,7 +162,7 @@ func run() error {
 
 	// ---- 5. Stand up the server and probe it ----------------------------
 
-	srv := server.New(":0", hostHandler) // address irrelevant — httptest replaces it
+	srv, _ := server.New(":0", hostHandler, server.DefaultTimeouts()) // address irrelevant — httptest replaces it
 	ts := httptest.NewServer(srv.Handler)
 	defer ts.Close()
 

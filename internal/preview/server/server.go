@@ -181,7 +181,7 @@ func Run(ctx context.Context, opts Options) error {
 	// 7. Build the host-manager web server. Address argument is recorded on
 	// the returned *http.Server but we replace its Handler with our outer
 	// mux below, then call ListenAndServe ourselves.
-	srv := hmserver.New(opts.Addr, fc.HostHandler)
+	srv, _ := hmserver.New(opts.Addr, fc.HostHandler, hmserver.DefaultTimeouts())
 
 	// 8. Wrap the host-manager handler with the function-proxy outer mux.
 	srv.Handler = newProxyMux(srv.Handler, routes, opts.MissingFn)
@@ -206,7 +206,9 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		// Wait for the ListenAndServe goroutine to actually return (so the
 		// listener is closed before we return to the caller).
-		<-listenErr
+		if err := <-listenErr; err != nil {
+			logger.Error(err, "listener failed during shutdown")
+		}
 		return nil
 	case err := <-listenErr:
 		return err

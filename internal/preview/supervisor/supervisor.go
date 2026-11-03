@@ -146,7 +146,9 @@ func (s *Supervisor) Shutdown(gracePeriod time.Duration) error {
 		// (cmd.Wait may only be called once; the goroutine launched in Spawn
 		// already owns that call).
 		for _, c := range children {
-			<-c.exit
+			if err := <-c.exit; err != nil {
+				_, _ = fmt.Fprintf(s.opts.Stderr, "[%s] exited: %v\n", c.name, err)
+			}
 		}
 		close(done)
 	}()

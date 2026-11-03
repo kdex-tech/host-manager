@@ -177,9 +177,11 @@ func TestProjectTranslation_NamesAndHostRef(t *testing.T) {
 	}
 	tr := kdexv1alpha1.KDexTranslation{
 		ObjectMeta: metav1.ObjectMeta{Name: "tr-en", Namespace: "ns1"},
-		Spec: kdexv1alpha1.KDexTranslationSpec{
-			Translations: []kdexv1alpha1.Translation{
-				{Lang: "en", KeysAndValues: map[string]string{"hello": "Hello"}},
+		Spec: kdexv1alpha1.KDexNamespacedTranslationSpec{
+			KDexTranslationSpec: kdexv1alpha1.KDexTranslationSpec{
+				Translations: []kdexv1alpha1.Translation{
+					{Lang: "en", KeysAndValues: map[string]string{"hello": "Hello"}},
+				},
 			},
 		},
 	}

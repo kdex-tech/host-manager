@@ -118,7 +118,7 @@ func ProjectTranslation(tr kdexv1alpha1.KDexTranslation, host kdexv1alpha1.KDexH
 			Annotations: copyAnnotations(tr.Annotations),
 		},
 		Spec: kdexv1alpha1.KDexInternalTranslationSpec{
-			KDexTranslationSpec: *tr.Spec.DeepCopy(),
+			KDexTranslationSpec: *tr.Spec.KDexTranslationSpec.DeepCopy(),
 			HostRef:             corev1.LocalObjectReference{Name: host.Name},
 		},
 	}

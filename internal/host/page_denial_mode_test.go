@@ -9,9 +9,9 @@ import (
 
 // The knob used to fail OPEN on a typo: SetPageDenialMode maps anything that
 // is not exactly "forbid" to PageDenialDiscover -- the LESS strict mode -- and
-// cmd/main.go validated nothing, so `forbidden`, `Forbid` or a trailing space
+// cmd/host-manager/main.go validated nothing, so `forbidden`, `Forbid` or a trailing space
 // silently bought the opposite of what the operator asked for. IsValid is what
-// cmd/main.go now refuses to start on.
+// cmd/host-manager/main.go now refuses to start on.
 func TestPageDenialModeIsValid(t *testing.T) {
 	valid := []PageDenialMode{PageDenialDiscover, PageDenialForbid}
 	for _, m := range valid {
@@ -28,7 +28,7 @@ func TestPageDenialModeIsValid(t *testing.T) {
 	}
 }
 
-// The setter keeps coercing -- it is the safety net behind cmd/main.go's
+// The setter keeps coercing -- it is the safety net behind cmd/host-manager/main.go's
 // check, not the check itself -- and still resolves to the strict-by-default
 // pair correctly for the two real values.
 func TestSetPageDenialModeCoercesUnknownToDiscover(t *testing.T) {

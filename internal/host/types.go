@@ -262,7 +262,7 @@ func (hh *HostHandler) SetProxyTimeouts(t ProxyTimeouts) *HostHandler {
 //
 // This coercion is a SAFETY NET, not the validation. It resolves to the LESS
 // strict mode, so an operator typo reaching here would silently buy the
-// opposite of what was asked for -- which is why cmd/main.go refuses to start
+// opposite of what was asked for -- which is why cmd/host-manager/main.go refuses to start
 // on anything that is not exactly "discover" or "forbid", and why a coercion
 // that does happen is logged at V(0): reaching it means something bypassed
 // that check.

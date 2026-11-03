@@ -453,7 +453,7 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 // The per-host observer CronJob lists by it, so the observed set stays exactly
 // the adaptor-deployed functions -- service-backed functions never had an
 // observer and still don't. Must match the constant in knative-deployer's
-// cmd/main.go. See kdex-tech/host-manager#156.
+// cmd/host-manager/main.go. See kdex-tech/host-manager#156.
 const ObservedByLabel = "kdex.dev/observed-by"
 
 // HostObserverName is the per-host observer CronJob's name.
