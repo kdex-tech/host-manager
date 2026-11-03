@@ -210,13 +210,14 @@ func TestGate_UnboundPlaceholder_NoSuppliableSource_Is500(t *testing.T) {
 	assert.False(t, *reached)
 }
 
-// A bound value of "*" or one containing ':' is ErrInvalidBoundValue. The value
+// A bound value of "*", one containing ':', or one shaped like a {placeholder}
+// (entitlements v0.7.0) is ErrInvalidBoundValue. The value
 // came from the caller's own request, so it is a client error (400) -- not the
 // error-logged 500 reserved for a CR fault, which any anonymous caller could
 // otherwise drive just by putting "*" in a path.
 func TestGate_InvalidBoundValue_Is400(t *testing.T) {
 	h, reached := binderFixture(t, scopedStoreFn())
-	for _, p := range []string{"/api/v1/vector_stores/*", "/api/v1/vector_stores/a:b"} {
+	for _, p := range []string{"/api/v1/vector_stores/*", "/api/v1/vector_stores/a:b", "/api/v1/vector_stores/%7Bx%7D"} {
 		for _, held := range [][]string{nil, {"functions:/api/v1/vector_stores:read", "vector_stores::all"}} {
 			code := requestAs(t, h, "GET", p, held, nil)
 			assert.Equal(t, http.StatusBadRequest, code, "%s held=%v", p, held)

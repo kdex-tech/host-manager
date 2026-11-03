@@ -528,3 +528,34 @@ func TestAuthorizationChecker_ParseRequirements_NilSafe(t *testing.T) {
 		})
 	})
 }
+
+// entitlements v0.7.0 rejects a ':' in resource, resourceName or verb with an
+// error (joined into "<resource>:<resourceName>:<verb>" it would re-split into
+// another shape). For host-manager such an identity names nothing a caller can
+// hold, so it is an ordinary denial -- (false, nil) -- not an error every
+// caller would turn into a 500 (#195).
+func TestAuthorizationChecker_ColonInIdentityIsADenial(t *testing.T) {
+	ac := NewAuthorizationChecker([]string{"pages::all", "kdexroles::read"}, logr.Discard())
+	held := ac.GetParsedEntitlements(context.Background())
+	none := ac.ParseRequirements(nil)
+
+	for _, tc := range []struct{ resource, name, verb string }{
+		{"pages", "/a:b", "read"},
+		{"kdexroles", "x@y:z", "read"},
+		{"pages", "/a", "foo:read"},
+		{"a:b", "c", "read"},
+	} {
+		ok, err := ac.VerifyResourceParsedEntitlements(tc.resource, tc.name, held, none, tc.verb)
+		assert.NoError(t, err, "%+v", tc)
+		assert.False(t, ok, "%+v", tc)
+
+		ok, err = ac.CheckAccess(context.Background(), tc.resource, tc.name, nil, tc.verb)
+		assert.NoError(t, err, "CheckAccess %+v", tc)
+		assert.False(t, ok, "CheckAccess %+v", tc)
+	}
+
+	// The wildcard holder is still admitted on an ordinary name.
+	ok, err := ac.VerifyResourceParsedEntitlements("pages", "/a", held, none, "read")
+	assert.NoError(t, err)
+	assert.True(t, ok)
+}

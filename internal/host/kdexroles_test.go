@@ -134,6 +134,20 @@ func TestKDexRoles_GetByName(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, getRoles(t, mux, "/-/roles/viewer", nil).Code)
 }
 
+// A ':' in the role name cannot name any KDexRole (Kubernetes object names
+// have none). entitlements v0.7.0 errors on such an identity instead of
+// matching nothing; the handler must still answer the ordinary denial, not a
+// caller-triggerable 500 (the #195 class).
+func TestKDexRoles_GetByNameWithColonIsDenied(t *testing.T) {
+	mux := kdexRolesMux(t)
+	for _, name := range []string{"a:b", "a%3Ab", "x@y:z"} {
+		p := "/-/roles/" + name
+		assert.Equal(t, http.StatusUnauthorized, getRoles(t, mux, p, nil).Code, "%s anonymous", p)
+		assert.Equal(t, http.StatusForbidden, getRoles(t, mux, p, []string{"kdexroles:viewer:read"}).Code, "%s viewer", p)
+		assert.Equal(t, http.StatusForbidden, getRoles(t, mux, p, []string{"kdexroles::read"}).Code, "%s wildcard holder", p)
+	}
+}
+
 // With auth disabled (no checker) there is nothing to gate the listing on, so
 // the endpoints are not registered at all.
 func TestKDexRoles_NotRegisteredWithoutAuth(t *testing.T) {

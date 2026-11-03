@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 	entitlements "github.com/kdex-tech/entitlements/go"
@@ -52,7 +53,7 @@ func (ac *AuthorizationChecker) CheckAccess(
 
 	ac.log.V(2).Info("CheckAccess", "resource", resource, "resourceName", resourceName)
 
-	return ac.ec.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, requirements, verbs...)
+	return ac.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, requirements, verbs...)
 }
 
 // HoldsScope reports whether the caller holds the opaque scope. An opaque
@@ -184,6 +185,21 @@ func (ac *AuthorizationChecker) BindRequirements(
 	return ac.ec.BindRequirements(reqs, binding)
 }
 
+// VerifyResourceParsedEntitlements checks the caller against the identity
+// "<resource>:<resourceName>:<verb>" plus parsedRequirements.
+//
+// An identity part containing ':' is an ordinary denial here, (false, nil).
+// entitlements v0.7.0 returns an error for it, because joined into the
+// identity it would re-split into another shape (since 0.7.0 possibly a
+// contextual check on a different resource type). Under v0.6.0 the same
+// identity was an opaque string no valid grant could match. A ':' only ever
+// arrives from the caller's request (a /-/roles path value, an apitokens sub)
+// or from a CR field nothing forbids it in (a page basePath), so every caller
+// treating the error as a server fault would answer a caller-triggerable 500
+// (#195). The check stays here rather than at each call site because the
+// library's error is untyped: it names no sentinel callers could test for.
+// Remove this guard once kdex-entitlements exports one (kdex-tech/entitlements#11)
+// and callers map it to a denial.
 func (ac *AuthorizationChecker) VerifyResourceParsedEntitlements(
 	resource string,
 	resourceName string,
@@ -191,5 +207,18 @@ func (ac *AuthorizationChecker) VerifyResourceParsedEntitlements(
 	parsedRequirements entitlements.ParsedRequirements,
 	verbs ...string,
 ) (bool, error) {
+	if identityHasColon(resource, resourceName, verbs) {
+		ac.log.V(1).Info("identity contains ':'; denied", "resource", resource, "resourceName", resourceName)
+		return false, nil
+	}
 	return ac.ec.VerifyResourceParsedEntitlements(resource, resourceName, parsedEntitlements, parsedRequirements, verbs...)
+}
+
+// identityHasColon reports whether any identity part contains ':'. An empty
+// resource or resourceName is still the library's error to report.
+func identityHasColon(resource, resourceName string, verbs []string) bool {
+	if strings.Contains(resource, ":") || strings.Contains(resourceName, ":") {
+		return true
+	}
+	return len(verbs) > 0 && strings.Contains(verbs[0], ":")
 }
