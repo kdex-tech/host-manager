@@ -12,6 +12,7 @@ package deploy
 
 import (
 	"context"
+	"github.com/kdex-tech/host-manager/internal"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -51,8 +52,8 @@ func TestDeployJob_IsNamedJobName(t *testing.T) {
 	job, err := d.Deploy(context.Background(), fn)
 	assert.NoError(t, err)
 	assert.Equal(t, JobName(fn), job.Name)
-	assert.Equal(t, AppDeployer, job.Labels[LabelApp])
-	assert.Equal(t, fn.Name, job.Labels[LabelFunction])
+	assert.Equal(t, internal.APP_DEPLOYER, job.Labels[internal.LABEL_APP])
+	assert.Equal(t, fn.Name, job.Labels[internal.LABEL_FUNCTION])
 }
 
 // JobName moves with the adaptor generation, so cleanup can tell the current

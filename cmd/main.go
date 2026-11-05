@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
@@ -35,7 +36,9 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	k8s_runtime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -328,21 +331,14 @@ func main() {
 	// namespace and its spec.referenceNamespaces, never the whole cluster
 	// (#290); Secrets only in the host's own namespace (#242). Cluster-scoped
 	// kinds are unaffected.
-	referenceNamespaces := controller.ParseReferenceNamespaces(referenceNamespacesFlag)
-	controller.SetReferenceNamespaces(referenceNamespaces)
-	cacheNamespaces := map[string]crcache.Config{}
-	for _, ns := range controller.CacheNamespaces(controllerNamespace, referenceNamespaces) {
-		cacheNamespaces[ns] = crcache.Config{}
+	cacheOptions, err := managerCacheOptions(controllerNamespace, referenceNamespacesFlag)
+	if err != nil {
+		setupLog.Error(err, "unable to scope the cache")
+		os.Exit(1)
 	}
-	setupLog.Info("scoping the cache", "namespaces", controller.CacheNamespaces(controllerNamespace, referenceNamespaces))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Cache: crcache.Options{
-			DefaultNamespaces: cacheNamespaces,
-			ByObject: map[client.Object]crcache.ByObject{
-				&corev1.Secret{}: {Namespaces: map[string]crcache.Config{controllerNamespace: {}}},
-			},
-		},
+		Cache: cacheOptions,
 		Controller: config.Controller{
 			Logger: logger,
 		},
@@ -465,12 +461,8 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
+	if err := addProbes(mgr, hostHandler); err != nil {
+		setupLog.Error(err, "unable to set up probes")
 		os.Exit(1)
 	}
 
@@ -558,4 +550,64 @@ func webserverPort(address string) int32 {
 	}
 
 	return int32(i)
+}
+
+// managerCacheOptions validates the controller namespace, records the focal
+// host's referenceNamespaces, and returns the scoped cache options.
+func managerCacheOptions(controllerNamespace, referenceNamespacesFlag string) (crcache.Options, error) {
+	if controllerNamespace == "" {
+		// An empty namespace in the cache options means every namespace:
+		// the scoping would silently become cluster-wide.
+		return crcache.Options{}, errors.New(
+			"cannot determine the controller namespace (no service-account namespace file, POD_NAMESPACE unset)")
+	}
+	referenceNamespaces := controller.ParseReferenceNamespaces(referenceNamespacesFlag)
+	controller.SetReferenceNamespaces(referenceNamespaces)
+	setupLog.Info("scoping the cache", "hostNamespace", controllerNamespace, "referenceNamespaces", referenceNamespaces)
+	return hostCacheOptions(controllerNamespace, controller.CacheNamespaces(controllerNamespace, referenceNamespaces)), nil
+}
+
+// addProbes registers the liveness and readiness checks. The pod is ready
+// only once the host is loaded: a restarted pod (a rollout, an edit to
+// spec.referenceNamespaces) otherwise reports ready before its caches sync
+// and its host is built, and serves 404s until then. With the check, a
+// rolling update keeps the old pod serving meanwhile.
+func addProbes(mgr ctrl.Manager, hostHandler *host.HostHandler) error {
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return err
+	}
+	if err := mgr.AddReadyzCheck("host", func(*http.Request) error {
+		if !hostHandler.HostLoaded() {
+			return errors.New("the focal host is not loaded yet")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return mgr.AddReadyzCheck("readyz", healthz.Ping)
+}
+
+// hostCacheOptions scopes the manager's cache (#290). The kdex.dev kinds a
+// reference can name, and the Services and EndpointSlices a function backend
+// can point at, are cached in the host's namespace and its
+// referenceNamespaces (the default). The workload kinds host-manager only
+// ever creates or reads in the host's own namespace are cached there alone,
+// so a reference namespace costs informers only for what a reference can
+// reach. Secrets are host-namespace-only whatever the list says (#242).
+// Cluster-scoped kinds are unaffected.
+func hostCacheOptions(hostNamespace string, referenceable []string) crcache.Options {
+	defaults := make(map[string]crcache.Config, len(referenceable))
+	for _, ns := range referenceable {
+		defaults[ns] = crcache.Config{}
+	}
+	hostOnly := crcache.ByObject{Namespaces: map[string]crcache.Config{hostNamespace: {}}}
+	byObject := map[client.Object]crcache.ByObject{}
+	for _, obj := range []client.Object{
+		&corev1.Secret{}, &corev1.ConfigMap{}, &corev1.Pod{}, &corev1.ServiceAccount{},
+		&corev1.PersistentVolumeClaim{}, &batchv1.Job{}, &batchv1.CronJob{}, &appsv1.Deployment{},
+		&networkingv1.Ingress{}, &gatewayv1.HTTPRoute{},
+	} {
+		byObject[obj] = hostOnly
+	}
+	return crcache.Options{DefaultNamespaces: defaults, ByObject: byObject}
 }

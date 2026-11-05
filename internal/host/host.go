@@ -450,6 +450,14 @@ func newPageIndex(pages []page.PageHandler) pageIndex {
 	return idx
 }
 
+// HostLoaded reports whether SetHost has given the handler its host, so it
+// can serve the site. The pod's readiness check.
+func (hh *HostHandler) HostLoaded() bool {
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	return hh.host != nil
+}
+
 func (hh *HostHandler) RebuildMux() {
 	hh.log.V(3).Info("rebuilding mux")
 

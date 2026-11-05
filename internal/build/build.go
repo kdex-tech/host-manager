@@ -142,9 +142,9 @@ func (b *Builder) GetOrCreateKPackImage(
 		}
 
 		kImage.SetLabels(map[string]string{
-			"app":           "builder",
-			"function":      function.Name,
-			"kdex.dev/host": function.Spec.HostRef.Name,
+			internal.LABEL_APP:      internal.APP_BUILDER,
+			internal.LABEL_FUNCTION: function.Name,
+			"kdex.dev/host":         function.Spec.HostRef.Name,
 		})
 
 		return ctrl.SetControllerReference(function, kImage, b.Scheme)

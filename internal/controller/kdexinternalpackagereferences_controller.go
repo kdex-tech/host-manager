@@ -534,8 +534,6 @@ func isNPMSecret(s corev1.Secret) bool {
 	return s.Annotations["kdex.dev/secret-type"] == "npm"
 }
 
-// secretRefKey returns the Secret a packageReference's secretRef names; the
-// namespace defaults to the IPR's.
 // secretRefKey is the npm credential Secret a package reference names. It is
 // always in the host's own namespace: reading another namespace's Secret let
 // a package reference make host-manager copy a credential its author may not

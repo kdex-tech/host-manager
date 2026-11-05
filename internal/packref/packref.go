@@ -313,7 +313,12 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 					},
 				},
 				Spec: corev1.PodSpec{
-					AutomountServiceAccountToken: new(true),
+					// No API token: the packager needs none (it authenticates
+					// with the npm Secret and the mounted dockerconfigjson),
+					// and its npm-build step runs third-party package code. A
+					// mounted token was host-manager's own, which can read
+					// Secrets cluster-wide.
+					AutomountServiceAccountToken: new(false),
 					SecurityContext:              podSecurityContext,
 					// Placement (nexus-manager#35): with none set the pod lands
 					// on whatever untainted node exists — on a segregated cluster

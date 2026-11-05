@@ -26,6 +26,7 @@ import (
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
+	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/apitoken"
@@ -1181,6 +1182,30 @@ func (r *KDexInternalHostReconciler) packagesPendingOutcome(
 	return nil, lastImportMap, requeue
 }
 
+// hostNamespaceSecretRefs returns packageReferences fit for the IPR, whose CRD
+// (kdex-crds v0.14.258) rejects any secretRef.namespace (#242). An app stored
+// under an older CRD can still carry one: naming the host's own namespace is
+// just the default spelled out, so it is cleared; naming another namespace is
+// not supported, so that package is left out (and logged) rather than letting
+// the apiserver refuse the whole IPR and stall every package on the host.
+func hostNamespaceSecretRefs(log logr.Logger, hostNamespace string, packageReferences []kdexv1alpha1.PackageReference) []kdexv1alpha1.PackageReference {
+	out := make([]kdexv1alpha1.PackageReference, 0, len(packageReferences))
+	for _, pkg := range packageReferences {
+		if pkg.SecretRef != nil && pkg.SecretRef.Namespace != "" {
+			if pkg.SecretRef.Namespace != hostNamespace {
+				log.Error(nil, "leaving out a package whose secretRef names another namespace; the Secret must be in the host's namespace",
+					"package", pkg.Name, "secretRefNamespace", pkg.SecretRef.Namespace, "hostNamespace", hostNamespace)
+				continue
+			}
+			ref := *pkg.SecretRef
+			ref.Namespace = ""
+			pkg.SecretRef = &ref
+		}
+		out = append(out, pkg)
+	}
+	return out
+}
+
 func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 	ctx context.Context,
 	internalHost *kdexv1alpha1.KDexInternalHost,
@@ -1207,7 +1232,7 @@ func (r *KDexInternalHostReconciler) createOrUpdatePackageReferences(
 				}
 			}
 
-			internalPackageReferences.Spec.PackageReferences = packageReferences
+			internalPackageReferences.Spec.PackageReferences = hostNamespaceSecretRefs(log, internalHost.Namespace, packageReferences)
 
 			return ctrl.SetControllerReference(internalHost, internalPackageReferences, r.Scheme)
 		},

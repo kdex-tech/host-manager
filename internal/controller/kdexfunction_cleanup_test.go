@@ -15,7 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/kdex-tech/host-manager/internal"
-	"github.com/kdex-tech/host-manager/internal/deploy"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -42,7 +41,7 @@ func TestCleanupJobs_KeepsOnlyTheCurrentDeployerJob(t *testing.T) {
 	job := func(name string, owner *kdexv1alpha1.KDexFunction, gen string, succeeded, active int32) *batchv1.Job {
 		j := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "dev", Labels: map[string]string{
-				deploy.LabelApp: deploy.AppDeployer, deploy.LabelFunction: owner.Name, internal.ANNOTATION_GENERATION: gen,
+				internal.LABEL_APP: internal.APP_DEPLOYER, internal.LABEL_FUNCTION: owner.Name, internal.ANNOTATION_GENERATION: gen,
 			}},
 			Status: batchv1.JobStatus{Succeeded: succeeded, Active: active},
 		}
@@ -61,7 +60,7 @@ func TestCleanupJobs_KeepsOnlyTheCurrentDeployerJob(t *testing.T) {
 	).Build()
 	r := &KDexFunctionReconciler{Client: cl, Scheme: scheme}
 
-	require.NoError(t, r.cleanupJobs(context.Background(), fn, deploy.AppDeployer, "billing-deployer-3-current"))
+	require.NoError(t, r.cleanupJobs(context.Background(), fn, internal.APP_DEPLOYER, "billing-deployer-3-current"))
 
 	var left batchv1.JobList
 	require.NoError(t, cl.List(context.Background(), &left, client.InNamespace("dev")))

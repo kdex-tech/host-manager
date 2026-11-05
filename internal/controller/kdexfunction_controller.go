@@ -58,6 +58,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+// backendServiceKey is the Service a service-backed function fronts: its
+// backend.service, in the function's namespace unless that names another.
+// The index and the reconcile both use it, so the index key always equals
+// the Get key.
+func backendServiceKey(fn *kdexv1alpha1.KDexFunction) client.ObjectKey {
+	svc := fn.Spec.Backend.Service
+	ns := svc.Namespace
+	if ns == "" {
+		ns = fn.Namespace
+	}
+	return client.ObjectKey{Namespace: ns, Name: svc.Name}
+}
+
 // BackendServiceIndexKey indexes KDexFunctions by the namespaced name of the
 // Service referenced in spec.backend.service. Used by Service/EndpointSlice
 // watches to enqueue dependent functions when a backend Service or its
@@ -69,11 +82,8 @@ func backendServiceIndexer(o client.Object) []string {
 	if !ok || fn.Spec.Backend == nil || fn.Spec.Backend.Service == nil {
 		return nil
 	}
-	ns := fn.Spec.Backend.Service.Namespace
-	if ns == "" {
-		ns = fn.Namespace
-	}
-	return []string{ns + "/" + fn.Spec.Backend.Service.Name}
+	key := backendServiceKey(fn)
+	return []string{key.Namespace + "/" + key.Name}
 }
 
 // KDexFunctionReconciler reconciles a KDexFunction object
@@ -341,10 +351,7 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 		// CEL prevents this, but defend.
 		return ctrl.Result{}, nil
 	}
-	ns := svcRef.Namespace
-	if ns == "" {
-		ns = fn.Namespace
-	}
+	ns := backendServiceKey(fn).Namespace
 	if err := checkReferenceNamespace(fn.Namespace, ns); err != nil {
 		return r.markBackendUnready(ctx, fn, "NamespaceNotReferenceable", err.Error(), false)
 	}
@@ -544,7 +551,9 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapServiceToFunctions := func(ctx context.Context, obj client.Object) []reconcile.Request {
 		key := obj.GetNamespace() + "/" + obj.GetName()
 		var list kdexv1alpha1.KDexFunctionList
-		if err := r.List(ctx, &list, client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
+		// Functions only act in the host namespace: one index lookup there,
+		// not one per cached namespace (#290).
+		if err := r.List(ctx, &list, client.InNamespace(r.ControllerNamespace), client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
 			return nil
 		}
 		reqs := make([]reconcile.Request, 0, len(list.Items))
@@ -565,7 +574,9 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		key := es.Namespace + "/" + svcName
 		var list kdexv1alpha1.KDexFunctionList
-		if err := r.List(ctx, &list, client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
+		// Functions only act in the host namespace: one index lookup there,
+		// not one per cached namespace (#290).
+		if err := r.List(ctx, &list, client.InNamespace(r.ControllerNamespace), client.MatchingFields{BackendServiceIndexKey: key}); err != nil {
 			return nil
 		}
 		reqs := make([]reconcile.Request, 0, len(list.Items))
@@ -583,7 +594,7 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// kdex-tech/host-manager#143.
 	mapFaaSAdaptorToFunctions := func(ctx context.Context, obj client.Object) []reconcile.Request {
 		hosts := &kdexv1alpha1.KDexInternalHostList{}
-		if err := r.List(ctx, hosts); err != nil {
+		if err := r.List(ctx, hosts, client.InNamespace(r.ControllerNamespace)); err != nil {
 			return nil
 		}
 
@@ -644,7 +655,7 @@ func (r *KDexFunctionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 
 		functions := &kdexv1alpha1.KDexFunctionList{}
-		if err := r.List(ctx, functions); err != nil {
+		if err := r.List(ctx, functions, client.InNamespace(r.ControllerNamespace)); err != nil {
 			return nil
 		}
 
@@ -1184,7 +1195,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 
 			log.V(2).Info(fmt.Sprintf("Waiting on code generation job %s/%s to complete", job.Namespace, job.Name))
 
-			if err := r.cleanupJobs(hc.ctx, hc.function, "codegen", ""); err != nil {
+			if err := r.cleanupJobs(hc.ctx, hc.function, internal.APP_CODEGEN, ""); err != nil {
 				return ctrl.Result{}, err
 			}
 
@@ -1578,6 +1589,26 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
+	// A function must not run as host-manager's own ServiceAccount: that
+	// account is bound to read Secrets cluster-wide and to create the
+	// workloads every function runs as, so a function author who named it
+	// would hold both. Kubernetes does not authorize which ServiceAccount a
+	// pod uses, and the deployer creates the function as host-manager.
+	if sa := hc.function.Spec.ServiceAccountName; sa != "" && sa == hc.serviceAccount {
+		err := fmt.Errorf("spec.serviceAccountName %q is host-manager's own ServiceAccount; a function must run as its own", sa)
+		kdexv1alpha1.SetConditions(
+			&hc.function.Status.Conditions,
+			kdexv1alpha1.ConditionStatuses{
+				Degraded:    metav1.ConditionTrue,
+				Progressing: metav1.ConditionFalse,
+				Ready:       metav1.ConditionFalse,
+			},
+			kdexv1alpha1.ConditionReasonReconcileError,
+			err.Error(),
+		)
+		return ctrl.Result{}, nil
+	}
+
 	deployer := r.deployer(hc)
 
 	job, err := deployer.Deploy(hc.ctx, hc.function)
@@ -1609,7 +1640,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 		log.V(2).Info(fmt.Sprintf("Waiting on function deployer job %s/%s to complete", job.Namespace, job.Name))
 
-		if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, job.Name); err != nil {
+		if err := r.cleanupJobs(hc.ctx, hc.function, internal.APP_DEPLOYER, job.Name); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -1651,7 +1682,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 				msg = msg + "; results: " + terminationMessage
 			}
 			// The failed Job stays for inspection (#27); the older ones go.
-			if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, job.Name); err != nil {
+			if err := r.cleanupJobs(hc.ctx, hc.function, internal.APP_DEPLOYER, job.Name); err != nil {
 				log.Error(err, "failed to clean up obsolete deployer Jobs")
 			}
 			return markCodegenJobTerminallyFailed(hc.function, job, msg)
@@ -1782,7 +1813,7 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	// #282 nothing reaped them. Sweeping them here clears that backlog the
 	// first time each Ready function reconciles. A sweep failure does not
 	// make the function un-Ready.
-	if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, deploy.JobName(hc.function)); err != nil {
+	if err := r.cleanupJobs(hc.ctx, hc.function, internal.APP_DEPLOYER, deploy.JobName(hc.function)); err != nil {
 		log.Error(err, "failed to clean up obsolete deployer Jobs")
 	}
 
@@ -1815,8 +1846,8 @@ func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdex
 	log := logf.FromContext(ctx)
 	var jobList batchv1.JobList
 	if err := r.List(ctx, &jobList, client.InNamespace(function.Namespace), client.MatchingLabels{
-		deploy.LabelApp:      appLabel,
-		deploy.LabelFunction: function.Name,
+		internal.LABEL_APP:      appLabel,
+		internal.LABEL_FUNCTION: function.Name,
 	}); err != nil {
 		return err
 	}

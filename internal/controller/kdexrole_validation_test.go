@@ -170,3 +170,36 @@ var _ = Describe("KDexRole PolicyRule CEL validation", func() {
 		Expect(err.Error()).To(ContainSubstring("resources requires verbs"))
 	})
 })
+
+// The npm credential Secret must be in the host's own namespace (#242). This
+// runs the real apiserver CEL, which is also what catches a rule that does
+// not compile: `namespace` is a CEL reserved word, spelled __namespace__.
+var _ = Describe("PackageReference secretRef CEL validation", func() {
+	ctx := context.Background()
+
+	newApp := func(name, secretNamespace string) *kdexv1alpha1.KDexApp {
+		return &kdexv1alpha1.KDexApp{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: kdexv1alpha1.KDexAppSpec{
+				CustomElements: []kdexv1alpha1.CustomElement{{Name: name + "-el", Description: name}},
+				PackageReference: kdexv1alpha1.PackageReference{
+					Name:    "@acme/" + name,
+					Version: "1.0.0",
+					SecretRef: &kdexv1alpha1.KDexObjectReference{
+						Kind: "Secret", Name: "npm", Namespace: secretNamespace,
+					},
+				},
+			},
+		}
+	}
+
+	It("admits a secretRef with no namespace", func() {
+		Expect(k8sClient.Create(ctx, newApp("app-secretref-local", ""))).To(Succeed())
+	})
+
+	It("rejects a secretRef naming a namespace", func() {
+		err := k8sClient.Create(ctx, newApp("app-secretref-other", "creds"))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("secretRef.namespace is not supported"))
+	})
+})

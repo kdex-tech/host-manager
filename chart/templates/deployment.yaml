@@ -38,9 +38,6 @@ spec:
             - --health-probe-bind-address=:8081
             - --webserver-bind-address=:8090
             - --focal-host={{ .Values.focalHost }}
-            {{- with .Values.referenceNamespaces }}
-            - --reference-namespaces={{ join "," . }}
-            {{- end }}
             - --service-name={{ include "host-manager.fullname" . }}
             {{- with .Values.proxy }}
             {{- with .dialTimeout }}
@@ -69,6 +66,9 @@ spec:
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            # Last, and always, so no extraArgs entry can override it: the
+            # flag package keeps the last value (#290).
+            - --reference-namespaces={{ join "," (.Values.referenceNamespaces | default list) }}
           env:
             - name: KUBERNETES_SERVICE_ACCOUNT
               valueFrom:

@@ -102,14 +102,6 @@ type Runtime interface {
 	Observe(ctx context.Context, function *kdexv1alpha1.KDexFunction) (client.Object, error)
 }
 
-// Labels every deployer Job carries. The controller's cleanup selects on
-// them, so both sides use these constants.
-const (
-	LabelApp      = "app"
-	LabelFunction = "function"
-	AppDeployer   = "deployer"
-)
-
 // JobName is the deployer Job for a function's current state: its
 // generation, its executable image and the FaaS adaptor generation, so a
 // change to any of them deploys again. Every other deployer Job for the
@@ -397,8 +389,8 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			Name:      jobName,
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				LabelApp:                       AppDeployer,
-				LabelFunction:                  function.Name,
+				internal.LABEL_APP:             internal.APP_DEPLOYER,
+				internal.LABEL_FUNCTION:        function.Name,
 				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 			Annotations: map[string]string{
@@ -634,8 +626,8 @@ func (d *Deployer) reconcileHostObserver(ctx context.Context) (client.Object, er
 
 	desiredSpec := d.observerCronJobSpec()
 	desiredLabels := map[string]string{
-		"app":  "observer",
-		"host": d.Host.Name,
+		internal.LABEL_APP: internal.APP_OBSERVER,
+		"host":             d.Host.Name,
 	}
 
 	cronJob := &batchv1.CronJob{}

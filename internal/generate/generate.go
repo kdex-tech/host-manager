@@ -176,8 +176,8 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 			Name:      jobName,
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				"app":                          "codegen",
-				"function":                     function.Name,
+				internal.LABEL_APP:             internal.APP_CODEGEN,
+				internal.LABEL_FUNCTION:        function.Name,
 				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 			Annotations: map[string]string{
@@ -201,7 +201,12 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 					},
 				},
 				Spec: corev1.PodSpec{
-					AutomountServiceAccountToken: new(true),
+					// No API token: codegen needs none (it reports through
+					// its termination message), and the generator runs
+					// package installs on author-controlled input. A mounted
+					// token was host-manager's own, which can read Secrets
+					// cluster-wide.
+					AutomountServiceAccountToken: new(false),
 					SecurityContext:              internal.PSSRestrictedPodSecurityContext(),
 					Containers: []corev1.Container{
 						{

@@ -170,6 +170,14 @@ func MakeHandlerByReferencePath(
 						}
 
 						theReferenceStruct := ref.Interface()
+						// A pointer to a reference matches as the reference
+						// does: one branch below handles both forms.
+						switch p := theReferenceStruct.(type) {
+						case *corev1.LocalObjectReference:
+							theReferenceStruct = *p
+						case *kdexv1alpha1.KDexObjectReference:
+							theReferenceStruct = *p
+						}
 
 						log.V(level).Info("struct", "interface", theReferenceStruct, "object", item.GetName(), "node", idx)
 
@@ -201,35 +209,7 @@ func MakeHandlerByReferencePath(
 									},
 								})
 							}
-						case *corev1.LocalObjectReference:
-							if v.Name == o.GetName() && item.GetNamespace() == o.GetNamespace() {
-								requests = append(requests, reconcile.Request{
-									NamespacedName: types.NamespacedName{
-										Name:      item.GetName(),
-										Namespace: item.GetNamespace(),
-									},
-								})
-							}
 						case kdexv1alpha1.KDexObjectReference:
-							namespace := item.GetNamespace()
-							if v.Namespace != "" {
-								namespace = v.Namespace
-							}
-
-							isMatch := v.Kind == objKind && v.Name == o.GetName()
-							if isMatch && !strings.Contains(objKind, "Cluster") {
-								isMatch = o.GetNamespace() == namespace
-							}
-
-							if isMatch {
-								requests = append(requests, reconcile.Request{
-									NamespacedName: types.NamespacedName{
-										Name:      item.GetName(),
-										Namespace: item.GetNamespace(),
-									},
-								})
-							}
-						case *kdexv1alpha1.KDexObjectReference:
 							namespace := item.GetNamespace()
 							if v.Namespace != "" {
 								namespace = v.Namespace
