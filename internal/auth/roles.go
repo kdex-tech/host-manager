@@ -382,6 +382,13 @@ var roleLog = logf.Log.WithName("role")
 // against an unbound requirement for every instance. kdex-crds v0.14.257
 // rejects all of these at apply time; this guards objects stored under an
 // older CRD (#289).
+//
+// It deliberately refuses only these characters, a subset of what the
+// entitlements canonical encoding escapes (controls, space, '%', non-ASCII).
+// The identities host-manager checks grants against (pages:<basePath>:read
+// and the like) are built raw, so a raw non-ASCII or spaced name matches
+// today; refusing or encoding it would break that. A non-canonical spelling
+// such as lower-case hex simply never matches: it fails closed.
 func malformedGrantPart(resource, resourceName, verb string) string {
 	switch {
 	case strings.Contains(resource, ":"):
@@ -394,6 +401,33 @@ func malformedGrantPart(resource, resourceName, verb string) string {
 	return ""
 }
 
+// ruleRefusals lists, once per rule, the parts of rule malformedGrantPart
+// refuses, so a bad rule logs one line rather than one per combination.
+func ruleRefusals(rule kdexv1alpha1.PolicyRule) []string {
+	var out []string
+	for _, r := range rule.Resources {
+		if reason := malformedGrantPart(r, "", ""); reason != "" {
+			out = append(out, reason+": "+r)
+		}
+	}
+	for _, n := range rule.ResourceNames {
+		if reason := malformedGrantPart("", n, ""); reason != "" {
+			out = append(out, reason+": "+n)
+		}
+	}
+	for _, v := range rule.Verbs {
+		if reason := malformedGrantPart("", "", v); reason != "" {
+			out = append(out, reason+": "+v)
+		}
+	}
+	for _, sc := range rule.Scopes {
+		if strings.Contains(sc, ":") {
+			out = append(out, "opaque scope contains ':': "+sc)
+		}
+	}
+	return out
+}
+
 func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map[string][]string {
 	table := make(map[string][]string, len(roles.Items))
 
@@ -401,8 +435,19 @@ func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map
 		table[role.Name] = []string{}
 
 		for _, rule := range role.Spec.Rules {
+			if refused := ruleRefusals(rule); len(refused) > 0 {
+				roleLog.Error(nil, "skipping KDexRole grants that would not mean what they say",
+					"role", role.Name, "refused", refused)
+			}
+
 			if len(rule.Scopes) > 0 {
-				table[role.Name] = append(table[role.Name], rule.Scopes...) // colon-less -> opaque
+				// colon-less -> opaque. The CRD has rejected ':' in a scope
+				// since v0.14.232; this guards an older stored object.
+				for _, sc := range rule.Scopes {
+					if !strings.Contains(sc, ":") {
+						table[role.Name] = append(table[role.Name], sc)
+					}
+				}
 				continue
 			}
 
@@ -415,10 +460,8 @@ func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map
 			for _, resource := range rule.Resources {
 				for _, resourceName := range resourceNames {
 					for _, verb := range rule.Verbs {
-						if reason := malformedGrantPart(resource, resourceName, verb); reason != "" {
-							roleLog.Error(nil, "skipping a KDexRole grant that would not mean what it says",
-								"role", role.Name, "resource", resource, "resourceName", resourceName, "verb", verb, "reason", reason)
-							continue
+						if malformedGrantPart(resource, resourceName, verb) != "" {
+							continue // logged once for the rule, above
 						}
 						table[role.Name] = append(table[role.Name], fmt.Sprintf("%s:%s:%s", resource, resourceName, verb))
 					}

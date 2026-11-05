@@ -60,6 +60,23 @@ func readsPageTree(ph page.PageHandler) bool {
 	return pageModeOf(ph.Page) == render.PageTypeText && strings.Contains(ph.Page.Body, "PageMap")
 }
 
+// migrateInBackground runs migrate in its own goroutine under hh.mu.RLock,
+// at most once per key at a time: every stale hit used to start its own
+// (#285). Holding the read lock for the whole re-render keeps hh.* state
+// consistent against a concurrent SetHost (#73). migrate must recheck that
+// its key still describes the current state before it stores anything.
+func (hh *HostHandler) migrateInBackground(key string, migrate func()) {
+	if _, running := hh.pageMigrations.LoadOrStore(key, struct{}{}); running {
+		return
+	}
+	go func() {
+		defer hh.pageMigrations.Delete(key)
+		hh.mu.RLock()
+		defer hh.mu.RUnlock()
+		migrate()
+	}()
+}
+
 func (hh *HostHandler) pageHandlerFunc(
 	ph page.PageHandler,
 	translations *Translations,
@@ -149,26 +166,18 @@ func (hh *HostHandler) pageHandlerFunc(
 				// A migration that gets the lock after a rebuild moved the
 				// page set stores nothing: its render would not match its
 				// key.
-				if _, running := hh.pageMigrations.LoadOrStore(renderKey, struct{}{}); !running {
-					go func(p page.PageHandler, lang language.Tag, trans *Translations) {
-						defer hh.pageMigrations.Delete(renderKey)
-						hh.mu.RLock()
-						defer hh.mu.RUnlock()
-
-						if pageSeed() != seed {
-							return
-						}
-						bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-						defer cancel()
-
-						newRender, err := renderPage(p, lang, trans)
-						if err == nil {
-							_ = pageCache.Set(bgCtx, cacheKey, newRender)
-						} else {
-							log.Error(err, "background migration failed", "page", p.Name)
-						}
-					}(ph, l, translations)
-				}
+				hh.migrateInBackground(renderKey, func() {
+					if pageSeed() != seed {
+						return
+					}
+					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if fresh, err := renderPage(ph, l, translations); err == nil {
+						_ = pageCache.Set(bgCtx, cacheKey, fresh)
+					} else {
+						log.Error(err, "background migration failed", "page", ph.Name)
+					}
+				})
 			}
 
 			log.V(2).Info("serving from cache", "page", ph.Name, "lang", l)

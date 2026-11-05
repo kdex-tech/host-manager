@@ -670,11 +670,20 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 
 	renderedPages := map[string]pageRender{}
 	treePages := make([]page.PageHandler, 0, len(pageHandlers))
+	// Name order, so that when two pages claim one basePath the same one
+	// wins on every rebuild and every replica, and the tree describes the
+	// page the route serves. Pages.List() iterates a map.
+	slices.SortFunc(pageHandlers, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
 	for _, ph := range pageHandlers {
 		basePath := ph.BasePath()
 
 		if basePath == "" {
 			hh.log.V(1).Info("somehow page has empty basePath, skipping", "page", ph.Name)
+			continue
+		}
+		if winner, taken := renderedPages[basePath]; taken {
+			hh.log.Error(nil, "two pages share a basePath; only the first by name is served",
+				"basePath", basePath, "served", winner.ph.Name, "dropped", ph.Name)
 			continue
 		}
 
@@ -697,13 +706,11 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 	// Resolve each rewrite page's target against THIS snapshot's pages and
 	// functions (#217), so a target that moved, vanished, or changed mode is
 	// reflected on the very rebuild that observed it.
-	pagesByName := make(map[string]page.PageHandler, len(pageHandlers))
-	for _, ph := range pageHandlers {
-		pagesByName[ph.Name] = ph
-	}
 	for bp, pr := range renderedPages {
 		if pageModeOf(pr.ph.Page) == render.PageTypeRewrite {
-			pr.rewrite, pr.rewriteFound = resolveRewriteTarget(pr.ph.Page.Rewrite.TargetRef, pagesByName, hh.functions)
+			// tree.byName, the same index the page tree resolves alias
+			// targets against, so a route and its tree entry agree.
+			pr.rewrite, pr.rewriteFound = resolveRewriteTarget(pr.ph.Page.Rewrite.TargetRef, tree.byName, hh.functions)
 			renderedPages[bp] = pr
 		}
 	}

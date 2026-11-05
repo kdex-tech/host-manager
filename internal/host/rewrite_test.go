@@ -254,7 +254,8 @@ func TestRewrite_SecondHopIs508(t *testing.T) {
 	mux := hh.registerRendersForTest(t, nil, target, alias)
 
 	req := httptest.NewRequest("GET", "/bots", nil)
-	req = req.WithContext(context.WithValue(req.Context(), rewriteMarkerKey{}, true))
+	req = req.WithContext(context.WithValue(req.Context(), rewriteMarkerKey{},
+		rewriteOrigin{path: "/bots", requestURI: "/bots"}))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusLoopDetected, rr.Code)

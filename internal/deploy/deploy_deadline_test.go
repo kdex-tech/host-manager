@@ -45,16 +45,14 @@ func assertJobHasReasonableDeadline(t *testing.T, spec *batchv1.JobSpec, label s
 		"%s Job ActiveDeadlineSeconds should be aggressive (≤ 2h) — operator-friendly upper bound", label)
 }
 
-// A finished deployer Job is reaped by the TTL controller. Before #282 none
-// was, and every FaaS adaptor generation bump left one more per function.
-func TestDeployJob_TTLSecondsAfterFinishedSet(t *testing.T) {
+// Deploy names the Job JobName, which the controller's cleanup keeps.
+func TestDeployJob_IsNamedJobName(t *testing.T) {
 	d, fn := scalingTestSetup(t)
 	job, err := d.Deploy(context.Background(), fn)
 	assert.NoError(t, err)
-	if assert.NotNil(t, job.Spec.TTLSecondsAfterFinished) {
-		assert.Equal(t, deployerJobTTL, *job.Spec.TTLSecondsAfterFinished)
-	}
-	assert.Equal(t, JobName(fn), job.Name, "Deploy names the Job JobName")
+	assert.Equal(t, JobName(fn), job.Name)
+	assert.Equal(t, AppDeployer, job.Labels[LabelApp])
+	assert.Equal(t, fn.Name, job.Labels[LabelFunction])
 }
 
 // JobName moves with the adaptor generation, so cleanup can tell the current

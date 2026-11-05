@@ -14,8 +14,9 @@ package host
 // Content-Type header a text-mime page is served with. spec.mimeType is
 // kubebuilder-enum-restricted to txt/json/yaml/markdown/xml (see
 // kdex-crds api/v1alpha1/kdexpage_types.go), so the default case below only
-// ever fires for the zero value -- pageHandlerFunc's `ph.Page.MimeType != ""`
-// gate never routes an unrecognised value here.
+// ever fires for the zero value -- pageHandlerFunc's
+// `pageModeOf(ph.Page) == render.PageTypeText` gate never routes an
+// unrecognised value here.
 func contentTypeFor(mime string) string {
 	switch mime {
 	case "txt":

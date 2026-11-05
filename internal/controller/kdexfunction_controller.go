@@ -1534,6 +1534,26 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 	return ctrl.Result{}, nil
 }
 
+// deployer is the Deployer for the function in hc.
+func (r *KDexFunctionReconciler) deployer(hc handlerContext) deploy.Deployer {
+	return deploy.Deployer{
+		Client:      r.Client,
+		FaaSAdaptor: hc.faasAdaptorSpec,
+		Host:        hc.host,
+		// Resolved white-label API token prefix (per-host spec or Nexus
+		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
+		// TokenManager uses, so mint and verify agree.
+		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
+		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
+			return corev1.LocalObjectReference{
+				Name: s.Name,
+			}
+		}),
+		Scheme:         r.Scheme,
+		ServiceAccount: hc.serviceAccount,
+	}
+}
+
 func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
@@ -1555,22 +1575,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	deployer := deploy.Deployer{
-		Client:      r.Client,
-		FaaSAdaptor: hc.faasAdaptorSpec,
-		Host:        hc.host,
-		// Resolved white-label API token prefix (per-host spec or Nexus
-		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
-		// TokenManager uses, so mint and verify agree.
-		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
-		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
-			return corev1.LocalObjectReference{
-				Name: s.Name,
-			}
-		}),
-		Scheme:         r.Scheme,
-		ServiceAccount: hc.serviceAccount,
-	}
+	deployer := r.deployer(hc)
 
 	job, err := deployer.Deploy(hc.ctx, hc.function)
 	if err != nil {
@@ -1601,7 +1606,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 		log.V(2).Info(fmt.Sprintf("Waiting on function deployer job %s/%s to complete", job.Namespace, job.Name))
 
-		if err := r.cleanupJobs(hc.ctx, hc.function, "deployer", job.Name); err != nil {
+		if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, job.Name); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -1641,6 +1646,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		if terminal, msg := isCodegenJobTerminal(job); terminal {
 			if terminationMessage != "" {
 				msg = msg + "; results: " + terminationMessage
+			}
+			// The failed Job stays for inspection (#27); the older ones go.
+			if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, job.Name); err != nil {
+				log.Error(err, "failed to clean up obsolete deployer Jobs")
 			}
 			return markCodegenJobTerminallyFailed(hc.function, job, msg)
 		}
@@ -1690,22 +1699,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 func (r *KDexFunctionReconciler) handleFunctionDeployed(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
-	deployer := deploy.Deployer{
-		Client:      r.Client,
-		FaaSAdaptor: hc.faasAdaptorSpec,
-		Host:        hc.host,
-		// Resolved white-label API token prefix (per-host spec or Nexus
-		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
-		// TokenManager uses, so mint and verify agree.
-		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
-		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
-			return corev1.LocalObjectReference{
-				Name: s.Name,
-			}
-		}),
-		ServiceAccount: hc.serviceAccount,
-		Scheme:         r.Scheme,
-	}
+	deployer := r.deployer(hc)
 
 	_, err := deployer.Observe(hc.ctx, hc.function)
 	if err != nil {
@@ -1763,22 +1757,7 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	deployer := deploy.Deployer{
-		Client:      r.Client,
-		FaaSAdaptor: hc.faasAdaptorSpec,
-		Host:        hc.host,
-		// Resolved white-label API token prefix (per-host spec or Nexus
-		// default), injected as PASETO_TOKEN_PREFIX. Same resolver the host's
-		// TokenManager uses, so mint and verify agree.
-		TokenPrefix: resolveAPITokenPrefix(hc.host.Spec.Auth, r.Configuration),
-		ImagePullSecrets: utils.MapSlice(hc.imagePullSecrets, func(s corev1.Secret) corev1.LocalObjectReference {
-			return corev1.LocalObjectReference{
-				Name: s.Name,
-			}
-		}),
-		ServiceAccount: hc.serviceAccount,
-		Scheme:         r.Scheme,
-	}
+	deployer := r.deployer(hc)
 
 	_, err := deployer.Observe(hc.ctx, hc.function)
 	if err != nil {
@@ -1800,7 +1779,7 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	// #282 nothing reaped them. Sweeping them here clears that backlog the
 	// first time each Ready function reconciles. A sweep failure does not
 	// make the function un-Ready.
-	if err := r.cleanupJobs(hc.ctx, hc.function, "deployer", deploy.JobName(hc.function)); err != nil {
+	if err := r.cleanupJobs(hc.ctx, hc.function, deploy.AppDeployer, deploy.JobName(hc.function)); err != nil {
 		log.Error(err, "failed to clean up obsolete deployer Jobs")
 	}
 
@@ -1824,22 +1803,28 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	return ctrl.Result{}, nil
 }
 
-// cleanupJobs deletes the function's finished appLabel Jobs that are
-// obsolete: those from another function generation, and, when keep is set,
-// every one not named keep (the deployer Job also changes name with the image
-// and the adaptor generation, #282). A running Job is never deleted.
+// cleanupJobs deletes the finished appLabel Jobs the function controls that
+// are obsolete: those from another function generation, and, when keep is
+// set, every one not named keep (the deployer Job also changes name with the
+// image and the adaptor generation, #282). A running Job, and a Job the
+// function does not control, is never deleted.
 func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdexv1alpha1.KDexFunction, appLabel string, keep string) error {
 	log := logf.FromContext(ctx)
 	var jobList batchv1.JobList
 	if err := r.List(ctx, &jobList, client.InNamespace(function.Namespace), client.MatchingLabels{
-		"app":      appLabel,
-		"function": function.Name,
+		deploy.LabelApp:      appLabel,
+		deploy.LabelFunction: function.Name,
 	}); err != nil {
 		return err
 	}
 
 	currentGen := fmt.Sprintf("%d", function.Generation)
 	for _, job := range jobList.Items {
+		// Labels are only a selector: anyone with Job-create rights can put
+		// them on a Job. Only Jobs this function controls are its to delete.
+		if !metav1.IsControlledBy(&job, function) {
+			continue
+		}
 		finished := job.Status.Succeeded > 0 || job.Status.Failed > 0
 		obsolete := job.Labels[internal.ANNOTATION_GENERATION] != currentGen || (keep != "" && job.Name != keep)
 		if finished && obsolete {

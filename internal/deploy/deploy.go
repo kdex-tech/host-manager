@@ -102,27 +102,20 @@ type Runtime interface {
 	Observe(ctx context.Context, function *kdexv1alpha1.KDexFunction) (client.Object, error)
 }
 
-// The FaaS adaptor is responsible for deploying the function.
-// Since there are virtually unlimited number of ways to deploy a function,
-// we use a job as a bridge between the Nexus controller and the FaaS adaptor.
-// The workload provided by the FaaS adaptor knows how to deploy the function.
-// Whether the functions are deployed on KNative, AWS Lambda, Google Cloud Functions,
-// Azure Functions, or something else is irrelevant to the Nexus controller.
-// The job is responsible for deploying the function and reporting the status
-// of the deployment back to the Nexus controller. The job must return success or
-// failure along with reasons, and upon success, at least the URL of the function so that the
-// Focal Controller can mount it into the host's service mesh and dispatch requests to it.
-// deployerJobTTL is how long a finished deployer Job (and its pod) is kept.
-// The controller reads the pod's termination message as soon as the Job
-// finishes, so an hour only serves debugging. A Job reaped before the
-// controller read it is recreated under the same name and redeploys, which
-// is an idempotent Knative apply (#282).
-const deployerJobTTL int32 = 3600
+// Labels every deployer Job carries. The controller's cleanup selects on
+// them, so both sides use these constants.
+const (
+	LabelApp      = "app"
+	LabelFunction = "function"
+	AppDeployer   = "deployer"
+)
 
 // JobName is the deployer Job for a function's current state: its
 // generation, its executable image and the FaaS adaptor generation, so a
 // change to any of them deploys again. Every other deployer Job for the
-// function is obsolete once finished (#282).
+// function is obsolete once finished, and the controller deletes it (#282).
+// The current one is kept, finished or not: its pod holds the termination
+// message and, for a terminal failure, the logs an operator inspects (#27).
 func JobName(function *kdexv1alpha1.KDexFunction) string {
 	var image string
 	if function.Status.Executable != nil {
@@ -134,6 +127,16 @@ func JobName(function *kdexv1alpha1.KDexFunction) string {
 	return fmt.Sprintf("%s-deployer-%d-%s", function.Name, function.Generation, fmt.Sprintf("%x", h.Sum(nil))[:8])
 }
 
+// The FaaS adaptor is responsible for deploying the function.
+// Since there are virtually unlimited number of ways to deploy a function,
+// we use a job as a bridge between the Nexus controller and the FaaS adaptor.
+// The workload provided by the FaaS adaptor knows how to deploy the function.
+// Whether the functions are deployed on KNative, AWS Lambda, Google Cloud Functions,
+// Azure Functions, or something else is irrelevant to the Nexus controller.
+// The job is responsible for deploying the function and reporting the status
+// of the deployment back to the Nexus controller. The job must return success or
+// failure along with reasons, and upon success, at least the URL of the function so that the
+// Focal Controller can mount it into the host's service mesh and dispatch requests to it.
 func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFunction) (*batchv1.Job, error) {
 	if function.Status.Executable == nil {
 		return nil, fmt.Errorf("function %s/%s has no executable", function.Namespace, function.Name)
@@ -394,8 +397,8 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			Name:      jobName,
 			Namespace: function.Namespace,
 			Labels: map[string]string{
-				"app":                          "deployer",
-				"function":                     function.Name,
+				LabelApp:                       AppDeployer,
+				LabelFunction:                  function.Name,
 				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", function.Generation),
 			},
 			Annotations: map[string]string{
@@ -403,9 +406,6 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			},
 		},
 		Spec: batchv1.JobSpec{
-			// Finished deployer Jobs used to pile up forever: every
-			// adaptor generation bump added one per function (#282).
-			TTLSecondsAfterFinished: new(deployerJobTTL),
 			// Without ActiveDeadlineSeconds a hung deployer pod (Knative
 			// API blocked, probe stuck) runs forever — BackoffLimit only
 			// counts pod failures, so a never-failing pod is never

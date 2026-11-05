@@ -135,14 +135,17 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	// the entry rendered while it was valid.
 	unverified := httptest.NewRequest("GET", "/-/navigation/main/en/test", nil)
 	unverified.Header.Set("Authorization", "Bearer user-token")
-	assert.Equal(t, "anon", hh.getUserHash(unverified))
+	unverifiedHash, ok := hh.getUserHash(unverified)
+	assert.True(t, ok)
+	assert.Equal(t, "anon", unverifiedHash)
 
 	req2 := callerCtx(httptest.NewRequest("GET", "/-/navigation/main/en/test", nil), "alice", []any{"pages::read"})
 	w2 := httptest.NewRecorder()
 	hh.Mux.ServeHTTP(w2, req2)
 	assert.Equal(t, http.StatusOK, w2.Code)
 
-	userHash := hh.getUserHash(req2)
+	userHash, ok := hh.getUserHash(req2)
+	assert.True(t, ok)
 	assert.NotEqual(t, "anon", userHash)
 	_, found2, _, err2 := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(),
 		navCacheKey("main", ph.Page.Paths.BasePath, seed, language.English, userHash))

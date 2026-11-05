@@ -12,6 +12,7 @@ package host
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -500,7 +501,8 @@ func TestNavigation_StaleMigrationKeepsTheCallersTree(t *testing.T) {
 	require.Contains(t, get(), "Admin;", "the stale entry is served while it migrates")
 
 	hh.mu.RLock()
-	key := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), hh.getUserHash(alice()))
+	aliceHash, _ := hh.getUserHash(alice())
+	key := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), aliceHash)
 	hh.mu.RUnlock()
 	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
 	require.Eventually(t, func() bool {
@@ -510,4 +512,47 @@ func TestNavigation_StaleMigrationKeepsTheCallersTree(t *testing.T) {
 	migrated, _, _, err := navCache.Get(context.Background(), key)
 	require.NoError(t, err)
 	require.Contains(t, migrated, "Admin;", "the migrated fragment is still alice's")
+}
+
+// A signed-in caller whose auth context cannot be hashed (a claimMapping can
+// leave a value json.Marshal rejects) is never filed under the shared "anon"
+// key: their fragment is rendered for them alone and cached under nothing.
+func TestNavigation_UnhashableCallerIsNeverCachedAsAnon(t *testing.T) {
+	home := newPage("home", "Home", "/home")
+	home.Navigations = map[string]string{"main": `[[ range $k, $v := .PageMap ]][[ $v.Label ]];[[ end ]]`}
+	hh := sitemapFixture(t, home)
+
+	req := httptest.NewRequest("GET", "/-/navigation/main/en/home", nil)
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{
+		"sub": "alice", "entitlements": []any{"pages::read", "admin"}, "bad": math.NaN(),
+	}))
+	_, ok := hh.getUserHash(req)
+	require.False(t, ok, "NaN does not marshal")
+
+	w := httptest.NewRecorder()
+	hh.Mux.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "Admin;", "the caller still gets their own tree")
+
+	hh.mu.RLock()
+	anonKey := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), "anon")
+	hh.mu.RUnlock()
+	_, found, _, err := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), anonKey)
+	require.NoError(t, err)
+	require.False(t, found, "nothing is stored under the anonymous key")
+}
+
+// When two pages claim one basePath, the one whose name sorts first is served
+// and is the one the tree describes, on every rebuild.
+func TestRebuildMux_DuplicateBasePathIsDeterministic(t *testing.T) {
+	hh := sitemapFixture(t, newPage("aaa-dup", "Dup", "/docs"))
+	for range 10 {
+		hh.RebuildMux()
+		hh.mu.RLock()
+		served := hh.tree.byBasePath["/docs"].Name
+		_, docsListed := hh.tree.byName["docs"]
+		hh.mu.RUnlock()
+		require.Equal(t, "aaa-dup", served)
+		require.False(t, docsListed, "the dropped page is in no tree")
+	}
 }

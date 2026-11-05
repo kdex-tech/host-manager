@@ -336,91 +336,83 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
-	cacheKey := navCacheKey(navKey, basePath, seed, l, hh.getUserHash(r))
-
-	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
-	if err == nil && ok {
+	renderNav := func(ctx context.Context) (string, error) {
+		return hh.performNavigationRender(ctx, l, pageHandler, navKey, translations, defaultLang, brandName, org, reconcileTime)
+	}
+	write := func(rendered string) {
 		// A navigation fragment is per-user HTML like a page, so it carries
 		// the same framing and nosniff headers (#248).
 		hh.setPageSecurityHeadersLocked(w)
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte(rendered))
+		if _, err := w.Write([]byte(rendered)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
 
+	userHash, cacheable := hh.getUserHash(r)
+	if !cacheable {
+		// A signed-in caller getUserHash cannot key: render for them alone,
+		// never through a cache key another caller could share.
+		rendered, err := renderNav(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		write(rendered)
+		return
+	}
+	cacheKey := navCacheKey(navKey, basePath, seed, l, userHash)
+	renderKey := navCacheClass + "\x00" + cacheKey
+
+	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
+	if err == nil && ok {
+		write(rendered)
 		if isCurrent {
 			return // Perfect hit
 		}
 
-		// 2. Stale Hit (vN-1): Serve fast, migrate in background
+		// 2. Stale Hit (vN-1): serve fast, migrate in background. The
+		// fragment is the caller's: the re-render runs with the request's
+		// auth context, detached from its cancellation, so it builds the
+		// caller's tree and Identity and not the anonymous one.
 		log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
-
-		// The fragment is the caller's: the re-render runs with the
-		// request's auth context, detached from its cancellation, so it
-		// builds the caller's tree and Identity and not the anonymous one.
-		// Hold hh.mu.RLock for the duration of the re-render so the
-		// goroutine sees consistent hh.* state vs concurrent SetHost
-		// writes (#73). One migration per key at a time (#285), and none
-		// is stored once the page set has moved past the key's seed.
-		migrationKey := navCacheClass + "\x00" + cacheKey
-		if _, running := hh.pageMigrations.LoadOrStore(migrationKey, struct{}{}); running {
-			return
-		}
 		callerCtx := context.WithoutCancel(r.Context())
-		go func() {
-			defer hh.pageMigrations.Delete(migrationKey)
-			hh.mu.RLock()
-			defer hh.mu.RUnlock()
-
-			bgCtx, cancel := context.WithTimeout(callerCtx, 15*time.Second)
-			defer cancel()
-
+		hh.migrateInBackground(renderKey, func() {
 			if hh.treeSeed(pageHandler.Checksum()) != seed {
 				return
 			}
-			newRender, err := hh.performNavigationRender(
-				bgCtx,
-				l,
-				pageHandler,
-				navKey,
-				translations,
-				defaultLang,
-				brandName,
-				org,
-				reconcileTime,
-			)
-			if err == nil {
-				_ = navCache.Set(bgCtx, cacheKey, newRender)
+			bgCtx, cancel := context.WithTimeout(callerCtx, 15*time.Second)
+			defer cancel()
+			if fresh, err := renderNav(bgCtx); err == nil {
+				_ = navCache.Set(bgCtx, cacheKey, fresh)
 			}
-		}()
+		})
 		return
 	}
 
-	// 3. Cache Miss: Perform Synchronous Render
+	// 3. Cache Miss: synchronous render. Concurrent misses on one key (one
+	// caller, or every anonymous caller) share one render (#285), stored
+	// under a context detached from the leader's request with its own
+	// deadline, as pageHandlerFunc does.
 	log.V(2).Info("generating navigation", "basePath", basePath, "lang", l.String(), "navKey", navKey)
-	rendered, err = hh.performNavigationRender(
-		r.Context(),
-		l,
-		pageHandler,
-		navKey,
-		translations,
-		defaultLang,
-		brandName,
-		org,
-		reconcileTime,
-	)
+	v, err, _ := hh.pageRenders.Do(renderKey, func() (any, error) {
+		fresh, err := renderNav(r.Context())
+		if err != nil {
+			return "", err
+		}
+		setCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pageCacheSetTimeout)
+		defer cancel()
+		if err := navCache.Set(setCtx, cacheKey, fresh); err != nil {
+			log.Error(err, "failed to cache navigation", "key", cacheKey)
+		}
+		return fresh, nil
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if err := navCache.Set(r.Context(), cacheKey, rendered); err != nil {
-		log.Error(err, "failed to cache navigation", "key", cacheKey)
-	}
-
-	hh.setPageSecurityHeadersLocked(w)
-	w.Header().Set("Content-Type", "text/html")
-	if _, err = w.Write([]byte(rendered)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	rendered, _ = v.(string)
+	write(rendered)
 }
 
 // navCacheKey is a navigation fragment's cache key: the fragment, the page

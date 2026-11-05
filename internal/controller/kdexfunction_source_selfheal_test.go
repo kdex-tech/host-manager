@@ -12,9 +12,6 @@ package controller
 
 import (
 	"context"
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 	"time"
 
@@ -22,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // TestHandleReady_SelfHealsNilStatusSource pins the fix for
@@ -41,9 +39,7 @@ import (
 // revision (#38).
 func TestHandleReady_SelfHealsNilStatusSource(t *testing.T) {
 	// handleReady sweeps obsolete deployer Jobs (#282), so it needs a client.
-	scheme := runtime.NewScheme()
-	require.NoError(t, clientgoscheme.AddToScheme(scheme))
-	require.NoError(t, kdexv1alpha1.AddToScheme(scheme))
+	scheme := functionTestScheme(t)
 	r := &KDexFunctionReconciler{
 		Client:       fake.NewClientBuilder().WithScheme(scheme).Build(),
 		RequeueDelay: 50 * time.Millisecond,

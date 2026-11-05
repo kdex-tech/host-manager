@@ -796,6 +796,7 @@ func TestBuildMappingTable_RefusesMalformedGrantParts(t *testing.T) {
 			{Resources: []string{"docs"}, ResourceNames: []string{"{id}", "a:b", "doc_1", "vis%3Amembers"}, Verbs: []string{"read"}},
 			{Resources: []string{"bad:res"}, Verbs: []string{"read"}},
 			{Resources: []string{"docs"}, Verbs: []string{"read:all", "write"}},
+			{Scopes: []string{"ok_scope", "bad:scope"}},
 		}},
 	}}}
 
@@ -805,5 +806,6 @@ func TestBuildMappingTable_RefusesMalformedGrantParts(t *testing.T) {
 		"docs:doc_1:read",
 		"docs:vis%3Amembers:read", // percent-encoded is the supported spelling
 		"docs::write",
+		"ok_scope",
 	}, table["r"])
 }

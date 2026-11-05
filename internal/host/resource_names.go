@@ -203,9 +203,10 @@ func (hh *HostHandler) resourceNamesHandler(mux *http.ServeMux, registeredPaths 
 }
 
 // hostNativeNames returns the names of a host-native resource the caller
-// passes the gate for, using the gate's own rule: a page with no requirements
-// is public, otherwise VerifyResourceParsedEntitlements decides; a function's
-// identity requirement (functions:<basePath>:read) always applies.
+// passes the gate for: a page by VerifyResourceParsedEntitlements over the
+// rebuild's page index (a page whose requirements are not parsed yet is
+// hidden); a function's identity requirement (functions:<basePath>:read)
+// always applies.
 func (hh *HostHandler) hostNativeNames(r *http.Request, resource string) []resourceName {
 	held := hh.authChecker.GetParsedEntitlements(r.Context())
 	none := hh.authChecker.ParseRequirements(nil)
@@ -224,18 +225,20 @@ func (hh *HostHandler) hostNativeNames(r *http.Request, resource string) []resou
 	}
 	switch resource {
 	case "pages":
-		for _, ph := range hh.Pages.List() {
-			if ph.ParsedRequirements != nil {
-				if ok, err := hh.authChecker.VerifyResourceParsedEntitlements(
-					"pages", ph.BasePath(), held, *ph.ParsedRequirements); err != nil || !ok {
-					continue
-				}
+		// Over the rebuild's page index, like every page tree, but always
+		// checked: unlike visibleInTree this endpoint answers an
+		// authenticated caller even on a host with auth off, so it never
+		// short-circuits to "everything is visible". An unparsed page is
+		// hidden, as in a tree.
+		for _, ph := range hh.tree.pages {
+			if ph.ParsedRequirements == nil {
+				continue
 			}
-			label := ""
-			if ph.Page != nil {
-				label = ph.Page.Label
+			if ok, err := hh.authChecker.VerifyResourceParsedEntitlements(
+				"pages", ph.Page.BasePath, held, *ph.ParsedRequirements); err != nil || !ok {
+				continue
 			}
-			add(ph.BasePath(), label)
+			add(ph.Page.BasePath, ph.Page.Label)
 		}
 	case "functions":
 		for _, fn := range hh.functions {

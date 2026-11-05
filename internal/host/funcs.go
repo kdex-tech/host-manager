@@ -1,6 +1,7 @@
 package host
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -124,7 +125,11 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 
 	identity := ""
 	if isPrivate && hh.IsAuthEnabled() {
-		identity = ":" + hh.getUserHash(r)
+		hash, ok := hh.getUserHash(r)
+		if !ok {
+			hash = uncacheableIdentity()
+		}
+		identity = ":" + hash
 	}
 
 	langSuffix := ""
@@ -202,23 +207,37 @@ func etagListMatches(values []string, etag string) bool {
 
 // getUserHash keys a per-caller render (the navigation fragment, a private
 // response's ETag) on the caller the auth middleware VERIFIED: a hash of the
-// request's auth context, which is what the render reads (the caller's tree
-// and Identity). A credential the middleware refused -- expired, revoked,
-// vetoed -- leaves no auth context, so its holder is "anon" and can never
-// hit the entry rendered while it was still valid. Hashing the raw
-// Authorization header or cookie did exactly that.
-func (hh *HostHandler) getUserHash(r *http.Request) string {
-	ac, ok := auth.GetAuthContext(r.Context())
-	if !ok || len(ac) == 0 {
-		return "anon"
+// request's auth context, which is what the render reads (the caller's tree,
+// and Identity, which a template may print in full, exp and iat included).
+// A credential the middleware refused -- expired, revoked, vetoed -- leaves
+// no auth context, so its holder is "anon" and can never hit the entry
+// rendered while it was still valid. Hashing the raw Authorization header or
+// cookie did exactly that.
+//
+// ok is false when the caller is signed in but the context cannot be hashed
+// (a claimMapping can leave a value json.Marshal rejects). The caller must
+// then not cache or 304 at all: "anon" would file a signed-in caller's tree
+// under the key every anonymous caller reads.
+func (hh *HostHandler) getUserHash(r *http.Request) (hash string, ok bool) {
+	ac, found := auth.GetAuthContext(r.Context())
+	if !found || len(ac) == 0 {
+		return "anon", true
 	}
 	// encoding/json sorts map keys, so equal contexts hash equally.
 	b, err := json.Marshal(ac)
 	if err != nil {
-		return "anon"
+		return "", false
 	}
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:8])
+	return hex.EncodeToString(h[:8]), true
+}
+
+// uncacheableIdentity is an ETag identity no other response shares, for a
+// caller getUserHash cannot key: such a response never answers 304.
+func uncacheableIdentity() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "uncacheable-" + hex.EncodeToString(b[:])
 }
 
 // Helper to strip the Domain attribute from a Set-Cookie string
