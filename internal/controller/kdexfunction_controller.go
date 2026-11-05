@@ -1181,7 +1181,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 
 			log.V(2).Info(fmt.Sprintf("Waiting on code generation job %s/%s to complete", job.Namespace, job.Name))
 
-			if err := r.cleanupJobs(hc.ctx, hc.function, "codegen"); err != nil {
+			if err := r.cleanupJobs(hc.ctx, hc.function, "codegen", ""); err != nil {
 				return ctrl.Result{}, err
 			}
 
@@ -1601,7 +1601,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 		log.V(2).Info(fmt.Sprintf("Waiting on function deployer job %s/%s to complete", job.Namespace, job.Name))
 
-		if err := r.cleanupJobs(hc.ctx, hc.function, "deployer"); err != nil {
+		if err := r.cleanupJobs(hc.ctx, hc.function, "deployer", job.Name); err != nil {
 			return ctrl.Result{}, err
 		}
 
@@ -1795,6 +1795,15 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 		return ctrl.Result{}, err
 	}
 
+	// Finished deployer Jobs other than the current one are obsolete: they
+	// were left by earlier generations, images or adaptor bumps, and before
+	// #282 nothing reaped them. Sweeping them here clears that backlog the
+	// first time each Ready function reconciles. A sweep failure does not
+	// make the function un-Ready.
+	if err := r.cleanupJobs(hc.ctx, hc.function, "deployer", deploy.JobName(hc.function)); err != nil {
+		log.Error(err, "failed to clean up obsolete deployer Jobs")
+	}
+
 	// Stay In Ready State
 	hc.function.Status.State = kdexv1alpha1.KDexFunctionStateReady
 	hc.function.Status.Detail = fmt.Sprintf("%v: %s%s", kdexv1alpha1.KDexFunctionStateReady, hc.function.Status.URL, hc.function.Spec.API.BasePath)
@@ -1815,7 +1824,11 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 	return ctrl.Result{}, nil
 }
 
-func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdexv1alpha1.KDexFunction, appLabel string) error {
+// cleanupJobs deletes the function's finished appLabel Jobs that are
+// obsolete: those from another function generation, and, when keep is set,
+// every one not named keep (the deployer Job also changes name with the image
+// and the adaptor generation, #282). A running Job is never deleted.
+func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdexv1alpha1.KDexFunction, appLabel string, keep string) error {
 	log := logf.FromContext(ctx)
 	var jobList batchv1.JobList
 	if err := r.List(ctx, &jobList, client.InNamespace(function.Namespace), client.MatchingLabels{
@@ -1827,8 +1840,10 @@ func (r *KDexFunctionReconciler) cleanupJobs(ctx context.Context, function *kdex
 
 	currentGen := fmt.Sprintf("%d", function.Generation)
 	for _, job := range jobList.Items {
-		if job.Labels[internal.ANNOTATION_GENERATION] != currentGen && (job.Status.Succeeded > 0 || job.Status.Failed > 0) {
-			log.V(2).Info("Cleaning up obsolete job from previous generation", "job", job.Name, "jobGen", job.Labels[internal.ANNOTATION_GENERATION], "app", appLabel)
+		finished := job.Status.Succeeded > 0 || job.Status.Failed > 0
+		obsolete := job.Labels[internal.ANNOTATION_GENERATION] != currentGen || (keep != "" && job.Name != keep)
+		if finished && obsolete {
+			log.V(2).Info("Cleaning up obsolete job", "job", job.Name, "jobGen", job.Labels[internal.ANNOTATION_GENERATION], "app", appLabel)
 			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
 				return err
 			}

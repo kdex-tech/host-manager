@@ -112,20 +112,35 @@ type Runtime interface {
 // of the deployment back to the Nexus controller. The job must return success or
 // failure along with reasons, and upon success, at least the URL of the function so that the
 // Focal Controller can mount it into the host's service mesh and dispatch requests to it.
+// deployerJobTTL is how long a finished deployer Job (and its pod) is kept.
+// The controller reads the pod's termination message as soon as the Job
+// finishes, so an hour only serves debugging. A Job reaped before the
+// controller read it is recreated under the same name and redeploys, which
+// is an idempotent Knative apply (#282).
+const deployerJobTTL int32 = 3600
+
+// JobName is the deployer Job for a function's current state: its
+// generation, its executable image and the FaaS adaptor generation, so a
+// change to any of them deploys again. Every other deployer Job for the
+// function is obsolete once finished (#282).
+func JobName(function *kdexv1alpha1.KDexFunction) string {
+	var image string
+	if function.Status.Executable != nil {
+		image = function.Status.Executable.Image
+	}
+	h := sha256.New()
+	h.Write([]byte(image))
+	h.Write([]byte(function.Status.Attributes["faasAdaptor.generation"]))
+	return fmt.Sprintf("%s-deployer-%d-%s", function.Name, function.Generation, fmt.Sprintf("%x", h.Sum(nil))[:8])
+}
+
 func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFunction) (*batchv1.Job, error) {
 	if function.Status.Executable == nil {
 		return nil, fmt.Errorf("function %s/%s has no executable", function.Namespace, function.Name)
 	}
 
-	// Create Job identity hash based on the image and the adaptor version
 	image := function.Status.Executable.Image
-	adaptorGen := function.Status.Attributes["faasAdaptor.generation"]
-	h := sha256.New()
-	h.Write([]byte(image))
-	h.Write([]byte(adaptorGen))
-	idHash := fmt.Sprintf("%x", h.Sum(nil))[:8]
-
-	jobName := fmt.Sprintf("%s-deployer-%d-%s", function.Name, function.Generation, idHash)
+	jobName := JobName(function)
 
 	job := &batchv1.Job{}
 	err := d.Client.Get(ctx, client.ObjectKey{Namespace: function.Namespace, Name: jobName}, job)
@@ -388,6 +403,9 @@ func (d *Deployer) Deploy(ctx context.Context, function *kdexv1alpha1.KDexFuncti
 			},
 		},
 		Spec: batchv1.JobSpec{
+			// Finished deployer Jobs used to pile up forever: every
+			// adaptor generation bump added one per function (#282).
+			TTLSecondsAfterFinished: new(deployerJobTTL),
 			// Without ActiveDeadlineSeconds a hung deployer pod (Knative
 			// API blocked, probe stuck) runs forever — BackoffLimit only
 			// counts pod failures, so a never-failing pod is never

@@ -44,3 +44,27 @@ func assertJobHasReasonableDeadline(t *testing.T, spec *batchv1.JobSpec, label s
 	assert.LessOrEqual(t, *spec.ActiveDeadlineSeconds, int64(2*60*60),
 		"%s Job ActiveDeadlineSeconds should be aggressive (≤ 2h) — operator-friendly upper bound", label)
 }
+
+// A finished deployer Job is reaped by the TTL controller. Before #282 none
+// was, and every FaaS adaptor generation bump left one more per function.
+func TestDeployJob_TTLSecondsAfterFinishedSet(t *testing.T) {
+	d, fn := scalingTestSetup(t)
+	job, err := d.Deploy(context.Background(), fn)
+	assert.NoError(t, err)
+	if assert.NotNil(t, job.Spec.TTLSecondsAfterFinished) {
+		assert.Equal(t, deployerJobTTL, *job.Spec.TTLSecondsAfterFinished)
+	}
+	assert.Equal(t, JobName(fn), job.Name, "Deploy names the Job JobName")
+}
+
+// JobName moves with the adaptor generation, so cleanup can tell the current
+// deployer Job from the ones an adaptor bump left behind (#282).
+func TestJobName_FollowsAdaptorGeneration(t *testing.T) {
+	_, fn := scalingTestSetup(t)
+	before := JobName(fn)
+	if fn.Status.Attributes == nil {
+		fn.Status.Attributes = map[string]string{}
+	}
+	fn.Status.Attributes["faasAdaptor.generation"] = "99"
+	assert.NotEqual(t, before, JobName(fn))
+}

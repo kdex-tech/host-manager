@@ -12,6 +12,9 @@ package controller
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"testing"
 	"time"
 
@@ -37,8 +40,14 @@ import (
 // image with no rebuild. Only when nil — never overwriting a codegen-resolved
 // revision (#38).
 func TestHandleReady_SelfHealsNilStatusSource(t *testing.T) {
+	// handleReady sweeps obsolete deployer Jobs (#282), so it needs a client.
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, kdexv1alpha1.AddToScheme(scheme))
 	r := &KDexFunctionReconciler{
+		Client:       fake.NewClientBuilder().WithScheme(scheme).Build(),
 		RequeueDelay: 50 * time.Millisecond,
+		Scheme:       scheme,
 	}
 
 	t.Run("source-authoritative Ready with nil Status.Source: re-derive from spec", func(t *testing.T) {
