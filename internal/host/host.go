@@ -373,23 +373,6 @@ func (hh *HostHandler) L10nRenderText(
 	return renderer.RenderOneText(ph.Name+"-body", body, templateData)
 }
 
-func (hh *HostHandler) L10nRenders(
-	handler page.PageHandler,
-	pageMaps map[language.Tag]map[string]any,
-	translations *Translations,
-) map[string]string {
-	l10nRenders := make(map[string]string)
-	for _, l := range translations.Languages() {
-		rendered, err := hh.L10nRender(handler, pageMaps[l], l, map[string]any{}, translations)
-		if err != nil {
-			hh.log.Error(err, "failed to render page for language", "page", handler.Name, "language", l)
-			continue
-		}
-		l10nRenders[l.String()] = rendered
-	}
-	return l10nRenders
-}
-
 func (hh *HostHandler) MetaToString(handler page.PageHandler, l language.Tag) string {
 	var buffer bytes.Buffer
 

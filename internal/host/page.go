@@ -123,21 +123,26 @@ func (hh *HostHandler) pageHandlerFunc(
 				// Background Migration. Hold hh.mu.RLock for the
 				// duration of the re-render so the goroutine sees
 				// consistent hh.* state vs concurrent SetHost writes.
-				// See kdex-tech/host-manager#73.
-				go func(p page.PageHandler, lang language.Tag, trans *Translations) {
-					hh.mu.RLock()
-					defer hh.mu.RUnlock()
+				// See kdex-tech/host-manager#73. One migration per key at
+				// a time: every stale hit used to start its own (#285).
+				migrationKey := pageCacheClass + "\x00" + cacheKey
+				if _, running := hh.pageMigrations.LoadOrStore(migrationKey, struct{}{}); !running {
+					go func(p page.PageHandler, lang language.Tag, trans *Translations) {
+						defer hh.pageMigrations.Delete(migrationKey)
+						hh.mu.RLock()
+						defer hh.mu.RUnlock()
 
-					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
+						bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
 
-					newRender, err := renderPage(p, lang, trans)
-					if err == nil {
-						_ = pageCache.Set(bgCtx, cacheKey, newRender)
-					} else {
-						log.Error(err, "background migration failed", "page", p.Name)
-					}
-				}(ph, l, translations)
+						newRender, err := renderPage(p, lang, trans)
+						if err == nil {
+							_ = pageCache.Set(bgCtx, cacheKey, newRender)
+						} else {
+							log.Error(err, "background migration failed", "page", p.Name)
+						}
+					}(ph, l, translations)
+				}
 			}
 
 			log.V(2).Info("serving from cache", "page", ph.Name, "lang", l)
@@ -147,18 +152,27 @@ func (hh *HostHandler) pageHandlerFunc(
 			return
 		}
 
-		// 2. Cache Miss: Synchronous Render
-		rendered, err = renderPage(ph, l, translations)
+		// 2. Cache Miss: Synchronous Render. Concurrent misses on one key
+		// share one render (#285). The leader stores it under a context
+		// detached from its own request, because the render serves every
+		// waiter. Waiters hold hh.mu.RLock while they wait, as the leader
+		// does while it renders; the render takes no lock of hh.mu itself.
+		v, err, _ := hh.pageRenders.Do(pageCacheClass+"\x00"+cacheKey, func() (any, error) {
+			fresh, err := renderPage(ph, l, translations)
+			if err != nil {
+				return "", err
+			}
+			if err := pageCache.Set(context.WithoutCancel(r.Context()), cacheKey, fresh); err != nil {
+				log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
+			}
+			return fresh, nil
+		})
 		if err != nil {
 			log.Error(err, "failed to render page", "page", ph.Name, "language", l)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		// Store the fresh render
-		if err := pageCache.Set(r.Context(), cacheKey, rendered); err != nil {
-			log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
-		}
+		rendered, _ = v.(string)
 
 		servePage(rendered)
 	}

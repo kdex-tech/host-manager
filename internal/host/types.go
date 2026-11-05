@@ -15,6 +15,7 @@ import (
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/kdex-tech/host-manager/internal/sniffer"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message/catalog"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -132,7 +133,12 @@ type HostHandler struct {
 	// removing, relabeling, re-parenting or gating ANY page invalidates it:
 	// the host checksum the caches cycle on does not move for a page change
 	// (#283).
-	pageSetDigest        string
+	pageSetDigest string
+	// pageRenders coalesces concurrent cache-miss renders of one page cache
+	// key into one render, and pageMigrations makes at most one background
+	// stale-entry migration run per key (#285). Zero values are ready.
+	pageRenders          singleflight.Group
+	pageMigrations       sync.Map
 	routeCollisions      []RouteCollision
 	status               *kdexv1alpha1.KDexObjectStatus
 	themeAssets          []kdexv1alpha1.Asset

@@ -15,9 +15,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/require"
@@ -370,4 +374,62 @@ func TestBuildMenuEntries_EntriesCarryPageMode(t *testing.T) {
 
 	entitled := hh.pageMap(entitledSitemapReq().Context(), language.Make("en"))
 	require.Equal(t, "/admin", entry(entitled, "Admin alias").Rewrite.Href)
+}
+
+// Siblings that share a label share one tree key. The page whose name sorts
+// first keeps it, on every build. See #286.
+func TestBuildMenuEntries_LabelCollisionIsDeterministic(t *testing.T) {
+	hh := sitemapFixture(t,
+		newPage("zeta", "Shared", "/zeta"),
+		newPage("alpha", "Shared", "/alpha"),
+	)
+	for range 20 {
+		got, ok := hh.pageMap(context.Background(), language.Make("en"))["Shared"].(render.PageEntry)
+		require.True(t, ok)
+		require.Equal(t, "alpha", got.Name)
+	}
+}
+
+// Concurrent cache misses on one page share one render. The checker holds
+// the first tree build until every request is in flight, so without
+// coalescing each request would build its own tree. See #285.
+func TestTextPage_ConcurrentMissesShareOneRender(t *testing.T) {
+	hh := sitemapFixture(t)
+
+	var builds atomic.Int32
+	release := make(chan struct{})
+	hh.mu.Lock()
+	hh.authChecker = &pageMockAuthChecker{
+		getEntitlementsFn: func(ctx context.Context) entitlements.ParsedEntitlements {
+			// The page gate asks with the request's context; the anonymous
+			// tree build asks with context.Background(). Count and hold
+			// only the build.
+			if ctx == context.Background() {
+				builds.Add(1)
+				<-release
+			}
+			return entitlements.ParsedEntitlements{}
+		},
+	}
+	hh.mu.Unlock()
+
+	const callers = 8
+	var wg sync.WaitGroup
+	bodies := make([]string, callers)
+	for i := range callers {
+		wg.Go(func() {
+			// t.Context(), not httptest.NewRequest's context.Background(),
+			// so the checker can tell the gate's calls from the build's.
+			bodies[i] = serveSitemap(t, hh, httptest.NewRequestWithContext(t.Context(), "GET", "/sitemap.xml", nil), "en")
+		})
+	}
+	require.Eventually(t, func() bool { return builds.Load() >= 1 }, time.Second, time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // let the other callers reach the render
+	close(release)
+	wg.Wait()
+
+	require.Equal(t, int32(1), builds.Load(), "one render for all concurrent misses")
+	for _, b := range bodies {
+		require.Equal(t, bodies[0], b)
+	}
 }

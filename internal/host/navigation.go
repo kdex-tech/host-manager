@@ -35,7 +35,33 @@ func (hh *HostHandler) BuildMenuEntries(
 		parsedUserEntitlements = &p
 	}
 
-	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
+	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements,
+		hh.visibleChildren(parsedUserEntitlements))
+}
+
+// visibleChildren lists the pages once, checks each one's visibility once,
+// and buckets the visible ones by parent name ("" for top-level pages), so a
+// tree build costs N checks rather than N per level (#285). Each bucket is
+// in name order, so the build does not depend on map iteration order (#286).
+// Caller holds hh.mu.RLock.
+func (hh *HostHandler) visibleChildren(
+	parsedUserEntitlements *entitlements.ParsedEntitlements,
+) map[string][]page.PageHandler {
+	children := map[string][]page.PageHandler{}
+	for _, handler := range hh.Pages.List() {
+		if handler.Page == nil || !hh.visibleInTree(handler, parsedUserEntitlements) {
+			continue
+		}
+		parentName := ""
+		if handler.Page.ParentPageRef != nil {
+			parentName = handler.Page.ParentPageRef.Name
+		}
+		children[parentName] = append(children[parentName], handler)
+	}
+	for _, bucket := range children {
+		slices.SortFunc(bucket, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
+	}
+	return children
 }
 
 // pageMap is the page tree BuildMenuEntries gives the caller in ctx, as a
@@ -203,84 +229,91 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	isDefaultLanguage bool,
 	parent *page.PageHandler,
 	parsedUserEntitlements *entitlements.ParsedEntitlements,
+	children map[string][]page.PageHandler,
 ) {
-	for _, handler := range hh.Pages.List() {
+	parentName := ""
+	if parent != nil {
+		parentName = parent.Name
+	}
+	for _, handler := range children[parentName] {
 		ph := handler.Page
 
-		if !hh.visibleInTree(handler, parsedUserEntitlements) {
+		// A page naming itself as its parent is never its own child.
+		if parent != nil && parent.Name == handler.Name {
 			continue
 		}
 
-		if (parent == nil && ph.ParentPageRef == nil) ||
-			(parent != nil && ph.ParentPageRef != nil &&
-				parent.Name == ph.ParentPageRef.Name) {
-
-			if parent != nil && parent.Name == handler.Name {
-				continue
-			}
-
-			if entry.Children == nil {
-				entry.Children = &map[string]any{}
-			}
-
-			label := ph.Label
-
-			// A page with localized: false registers only its bare route, so
-			// a language prefix would link a 404 (#283).
-			href := ph.BasePath
-			if !isDefaultLanguage && isLocalized(ph.Localized) {
-				href = "/" + l.String() + ph.BasePath
-			}
-
-			pageEntry := render.PageEntry{
-				BasePath: ph.BasePath,
-				Href:     href,
-				Label:    label,
-				Name:     handler.Name,
-				Type:     render.PageTypeHTML,
-				Weight:   resource.MustParse("0"),
-			}
-
-			// The page's mode, by the same checks routing uses
-			// (addHandlerAndRegister, pageHandlerFunc), so a template can
-			// tell a text file or an alias from an HTML page without a tag
-			// (#284).
-			switch {
-			case ph.Rewrite != nil:
-				pageEntry.Type = render.PageTypeRewrite
-				pageEntry.Rewrite = hh.rewriteEntry(handler, l, isDefaultLanguage, parsedUserEntitlements)
-			case ph.MimeType != "":
-				pageEntry.Type = render.PageTypeText
-				pageEntry.MimeType = ph.MimeType
-			}
-
-			if ph.NavigationHints != nil {
-				pageEntry.Icon = ph.NavigationHints.Icon
-				// An unset weight keeps the "0" default above, which is what the
-				// zero Quantity resolved to before the field became optional.
-				if ph.NavigationHints.Weight != nil {
-					pageEntry.Weight = *ph.NavigationHints.Weight
-				}
-			}
-
-			// Project the page's spec.tags onto the nav entry so templates can
-			// render tag-driven badges, groupings, tooltips, or external links
-			// via [[ range $t := $value.Tags ]].
-			if len(ph.Tags) > 0 {
-				pageEntry.Tags = make([]render.PageTag, 0, len(ph.Tags))
-				for _, tag := range ph.Tags {
-					pageEntry.Tags = append(pageEntry.Tags, render.PageTag{
-						Name:        tag.Name,
-						Description: tag.Description,
-						URL:         tag.URL,
-					})
-				}
-			}
-
-			hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements)
-
-			(*entry.Children)[label] = pageEntry
+		if entry.Children == nil {
+			entry.Children = &map[string]any{}
 		}
+
+		label := ph.Label
+		if existing, taken := (*entry.Children)[label]; taken {
+			// Entries are keyed by label, so two siblings with one label
+			// cannot both be listed. The bucket is in name order, so the
+			// page whose name sorts first keeps the slot on every render
+			// and every replica (#286).
+			kept, _ := existing.(render.PageEntry)
+			hh.log.V(1).Info("page tree label collision; page left out",
+				"label", label, "kept", kept.Name, "dropped", handler.Name)
+			continue
+		}
+
+		// A page with localized: false registers only its bare route, so
+		// a language prefix would link a 404 (#283).
+		href := ph.BasePath
+		if !isDefaultLanguage && isLocalized(ph.Localized) {
+			href = "/" + l.String() + ph.BasePath
+		}
+
+		pageEntry := render.PageEntry{
+			BasePath: ph.BasePath,
+			Href:     href,
+			Label:    label,
+			Name:     handler.Name,
+			Type:     render.PageTypeHTML,
+			Weight:   resource.MustParse("0"),
+		}
+
+		// The page's mode, by the same checks routing uses
+		// (addHandlerAndRegister, pageHandlerFunc), so a template can
+		// tell a text file or an alias from an HTML page without a tag
+		// (#284).
+		switch {
+		case ph.Rewrite != nil:
+			pageEntry.Type = render.PageTypeRewrite
+			pageEntry.Rewrite = hh.rewriteEntry(handler, l, isDefaultLanguage, parsedUserEntitlements)
+		case ph.MimeType != "":
+			pageEntry.Type = render.PageTypeText
+			pageEntry.MimeType = ph.MimeType
+		}
+
+		if ph.NavigationHints != nil {
+			pageEntry.Icon = ph.NavigationHints.Icon
+			// An unset weight keeps the "0" default above, which is what the
+			// zero Quantity resolved to before the field became optional.
+			if ph.NavigationHints.Weight != nil {
+				pageEntry.Weight = *ph.NavigationHints.Weight
+			}
+		}
+
+		// Project the page's spec.tags onto the nav entry so templates can
+		// render tag-driven badges, groupings, tooltips, or external links
+		// via [[ range $t := $value.Tags ]].
+		if len(ph.Tags) > 0 {
+			pageEntry.Tags = make([]render.PageTag, 0, len(ph.Tags))
+			for _, tag := range ph.Tags {
+				pageEntry.Tags = append(pageEntry.Tags, render.PageTag{
+					Name:        tag.Name,
+					Description: tag.Description,
+					URL:         tag.URL,
+				})
+			}
+		}
+
+		hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements, children)
+
+		(*entry.Children)[label] = pageEntry
 	}
 }
 

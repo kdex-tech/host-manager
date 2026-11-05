@@ -309,7 +309,9 @@ func TestHostHandler_L10nRender(t *testing.T) {
 	}
 }
 
-func TestHostHandler_L10nRenders(t *testing.T) {
+// Each language renders with its own translations and navigation paths.
+// This replaced the test of L10nRenders, which nothing called (#287).
+func TestHostHandler_L10nRenderPerLanguage(t *testing.T) {
 	type THost struct {
 		name string
 		host kdexv1alpha1.KDexHostSpec
@@ -393,10 +395,9 @@ func TestHostHandler_L10nRenders(t *testing.T) {
 			th.SetHost(context.Background(), &tt.host.host, nil, nil, nil, nil, "", map[string]ko.PathInfo{}, nil, nil, nil, "http", nil, time.Now())
 			th.AddOrUpdateTranslation(tt.translationName, tt.translation)
 
-			got := th.L10nRenders(tt.pageHandler, map[language.Tag]map[string]any{}, &th.Translations)
-
 			for key, values := range tt.want {
-				l10nRender := got[key]
+				l10nRender, err := th.L10nRender(tt.pageHandler, nil, language.Make(key), map[string]any{}, &th.Translations)
+				g.Expect(err).NotTo(G.HaveOccurred())
 				for _, v := range values {
 					g.Expect(l10nRender).To(G.ContainSubstring(v))
 				}
