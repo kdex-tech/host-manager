@@ -28,8 +28,9 @@ import (
 // renders. The version is part of the cache CLASS, not the checksum, so the
 // keys of two binaries with different versions are disjoint and neither ever
 // reads the other's renders. Version 2 is #246 (a page imports only its own
-// packages).
-const renderFormatVersion = "2"
+// packages). Version 3 is #283 (a text page's .PageMap is the anonymous page
+// tree, where it was empty).
+const renderFormatVersion = "3"
 
 // pageCacheClass and utilityCacheClass are the render cache classes. The
 // "nav" cache is deliberately unversioned: a navigation fragment renders from

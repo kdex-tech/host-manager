@@ -335,12 +335,21 @@ func (hh *HostHandler) L10nRender(
 // yaml, markdown, xml) are not HTML, so an interpolated [[ l10n "key" ]]
 // value must come through verbatim -- html/template's auto-escaping would
 // corrupt any &, <, >, or " in a translation or template value.
+//
+// .PageMap is the host's page tree as an ANONYMOUS caller sees it, whoever
+// asks (#283). A text page is a public document (sitemap.xml, llms.txt,
+// robots.txt): it should list what an anonymous crawler can reach, not what
+// the caller fetching it happens to be entitled to. It is also what keeps
+// the text-page cache key -- page + language, ph.CacheKey -- correct: the
+// body depends on no caller, so every caller shares one cached copy. A
+// per-caller tree here would need getUserHash in that key, as the nav cache
+// has. Caller holds hh.mu.RLock.
 func (hh *HostHandler) L10nRenderText(
 	ph page.PageHandler,
 	lang language.Tag,
 	translations *Translations,
 ) (string, error) {
-	renderer := hh.l10nRenderer(ph, nil, lang, map[string]any{}, translations)
+	renderer := hh.l10nRenderer(ph, hh.anonymousPageMap(lang), lang, map[string]any{}, translations)
 
 	templateData, err := renderer.TemplateData()
 	if err != nil {
@@ -353,6 +362,19 @@ func (hh *HostHandler) L10nRenderText(
 	}
 
 	return renderer.RenderOneText(ph.Name+"-body", body, templateData)
+}
+
+// anonymousPageMap builds the page tree BuildMenuEntries gives a caller with
+// no auth context: GetParsedEntitlements of an empty context is the anonymous
+// caller's set, which the checker matches against anonymousEntitlements. It
+// returns nil when no page is visible. Caller holds hh.mu.RLock.
+func (hh *HostHandler) anonymousPageMap(lang language.Tag) map[string]any {
+	root := &render.PageEntry{}
+	hh.BuildMenuEntries(context.Background(), root, &lang, lang.String() == hh.defaultLanguage, nil)
+	if root.Children == nil {
+		return nil
+	}
+	return *root.Children
 }
 
 func (hh *HostHandler) L10nRenders(

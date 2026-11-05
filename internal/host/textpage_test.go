@@ -12,12 +12,19 @@ package host
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/text/language"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"kdex.dev/crds/render"
 )
 
 // withText sets MimeType and Body on the spec built by registerPageForTest,
@@ -162,4 +169,86 @@ func TestTextPage_NoSniffHeader(t *testing.T) {
 	rr := doRequest(t, hh.currentMux(t), "GET", "/robots.txt")
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
+}
+
+// sitemapBody is the sitemap template documented in kdex-main-site's Page
+// Operating Modes page (Text mode), verbatim: a recursive walk of .PageMap
+// via define/template that drops entries tagged nav-surrogate or
+// no-navigation. Keep the two in step.
+const sitemapBody = `[[- define "urls" ]][[ range $p := . ]]
+  [[- $skip := false ]][[ range $t := $p.Tags ]][[ if or (eq $t.Name "nav-surrogate") (eq $t.Name "no-navigation") ]][[ $skip = true ]][[ end ]][[ end ]]
+  [[- if not $skip ]]<url><loc>https://example.com[[ $p.Href ]]</loc></url>[[ end ]]
+  [[- if $p.Children ]][[ template "urls" $p.Children ]][[ end ]]
+[[- end ]][[ end -]]
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">[[ template "urls" .PageMap ]]</urlset>
+`
+
+// A text page's .PageMap is the host's page tree built under the ANONYMOUS
+// scope, whoever asks: a sitemap lists what an anonymous crawler can reach,
+// and the text-page cache key (page + language) stays correct for every
+// caller. The entitled caller asks first, so a per-caller tree would be the
+// one cached and then served to the anonymous caller. See #283.
+func TestTextPage_PageMapIsAnonymousScopedTree(t *testing.T) {
+	// Anonymous callers may read pages, as on a real public host; /admin
+	// additionally requires the "admin" entitlement.
+	checker := auth.NewAuthorizationChecker([]string{"pages::read"}, logr.Discard())
+
+	admin := newPage("admin", "Admin", "/admin")
+	adminReqs := checker.ParseRequirements([]kdexv1alpha1.SecurityRequirement{{"bearer": {"admin"}}})
+	admin.ParsedRequirements = &adminReqs
+
+	docs := newPage("docs", "Docs", "/docs")
+	intro := newPage("intro", "Intro", "/docs/intro")
+	intro.Page.ParentPageRef = &corev1.LocalObjectReference{Name: "docs"}
+	tools := newPage("tools", "Tools", "/tools")
+	tools.Page.Tags = []kdexv1alpha1.Tag{{Name: "nav-surrogate"}}
+
+	sitemap := newPage("sitemap", "Sitemap", "/sitemap.xml")
+	sitemap.Page.MimeType = "xml"
+	sitemap.Page.Body = sitemapBody
+	sitemap.Page.Tags = []kdexv1alpha1.Tag{{Name: "no-navigation"}}
+
+	// The real checker fails closed on a zero-value ParsedRequirements, so
+	// the open pages carry a parsed empty set, as RebuildMux gives them.
+	open := checker.ParseRequirements(nil)
+	for _, p := range []*page.PageHandler{&docs, &intro, &tools, &sitemap} {
+		p.ParsedRequirements = &open
+	}
+
+	hh := gatedHostFixture(admin, docs, intro, tools, sitemap)
+	hh.authChecker = checker
+
+	entitled := func() *http.Request {
+		req := httptest.NewRequest("GET", "/sitemap.xml", nil)
+		return req.WithContext(auth.SetAuthContext(req.Context(),
+			auth.AuthContext{"sub": "alice", "entitlements": []any{"pages::read", "admin"}}))
+	}
+
+	// Control: the entitled caller really can reach /admin, so its absence
+	// below is the scope at work, not a fixture that hides it from everyone.
+	root := &render.PageEntry{}
+	hh.BuildMenuEntries(entitled().Context(), root, ptr.To(language.Make("en")), true, nil)
+	require.NotNil(t, root.Children)
+	require.Contains(t, *root.Children, "Admin")
+
+	serve := func(req *http.Request) string {
+		w := httptest.NewRecorder()
+		hh.pageHandlerFunc(sitemap, &hh.Translations, language.Make(hh.defaultLanguage))(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		return w.Body.String()
+	}
+
+	first := serve(entitled())
+	second := serve(httptest.NewRequest("GET", "/sitemap.xml", nil))
+
+	for _, body := range []string{first, second} {
+		require.True(t, strings.HasPrefix(body, "<?xml "), "the XML declaration must come first: %q", body)
+		require.Contains(t, body, "<loc>https://example.com/docs</loc>")
+		require.Contains(t, body, "<loc>https://example.com/docs/intro</loc>", "the template walks Children")
+		require.NotContains(t, body, "sitemap.xml", "the template filters by tag")
+		require.NotContains(t, body, "/admin", "the tree is the anonymous scope's")
+		require.NotContains(t, body, "/tools", "the template filters by tag")
+	}
+	require.Equal(t, first, second)
 }
