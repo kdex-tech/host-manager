@@ -38,6 +38,9 @@ spec:
             - --health-probe-bind-address=:8081
             - --webserver-bind-address=:8090
             - --focal-host={{ .Values.focalHost }}
+            {{- with .Values.referenceNamespaces }}
+            - --reference-namespaces={{ join "," . }}
+            {{- end }}
             - --service-name={{ include "host-manager.fullname" . }}
             {{- with .Values.proxy }}
             {{- with .dialTimeout }}

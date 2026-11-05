@@ -536,20 +536,26 @@ func isNPMSecret(s corev1.Secret) bool {
 
 // secretRefKey returns the Secret a packageReference's secretRef names; the
 // namespace defaults to the IPR's.
-func secretRefKey(ipr *kdexv1alpha1.KDexInternalPackageReferences, pkg kdexv1alpha1.PackageReference) (client.ObjectKey, bool) {
+// secretRefKey is the npm credential Secret a package reference names. It is
+// always in the host's own namespace: reading another namespace's Secret let
+// a package reference make host-manager copy a credential its author may not
+// be able to read (#242), so secretRef.namespace is refused, by the CRD since
+// kdex-crds v0.14.258 and here for an object stored under an older CRD.
+func secretRefKey(ipr *kdexv1alpha1.KDexInternalPackageReferences, pkg kdexv1alpha1.PackageReference) (client.ObjectKey, bool, error) {
 	if pkg.SecretRef == nil {
-		return client.ObjectKey{}, false
+		return client.ObjectKey{}, false, nil
 	}
-	namespace := pkg.SecretRef.Namespace
-	if namespace == "" {
-		namespace = ipr.Namespace
+	if ns := pkg.SecretRef.Namespace; ns != "" && ns != ipr.Namespace {
+		return client.ObjectKey{}, false, fmt.Errorf(
+			"package %s: secretRef.namespace %q is not supported: the Secret must be in the host's namespace %q",
+			pkg.Name, ns, ipr.Namespace)
 	}
-	return client.ObjectKey{Namespace: namespace, Name: pkg.SecretRef.Name}, true
+	return client.ObjectKey{Namespace: ipr.Namespace, Name: pkg.SecretRef.Name}, true, nil
 }
 
 func referencesSecret(ipr *kdexv1alpha1.KDexInternalPackageReferences, secret *corev1.Secret) bool {
 	for _, pkg := range ipr.Spec.PackageReferences {
-		if key, ok := secretRefKey(ipr, pkg); ok && key == client.ObjectKeyFromObject(secret) {
+		if key, ok, _ := secretRefKey(ipr, pkg); ok && key == client.ObjectKeyFromObject(secret) {
 			return true
 		}
 	}
@@ -712,7 +718,11 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 			}
 
 			for _, packageReference := range ipr.Spec.PackageReferences {
-				if key, ok := secretRefKey(ipr, packageReference); ok {
+				key, ok, err := secretRefKey(ipr, packageReference)
+				if err != nil {
+					return err
+				}
+				if ok {
 					secret := &corev1.Secret{}
 					if err := r.Get(ctx, key, secret); err != nil {
 						return err

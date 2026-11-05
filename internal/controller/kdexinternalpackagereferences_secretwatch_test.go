@@ -104,13 +104,16 @@ var _ = Describe("KDexInternalPackageReferencesReconciler.secretToRequests", fun
 		Expect(r.secretToRequests(ctx, secret(ns, "gitlab-npm", nil, nil))).To(ConsistOf(req("rsi-packages")))
 	})
 
-	It("honours a secretRef namespace and ignores a same-named Secret in the IPR namespace", func() {
+	// secretRef.namespace is not supported (#242): a reference naming another
+	// namespace resolves nowhere, so neither that Secret nor a same-named one
+	// in the IPR namespace enqueues the IPR.
+	It("ignores a secretRef that names another namespace", func() {
 		r := reconciler(
 			host(nil),
 			ipr("rsi-packages", focalHost, pkg("@acme/a", &kdexv1alpha1.KDexObjectReference{Name: "gitlab-npm", Kind: "Secret", Namespace: "creds"})),
 		)
 
-		Expect(r.secretToRequests(ctx, secret("creds", "gitlab-npm", nil, nil))).To(ConsistOf(req("rsi-packages")))
+		Expect(r.secretToRequests(ctx, secret("creds", "gitlab-npm", nil, nil))).To(BeEmpty())
 		Expect(r.secretToRequests(ctx, secret(ns, "gitlab-npm", nil, nil))).To(BeEmpty())
 	})
 

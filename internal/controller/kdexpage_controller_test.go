@@ -649,7 +649,11 @@ var _ = Describe("KDexPage Controller", func() {
 			Eventually(check).Should(Succeed())
 		})
 
-		It("cross namespace reference", func() {
+		It("cross namespace reference to a namespace the host lists", func() {
+			// The host's spec.referenceNamespaces lists secondNamespace (#290).
+			SetReferenceNamespaces([]string{secondNamespace})
+			DeferCleanup(SetReferenceNamespaces, []string(nil))
+
 			resource := &kdexv1alpha1.KDexPage{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      resourceName,

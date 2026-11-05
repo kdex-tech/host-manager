@@ -345,6 +345,9 @@ func (r *KDexFunctionReconciler) reconcileServiceBacked(ctx context.Context, fn 
 	if ns == "" {
 		ns = fn.Namespace
 	}
+	if err := checkReferenceNamespace(fn.Namespace, ns); err != nil {
+		return r.markBackendUnready(ctx, fn, "NamespaceNotReferenceable", err.Error(), false)
+	}
 
 	// 1. Resolve the Service.
 	svc := &corev1.Service{}

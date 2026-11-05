@@ -43,6 +43,8 @@ import (
 	"kdex.dev/crds/configuration"
 	kdexlog "kdex.dev/crds/log"
 	ctrl "sigs.k8s.io/controller-runtime"
+	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -105,12 +107,16 @@ func main() {
 	var secureMetrics bool
 	var tlsOpts []func(*tls.Config)
 	var webhookCertKey, webhookCertName, webhookCertPath string
+	var referenceNamespacesFlag string
 
 	flag.StringVar(&cacheAddr, "cache-address", os.Getenv("CACHE_ADDRESS"), "The address of the Redis/Valkey cache. "+
 		"Or set CACHE_ADDRESS env var.")
 	flag.StringVar(&configFile, "config-file", "/config.yaml", "The path to a configuration yaml file.")
 	flag.StringVar(&focalHost, "focal-host", "", "The name of a KDexHost resource to focus the controller instance's "+
 		"attention on.")
+	flag.StringVar(&referenceNamespacesFlag, "reference-namespaces", "", "Comma-separated namespaces, besides the "+
+		"controller's own, in which the focal host's resources may reference namespaced objects (the KDexHost's "+
+		"spec.referenceNamespaces). The manager caches and watches only these namespaces.")
 	flag.Var(&namedLogLevels, "named-log-level", "Specify a named log level pair (format: NAME=LEVEL) (can be used "+
 		"multiple times). Or set NAMED_LOG_LEVELS env var with space delimited pairs with the same format.")
 	flag.StringVar(&pprofAddr, "pprof-bind-address", os.Getenv("PPROF_BIND_ADDRESS"), "The address the pprof endpoint "+
@@ -318,7 +324,25 @@ func main() {
 
 	controllerNamespace := controller.ControllerNamespace()
 
+	// The manager caches and watches namespaced objects only in the host's own
+	// namespace and its spec.referenceNamespaces, never the whole cluster
+	// (#290); Secrets only in the host's own namespace (#242). Cluster-scoped
+	// kinds are unaffected.
+	referenceNamespaces := controller.ParseReferenceNamespaces(referenceNamespacesFlag)
+	controller.SetReferenceNamespaces(referenceNamespaces)
+	cacheNamespaces := map[string]crcache.Config{}
+	for _, ns := range controller.CacheNamespaces(controllerNamespace, referenceNamespaces) {
+		cacheNamespaces[ns] = crcache.Config{}
+	}
+	setupLog.Info("scoping the cache", "namespaces", controller.CacheNamespaces(controllerNamespace, referenceNamespaces))
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Cache: crcache.Options{
+			DefaultNamespaces: cacheNamespaces,
+			ByObject: map[client.Object]crcache.ByObject{
+				&corev1.Secret{}: {Namespaces: map[string]crcache.Config{controllerNamespace: {}}},
+			},
+		},
 		Controller: config.Controller{
 			Logger: logger,
 		},

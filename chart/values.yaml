@@ -46,6 +46,13 @@ extraVolumeMounts: []
 # host-manager specific config
 focalHost: ""
 
+# The KDexHost's spec.referenceNamespaces: namespaces, besides the host's own,
+# in which its resources may reference namespaced objects. host-manager caches
+# and watches only the host's namespace plus these; Secrets only the host's
+# own. Empty means the host's own namespace only. nexus-manager sets it from
+# the KDexHost (#290).
+referenceNamespaces: []
+
 # Reverse-proxy transport timeouts. Apply to every KDexFunction proxied
 # through this host-manager. responseHeaderTimeout is the knob that
 # matters for Knative scale-from-zero cold starts — the default covers

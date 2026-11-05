@@ -246,7 +246,11 @@ func ResolveKDexObjectReference(
 		}
 	}
 
-	if err := c.Get(ctx, key, obj.(client.Object)); err != nil {
+	err = checkReferenceNamespace(referrer.GetNamespace(), key.Namespace)
+	if err == nil {
+		err = c.Get(ctx, key, obj.(client.Object))
+	}
+	if err != nil {
 		kdexv1alpha1.SetConditions(
 			referrerConditions,
 			kdexv1alpha1.ConditionStatuses{
