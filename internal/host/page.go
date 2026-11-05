@@ -29,17 +29,21 @@ import (
 // keys of two binaries with different versions are disjoint and neither ever
 // reads the other's renders. Version 2 is #246 (a page imports only its own
 // packages). Version 3 is #283 (a text page's .PageMap is the anonymous page
-// tree, where it was empty).
+// tree, where it was empty) and #284 (its entries carry Type, MimeType and
+// Rewrite).
 const renderFormatVersion = "3"
 
-// pageCacheClass and utilityCacheClass are the render cache classes. The
-// "nav" cache is deliberately unversioned: a navigation fragment renders from
-// the navigation template alone (performNavigationRender), with no head
-// script, importmap or package imports, so #246 did not change it. Version it
-// too the first time a release changes navigation output.
+// pageCacheClass and utilityCacheClass are the render cache classes.
+// navCacheClass is the navigation fragment cache's. It has its own version,
+// because a fragment renders from the navigation template alone
+// (performNavigationRender), with no head script, importmap or package
+// imports, so #246 did not change it. Bump it whenever a release changes
+// navigation output for unchanged CRs. Version 1 is #283 (unlocalized pages
+// keep a bare href) and #284 (entries carry Type, MimeType and Rewrite).
 const (
 	pageCacheClass    = "page.v" + renderFormatVersion
 	utilityCacheClass = "utility.v" + renderFormatVersion
+	navCacheClass     = "nav.v1"
 )
 
 func (hh *HostHandler) pageHandlerFunc(

@@ -14,6 +14,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
+	"github.com/kdex-tech/host-manager/internal/rewrite"
 	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/api/resource"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -128,6 +129,75 @@ func (hh *HostHandler) discoverLandingPage(
 	return hh.firstAuthorizedPage(ctx, l, isDefaultLanguage)
 }
 
+// visibleInTree reports whether a page tree built for parsedUserEntitlements
+// lists handler: the same check the page gate runs. Caller holds
+// hh.mu.RLock.
+func (hh *HostHandler) visibleInTree(
+	handler page.PageHandler,
+	parsedUserEntitlements *entitlements.ParsedEntitlements,
+) bool {
+	if !hh.IsAuthEnabled() || hh.authChecker == nil {
+		return true
+	}
+	if handler.ParsedRequirements == nil {
+		// Pages.Set stores a page before RebuildMux parses its requirements.
+		// Until then nothing says who may see it, so it stays out of every
+		// tree: a sitemap cached in that window would otherwise list a gated
+		// page to anonymous callers (#283).
+		return false
+	}
+	if parsedUserEntitlements == nil {
+		return true
+	}
+	access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
+		"pages", handler.Page.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
+	return access
+}
+
+// rewriteEntry describes an alias's target for its tree entry (#284). Href is
+// the path the alias's own Href dispatches to, built the way
+// rewriteHandlerFunc builds it for a request at the alias's basePath (where
+// no wildcard has a value), so a sitemap can list the canonical URL instead
+// of the alias. It is empty when the target is not servable, or is a page
+// this tree does not list: an alias does not disclose a target the caller
+// cannot see. Caller holds hh.mu.RLock.
+func (hh *HostHandler) rewriteEntry(
+	alias page.PageHandler,
+	l *language.Tag,
+	isDefaultLanguage bool,
+	parsedUserEntitlements *entitlements.ParsedEntitlements,
+) *render.PageRewrite {
+	rw := alias.Page.Rewrite
+	entry := &render.PageRewrite{
+		Canonical: rw.Canonical,
+		Kind:      rw.TargetRef.Kind,
+		Name:      rw.TargetRef.Name,
+	}
+
+	pagesByName := map[string]page.PageHandler{}
+	if rw.TargetRef.Kind == "KDexPage" {
+		target, ok := hh.Pages.Get(rw.TargetRef.Name)
+		if !ok || !hh.visibleInTree(target, parsedUserEntitlements) {
+			return entry
+		}
+		pagesByName[target.Name] = target
+	}
+	resolved, ok := resolveRewriteTarget(rw.TargetRef, pagesByName, hh.functions)
+	if !ok {
+		return entry
+	}
+	href, err := rewrite.Target(resolved.basePath, resolved.exact, rw.Path, alias.Page.PatternPath,
+		func(string) string { return "" })
+	if err != nil {
+		return entry
+	}
+	if resolved.localized && !isDefaultLanguage {
+		href = "/" + l.String() + href
+	}
+	entry.Href = href
+	return entry
+}
+
 func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
@@ -137,21 +207,8 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	for _, handler := range hh.Pages.List() {
 		ph := handler.Page
 
-		if hh.IsAuthEnabled() && hh.authChecker != nil && handler.ParsedRequirements == nil {
-			// Pages.Set stores a page before RebuildMux parses its
-			// requirements. Until then nothing says who may see it, so it
-			// stays out of every tree: a sitemap cached in that window would
-			// otherwise list a gated page to anonymous callers (#283).
+		if !hh.visibleInTree(handler, parsedUserEntitlements) {
 			continue
-		}
-
-		if hh.IsAuthEnabled() && hh.authChecker != nil && parsedUserEntitlements != nil {
-			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
-				"pages", ph.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
-
-			if !access {
-				continue
-			}
 		}
 
 		if (parent == nil && ph.ParentPageRef == nil) ||
@@ -180,7 +237,21 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 				Href:     href,
 				Label:    label,
 				Name:     handler.Name,
+				Type:     render.PageTypeHTML,
 				Weight:   resource.MustParse("0"),
+			}
+
+			// The page's mode, by the same checks routing uses
+			// (addHandlerAndRegister, pageHandlerFunc), so a template can
+			// tell a text file or an alias from an HTML page without a tag
+			// (#284).
+			switch {
+			case ph.Rewrite != nil:
+				pageEntry.Type = render.PageTypeRewrite
+				pageEntry.Rewrite = hh.rewriteEntry(handler, l, isDefaultLanguage, parsedUserEntitlements)
+			case ph.MimeType != "":
+				pageEntry.Type = render.PageTypeText
+				pageEntry.MimeType = ph.MimeType
 			}
 
 			if ph.NavigationHints != nil {
@@ -261,7 +332,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	navCache := hh.cacheManager.GetCache("nav", cache.CacheOptions{})
+	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
 	userHash := hh.getUserHash(r)
 	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, seed, l.String(), userHash)
 

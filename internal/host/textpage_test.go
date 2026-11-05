@@ -174,12 +174,11 @@ func TestTextPage_NoSniffHeader(t *testing.T) {
 
 // sitemapBody is the sitemap template documented in kdex-main-site's Page
 // Operating Modes page (Text mode), verbatim: a recursive walk of .PageMap
-// via define/template that drops entries tagged nav-surrogate or
-// no-navigation, and escapes each href for XML. The doc points back here;
-// keep the two in step.
+// via define/template that lists only HTML pages (no text files, no rewrite
+// aliases) and escapes each href for XML. The doc points back here; keep the
+// two in step.
 const sitemapBody = `[[- define "urls" ]][[ range $p := . ]]
-  [[- $skip := false ]][[ range $t := $p.Tags ]][[ if or (eq $t.Name "nav-surrogate") (eq $t.Name "no-navigation") ]][[ $skip = true ]][[ end ]][[ end ]]
-  [[- if not $skip ]]<url><loc>https://example.com[[ $p.Href | html ]]</loc></url>[[ end ]]
+  [[- if eq $p.Type "html" ]]<url><loc>https://example.com[[ $p.Href | html ]]</loc></url>[[ end ]]
   [[- if $p.Children ]][[ template "urls" $p.Children ]][[ end ]]
 [[- end ]][[ end -]]
 <?xml version="1.0" encoding="UTF-8"?>
@@ -187,8 +186,8 @@ const sitemapBody = `[[- define "urls" ]][[ range $p := . ]]
 `
 
 // sitemapFixture is a host with auth on, a real checker, and a sitemap text
-// page over a small tree: /docs with child /docs/intro, a nav-surrogate
-// /tools, and /admin, which requires the "admin" entitlement. Anonymous
+// page over a small tree: /docs with child /docs/intro, /tools, a rewrite
+// alias of /docs/intro, and /admin, which requires the "admin" entitlement. Anonymous
 // callers may read pages, as on a real public host. The checker, not
 // gatedHostFixture's authConfig.AnonymousEntitlements, decides the anonymous
 // set. RebuildMux parses each page's spec.security, as in production.
@@ -200,10 +199,8 @@ func sitemapFixture(t *testing.T, extra ...page.PageHandler) *HostHandler {
 	docs := newPage("docs", "Docs", "/docs")
 	intro := newPage("intro", "Intro", "/docs/intro")
 	intro.Page.ParentPageRef = &corev1.LocalObjectReference{Name: "docs"}
-	tools := newPage("tools", "Tools", "/tools")
-	tools.Page.Tags = []kdexv1alpha1.Tag{{Name: "nav-surrogate"}}
+	tools := rewritePage("tools", "Tools", "/tools", "KDexPage", "intro", "", true)
 	sitemap := textPageForTest(t, "sitemap", "/sitemap.xml", "xml", sitemapBody)
-	sitemap.Page.Tags = []kdexv1alpha1.Tag{{Name: "no-navigation"}}
 	sitemap.Page.Localized = ptr.To(false)
 
 	hh := gatedHostFixture(append([]page.PageHandler{admin, docs, intro, tools, sitemap}, extra...)...)
@@ -247,9 +244,9 @@ func TestTextPage_PageMapIsAnonymousScopedTree(t *testing.T) {
 		require.True(t, strings.HasPrefix(body, "<?xml "), "the XML declaration must come first: %q", body)
 		require.Contains(t, body, "<loc>https://example.com/docs</loc>")
 		require.Contains(t, body, "<loc>https://example.com/docs/intro</loc>", "the template walks Children")
-		require.NotContains(t, body, "sitemap.xml", "the template filters by tag")
+		require.NotContains(t, body, "sitemap.xml", "the template lists only HTML pages, not text files")
 		require.NotContains(t, body, "/admin", "the tree is the anonymous scope's")
-		require.NotContains(t, body, "/tools", "the template filters by tag")
+		require.NotContains(t, body, "/tools", "the template lists only HTML pages, not aliases")
 	}
 	require.Equal(t, first, second)
 }
@@ -307,4 +304,70 @@ func TestBuildMenuEntries_UnlocalizedPageKeepsBareHref(t *testing.T) {
 	sitemap, ok := tree["sitemap"].(render.PageEntry)
 	require.True(t, ok)
 	require.Equal(t, "/sitemap.xml", sitemap.Href, "the fixture's sitemap sets localized: false")
+}
+
+// rewritePage is a rewrite-mode page aliasing kind/name, with rewrite.path
+// set to path.
+func rewritePage(name, label, basePath, kind, target, path string, canonical bool) page.PageHandler {
+	ph := newPage(name, label, basePath)
+	ph.Page.Rewrite = &kdexv1alpha1.RewriteSpec{
+		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: kind, Name: target},
+		Path:      path,
+		Canonical: canonical,
+	}
+	return ph
+}
+
+// Every tree entry carries its page's mode, and an alias carries its target,
+// with the Href the alias serves. An alias of a page the tree hides keeps
+// its target's identity but not its path. See #284.
+func TestBuildMenuEntries_EntriesCarryPageMode(t *testing.T) {
+	hh := sitemapFixture(t,
+		rewritePage("docs-alias", "Docs alias", "/d", "KDexPage", "docs", "", true),
+		rewritePage("intro-alias", "Intro alias", "/i", "KDexPage", "docs", "intro", false),
+		rewritePage("admin-alias", "Admin alias", "/a", "KDexPage", "admin", "", false),
+		rewritePage("billing-alias", "Billing alias", "/b", "KDexFunction", "billing", "", false),
+	)
+	hh.mu.Lock()
+	hh.functions = []kdexv1alpha1.KDexFunction{{
+		ObjectMeta: metav1ObjectMeta("billing"),
+		Spec:       kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: "/api/billing"}},
+		Status:     kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady},
+	}}
+	hh.mu.Unlock()
+
+	entry := func(tree map[string]any, label string) render.PageEntry {
+		t.Helper()
+		e, ok := tree[label].(render.PageEntry)
+		require.True(t, ok, label)
+		return e
+	}
+
+	tree := hh.pageMap(context.Background(), language.Make("en"))
+
+	docs := entry(tree, "Docs")
+	require.Equal(t, render.PageTypeHTML, docs.Type)
+	require.Empty(t, docs.MimeType)
+	require.Nil(t, docs.Rewrite)
+	require.Equal(t, render.PageTypeHTML, entry(*docs.Children, "Intro").Type, "nested entries carry it too")
+
+	sitemap := entry(tree, "sitemap")
+	require.Equal(t, render.PageTypeText, sitemap.Type)
+	require.Equal(t, "xml", sitemap.MimeType)
+	require.Nil(t, sitemap.Rewrite)
+
+	require.Equal(t, &render.PageRewrite{Canonical: true, Href: "/docs", Kind: "KDexPage", Name: "docs"},
+		entry(tree, "Docs alias").Rewrite)
+	require.Equal(t, render.PageTypeRewrite, entry(tree, "Docs alias").Type)
+	require.Equal(t, "/docs/intro", entry(tree, "Intro alias").Rewrite.Href, "rewrite.path joins the target's basePath")
+	require.Equal(t, &render.PageRewrite{Kind: "KDexPage", Name: "admin"}, entry(tree, "Admin alias").Rewrite,
+		"the anonymous tree does not disclose a hidden target's path")
+	require.Equal(t, "/api/billing", entry(tree, "Billing alias").Rewrite.Href)
+
+	fr := hh.pageMap(context.Background(), language.Make("fr"))
+	require.Equal(t, "/fr/docs", entry(fr, "Docs alias").Rewrite.Href, "a localized page target keeps the language")
+	require.Equal(t, "/api/billing", entry(fr, "Billing alias").Rewrite.Href, "functions are not localized")
+
+	entitled := hh.pageMap(entitledSitemapReq().Context(), language.Make("en"))
+	require.Equal(t, "/admin", entry(entitled, "Admin alias").Rewrite.Href)
 }

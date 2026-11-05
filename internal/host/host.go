@@ -767,16 +767,18 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		functionHandlers:    actualHandlers,
 		hasFunctionHandlers: true,
 		routeCollisions:     routes.collisions,
-		pageSetDigest:       computePageSetDigest(pageHandlers),
+		pageSetDigest:       computePageSetDigest(pageHandlers, hh.functions),
 	}, true
 }
 
 // computePageSetDigest hashes every page's name and spec, in name order. The
 // spec holds everything a page tree reads -- basePath, label, parentPageRef,
 // tags, navigationHints, localized, mimeType, rewrite and security -- so the
-// digest moves whenever any page's entry in any tree could. See
+// digest moves whenever any page's entry in any tree could. A rewrite entry's
+// target Href also resolves against the functions (#284), so each function's
+// name, basePath, internal flag and state are hashed too. See
 // HostHandler.pageSetDigest.
-func computePageSetDigest(pages []page.PageHandler) string {
+func computePageSetDigest(pages []page.PageHandler, functions []kdexv1alpha1.KDexFunction) string {
 	sorted := slices.Clone(pages)
 	slices.SortFunc(sorted, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
 	h := sha256.New()
@@ -789,6 +791,14 @@ func computePageSetDigest(pages []page.PageHandler) string {
 		}
 		_, _ = fmt.Fprintf(h, "%d:%s%d:", len(ph.Name), ph.Name, len(spec))
 		_, _ = h.Write(spec)
+	}
+	fns := make([]string, 0, len(functions))
+	for _, f := range functions {
+		fns = append(fns, fmt.Sprintf("%q %q %t %q", f.Name, f.Spec.API.BasePath, f.Spec.Internal, f.Status.State))
+	}
+	slices.Sort(fns)
+	for _, f := range fns {
+		_, _ = fmt.Fprintf(h, "fn:%s\n", f)
 	}
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }

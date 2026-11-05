@@ -125,7 +125,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	// whole page tree (#283).
 	seed := ph.Checksum() + ":" + hh.pageSetDigest
 	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), "anon")
-	cacheVal, found, isCurrent, err := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey)
+	cacheVal, found, isCurrent, err := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, isCurrent)
@@ -150,7 +150,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	// cacheKey2 := fmt.Sprintf("main:/test:en:%s", userHash)
 	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), userHash)
 
-	_, found2, _, err2 := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey2)
+	_, found2, _, err2 := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), cacheKey2)
 	assert.NoError(t, err2)
 	assert.True(t, found2)
 }
