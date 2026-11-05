@@ -28,7 +28,6 @@ type Generator struct {
 	OpenAPIBuilder   *ko.Builder
 	Scheme           *runtime.Scheme
 	ServerUrl        string
-	ServiceAccount   string
 }
 
 func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1alpha1.KDexFunction) (*batchv1.Job, error) {
@@ -258,8 +257,7 @@ func (g *Generator) GetOrCreateGenerateJob(ctx context.Context, function *kdexv1
 							VolumeMounts:    volumeMounts,
 						},
 					},
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: g.ServiceAccount,
+					RestartPolicy: corev1.RestartPolicyNever,
 					Volumes: []corev1.Volume{
 						{
 							Name: internal.SHARED_VOLUME,

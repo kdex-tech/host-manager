@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -28,7 +29,13 @@ import (
 )
 
 func CRDExists(mgr ctrl.Manager, gvk schema.GroupVersionKind) (bool, error) {
-	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	return CRDExistsIn(mgr.GetRESTMapper(), gvk)
+}
+
+// CRDExistsIn is CRDExists against any RESTMapper, for callers that run
+// before a manager exists (the manager's cache options).
+func CRDExistsIn(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (bool, error) {
+	_, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		if meta.IsNoMatchError(err) {
 			return false, nil
@@ -272,6 +279,38 @@ func UniqueBackendRefs(backends []kdexv1alpha1.KDexObjectReference) []kdexv1alph
 	})
 
 	return unique
+}
+
+// packageRefsForIPR checks the host's unique package references against what
+// the KDexInternalPackageReferences CRD accepts, so a bad reference marks the
+// host Degraded naming it, instead of the apiserver refusing the whole IPR
+// write and stalling every package on the host:
+//   - secretRef.namespace is rejected by the CRD (kdex-crds v0.14.258, #242).
+//     An app stored under an older CRD can still carry one: the host's own
+//     namespace is just the default spelled out, so it is cleared; any
+//     other namespace is unsupported.
+//   - the IPR's packageReferences list is keyed by name, so one package at
+//     two versions cannot be written.
+func packageRefsForIPR(hostNamespace string, refs []kdexv1alpha1.PackageReference) ([]kdexv1alpha1.PackageReference, error) {
+	out := make([]kdexv1alpha1.PackageReference, 0, len(refs))
+	versions := map[string]string{}
+	for _, pkg := range refs {
+		if pkg.SecretRef != nil && pkg.SecretRef.Namespace != "" {
+			if pkg.SecretRef.Namespace != hostNamespace {
+				return nil, fmt.Errorf("package %s: secretRef.namespace %q is not supported; put the Secret in the host's namespace %q",
+					pkg.Name, pkg.SecretRef.Namespace, hostNamespace)
+			}
+			ref := *pkg.SecretRef
+			ref.Namespace = ""
+			pkg.SecretRef = &ref
+		}
+		if v, seen := versions[pkg.Name]; seen && v != pkg.Version {
+			return nil, fmt.Errorf("package %s is referenced at two versions, %s and %s; reference one", pkg.Name, v, pkg.Version)
+		}
+		versions[pkg.Name] = pkg.Version
+		out = append(out, pkg)
+	}
+	return out, nil
 }
 
 func UniquePackageRefs(packages []kdexv1alpha1.PackageReference) []kdexv1alpha1.PackageReference {

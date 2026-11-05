@@ -556,14 +556,3 @@ func TestRebuildMux_DuplicateBasePathIsDeterministic(t *testing.T) {
 		require.False(t, docsListed, "the dropped page is in no tree")
 	}
 }
-
-// The pod is ready only once SetHost has given the handler its host.
-func TestHostLoaded(t *testing.T) {
-	cacheManager, _ := cache.NewCacheManager("", "", nil)
-	hh := NewHostHandler(nil, "h", "ns", logr.Discard(), cacheManager)
-	require.False(t, hh.HostLoaded())
-	hh.mu.Lock()
-	hh.host = &kdexv1alpha1.KDexHostSpec{}
-	hh.mu.Unlock()
-	require.True(t, hh.HostLoaded())
-}

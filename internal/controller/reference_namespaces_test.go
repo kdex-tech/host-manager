@@ -108,3 +108,56 @@ func TestReconcileServiceBacked_RefusesUnlistedNamespace(t *testing.T) {
 	require.NotNil(t, degraded)
 	assert.Equal(t, "NamespaceNotReferenceable", degraded.Reason)
 }
+
+// The IPR accepts no secretRef.namespace and keys packages by name: the
+// host's own namespace is cleared, anything else and one package at two
+// versions mark the host Degraded naming the package (#242).
+func TestPackageRefsForIPR(t *testing.T) {
+	ref := func(name, version, ns string) kdexv1alpha1.PackageReference {
+		p := kdexv1alpha1.PackageReference{Name: name, Version: version}
+		if ns != "-" {
+			p.SecretRef = &kdexv1alpha1.KDexObjectReference{Kind: "Secret", Name: "npm", Namespace: ns}
+		}
+		return p
+	}
+
+	out, err := packageRefsForIPR("dev", []kdexv1alpha1.PackageReference{ref("@a/x", "1.0.0", "dev"), ref("@a/y", "1.0.0", "-")})
+	require.NoError(t, err)
+	assert.Empty(t, out[0].SecretRef.Namespace, "the host's own namespace is cleared")
+	assert.Nil(t, out[1].SecretRef)
+
+	_, err = packageRefsForIPR("dev", []kdexv1alpha1.PackageReference{ref("@a/x", "1.0.0", "creds")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "@a/x")
+
+	_, err = packageRefsForIPR("dev", []kdexv1alpha1.PackageReference{ref("@a/x", "1.0.0", "-"), ref("@a/x", "2.0.0", "-")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "two versions")
+}
+
+// No function or build may run as a host-manager ServiceAccount: this
+// host's, or any other host's (the chart labels every one).
+func TestRefuseHostManagerServiceAccount(t *testing.T) {
+	scheme := functionTestScheme(t)
+	other := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "other-host", Namespace: "dev",
+		Labels: map[string]string{"app.kubernetes.io/name": "host-manager", "helm.sh/chart": "host-manager-0.30.1"}}}
+	plain := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "user-service-sa", Namespace: "dev"}}
+	r := &KDexFunctionReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(other, plain).Build(), Scheme: scheme}
+
+	check := func(sa string) (error, *kdexv1alpha1.KDexFunction) {
+		fn := &kdexv1alpha1.KDexFunction{ObjectMeta: metav1.ObjectMeta{Name: "f", Namespace: "dev"}}
+		return r.refuseHostManagerServiceAccount(handlerContext{ctx: context.Background(), function: fn, serviceAccount: "rsi-dev"}, "spec.serviceAccountName", sa), fn
+	}
+
+	for _, sa := range []string{"rsi-dev", "other-host"} {
+		err, fn := check(sa)
+		require.Error(t, err, sa)
+		degraded := meta.FindStatusCondition(fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
+		require.NotNil(t, degraded, sa)
+		assert.Contains(t, degraded.Message, "host-manager ServiceAccount")
+	}
+	for _, sa := range []string{"user-service-sa", "missing-sa"} {
+		err, _ := check(sa)
+		assert.NoError(t, err, sa)
+	}
+}

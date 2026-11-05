@@ -1163,7 +1163,6 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 			OpenAPIBuilder: r.HostHandler.GetOpenAPIBuilder(),
 			Scheme:         r.Scheme,
 			ServerUrl:      fmt.Sprintf("%s://%s", hc.host.Spec.Routing.Scheme, hc.host.Spec.Routing.Domains[0]),
-			ServiceAccount: hc.serviceAccount,
 		}
 
 		job, err := generator.GetOrCreateGenerateJob(hc.ctx, hc.function)
@@ -1424,9 +1423,16 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 		// spec.origin.source.builder.serviceAccountName when set; fall
 		// back to host-manager's own SA so prior behavior is preserved
 		// for CRs that don't specify a build SA.
+		// The fallback is a known gap: the build then runs the author's
+		// source with host-manager's token. A dedicated build ServiceAccount
+		// is part of the host-manager privilege redesign; an author may at
+		// least not pick a host-manager ServiceAccount explicitly.
 		buildSA := hc.serviceAccount
-		if sourceForBuild.Builder.ServiceAccountName != "" {
-			buildSA = sourceForBuild.Builder.ServiceAccountName
+		if sa := sourceForBuild.Builder.ServiceAccountName; sa != "" {
+			if err := r.refuseHostManagerServiceAccount(hc, "spec.origin.source.builder.serviceAccountName", sa); err != nil {
+				return ctrl.Result{}, nil
+			}
+			buildSA = sa
 		}
 
 		imagePrefix := hc.function.Spec.HostRef.Name + "/"
@@ -1548,6 +1554,45 @@ func (r *KDexFunctionReconciler) handleSourceAvailable(hc handlerContext) (ctrl.
 	return ctrl.Result{}, nil
 }
 
+// refuseHostManagerServiceAccount marks the function Degraded, and returns an
+// error, when sa is a host-manager ServiceAccount: this host's (the one this
+// process runs as) or any other host's (the chart labels every one). Those
+// accounts are bound to read Secrets cluster-wide and to create the
+// workloads functions run as, and Kubernetes does not authorize which
+// ServiceAccount a pod uses, so a function or build that named one would
+// hold those rights. field names the spec field, for the message.
+func (r *KDexFunctionReconciler) refuseHostManagerServiceAccount(hc handlerContext, field, sa string) error {
+	hostManager := sa == hc.serviceAccount
+	if !hostManager {
+		account := &corev1.ServiceAccount{}
+		if err := r.Get(hc.ctx, client.ObjectKey{Namespace: hc.function.Namespace, Name: sa}, account); err == nil {
+			hostManager = isHostManagerServiceAccount(account)
+		}
+	}
+	if !hostManager {
+		return nil
+	}
+	err := fmt.Errorf("%s %q is a host-manager ServiceAccount; a function must run as its own", field, sa)
+	kdexv1alpha1.SetConditions(
+		&hc.function.Status.Conditions,
+		kdexv1alpha1.ConditionStatuses{
+			Degraded:    metav1.ConditionTrue,
+			Progressing: metav1.ConditionFalse,
+			Ready:       metav1.ConditionFalse,
+		},
+		kdexv1alpha1.ConditionReasonReconcileError,
+		err.Error(),
+	)
+	return err
+}
+
+// isHostManagerServiceAccount reports whether account was created by the
+// host-manager chart, for any host.
+func isHostManagerServiceAccount(account *corev1.ServiceAccount) bool {
+	return account.Labels["app.kubernetes.io/name"] == "host-manager" ||
+		strings.HasPrefix(account.Labels["helm.sh/chart"], "host-manager-")
+}
+
 // deployer is the Deployer for the function in hc.
 func (r *KDexFunctionReconciler) deployer(hc handlerContext) deploy.Deployer {
 	return deploy.Deployer{
@@ -1589,24 +1634,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	}
 
-	// A function must not run as host-manager's own ServiceAccount: that
-	// account is bound to read Secrets cluster-wide and to create the
-	// workloads every function runs as, so a function author who named it
-	// would hold both. Kubernetes does not authorize which ServiceAccount a
-	// pod uses, and the deployer creates the function as host-manager.
-	if sa := hc.function.Spec.ServiceAccountName; sa != "" && sa == hc.serviceAccount {
-		err := fmt.Errorf("spec.serviceAccountName %q is host-manager's own ServiceAccount; a function must run as its own", sa)
-		kdexv1alpha1.SetConditions(
-			&hc.function.Status.Conditions,
-			kdexv1alpha1.ConditionStatuses{
-				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
-			},
-			kdexv1alpha1.ConditionReasonReconcileError,
-			err.Error(),
-		)
-		return ctrl.Result{}, nil
+	if sa := hc.function.Spec.ServiceAccountName; sa != "" {
+		if err := r.refuseHostManagerServiceAccount(hc, "spec.serviceAccountName", sa); err != nil {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	deployer := r.deployer(hc)

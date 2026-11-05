@@ -29,7 +29,6 @@ type PackRef struct {
 	NPMSecret        corev1.Secret
 	Packages         *configuration.Packages
 	Scheme           *runtime.Scheme
-	ServiceAccount   string
 }
 
 // imageBuiltForCurrentGeneration reports whether status already records a
@@ -287,8 +286,8 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 			Name:      jobName,
 			Namespace: ipr.Namespace,
 			Labels: map[string]string{
-				"app":                          "packages",
-				"packages":                     ipr.Name,
+				internal.LABEL_APP:             internal.APP_PACKAGES,
+				internal.LABEL_PACKAGES:        ipr.Name,
 				internal.ANNOTATION_GENERATION: fmt.Sprintf("%d", ipr.Generation),
 			},
 			Annotations: map[string]string{
@@ -367,9 +366,8 @@ func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.K
 							VolumeMounts:    volumeMounts,
 						},
 					},
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: p.ServiceAccount,
-					Volumes:            volumes,
+					RestartPolicy: corev1.RestartPolicyNever,
+					Volumes:       volumes,
 				},
 			},
 		},

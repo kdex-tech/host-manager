@@ -12,9 +12,9 @@ package deploy
 
 import (
 	"context"
-	"github.com/kdex-tech/host-manager/internal"
 	"testing"
 
+	"github.com/kdex-tech/host-manager/internal"
 	"github.com/stretchr/testify/assert"
 	batchv1 "k8s.io/api/batch/v1"
 )

@@ -63,4 +63,12 @@ func TestGenerateJob_ActiveDeadlineSecondsSet(t *testing.T) {
 		assert.LessOrEqual(t, *job.Spec.ActiveDeadlineSeconds, int64(2*60*60),
 			"codegen Job ActiveDeadlineSeconds should be aggressive (≤ 2h)")
 	}
+
+	// It runs generation on author-controlled input, so it carries no API
+	// token and no host-manager ServiceAccount (#290).
+	spec := job.Spec.Template.Spec
+	if assert.NotNil(t, spec.AutomountServiceAccountToken) {
+		assert.False(t, *spec.AutomountServiceAccountToken, "the codegen pod must not mount an API token")
+	}
+	assert.Empty(t, spec.ServiceAccountName, "the codegen pod must not run as host-manager's ServiceAccount")
 }

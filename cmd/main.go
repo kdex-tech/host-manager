@@ -39,15 +39,20 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8s_runtime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	kdexlog "kdex.dev/crds/log"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -56,6 +61,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/controller"
 	"github.com/kdex-tech/host-manager/internal/host"
@@ -327,17 +333,16 @@ func main() {
 
 	controllerNamespace := controller.ControllerNamespace()
 
-	// The manager caches and watches namespaced objects only in the host's own
-	// namespace and its spec.referenceNamespaces, never the whole cluster
-	// (#290); Secrets only in the host's own namespace (#242). Cluster-scoped
-	// kinds are unaffected.
-	cacheOptions, err := managerCacheOptions(controllerNamespace, referenceNamespacesFlag)
+	// The cache is scoped to the host's namespace and its
+	// spec.referenceNamespaces (#290); see hostCacheOptions.
+	restConfig := ctrl.GetConfigOrDie()
+	cacheOptions, err := managerCacheOptions(restConfig, controllerNamespace, referenceNamespacesFlag)
 	if err != nil {
 		setupLog.Error(err, "unable to scope the cache")
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Cache: cacheOptions,
 		Controller: config.Controller{
 			Logger: logger,
@@ -461,7 +466,7 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := addProbes(mgr, hostHandler); err != nil {
+	if err := addProbes(mgr); err != nil {
 		setupLog.Error(err, "unable to set up probes")
 		os.Exit(1)
 	}
@@ -554,7 +559,7 @@ func webserverPort(address string) int32 {
 
 // managerCacheOptions validates the controller namespace, records the focal
 // host's referenceNamespaces, and returns the scoped cache options.
-func managerCacheOptions(controllerNamespace, referenceNamespacesFlag string) (crcache.Options, error) {
+func managerCacheOptions(restConfig *rest.Config, controllerNamespace, referenceNamespacesFlag string) (crcache.Options, error) {
 	if controllerNamespace == "" {
 		// An empty namespace in the cache options means every namespace:
 		// the scoping would silently become cluster-wide.
@@ -564,50 +569,78 @@ func managerCacheOptions(controllerNamespace, referenceNamespacesFlag string) (c
 	referenceNamespaces := controller.ParseReferenceNamespaces(referenceNamespacesFlag)
 	controller.SetReferenceNamespaces(referenceNamespaces)
 	setupLog.Info("scoping the cache", "hostNamespace", controllerNamespace, "referenceNamespaces", referenceNamespaces)
-	return hostCacheOptions(controllerNamespace, controller.CacheNamespaces(controllerNamespace, referenceNamespaces)), nil
+
+	httpClient, err := rest.HTTPClientFor(restConfig)
+	if err != nil {
+		return crcache.Options{}, err
+	}
+	mapper, err := apiutil.NewDynamicRESTMapper(restConfig, httpClient)
+	if err != nil {
+		return crcache.Options{}, err
+	}
+	return hostCacheOptions(controllerNamespace, controller.CacheNamespaces(controllerNamespace, referenceNamespaces), mapper)
 }
 
-// addProbes registers the liveness and readiness checks. The pod is ready
-// only once the host is loaded: a restarted pod (a rollout, an edit to
-// spec.referenceNamespaces) otherwise reports ready before its caches sync
-// and its host is built, and serves 404s until then. With the check, a
-// rolling update keeps the old pod serving meanwhile.
-func addProbes(mgr ctrl.Manager, hostHandler *host.HostHandler) error {
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		return err
-	}
-	if err := mgr.AddReadyzCheck("host", func(*http.Request) error {
-		if !hostHandler.HostLoaded() {
-			return errors.New("the focal host is not loaded yet")
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	return mgr.AddReadyzCheck("readyz", healthz.Ping)
-}
-
-// hostCacheOptions scopes the manager's cache (#290). The kdex.dev kinds a
-// reference can name, and the Services and EndpointSlices a function backend
-// can point at, are cached in the host's namespace and its
-// referenceNamespaces (the default). The workload kinds host-manager only
-// ever creates or reads in the host's own namespace are cached there alone,
-// so a reference namespace costs informers only for what a reference can
-// reach. Secrets are host-namespace-only whatever the list says (#242).
-// Cluster-scoped kinds are unaffected.
-func hostCacheOptions(hostNamespace string, referenceable []string) crcache.Options {
+// hostCacheOptions scopes the manager's cache (#290). Every namespaced kind
+// is cached in the host's namespace and its referenceNamespaces by default:
+// the kdex.dev kinds a reference can name, and the Services and
+// EndpointSlices a function backend can point at. The kinds that only ever
+// live in, or are only ever read from, the host's own namespace are cached
+// there alone, so a reference namespace costs informers only for what a
+// reference can reach. Secrets are host-namespace-only whatever the list
+// says (#242). Cluster-scoped kinds are unaffected. The optional CRDs
+// (Gateway API's HTTPRoute, kpack's Image) are scoped only when installed:
+// a ByObject entry for a kind the cluster does not serve fails the manager
+// at startup.
+func hostCacheOptions(hostNamespace string, referenceable []string, mapper meta.RESTMapper) (crcache.Options, error) {
 	defaults := make(map[string]crcache.Config, len(referenceable))
 	for _, ns := range referenceable {
 		defaults[ns] = crcache.Config{}
 	}
-	hostOnly := crcache.ByObject{Namespaces: map[string]crcache.Config{hostNamespace: {}}}
-	byObject := map[client.Object]crcache.ByObject{}
-	for _, obj := range []client.Object{
+	hostOnlyKinds := []client.Object{
 		&corev1.Secret{}, &corev1.ConfigMap{}, &corev1.Pod{}, &corev1.ServiceAccount{},
 		&corev1.PersistentVolumeClaim{}, &batchv1.Job{}, &batchv1.CronJob{}, &appsv1.Deployment{},
-		&networkingv1.Ingress{}, &gatewayv1.HTTPRoute{},
-	} {
+		&networkingv1.Ingress{},
+		// kdex.dev kinds no reference can name in another namespace: the
+		// internal kinds, pages and functions (hostRef and rewrite targets
+		// are same-namespace), and roles.
+		&kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalPackageReferences{},
+		&kdexv1alpha1.KDexInternalTranslation{}, &kdexv1alpha1.KDexInternalUtilityPage{},
+		&kdexv1alpha1.KDexPage{}, &kdexv1alpha1.KDexFunction{},
+		&kdexv1alpha1.KDexRole{}, &kdexv1alpha1.KDexRoleBinding{},
+	}
+	httpRouteGVK := schema.GroupVersionKind{Group: gatewayv1.GroupName, Version: "v1", Kind: "HTTPRoute"}
+	if ok, err := controller.CRDExistsIn(mapper, httpRouteGVK); err != nil {
+		return crcache.Options{}, err
+	} else if ok {
+		hostOnlyKinds = append(hostOnlyKinds, &gatewayv1.HTTPRoute{})
+	}
+	if ok, err := controller.CRDExistsIn(mapper, internal.KPackImageGVK); err != nil {
+		return crcache.Options{}, err
+	} else if ok {
+		image := &unstructured.Unstructured{}
+		image.SetGroupVersionKind(internal.KPackImageGVK)
+		hostOnlyKinds = append(hostOnlyKinds, image)
+	}
+
+	hostOnly := crcache.ByObject{Namespaces: map[string]crcache.Config{hostNamespace: {}}}
+	byObject := make(map[client.Object]crcache.ByObject, len(hostOnlyKinds))
+	for _, obj := range hostOnlyKinds {
 		byObject[obj] = hostOnly
 	}
-	return crcache.Options{DefaultNamespaces: defaults, ByObject: byObject}
+	return crcache.Options{DefaultNamespaces: defaults, ByObject: byObject}, nil
+}
+
+// addProbes registers the liveness and readiness checks.
+//
+// Readiness is deliberately not gated on the host being loaded: with
+// LeaderElection off and the chart's default RollingUpdate, an ungated new
+// pod replaces the old one in seconds, whereas a gate on a host that cannot
+// load (one broken page, a reference the new referenceNamespaces refuses)
+// would leave the old and new pods reconciling side by side indefinitely.
+func addProbes(mgr ctrl.Manager) error {
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return err
+	}
+	return mgr.AddReadyzCheck("readyz", healthz.Ping)
 }

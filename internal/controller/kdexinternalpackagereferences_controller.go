@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -222,7 +221,6 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		NPMSecret:        *secret,
 		Packages:         &r.Configuration.Packages,
 		Scheme:           r.Scheme,
-		ServiceAccount:   os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
 	}
 
 	job, err := packRef.GetOrCreatePackRefJob(ctx, &ipr)
@@ -569,8 +567,8 @@ func (r *KDexInternalPackageReferencesReconciler) cleanupJobs(ctx context.Contex
 	log := logf.FromContext(ctx)
 	var jobList batchv1.JobList
 	if err := r.List(ctx, &jobList, client.InNamespace(ipr.Namespace), client.MatchingLabels{
-		"app":      "packages",
-		"packages": ipr.Name,
+		internal.LABEL_APP:      internal.APP_PACKAGES,
+		internal.LABEL_PACKAGES: ipr.Name,
 	}); err != nil {
 		return err
 	}
