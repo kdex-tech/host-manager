@@ -118,6 +118,33 @@ var _ = Describe("KDexRole PolicyRule CEL validation", func() {
 		Expect(err.Error()).To(ContainSubstring("an opaque scope must not contain"))
 	})
 
+	// A grant is "<resource>:<resourceName>:<verb>", so a ':' inside a part
+	// shifts the segments, and a '{name}' resourceName reads as a placeholder
+	// no grant ever binds (#289).
+	for _, tc := range []struct {
+		name string
+		rule kdexv1alpha1.PolicyRule
+		msg  string
+	}{
+		{"kdexrole-deny-name-colon", kdexv1alpha1.PolicyRule{Resources: []string{"docs"}, ResourceNames: []string{"a:b"}, Verbs: []string{"read"}}, "a resourceName must not contain"},
+		{"kdexrole-deny-name-placeholder", kdexv1alpha1.PolicyRule{Resources: []string{"docs"}, ResourceNames: []string{"{id}"}, Verbs: []string{"read"}}, "a resourceName must not contain"},
+		{"kdexrole-deny-resource-colon", kdexv1alpha1.PolicyRule{Resources: []string{"a:b"}, Verbs: []string{"read"}}, "a resource must not contain"},
+		{"kdexrole-deny-verb-colon", kdexv1alpha1.PolicyRule{Resources: []string{"docs"}, Verbs: []string{"read:all"}}, "a verb must not contain"},
+	} {
+		It("rejects "+tc.name, func() {
+			err := k8sClient.Create(ctx, newRole(tc.name, []kdexv1alpha1.PolicyRule{tc.rule}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(tc.msg))
+		})
+	}
+
+	It("admits a percent-encoded resourceName", func() {
+		role := newRole("kdexrole-admit-encoded-name", []kdexv1alpha1.PolicyRule{
+			{Resources: []string{"docs"}, ResourceNames: []string{"vis%3Amembers", "%7Bid%7D"}, Verbs: []string{"read"}},
+		})
+		Expect(k8sClient.Create(ctx, role)).To(Succeed())
+	})
+
 	It("rejects scopes combined with verbs", func() {
 		role := newRole("kdexrole-deny-scopes-with-verbs", []kdexv1alpha1.PolicyRule{
 			{

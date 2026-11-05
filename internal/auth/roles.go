@@ -370,6 +370,30 @@ func (rp *scopeProvider) collectEntitlements(roles []string) []string {
 	return scopes
 }
 
+// roleLog reports KDexRole content the provider refuses to turn into grants.
+var roleLog = logf.Log.WithName("role")
+
+// malformedGrantPart reports why resource, resourceName and verb cannot form
+// the grant "<resource>:<resourceName>:<verb>" by formatting, or "" when they
+// can. A ':' in any part shifts the segments, so the grant would mean
+// something other than what was written. A '{' or '}' in a resourceName
+// looks like a requirement placeholder, but a grant is never bound, so it is
+// only the literal text, which an unbinding checker (fnnodejsgen#4) matches
+// against an unbound requirement for every instance. kdex-crds v0.14.257
+// rejects all of these at apply time; this guards objects stored under an
+// older CRD (#289).
+func malformedGrantPart(resource, resourceName, verb string) string {
+	switch {
+	case strings.Contains(resource, ":"):
+		return "resource contains ':'"
+	case strings.Contains(verb, ":"):
+		return "verb contains ':'"
+	case strings.ContainsAny(resourceName, ":{}"):
+		return "resourceName contains ':', '{' or '}'"
+	}
+	return ""
+}
+
 func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map[string][]string {
 	table := make(map[string][]string, len(roles.Items))
 
@@ -391,6 +415,11 @@ func (rp *scopeProvider) buildMappingTable(roles *kdexv1alpha1.KDexRoleList) map
 			for _, resource := range rule.Resources {
 				for _, resourceName := range resourceNames {
 					for _, verb := range rule.Verbs {
+						if reason := malformedGrantPart(resource, resourceName, verb); reason != "" {
+							roleLog.Error(nil, "skipping a KDexRole grant that would not mean what it says",
+								"role", role.Name, "resource", resource, "resourceName", resourceName, "verb", verb, "reason", reason)
+							continue
+						}
 						table[role.Name] = append(table[role.Name], fmt.Sprintf("%s:%s:%s", resource, resourceName, verb))
 					}
 				}

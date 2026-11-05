@@ -784,3 +784,26 @@ func TestScopeProvider_FindInternalWithSource_ReportsVouchingLookup(t *testing.T
 	assert.Error(t, err)
 	assert.Empty(t, source, "a rejected credential vouches for nothing")
 }
+
+// A grant is formatted "<resource>:<resourceName>:<verb>", so a part holding
+// ':' (or a resourceName holding '{' / '}', which reads as a placeholder no
+// grant ever binds) would mean something other than what was written. Such
+// grants are refused; the rest of the rule still expands. See #289.
+func TestBuildMappingTable_RefusesMalformedGrantParts(t *testing.T) {
+	roles := &kdexv1alpha1.KDexRoleList{Items: []kdexv1alpha1.KDexRole{{
+		ObjectMeta: metav1.ObjectMeta{Name: "r"},
+		Spec: kdexv1alpha1.KDexRoleSpec{Rules: []kdexv1alpha1.PolicyRule{
+			{Resources: []string{"docs"}, ResourceNames: []string{"{id}", "a:b", "doc_1", "vis%3Amembers"}, Verbs: []string{"read"}},
+			{Resources: []string{"bad:res"}, Verbs: []string{"read"}},
+			{Resources: []string{"docs"}, Verbs: []string{"read:all", "write"}},
+		}},
+	}}}
+
+	table := (&scopeProvider{}).buildMappingTable(roles)
+
+	assert.ElementsMatch(t, []string{
+		"docs:doc_1:read",
+		"docs:vis%3Amembers:read", // percent-encoded is the supported spelling
+		"docs::write",
+	}, table["r"])
+}
