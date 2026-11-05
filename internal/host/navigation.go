@@ -37,6 +37,20 @@ func (hh *HostHandler) BuildMenuEntries(
 	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements)
 }
 
+// pageMap is the page tree BuildMenuEntries gives the caller in ctx, as a
+// template's .PageMap: the root's children, or nil when no page is visible.
+// context.Background() has no auth context, so it gives the ANONYMOUS
+// caller's tree: GetParsedEntitlements of it is the anonymous set, which the
+// checker matches against anonymousEntitlements. Caller holds hh.mu.RLock.
+func (hh *HostHandler) pageMap(ctx context.Context, l language.Tag) map[string]any {
+	root := &render.PageEntry{}
+	hh.BuildMenuEntries(ctx, root, &l, l.String() == hh.defaultLanguage, nil)
+	if root.Children == nil {
+		return nil
+	}
+	return *root.Children
+}
+
 func (hh *HostHandler) firstAuthorizedPage(
 	ctx context.Context,
 	l *language.Tag,
@@ -123,7 +137,15 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	for _, handler := range hh.Pages.List() {
 		ph := handler.Page
 
-		if hh.IsAuthEnabled() && hh.authChecker != nil && parsedUserEntitlements != nil && handler.ParsedRequirements != nil {
+		if hh.IsAuthEnabled() && hh.authChecker != nil && handler.ParsedRequirements == nil {
+			// Pages.Set stores a page before RebuildMux parses its
+			// requirements. Until then nothing says who may see it, so it
+			// stays out of every tree: a sitemap cached in that window would
+			// otherwise list a gated page to anonymous callers (#283).
+			continue
+		}
+
+		if hh.IsAuthEnabled() && hh.authChecker != nil && parsedUserEntitlements != nil {
 			access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
 				"pages", ph.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
 
@@ -146,8 +168,10 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 
 			label := ph.Label
 
+			// A page with localized: false registers only its bare route, so
+			// a language prefix would link a 404 (#283).
 			href := ph.BasePath
-			if !isDefaultLanguage {
+			if !isDefaultLanguage && isLocalized(ph.Localized) {
 				href = "/" + l.String() + ph.BasePath
 			}
 
@@ -228,14 +252,18 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	// applyCachingHeadersWithSeed folds language + per-page seed
 	// (#43, #44) so en-CA / fr-CA renders get distinct ETags AND each
 	// page's nav fragment invalidates only when its own observed state
-	// moves rather than on every host reconcile.
-	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), pageHandler.Checksum()) {
+	// moves rather than on every host reconcile. The fragment renders the
+	// whole page tree, so the seed and the cache key also carry the page-set
+	// digest: the host checksum the cache cycles on does not move when
+	// another page changes (#283).
+	seed := pageHandler.Checksum() + ":" + hh.pageSetDigest
+	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), seed) {
 		return
 	}
 
 	navCache := hh.cacheManager.GetCache("nav", cache.CacheOptions{})
 	userHash := hh.getUserHash(r)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, pageHandler.Checksum(), l.String(), userHash)
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, seed, l.String(), userHash)
 
 	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
 	if err == nil && ok {
@@ -335,12 +363,7 @@ func (hh *HostHandler) performNavigationRender(
 		return "", fmt.Errorf("navigation not found")
 	}
 
-	rootEntry := &render.PageEntry{}
-	hh.BuildMenuEntries(ctx, rootEntry, &l, l.String() == defaultLang, nil)
-	var pageMap map[string]any
-	if rootEntry.Children != nil {
-		pageMap = *rootEntry.Children
-	}
+	pageMap := hh.pageMap(ctx, l)
 
 	extra := map[string]any{}
 	extra["AuthEnabled"] = hh.IsAuthEnabled()

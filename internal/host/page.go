@@ -63,17 +63,6 @@ func (hh *HostHandler) pageHandlerFunc(
 		if !hh.pageGateLocked(w, r, ph, l) {
 			return
 		}
-		// Per-page seed: ph.Checksum() is sha256(ObservedGeneration +
-		// sorted Status.Attributes), so the ETag invalidates only when
-		// this specific KDexPage's observed state moved — not whenever
-		// any other CR triggered a host reconcile. See #44.
-		if hh.applyCachingHeadersWithSeed(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String(), ph.Checksum()) {
-			return
-		}
-
-		pageCache := hh.cacheManager.GetCache(pageCacheClass, cache.CacheOptions{})
-
-		cacheKey := ph.CacheKey(l)
 
 		// A non-empty spec.mimeType marks this as a text-mime KDexPage: its
 		// Body renders through L10nRenderText -- the l10n engine alone, none
@@ -83,6 +72,24 @@ func (hh *HostHandler) pageHandlerFunc(
 		// pageCache / cacheKey / hit-or-miss structure below; only the
 		// render + serve calls differ, so those are the only branch points.
 		isTextPage := ph.Page != nil && ph.Page.MimeType != ""
+
+		// Per-page seed: ph.Checksum() is sha256(ObservedGeneration +
+		// sorted Status.Attributes), so the ETag invalidates only when
+		// this specific KDexPage's observed state moved — not whenever
+		// any other CR triggered a host reconcile. See #44. A text page
+		// can read the whole page tree (.PageMap), so its seed and cache
+		// key also carry the page-set digest (#283).
+		seed := ph.Checksum()
+		cacheKey := ph.CacheKey(l)
+		if isTextPage {
+			seed += ":" + hh.pageSetDigest
+			cacheKey += ":" + hh.pageSetDigest
+		}
+		if hh.applyCachingHeadersWithSeed(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String(), seed) {
+			return
+		}
+
+		pageCache := hh.cacheManager.GetCache(pageCacheClass, cache.CacheOptions{})
 
 		renderPage := func(p page.PageHandler, lang language.Tag, trans *Translations) (string, error) {
 			if isTextPage {

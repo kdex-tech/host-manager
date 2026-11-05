@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -343,13 +345,20 @@ func (hh *HostHandler) L10nRender(
 // the text-page cache key -- page + language, ph.CacheKey -- correct: the
 // body depends on no caller, so every caller shares one cached copy. A
 // per-caller tree here would need getUserHash in that key, as the nav cache
-// has. Caller holds hh.mu.RLock.
+// has. The key also carries hh.pageSetDigest (pageHandlerFunc), because the
+// tree depends on every page and not only this one. A body that never
+// mentions PageMap cannot read it, so the tree is not built for it. Caller
+// holds hh.mu.RLock.
 func (hh *HostHandler) L10nRenderText(
 	ph page.PageHandler,
 	lang language.Tag,
 	translations *Translations,
 ) (string, error) {
-	renderer := hh.l10nRenderer(ph, hh.anonymousPageMap(lang), lang, map[string]any{}, translations)
+	var pageMap map[string]any
+	if ph.Page != nil && strings.Contains(ph.Page.Body, "PageMap") {
+		pageMap = hh.pageMap(context.Background(), lang)
+	}
+	renderer := hh.l10nRenderer(ph, pageMap, lang, map[string]any{}, translations)
 
 	templateData, err := renderer.TemplateData()
 	if err != nil {
@@ -362,19 +371,6 @@ func (hh *HostHandler) L10nRenderText(
 	}
 
 	return renderer.RenderOneText(ph.Name+"-body", body, templateData)
-}
-
-// anonymousPageMap builds the page tree BuildMenuEntries gives a caller with
-// no auth context: GetParsedEntitlements of an empty context is the anonymous
-// caller's set, which the checker matches against anonymousEntitlements. It
-// returns nil when no page is visible. Caller holds hh.mu.RLock.
-func (hh *HostHandler) anonymousPageMap(lang language.Tag) map[string]any {
-	root := &render.PageEntry{}
-	hh.BuildMenuEntries(context.Background(), root, &lang, lang.String() == hh.defaultLanguage, nil)
-	if root.Children == nil {
-		return nil
-	}
-	return *root.Children
 }
 
 func (hh *HostHandler) L10nRenders(
@@ -442,6 +438,8 @@ type rebuildSnapshot struct {
 	// longer collides clears a previously-recorded collision instead of
 	// leaving it stale.
 	routeCollisions []RouteCollision
+	// pageSetDigest is computePageSetDigest over this build's pages.
+	pageSetDigest string
 }
 
 func (hh *HostHandler) RebuildMux() {
@@ -458,6 +456,7 @@ func (hh *HostHandler) RebuildMux() {
 	hh.registeredPaths = snap.registeredPaths
 	hh.Mux = snap.mux
 	hh.routeCollisions = snap.routeCollisions
+	hh.pageSetDigest = snap.pageSetDigest
 	if snap.hasFunctionHandlers {
 		hh.functionHandlers = snap.functionHandlers
 	}
@@ -768,7 +767,30 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		functionHandlers:    actualHandlers,
 		hasFunctionHandlers: true,
 		routeCollisions:     routes.collisions,
+		pageSetDigest:       computePageSetDigest(pageHandlers),
 	}, true
+}
+
+// computePageSetDigest hashes every page's name and spec, in name order. The
+// spec holds everything a page tree reads -- basePath, label, parentPageRef,
+// tags, navigationHints, localized, mimeType, rewrite and security -- so the
+// digest moves whenever any page's entry in any tree could. See
+// HostHandler.pageSetDigest.
+func computePageSetDigest(pages []page.PageHandler) string {
+	sorted := slices.Clone(pages)
+	slices.SortFunc(sorted, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
+	h := sha256.New()
+	for _, ph := range sorted {
+		spec, err := json.Marshal(ph.Page)
+		if err != nil {
+			// Unmarshalable is not expected from a typed spec; hash the error
+			// so the digest still moves with the page set.
+			spec = []byte(err.Error())
+		}
+		_, _ = fmt.Fprintf(h, "%d:%s%d:", len(ph.Name), ph.Name, len(spec))
+		_, _ = h.Write(spec)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
 func (hh *HostHandler) RemovePage(name string) {

@@ -120,8 +120,11 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	assert.Contains(t, body1, "Test Page")
 
 	// Verify it's in cache
-	// Key format: nav:main:/test:en:anon (since no auth)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, ph.Checksum(), language.English.String(), "anon")
+	// Key format: main:/test:<page checksum>:<page-set digest>:en:anon
+	// (since no auth). The digest is there because the fragment renders the
+	// whole page tree (#283).
+	seed := ph.Checksum() + ":" + hh.pageSetDigest
+	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), "anon")
 	cacheVal, found, isCurrent, err := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -145,7 +148,7 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	userHash := hh.getUserHash(req2)
 	assert.NotEqual(t, "anon", userHash)
 	// cacheKey2 := fmt.Sprintf("main:/test:en:%s", userHash)
-	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, ph.Checksum(), language.English.String(), userHash)
+	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), userHash)
 
 	_, found2, _, err2 := cacheManager.GetCache("nav", cache.CacheOptions{}).Get(context.Background(), cacheKey2)
 	assert.NoError(t, err2)

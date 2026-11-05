@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package host
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,73 +175,73 @@ func TestTextPage_NoSniffHeader(t *testing.T) {
 // sitemapBody is the sitemap template documented in kdex-main-site's Page
 // Operating Modes page (Text mode), verbatim: a recursive walk of .PageMap
 // via define/template that drops entries tagged nav-surrogate or
-// no-navigation. Keep the two in step.
+// no-navigation, and escapes each href for XML. The doc points back here;
+// keep the two in step.
 const sitemapBody = `[[- define "urls" ]][[ range $p := . ]]
   [[- $skip := false ]][[ range $t := $p.Tags ]][[ if or (eq $t.Name "nav-surrogate") (eq $t.Name "no-navigation") ]][[ $skip = true ]][[ end ]][[ end ]]
-  [[- if not $skip ]]<url><loc>https://example.com[[ $p.Href ]]</loc></url>[[ end ]]
+  [[- if not $skip ]]<url><loc>https://example.com[[ $p.Href | html ]]</loc></url>[[ end ]]
   [[- if $p.Children ]][[ template "urls" $p.Children ]][[ end ]]
 [[- end ]][[ end -]]
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">[[ template "urls" .PageMap ]]</urlset>
 `
 
-// A text page's .PageMap is the host's page tree built under the ANONYMOUS
-// scope, whoever asks: a sitemap lists what an anonymous crawler can reach,
-// and the text-page cache key (page + language) stays correct for every
-// caller. The entitled caller asks first, so a per-caller tree would be the
-// one cached and then served to the anonymous caller. See #283.
-func TestTextPage_PageMapIsAnonymousScopedTree(t *testing.T) {
-	// Anonymous callers may read pages, as on a real public host; /admin
-	// additionally requires the "admin" entitlement.
-	checker := auth.NewAuthorizationChecker([]string{"pages::read"}, logr.Discard())
+// sitemapFixture is a host with auth on, a real checker, and a sitemap text
+// page over a small tree: /docs with child /docs/intro, a nav-surrogate
+// /tools, and /admin, which requires the "admin" entitlement. Anonymous
+// callers may read pages, as on a real public host. The checker, not
+// gatedHostFixture's authConfig.AnonymousEntitlements, decides the anonymous
+// set. RebuildMux parses each page's spec.security, as in production.
+func sitemapFixture(t *testing.T, extra ...page.PageHandler) *HostHandler {
+	t.Helper()
 
 	admin := newPage("admin", "Admin", "/admin")
-	adminReqs := checker.ParseRequirements([]kdexv1alpha1.SecurityRequirement{{"bearer": {"admin"}}})
-	admin.ParsedRequirements = &adminReqs
-
+	admin.Page.Security = &[]kdexv1alpha1.SecurityRequirement{{"bearer": {"admin"}}}
 	docs := newPage("docs", "Docs", "/docs")
 	intro := newPage("intro", "Intro", "/docs/intro")
 	intro.Page.ParentPageRef = &corev1.LocalObjectReference{Name: "docs"}
 	tools := newPage("tools", "Tools", "/tools")
 	tools.Page.Tags = []kdexv1alpha1.Tag{{Name: "nav-surrogate"}}
-
-	sitemap := newPage("sitemap", "Sitemap", "/sitemap.xml")
-	sitemap.Page.MimeType = "xml"
-	sitemap.Page.Body = sitemapBody
+	sitemap := textPageForTest(t, "sitemap", "/sitemap.xml", "xml", sitemapBody)
 	sitemap.Page.Tags = []kdexv1alpha1.Tag{{Name: "no-navigation"}}
+	sitemap.Page.Localized = ptr.To(false)
 
-	// The real checker fails closed on a zero-value ParsedRequirements, so
-	// the open pages carry a parsed empty set, as RebuildMux gives them.
-	open := checker.ParseRequirements(nil)
-	for _, p := range []*page.PageHandler{&docs, &intro, &tools, &sitemap} {
-		p.ParsedRequirements = &open
-	}
+	hh := gatedHostFixture(append([]page.PageHandler{admin, docs, intro, tools, sitemap}, extra...)...)
+	hh.authChecker = auth.NewAuthorizationChecker([]string{"pages::read"}, logr.Discard())
+	hh.RebuildMux()
+	return hh
+}
 
-	hh := gatedHostFixture(admin, docs, intro, tools, sitemap)
-	hh.authChecker = checker
+// serveSitemap serves req through the sitemap page's handler, as registered
+// now, and returns the body.
+func serveSitemap(t *testing.T, hh *HostHandler, req *http.Request, lang string) string {
+	t.Helper()
+	sitemap, ok := hh.Pages.Get("sitemap")
+	require.True(t, ok)
+	w := httptest.NewRecorder()
+	hh.pageHandlerFunc(sitemap, &hh.Translations, language.Make(lang))(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	return w.Body.String()
+}
 
-	entitled := func() *http.Request {
-		req := httptest.NewRequest("GET", "/sitemap.xml", nil)
-		return req.WithContext(auth.SetAuthContext(req.Context(),
-			auth.AuthContext{"sub": "alice", "entitlements": []any{"pages::read", "admin"}}))
-	}
+func entitledSitemapReq() *http.Request {
+	return callerCtx(httptest.NewRequest("GET", "/sitemap.xml", nil), "alice", []any{"pages::read", "admin"})
+}
+
+// A text page's .PageMap is the host's page tree built under the ANONYMOUS
+// scope, whoever asks: a sitemap lists what an anonymous crawler can reach,
+// and the text-page cache key stays correct for every caller. The entitled
+// caller asks first, so a per-caller tree would be the one cached and then
+// served to the anonymous caller. See #283.
+func TestTextPage_PageMapIsAnonymousScopedTree(t *testing.T) {
+	hh := sitemapFixture(t)
 
 	// Control: the entitled caller really can reach /admin, so its absence
 	// below is the scope at work, not a fixture that hides it from everyone.
-	root := &render.PageEntry{}
-	hh.BuildMenuEntries(entitled().Context(), root, ptr.To(language.Make("en")), true, nil)
-	require.NotNil(t, root.Children)
-	require.Contains(t, *root.Children, "Admin")
+	require.Contains(t, hh.pageMap(entitledSitemapReq().Context(), language.Make("en")), "Admin")
 
-	serve := func(req *http.Request) string {
-		w := httptest.NewRecorder()
-		hh.pageHandlerFunc(sitemap, &hh.Translations, language.Make(hh.defaultLanguage))(w, req)
-		require.Equal(t, http.StatusOK, w.Code)
-		return w.Body.String()
-	}
-
-	first := serve(entitled())
-	second := serve(httptest.NewRequest("GET", "/sitemap.xml", nil))
+	first := serveSitemap(t, hh, entitledSitemapReq(), "en")
+	second := serveSitemap(t, hh, httptest.NewRequest("GET", "/sitemap.xml", nil), "en")
 
 	for _, body := range []string{first, second} {
 		require.True(t, strings.HasPrefix(body, "<?xml "), "the XML declaration must come first: %q", body)
@@ -251,4 +252,59 @@ func TestTextPage_PageMapIsAnonymousScopedTree(t *testing.T) {
 		require.NotContains(t, body, "/tools", "the template filters by tag")
 	}
 	require.Equal(t, first, second)
+}
+
+// The cached sitemap moves with the page set, not only with its own page:
+// the host checksum the caches cycle on does not change when another
+// KDexPage is added or gated. See #283.
+func TestTextPage_PageMapCacheFollowsOtherPages(t *testing.T) {
+	hh := sitemapFixture(t)
+	anon := func() *http.Request { return httptest.NewRequest("GET", "/sitemap.xml", nil) }
+
+	require.NotContains(t, serveSitemap(t, hh, anon(), "en"), "/pricing")
+
+	hh.Pages.Set(newPage("pricing", "Pricing", "/pricing"))
+	require.Contains(t, serveSitemap(t, hh, anon(), "en"), "<loc>https://example.com/pricing</loc>",
+		"a page added after the first render must appear")
+
+	gated := newPage("pricing", "Pricing", "/pricing")
+	gated.Page.Security = &[]kdexv1alpha1.SecurityRequirement{{"bearer": {"admin"}}}
+	hh.Pages.Set(gated)
+	require.NotContains(t, serveSitemap(t, hh, anon(), "en"), "/pricing",
+		"a page gated after the first render must drop out")
+}
+
+// Pages.Set stores a page before RebuildMux parses its requirements. In that
+// window nothing says who may see it, so no tree lists it. See #283.
+func TestBuildMenuEntries_UnparsedRequirementsAreHidden(t *testing.T) {
+	hh := sitemapFixture(t)
+	// A store with no RebuildMux hook holds the page exactly as Pages.Set
+	// leaves it before the rebuild parses it.
+	store := page.NewPageStore("test-host", nil, logr.Discard())
+	for _, ph := range hh.Pages.List() {
+		store.Set(ph)
+	}
+	unparsed := newPage("fresh", "Fresh", "/fresh")
+	unparsed.ParsedRequirements = nil
+	store.Set(unparsed)
+	hh.Pages = store
+
+	tree := hh.pageMap(context.Background(), language.Make("en"))
+	require.Contains(t, tree, "Docs", "parsed pages still list")
+	require.NotContains(t, tree, "Fresh")
+}
+
+// On a non-default language, a page with localized: false keeps its bare
+// href: it registers only the bare route, so /fr/... would be a 404. See
+// #283.
+func TestBuildMenuEntries_UnlocalizedPageKeepsBareHref(t *testing.T) {
+	hh := sitemapFixture(t)
+	tree := hh.pageMap(context.Background(), language.Make("fr"))
+
+	docs, ok := tree["Docs"].(render.PageEntry)
+	require.True(t, ok)
+	require.Equal(t, "/fr/docs", docs.Href)
+	sitemap, ok := tree["sitemap"].(render.PageEntry)
+	require.True(t, ok)
+	require.Equal(t, "/sitemap.xml", sitemap.Href, "the fixture's sitemap sets localized: false")
 }

@@ -126,6 +126,13 @@ type HostHandler struct {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
 		DocsHandler(http.ResponseWriter, *http.Request)
 	}
+	// pageSetDigest is a digest of every page's spec, set by RebuildMux. A
+	// render that reads the whole page tree (a text page's .PageMap, a
+	// navigation fragment) folds it into its cache key and ETag, so adding,
+	// removing, relabeling, re-parenting or gating ANY page invalidates it:
+	// the host checksum the caches cycle on does not move for a page change
+	// (#283).
+	pageSetDigest        string
 	routeCollisions      []RouteCollision
 	status               *kdexv1alpha1.KDexObjectStatus
 	themeAssets          []kdexv1alpha1.Asset
