@@ -27,6 +27,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/utils"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/render"
@@ -355,7 +356,7 @@ func (hh *HostHandler) L10nRenderText(
 	translations *Translations,
 ) (string, error) {
 	var pageMap map[string]any
-	if ph.Page != nil && strings.Contains(ph.Page.Body, "PageMap") {
+	if readsPageTree(ph) {
 		pageMap = hh.pageMap(context.Background(), lang)
 	}
 	renderer := hh.l10nRenderer(ph, pageMap, lang, map[string]any{}, translations)
@@ -421,8 +422,32 @@ type rebuildSnapshot struct {
 	// longer collides clears a previously-recorded collision instead of
 	// leaving it stale.
 	routeCollisions []RouteCollision
-	// pageSetDigest is computePageSetDigest over this build's pages.
+	// tree and pageSetDigest are published together; see
+	// HostHandler.pageSetDigest.
+	tree          pageIndex
 	pageSetDigest string
+}
+
+// pageIndex is one rebuild's pages, with requirements parsed, as every page
+// tree reads them: in name order, and by name and by basePath.
+type pageIndex struct {
+	pages      []page.PageHandler
+	byName     map[string]page.PageHandler
+	byBasePath map[string]page.PageHandler
+}
+
+func newPageIndex(pages []page.PageHandler) pageIndex {
+	idx := pageIndex{
+		pages:      slices.Clone(pages),
+		byName:     make(map[string]page.PageHandler, len(pages)),
+		byBasePath: make(map[string]page.PageHandler, len(pages)),
+	}
+	slices.SortFunc(idx.pages, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
+	for _, ph := range idx.pages {
+		idx.byName[ph.Name] = ph
+		idx.byBasePath[ph.Page.BasePath] = ph
+	}
+	return idx
 }
 
 func (hh *HostHandler) RebuildMux() {
@@ -440,6 +465,7 @@ func (hh *HostHandler) RebuildMux() {
 	hh.Mux = snap.mux
 	hh.routeCollisions = snap.routeCollisions
 	hh.pageSetDigest = snap.pageSetDigest
+	hh.tree = snap.tree
 	if snap.hasFunctionHandlers {
 		hh.functionHandlers = snap.functionHandlers
 	}
@@ -643,6 +669,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 	}
 
 	renderedPages := map[string]pageRender{}
+	treePages := make([]page.PageHandler, 0, len(pageHandlers))
 	for _, ph := range pageHandlers {
 		basePath := ph.BasePath()
 
@@ -662,7 +689,10 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		}
 
 		renderedPages[basePath] = pageRender{ph: ph}
+		treePages = append(treePages, ph)
 	}
+	tree := newPageIndex(treePages)
+	hh.logLabelCollisions(tree)
 
 	// Resolve each rewrite page's target against THIS snapshot's pages and
 	// functions (#217), so a target that moved, vanished, or changed mode is
@@ -672,7 +702,7 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		pagesByName[ph.Name] = ph
 	}
 	for bp, pr := range renderedPages {
-		if pr.ph.Page != nil && pr.ph.Page.Rewrite != nil {
+		if pageModeOf(pr.ph.Page) == render.PageTypeRewrite {
 			pr.rewrite, pr.rewriteFound = resolveRewriteTarget(pr.ph.Page.Rewrite.TargetRef, pagesByName, hh.functions)
 			renderedPages[bp] = pr
 		}
@@ -750,40 +780,120 @@ func (hh *HostHandler) rebuildMuxSnapshot() (rebuildSnapshot, bool) {
 		functionHandlers:    actualHandlers,
 		hasFunctionHandlers: true,
 		routeCollisions:     routes.collisions,
-		pageSetDigest:       computePageSetDigest(pageHandlers, hh.functions),
+		tree:                tree,
+		pageSetDigest:       hh.computePageSetDigest(tree),
 	}, true
 }
 
-// computePageSetDigest hashes every page's name and spec, in name order. The
-// spec holds everything a page tree reads -- basePath, label, parentPageRef,
-// tags, navigationHints, localized, mimeType, rewrite and security -- so the
-// digest moves whenever any page's entry in any tree could. A rewrite entry's
-// target Href also resolves against the functions (#284), so each function's
-// name, basePath, internal flag and state are hashed too. See
-// HostHandler.pageSetDigest.
-func computePageSetDigest(pages []page.PageHandler, functions []kdexv1alpha1.KDexFunction) string {
-	sorted := slices.Clone(pages)
-	slices.SortFunc(sorted, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
-	h := sha256.New()
-	for _, ph := range sorted {
-		spec, err := json.Marshal(ph.Page)
-		if err != nil {
-			// Unmarshalable is not expected from a typed spec; hash the error
-			// so the digest still moves with the page set.
-			spec = []byte(err.Error())
+// logLabelCollisions logs, once per rebuild, each set of sibling pages that
+// share a label: a page tree keys entries by label, so only the one whose
+// name sorts first is listed (#286).
+func (hh *HostHandler) logLabelCollisions(tree pageIndex) {
+	type slot struct{ parent, label string }
+	first := map[slot]string{}
+	for _, ph := range tree.pages {
+		s := slot{label: ph.Page.Label}
+		if ph.Page.ParentPageRef != nil {
+			s.parent = ph.Page.ParentPageRef.Name
 		}
-		_, _ = fmt.Fprintf(h, "%d:%s%d:", len(ph.Name), ph.Name, len(spec))
-		_, _ = h.Write(spec)
+		if kept, taken := first[s]; taken {
+			hh.log.V(1).Info("page tree label collision; page left out of every tree",
+				"label", s.label, "parent", s.parent, "kept", kept, "dropped", ph.Name)
+			continue
+		}
+		first[s] = ph.Name
 	}
-	fns := make([]string, 0, len(functions))
-	for _, f := range functions {
-		fns = append(fns, fmt.Sprintf("%q %q %t %q", f.Name, f.Spec.API.BasePath, f.Spec.Internal, f.Status.State))
+}
+
+// computePageSetDigest hashes what a page tree reads, and nothing else, so it
+// moves exactly when some tree could (#283):
+//   - each page's tree fields, in name order: basePath, patternPath, label,
+//     parentPageRef, tags, navigationHints, localized, mimeType, rewrite and
+//     security. Content and body are not hashed: an edit to them changes no
+//     tree, and the page's own checksum covers its own render;
+//   - whether each page's requirements are parsed (the tree hides an
+//     unparsed page);
+//   - the host's security (pageRequirements falls back to it), whether auth
+//     is on, the anonymous entitlements, and the default language;
+//   - the name, basePath, internal flag and state of each function an alias
+//     targets (rewriteEntry resolves its Href against them).
+//
+// Caller holds hh.mu.RLock. See HostHandler.pageSetDigest.
+func (hh *HostHandler) computePageSetDigest(tree pageIndex) string {
+	type treeFields struct {
+		Name            string                              `json:"n"`
+		BasePath        string                              `json:"b"`
+		PatternPath     string                              `json:"p,omitempty"`
+		Label           string                              `json:"l"`
+		ParentPageRef   *corev1.LocalObjectReference        `json:"pr,omitempty"`
+		Tags            []kdexv1alpha1.Tag                  `json:"t,omitempty"`
+		NavigationHints *kdexv1alpha1.NavigationHints       `json:"nh,omitempty"`
+		Localized       *bool                               `json:"lo,omitempty"`
+		MimeType        string                              `json:"m,omitempty"`
+		Rewrite         *kdexv1alpha1.RewriteSpec           `json:"r,omitempty"`
+		Security        *[]kdexv1alpha1.SecurityRequirement `json:"s,omitempty"`
+		Parsed          bool                                `json:"ps"`
 	}
-	slices.Sort(fns)
-	for _, f := range fns {
-		_, _ = fmt.Fprintf(h, "fn:%s\n", f)
+	type functionFields struct {
+		Name     string `json:"n"`
+		BasePath string `json:"b"`
+		Internal bool   `json:"i"`
+		State    string `json:"s"`
 	}
-	return hex.EncodeToString(h.Sum(nil)[:8])
+	digest := struct {
+		Pages        []treeFields                        `json:"p"`
+		HostSecurity *[]kdexv1alpha1.SecurityRequirement `json:"hs,omitempty"`
+		AuthEnabled  bool                                `json:"a"`
+		Anonymous    []string                            `json:"an,omitempty"`
+		DefaultLang  string                              `json:"d"`
+		Functions    []functionFields                    `json:"f,omitempty"`
+	}{
+		AuthEnabled: hh.IsAuthEnabled(),
+		DefaultLang: hh.defaultLanguage,
+	}
+	if hh.host != nil {
+		digest.HostSecurity = hh.host.Security
+	}
+	if hh.authConfig != nil {
+		digest.Anonymous = hh.authConfig.AnonymousEntitlements
+	}
+	targeted := map[string]bool{}
+	for _, ph := range tree.pages {
+		spec := ph.Page
+		digest.Pages = append(digest.Pages, treeFields{
+			Name:            ph.Name,
+			BasePath:        spec.BasePath,
+			PatternPath:     spec.PatternPath,
+			Label:           spec.Label,
+			ParentPageRef:   spec.ParentPageRef,
+			Tags:            spec.Tags,
+			NavigationHints: spec.NavigationHints,
+			Localized:       spec.Localized,
+			MimeType:        spec.MimeType,
+			Rewrite:         spec.Rewrite,
+			Security:        spec.Security,
+			Parsed:          ph.ParsedRequirements != nil,
+		})
+		if spec.Rewrite != nil && spec.Rewrite.TargetRef.Kind == "KDexFunction" {
+			targeted[spec.Rewrite.TargetRef.Name] = true
+		}
+	}
+	for _, fn := range hh.functions {
+		if targeted[fn.Name] {
+			digest.Functions = append(digest.Functions, functionFields{
+				Name: fn.Name, BasePath: fn.Spec.API.BasePath, Internal: fn.Spec.Internal, State: string(fn.Status.State),
+			})
+		}
+	}
+	slices.SortFunc(digest.Functions, func(a, b functionFields) int { return strings.Compare(a.Name, b.Name) })
+	sum, err := json.Marshal(digest)
+	if err != nil {
+		// Not expected from these types; hash the error so the digest still
+		// moves with the inputs.
+		sum = []byte(err.Error())
+	}
+	h := sha256.Sum256(sum)
+	return hex.EncodeToString(h[:8])
 }
 
 func (hh *HostHandler) RemovePage(name string) {

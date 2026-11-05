@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -13,6 +14,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/page"
 	"golang.org/x/text/language"
 	"kdex.dev/crds/api/v1alpha1"
+	"kdex.dev/crds/render"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -46,6 +48,18 @@ const (
 	navCacheClass     = "nav.v1"
 )
 
+// pageCacheSetTimeout bounds the cache write a coalesced render makes while
+// its waiters hold hh.mu.RLock.
+const pageCacheSetTimeout = 5 * time.Second
+
+// readsPageTree reports whether a page's render reads the whole page tree:
+// a text page whose body names .PageMap. A body that never mentions it
+// cannot read it (the template data is a struct), so its render depends on
+// no other page.
+func readsPageTree(ph page.PageHandler) bool {
+	return pageModeOf(ph.Page) == render.PageTypeText && strings.Contains(ph.Page.Body, "PageMap")
+}
+
 func (hh *HostHandler) pageHandlerFunc(
 	ph page.PageHandler,
 	translations *Translations,
@@ -75,20 +89,27 @@ func (hh *HostHandler) pageHandlerFunc(
 		// hardcoded "text/html" (serveRendered). Both kinds share the same
 		// pageCache / cacheKey / hit-or-miss structure below; only the
 		// render + serve calls differ, so those are the only branch points.
-		isTextPage := ph.Page != nil && ph.Page.MimeType != ""
+		isTextPage := pageModeOf(ph.Page) == render.PageTypeText
 
 		// Per-page seed: ph.Checksum() is sha256(ObservedGeneration +
 		// sorted Status.Attributes), so the ETag invalidates only when
 		// this specific KDexPage's observed state moved — not whenever
-		// any other CR triggered a host reconcile. See #44. A text page
-		// can read the whole page tree (.PageMap), so its seed and cache
-		// key also carry the page-set digest (#283).
-		seed := ph.Checksum()
+		// any other CR triggered a host reconcile. See #44. A body that
+		// reads the whole page tree (.PageMap) also carries the page-set
+		// digest in its seed and cache key (treeSeed, #283).
+		readsTree := readsPageTree(ph)
+		pageSeed := func() string {
+			if readsTree {
+				return hh.treeSeed(ph.Checksum())
+			}
+			return ph.Checksum()
+		}
+		seed := pageSeed()
 		cacheKey := ph.CacheKey(l)
-		if isTextPage {
-			seed += ":" + hh.pageSetDigest
+		if readsTree {
 			cacheKey += ":" + hh.pageSetDigest
 		}
+		renderKey := pageCacheClass + "\x00" + cacheKey
 		if hh.applyCachingHeadersWithSeed(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String(), seed) {
 			return
 		}
@@ -125,13 +146,18 @@ func (hh *HostHandler) pageHandlerFunc(
 				// consistent hh.* state vs concurrent SetHost writes.
 				// See kdex-tech/host-manager#73. One migration per key at
 				// a time: every stale hit used to start its own (#285).
-				migrationKey := pageCacheClass + "\x00" + cacheKey
-				if _, running := hh.pageMigrations.LoadOrStore(migrationKey, struct{}{}); !running {
+				// A migration that gets the lock after a rebuild moved the
+				// page set stores nothing: its render would not match its
+				// key.
+				if _, running := hh.pageMigrations.LoadOrStore(renderKey, struct{}{}); !running {
 					go func(p page.PageHandler, lang language.Tag, trans *Translations) {
-						defer hh.pageMigrations.Delete(migrationKey)
+						defer hh.pageMigrations.Delete(renderKey)
 						hh.mu.RLock()
 						defer hh.mu.RUnlock()
 
+						if pageSeed() != seed {
+							return
+						}
 						bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
 
@@ -155,14 +181,17 @@ func (hh *HostHandler) pageHandlerFunc(
 		// 2. Cache Miss: Synchronous Render. Concurrent misses on one key
 		// share one render (#285). The leader stores it under a context
 		// detached from its own request, because the render serves every
-		// waiter. Waiters hold hh.mu.RLock while they wait, as the leader
-		// does while it renders; the render takes no lock of hh.mu itself.
-		v, err, _ := hh.pageRenders.Do(pageCacheClass+"\x00"+cacheKey, func() (any, error) {
+		// waiter, with its own deadline, because every waiter holds
+		// hh.mu.RLock until it returns. The render takes no lock of hh.mu
+		// itself.
+		v, err, _ := hh.pageRenders.Do(renderKey, func() (any, error) {
 			fresh, err := renderPage(ph, l, translations)
 			if err != nil {
 				return "", err
 			}
-			if err := pageCache.Set(context.WithoutCancel(r.Context()), cacheKey, fresh); err != nil {
+			setCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pageCacheSetTimeout)
+			defer cancel()
+			if err := pageCache.Set(setCtx, cacheKey, fresh); err != nil {
 				log.Error(err, "failed to set cache", "page", ph.Name, "language", l)
 			}
 			return fresh, nil
@@ -308,7 +337,7 @@ func (hh *HostHandler) pageGateLocked(w http.ResponseWriter, r *http.Request, ph
 				// user back to a bare /search. SafeReturnPath round-trips
 				// a query and still collapses anything cross-origin.
 				http.Redirect(w, r,
-					"/-/login?return="+url.QueryEscape(r.URL.RequestURI()),
+					"/-/login?return="+url.QueryEscape(clientRequestURI(r)),
 					http.StatusSeeOther)
 				return false
 			}
@@ -328,17 +357,19 @@ func (hh *HostHandler) pageGateLocked(w http.ResponseWriter, r *http.Request, ph
 				acceptsHTML(r) &&
 				!r.URL.Query().Has("denied") {
 
-				first := hh.discoverLandingPage(r.Context(), &l, l.String() == hh.defaultLanguage, &parsedUserEntitlements)
+				first := hh.discoverLandingPage(&parsedUserEntitlements)
 				if first != "" {
 					if l.String() != hh.defaultLanguage {
 						first = "/" + l.String() + first
 					}
-					// r.URL.Path, not RequestURI: this is a label, never
-					// a redirect target, so it needs no SafeReturnPath
+					// The path, not RequestURI: this is a label, never a
+					// redirect target, so it needs no SafeReturnPath
 					// collapse -- but it IS caller-influenceable, so any
-					// consumer that renders it must treat it as text.
-					target := first + "?denied=" + url.QueryEscape(r.URL.Path)
-					log.V(2).Info("discovery redirect", "to", first, "denied", r.URL.Path)
+					// consumer that renders it must treat it as text. The
+					// client's path: an alias never discloses its target.
+					denied := clientPath(r)
+					target := first + "?denied=" + url.QueryEscape(denied)
+					log.V(2).Info("discovery redirect", "to", first, "denied", denied)
 					// A cached denial follows the user past the grant
 					// change that fixed it.
 					w.Header().Set("Cache-Control", "no-store")

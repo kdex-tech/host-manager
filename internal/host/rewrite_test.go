@@ -287,6 +287,26 @@ func TestRewrite_AliasGateAndTargetGateBothApply(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+// A gated target sends an anonymous browser to the login page with the
+// ALIAS's URL as the return trip, and a forbidden one is labelled with the
+// alias's path: the client never learns the target URL.
+func TestRewrite_DenialNamesTheAliasNotTheTarget(t *testing.T) {
+	target := newPage("keys", "Keys", "/keys")
+	alias := aliasPH("k", "/k", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("keys")})
+	alias.ParsedRequirements = &entitlements.ParsedRequirements{}
+
+	hh := newTestHostHandler(t, "en", []string{"en"})
+	hh.authConfig = &auth.Config{AnonymousEntitlements: []string{"public"}, ActivePair: &keys.KeyPair{}}
+	hh.utilityPages[kdexv1alpha1.LoginUtilityPageType] = page.PageHandler{Name: "login"}
+	hh.authChecker = denyPath("/keys")
+	mux := hh.registerRendersForTest(t, nil, target, alias)
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, anonReq("GET", "/k?x=1", "text/html"))
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/-/login?return=%2Fk%3Fx%3D1", w.Header().Get("Location"))
+}
+
 func TestRewrite_NoDeadlockUnderConcurrentWriter(t *testing.T) {
 	hh := newTestHostHandler(t, "en", []string{"en"})
 	target := textPageForTest(t, "robots", "/robots.txt", "txt", "hello")

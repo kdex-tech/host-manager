@@ -3,6 +3,7 @@ package host
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
+	"github.com/kdex-tech/host-manager/internal/auth"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
@@ -198,20 +200,25 @@ func etagListMatches(values []string, etag string) bool {
 	return false
 }
 
+// getUserHash keys a per-caller render (the navigation fragment, a private
+// response's ETag) on the caller the auth middleware VERIFIED: a hash of the
+// request's auth context, which is what the render reads (the caller's tree
+// and Identity). A credential the middleware refused -- expired, revoked,
+// vetoed -- leaves no auth context, so its holder is "anon" and can never
+// hit the entry rendered while it was still valid. Hashing the raw
+// Authorization header or cookie did exactly that.
 func (hh *HostHandler) getUserHash(r *http.Request) string {
-	// Try Authorization header
-	if auth := r.Header.Get("Authorization"); auth != "" {
-		h := sha256.Sum256([]byte(auth))
-		return hex.EncodeToString(h[:8])
+	ac, ok := auth.GetAuthContext(r.Context())
+	if !ok || len(ac) == 0 {
+		return "anon"
 	}
-	// Try Cookie
-	if hh.authConfig != nil && hh.authConfig.CookieName != "" {
-		if cookie, err := r.Cookie(hh.authConfig.CookieName); err == nil {
-			h := sha256.Sum256([]byte(cookie.Value))
-			return hex.EncodeToString(h[:8])
-		}
+	// encoding/json sorts map keys, so equal contexts hash equally.
+	b, err := json.Marshal(ac)
+	if err != nil {
+		return "anon"
 	}
-	return "anon"
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:8])
 }
 
 // Helper to strip the Domain attribute from a Set-Cookie string

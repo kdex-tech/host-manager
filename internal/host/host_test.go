@@ -310,7 +310,6 @@ func TestHostHandler_L10nRender(t *testing.T) {
 }
 
 // Each language renders with its own translations and navigation paths.
-// This replaced the test of L10nRenders, which nothing called (#287).
 func TestHostHandler_L10nRenderPerLanguage(t *testing.T) {
 	type THost struct {
 		name string

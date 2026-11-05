@@ -191,6 +191,8 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 			ctx := context.Background()
 			cacheManager, _ := cache.NewCacheManager("", "", nil)
 			hh := NewHostHandler(fake.NewClientBuilder().Build(), "foo", "foo", logr.Logger{}, cacheManager)
+			// A rebuild publishes the page tree only once there is a host.
+			hh.host = &kdexv1alpha1.KDexHostSpec{}
 			for _, it := range *tt.items {
 				hh.Pages.Set(it)
 			}
@@ -199,7 +201,7 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 			catalogBuilder.SetString(language.English, "Foo", "Foo Translated")
 			got := &render.PageEntry{}
 
-			hh.BuildMenuEntries(ctx, got, &tag, tt.isDefaultLanguage, nil)
+			hh.BuildMenuEntries(ctx, got, &tag, tt.isDefaultLanguage)
 			children := got.Children
 			assert.Equal(t, tt.want, children)
 		})
@@ -212,9 +214,10 @@ func TestHostHandler_BuildMenuEntries(t *testing.T) {
 // map happened to yield. That is what makes a gated page redirect somewhere
 // different on every request. See kdex-tech/host-manager#184.
 func TestFirstAuthorizedPage_IsDeterministicWhenWeightsTie(t *testing.T) {
-	ctx := context.Background()
 	cacheManager, _ := cache.NewCacheManager("", "", nil)
 	hh := NewHostHandler(fake.NewClientBuilder().Build(), "foo", "foo", logr.Discard(), cacheManager)
+	// A rebuild publishes the page tree only once there is a host.
+	hh.host = &kdexv1alpha1.KDexHostSpec{}
 
 	for _, basePath := range []string{"/terms", "/pricing", "/signup", "/tools/bridge-mac", "/reset-password"} {
 		hh.Pages.Set(page.PageHandler{
@@ -226,11 +229,10 @@ func TestFirstAuthorizedPage_IsDeterministicWhenWeightsTie(t *testing.T) {
 		})
 	}
 
-	tag := language.English
-	first := hh.firstAuthorizedPage(ctx, &tag, true)
+	first := hh.firstAuthorizedPage(nil)
 
 	for i := 0; i < 200; i++ {
-		assert.Equal(t, first, hh.firstAuthorizedPage(ctx, &tag, true),
+		assert.Equal(t, first, hh.firstAuthorizedPage(nil),
 			"identical requests must resolve to the same page")
 	}
 

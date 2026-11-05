@@ -14,6 +14,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/go-logr/logr"
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/page"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/text/language"
@@ -203,7 +205,7 @@ func sitemapFixture(t *testing.T, extra ...page.PageHandler) *HostHandler {
 	docs := newPage("docs", "Docs", "/docs")
 	intro := newPage("intro", "Intro", "/docs/intro")
 	intro.Page.ParentPageRef = &corev1.LocalObjectReference{Name: "docs"}
-	tools := rewritePage("tools", "Tools", "/tools", "KDexPage", "intro", "", true)
+	tools := aliasPH("tools", "/tools", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("intro"), Canonical: true})
 	sitemap := textPageForTest(t, "sitemap", "/sitemap.xml", "xml", sitemapBody)
 	sitemap.Page.Localized = ptr.To(false)
 
@@ -275,20 +277,16 @@ func TestTextPage_PageMapCacheFollowsOtherPages(t *testing.T) {
 		"a page gated after the first render must drop out")
 }
 
-// Pages.Set stores a page before RebuildMux parses its requirements. In that
-// window nothing says who may see it, so no tree lists it. See #283.
+// A page whose requirements are not parsed is in no tree: nothing yet says
+// who may see it. RebuildMux parses before it publishes the index, so this
+// guards a checker installed after the last rebuild. See #283.
 func TestBuildMenuEntries_UnparsedRequirementsAreHidden(t *testing.T) {
 	hh := sitemapFixture(t)
-	// A store with no RebuildMux hook holds the page exactly as Pages.Set
-	// leaves it before the rebuild parses it.
-	store := page.NewPageStore("test-host", nil, logr.Discard())
-	for _, ph := range hh.Pages.List() {
-		store.Set(ph)
-	}
 	unparsed := newPage("fresh", "Fresh", "/fresh")
 	unparsed.ParsedRequirements = nil
-	store.Set(unparsed)
-	hh.Pages = store
+	hh.mu.Lock()
+	hh.tree = newPageIndex(append(slices.Clone(hh.tree.pages), unparsed))
+	hh.mu.Unlock()
 
 	tree := hh.pageMap(context.Background(), language.Make("en"))
 	require.Contains(t, tree, "Docs", "parsed pages still list")
@@ -310,27 +308,20 @@ func TestBuildMenuEntries_UnlocalizedPageKeepsBareHref(t *testing.T) {
 	require.Equal(t, "/sitemap.xml", sitemap.Href, "the fixture's sitemap sets localized: false")
 }
 
-// rewritePage is a rewrite-mode page aliasing kind/name, with rewrite.path
-// set to path.
-func rewritePage(name, label, basePath, kind, target, path string, canonical bool) page.PageHandler {
-	ph := newPage(name, label, basePath)
-	ph.Page.Rewrite = &kdexv1alpha1.RewriteSpec{
-		TargetRef: kdexv1alpha1.KDexObjectReference{Kind: kind, Name: target},
-		Path:      path,
-		Canonical: canonical,
-	}
-	return ph
-}
-
 // Every tree entry carries its page's mode, and an alias carries its target,
 // with the Href the alias serves. An alias of a page the tree hides keeps
 // its target's identity but not its path. See #284.
 func TestBuildMenuEntries_EntriesCarryPageMode(t *testing.T) {
+	billingRef := kdexv1alpha1.KDexObjectReference{Kind: "KDexFunction", Name: "billing"}
+	bare := aliasPH("bare-alias", "/bare", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs")})
+	bare.Page.Localized = ptr.To(false)
 	hh := sitemapFixture(t,
-		rewritePage("docs-alias", "Docs alias", "/d", "KDexPage", "docs", "", true),
-		rewritePage("intro-alias", "Intro alias", "/i", "KDexPage", "docs", "intro", false),
-		rewritePage("admin-alias", "Admin alias", "/a", "KDexPage", "admin", "", false),
-		rewritePage("billing-alias", "Billing alias", "/b", "KDexFunction", "billing", "", false),
+		aliasPH("docs-alias", "/d", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs"), Canonical: true}),
+		aliasPH("intro-alias", "/i", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs"), Path: "intro"}),
+		aliasPH("old-alias", "/old", "/old/{rest...}", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("docs"), Path: "{rest}"}),
+		aliasPH("admin-alias", "/a", "", kdexv1alpha1.RewriteSpec{TargetRef: pageRef("admin")}),
+		aliasPH("billing-alias", "/b", "", kdexv1alpha1.RewriteSpec{TargetRef: billingRef}),
+		bare,
 	)
 	hh.mu.Lock()
 	hh.functions = []kdexv1alpha1.KDexFunction{{
@@ -360,20 +351,70 @@ func TestBuildMenuEntries_EntriesCarryPageMode(t *testing.T) {
 	require.Equal(t, "xml", sitemap.MimeType)
 	require.Nil(t, sitemap.Rewrite)
 
+	require.Equal(t, render.PageTypeRewrite, entry(tree, "docs-alias").Type)
 	require.Equal(t, &render.PageRewrite{Canonical: true, Href: "/docs", Kind: "KDexPage", Name: "docs"},
-		entry(tree, "Docs alias").Rewrite)
-	require.Equal(t, render.PageTypeRewrite, entry(tree, "Docs alias").Type)
-	require.Equal(t, "/docs/intro", entry(tree, "Intro alias").Rewrite.Href, "rewrite.path joins the target's basePath")
-	require.Equal(t, &render.PageRewrite{Kind: "KDexPage", Name: "admin"}, entry(tree, "Admin alias").Rewrite,
-		"the anonymous tree does not disclose a hidden target's path")
-	require.Equal(t, "/api/billing", entry(tree, "Billing alias").Rewrite.Href)
+		entry(tree, "docs-alias").Rewrite)
+	require.Equal(t, "/docs/intro", entry(tree, "intro-alias").Rewrite.Href, "rewrite.path joins the target's basePath")
+	require.Equal(t, "/docs", entry(tree, "old-alias").Rewrite.Href,
+		"an empty wildcard's trailing slash is the legacy redirect the runtime follows")
+	require.Equal(t, &render.PageRewrite{Kind: "KDexPage", Name: "admin"}, entry(tree, "admin-alias").Rewrite,
+		"the anonymous tree does not list a hidden target's path")
+	require.Equal(t, "/api/billing", entry(tree, "billing-alias").Rewrite.Href)
 
 	fr := hh.pageMap(context.Background(), language.Make("fr"))
-	require.Equal(t, "/fr/docs", entry(fr, "Docs alias").Rewrite.Href, "a localized page target keeps the language")
-	require.Equal(t, "/api/billing", entry(fr, "Billing alias").Rewrite.Href, "functions are not localized")
+	require.Equal(t, "/fr/docs", entry(fr, "docs-alias").Rewrite.Href, "a localized page target keeps the language")
+	require.Equal(t, "/api/billing", entry(fr, "billing-alias").Rewrite.Href, "functions are not localized")
+	require.Equal(t, "/bare", entry(fr, "bare-alias").Href)
+	require.Equal(t, "/docs", entry(fr, "bare-alias").Rewrite.Href,
+		"a localized: false alias serves the default language")
 
 	entitled := hh.pageMap(entitledSitemapReq().Context(), language.Make("en"))
-	require.Equal(t, "/admin", entry(entitled, "Admin alias").Rewrite.Href)
+	require.Equal(t, "/admin", entry(entitled, "admin-alias").Rewrite.Href)
+}
+
+// A parentPageRef with an empty name names no page, so the page is in no
+// tree, as before the bucketed build.
+func TestBuildMenuEntries_EmptyParentNameIsInNoTree(t *testing.T) {
+	stray := newPage("stray", "Stray", "/stray")
+	stray.Page.ParentPageRef = &corev1.LocalObjectReference{}
+	hh := sitemapFixture(t, stray)
+	require.NotContains(t, hh.pageMap(context.Background(), language.Make("en")), "Stray")
+}
+
+// A text page is never a landing page for a denied caller, even when it
+// wins the weight-then-basePath order. See #283.
+func TestFirstAuthorizedPage_SkipsTextPages(t *testing.T) {
+	robots := textPageForTest(t, "robots", "/a-robots.txt", "txt", "User-agent: *")
+	hh := sitemapFixture(t, robots)
+	hh.mu.RLock()
+	defer hh.mu.RUnlock()
+	require.Equal(t, "/docs", hh.firstAuthorizedPage(hh.treeEntitlements(context.Background())))
+}
+
+// The digest moves with what a tree reads and with nothing else: a content
+// edit leaves every cached tree valid, a host-level gate does not. See #283.
+func TestComputePageSetDigest_TracksTreeInputsOnly(t *testing.T) {
+	hh := sitemapFixture(t)
+	digest := func() string {
+		hh.mu.RLock()
+		defer hh.mu.RUnlock()
+		return hh.pageSetDigest
+	}
+	before := digest()
+
+	docs, _ := hh.Pages.Get("docs")
+	edited := docs
+	spec := *docs.Page
+	spec.Body = "edited"
+	edited.Page = &spec
+	hh.Pages.Set(edited)
+	require.Equal(t, before, digest(), "a body edit changes no tree")
+
+	hh.mu.Lock()
+	hh.host.Security = &[]kdexv1alpha1.SecurityRequirement{{"bearer": {"member"}}}
+	hh.mu.Unlock()
+	hh.RebuildMux()
+	require.NotEqual(t, before, digest(), "a host-level gate changes what the tree shows")
 }
 
 // Siblings that share a label share one tree key. The page whose name sorts
@@ -391,40 +432,40 @@ func TestBuildMenuEntries_LabelCollisionIsDeterministic(t *testing.T) {
 }
 
 // Concurrent cache misses on one page share one render. The checker holds
-// the first tree build until every request is in flight, so without
-// coalescing each request would build its own tree. See #285.
+// the first tree build until every caller has passed the page gate, so
+// without coalescing each caller would build its own tree. See #285.
 func TestTextPage_ConcurrentMissesShareOneRender(t *testing.T) {
 	hh := sitemapFixture(t)
 
-	var builds atomic.Int32
+	const callers = 8
+	var builds, gates atomic.Int32
 	release := make(chan struct{})
 	hh.mu.Lock()
 	hh.authChecker = &pageMockAuthChecker{
 		getEntitlementsFn: func(ctx context.Context) entitlements.ParsedEntitlements {
-			// The page gate asks with the request's context; the anonymous
-			// tree build asks with context.Background(). Count and hold
-			// only the build.
+			// The gate asks with the request's context (t.Context() below),
+			// the anonymous tree build with context.Background().
 			if ctx == context.Background() {
 				builds.Add(1)
 				<-release
+			} else {
+				gates.Add(1)
 			}
 			return entitlements.ParsedEntitlements{}
 		},
 	}
 	hh.mu.Unlock()
 
-	const callers = 8
 	var wg sync.WaitGroup
 	bodies := make([]string, callers)
 	for i := range callers {
 		wg.Go(func() {
-			// t.Context(), not httptest.NewRequest's context.Background(),
-			// so the checker can tell the gate's calls from the build's.
 			bodies[i] = serveSitemap(t, hh, httptest.NewRequestWithContext(t.Context(), "GET", "/sitemap.xml", nil), "en")
 		})
 	}
-	require.Eventually(t, func() bool { return builds.Load() >= 1 }, time.Second, time.Millisecond)
-	time.Sleep(50 * time.Millisecond) // let the other callers reach the render
+	require.Eventually(t, func() bool { return gates.Load() == callers && builds.Load() >= 1 },
+		5*time.Second, time.Millisecond, "every caller passed the gate while the first render is held")
+	time.Sleep(20 * time.Millisecond) // the last callers go from the gate into the render
 	close(release)
 	wg.Wait()
 
@@ -432,4 +473,41 @@ func TestTextPage_ConcurrentMissesShareOneRender(t *testing.T) {
 	for _, b := range bodies {
 		require.Equal(t, bodies[0], b)
 	}
+}
+
+// A stale navigation fragment is re-rendered in the background for the
+// caller it belongs to: its tree and Identity, not the anonymous ones.
+// Rendering it with context.Background() stored the anonymous menu under a
+// signed-in caller's key.
+func TestNavigation_StaleMigrationKeepsTheCallersTree(t *testing.T) {
+	home := newPage("home", "Home", "/home")
+	home.Navigations = map[string]string{"main": `[[ range $k, $v := .PageMap ]][[ $v.Label ]];[[ end ]]`}
+	hh := sitemapFixture(t, home)
+
+	alice := func() *http.Request {
+		return callerCtx(httptest.NewRequest("GET", "/-/navigation/main/en/home", nil), "alice", []any{"pages::read", "admin"})
+	}
+	get := func() string {
+		w := httptest.NewRecorder()
+		hh.Mux.ServeHTTP(w, alice())
+		require.Equal(t, http.StatusOK, w.Code)
+		return w.Body.String()
+	}
+	require.Contains(t, get(), "Admin;", "alice's tree lists the page she may see")
+
+	// A host generation moves on: alice's entry is now stale.
+	require.NoError(t, hh.cacheManager.Cycle("next-generation", false))
+	require.Contains(t, get(), "Admin;", "the stale entry is served while it migrates")
+
+	hh.mu.RLock()
+	key := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), hh.getUserHash(alice()))
+	hh.mu.RUnlock()
+	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
+	require.Eventually(t, func() bool {
+		_, _, current, _ := navCache.Get(context.Background(), key)
+		return current
+	}, 5*time.Second, 5*time.Millisecond, "the migration stores a current entry")
+	migrated, _, _, err := navCache.Get(context.Background(), key)
+	require.NoError(t, err)
+	require.Contains(t, migrated, "Admin;", "the migrated fragment is still alice's")
 }

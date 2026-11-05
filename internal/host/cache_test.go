@@ -2,7 +2,6 @@ package host
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -119,38 +118,34 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	body1 := w.Body.String()
 	assert.Contains(t, body1, "Test Page")
 
-	// Verify it's in cache
-	// Key format: main:/test:<page checksum>:<page-set digest>:en:anon
-	// (since no auth). The digest is there because the fragment renders the
-	// whole page tree (#283).
-	seed := ph.Checksum() + ":" + hh.pageSetDigest
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), "anon")
+	// Verify it's in cache, under main:/test:<tree seed>:en:anon (since no
+	// auth). The seed carries the page-set digest because the fragment
+	// renders the whole page tree (#283).
+	seed := hh.treeSeed(ph.Checksum())
+	cacheKey := navCacheKey("main", ph.Page.Paths.BasePath, seed, language.English, "anon")
 	cacheVal, found, isCurrent, err := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), cacheKey)
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, isCurrent)
 	assert.Equal(t, body1, cacheVal)
 
-	// 2. Test RBAC/Identity Separation
-	// Mock a request with an Authorization header
-	req2 := httptest.NewRequest("GET", "/-/navigation/main/en/test", nil)
-	req2.Header.Set("Authorization", "Bearer user-token")
+	// 2. Identity separation. A credential alone keys nothing: only the
+	// caller the auth middleware verified (its auth context) does, so a
+	// refused (expired, revoked) credential is anonymous and can never hit
+	// the entry rendered while it was valid.
+	unverified := httptest.NewRequest("GET", "/-/navigation/main/en/test", nil)
+	unverified.Header.Set("Authorization", "Bearer user-token")
+	assert.Equal(t, "anon", hh.getUserHash(unverified))
 
-	// Make NavigationGet public for this test or mock auth requirements
-	// In the code, NavigationGet uses authenticated requirement by default in my change.
-	// But applyCachingHeaders checks hh.authConfig.IsAuthEnabled().
-
+	req2 := callerCtx(httptest.NewRequest("GET", "/-/navigation/main/en/test", nil), "alice", []any{"pages::read"})
 	w2 := httptest.NewRecorder()
 	hh.Mux.ServeHTTP(w2, req2)
 	assert.Equal(t, http.StatusOK, w2.Code)
 
-	// Verify different cache key is used
 	userHash := hh.getUserHash(req2)
 	assert.NotEqual(t, "anon", userHash)
-	// cacheKey2 := fmt.Sprintf("main:/test:en:%s", userHash)
-	cacheKey2 := fmt.Sprintf("%s:%s:%s:%s:%s", "main", ph.Page.Paths.BasePath, seed, language.English.String(), userHash)
-
-	_, found2, _, err2 := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), cacheKey2)
+	_, found2, _, err2 := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(),
+		navCacheKey("main", ph.Page.Paths.BasePath, seed, language.English, userHash))
 	assert.NoError(t, err2)
 	assert.True(t, found2)
 }

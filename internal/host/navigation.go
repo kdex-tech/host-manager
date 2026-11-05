@@ -3,7 +3,6 @@ package host
 import (
 	"context"
 	"fmt"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/kdex-tech/host-manager/internal/cache"
 	kdexhttp "github.com/kdex-tech/host-manager/internal/http"
 	"github.com/kdex-tech/host-manager/internal/page"
-	"github.com/kdex-tech/host-manager/internal/rewrite"
 	"golang.org/x/text/language"
 	"k8s.io/apimachinery/pkg/api/resource"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
@@ -22,44 +20,52 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// BuildMenuEntries fills entry.Children with the page tree the caller in ctx
+// can see. It reads hh.tree, the page index RebuildMux published together
+// with hh.pageSetDigest, so a tree always matches the digest a cache key
+// carries for it (#283). Caller holds hh.mu.RLock.
 func (hh *HostHandler) BuildMenuEntries(
 	ctx context.Context,
 	entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
-	parent *page.PageHandler,
 ) {
-	var parsedUserEntitlements *entitlements.ParsedEntitlements
-	if hh.authChecker != nil {
-		p := hh.authChecker.GetParsedEntitlements(ctx)
-		parsedUserEntitlements = &p
-	}
-
-	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, parent, parsedUserEntitlements,
-		hh.visibleChildren(parsedUserEntitlements))
+	ents := hh.treeEntitlements(ctx)
+	hh.buildMenuEntriesRecursive(entry, l, isDefaultLanguage, "", ents, hh.visibleChildren(ents))
 }
 
-// visibleChildren lists the pages once, checks each one's visibility once,
-// and buckets the visible ones by parent name ("" for top-level pages), so a
-// tree build costs N checks rather than N per level (#285). Each bucket is
-// in name order, so the build does not depend on map iteration order (#286).
-// Caller holds hh.mu.RLock.
+// treeEntitlements is the caller's parsed entitlements for a tree build, or
+// nil when there is no checker (every page is then visible).
+func (hh *HostHandler) treeEntitlements(ctx context.Context) *entitlements.ParsedEntitlements {
+	if hh.authChecker == nil {
+		return nil
+	}
+	p := hh.authChecker.GetParsedEntitlements(ctx)
+	return &p
+}
+
+// visibleChildren checks each page's visibility once and buckets the visible
+// ones by parent name ("" for top-level pages), so a tree build costs N
+// checks rather than N per level (#285). Buckets keep hh.tree's name order,
+// so the build does not depend on map iteration order (#286). A
+// parentPageRef with an empty name names no page: such a page is in no
+// bucket, as it was in no tree before. Caller holds hh.mu.RLock.
 func (hh *HostHandler) visibleChildren(
 	parsedUserEntitlements *entitlements.ParsedEntitlements,
 ) map[string][]page.PageHandler {
 	children := map[string][]page.PageHandler{}
-	for _, handler := range hh.Pages.List() {
-		if handler.Page == nil || !hh.visibleInTree(handler, parsedUserEntitlements) {
+	for _, handler := range hh.tree.pages {
+		if !hh.visibleInTree(handler, parsedUserEntitlements) {
 			continue
 		}
 		parentName := ""
-		if handler.Page.ParentPageRef != nil {
-			parentName = handler.Page.ParentPageRef.Name
+		if ref := handler.Page.ParentPageRef; ref != nil {
+			if ref.Name == "" {
+				continue
+			}
+			parentName = ref.Name
 		}
 		children[parentName] = append(children[parentName], handler)
-	}
-	for _, bucket := range children {
-		slices.SortFunc(bucket, func(a, b page.PageHandler) int { return strings.Compare(a.Name, b.Name) })
 	}
 	return children
 }
@@ -71,126 +77,113 @@ func (hh *HostHandler) visibleChildren(
 // checker matches against anonymousEntitlements. Caller holds hh.mu.RLock.
 func (hh *HostHandler) pageMap(ctx context.Context, l language.Tag) map[string]any {
 	root := &render.PageEntry{}
-	hh.BuildMenuEntries(ctx, root, &l, l.String() == hh.defaultLanguage, nil)
+	hh.BuildMenuEntries(ctx, root, &l, l.String() == hh.defaultLanguage)
 	if root.Children == nil {
 		return nil
 	}
 	return *root.Children
 }
 
-func (hh *HostHandler) firstAuthorizedPage(
-	ctx context.Context,
-	l *language.Tag,
-	isDefaultLanguage bool,
-) string {
-	rootEntry := &render.PageEntry{}
-	hh.BuildMenuEntries(ctx, rootEntry, l, isDefaultLanguage, nil)
-
-	if rootEntry.Children != nil {
-		se := maps.Values(*rootEntry.Children)
-		values := slices.Collect(se)
-		// values comes from maps.Values, whose order is randomized, and
-		// slices.SortFunc is not stable -- so Weight alone is not a total
-		// order. Every page without a navigationHints.weight defaults to 0,
-		// making ties the normal case rather than the edge case, and the
-		// winner then varied per request. BasePath is unique per page, so
-		// breaking ties on it makes the pick reproducible. See #184.
-		slices.SortFunc(values, func(a, b any) int {
-			aPE, aOk := a.(render.PageEntry)
-			bPE, bOk := b.(render.PageEntry)
-			if !aOk || !bOk {
-				return 0
-			}
-			if c := aPE.Weight.Cmp(bPE.Weight); c != 0 {
-				return c
-			}
-			return strings.Compare(aPE.BasePath, bPE.BasePath)
-		})
-		pe, ok := values[0].(render.PageEntry)
-		if !ok {
-			return ""
+// firstAuthorizedPage is the basePath of the lightest top-level page the
+// caller can see, for a denied caller to land on. Text pages (robots.txt,
+// sitemap.xml) are never a landing page. Weight alone is not a total order:
+// every page without navigationHints.weight weighs 0, so ties are the normal
+// case, and BasePath, unique per page, breaks them (#184). Caller holds
+// hh.mu.RLock.
+func (hh *HostHandler) firstAuthorizedPage(userEntitlements *entitlements.ParsedEntitlements) string {
+	var candidates []page.PageHandler
+	for _, ph := range hh.visibleChildren(userEntitlements)[""] {
+		if pageModeOf(ph.Page) != render.PageTypeText {
+			candidates = append(candidates, ph)
 		}
-		return pe.BasePath
 	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	best := slices.MinFunc(candidates, func(a, b page.PageHandler) int {
+		aw, bw := navigationWeight(a.Page), navigationWeight(b.Page)
+		if c := aw.Cmp(bw); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Page.BasePath, b.Page.BasePath)
+	})
+	return best.Page.BasePath
+}
 
-	return ""
+// navigationWeight is a page's navigationHints.weight, or 0 when unset.
+func navigationWeight(spec *kdexv1alpha1.KDexPageSpec) resource.Quantity {
+	if spec.NavigationHints != nil && spec.NavigationHints.Weight != nil {
+		return *spec.NavigationHints.Weight
+	}
+	return resource.MustParse("0")
 }
 
 // discoverLandingPage picks where to send a caller the page gate denied. It
 // honors the host's ordered spec.auth.defaultLandingPaths first — returning the
-// first entry the caller is entitled to render, checked with the same
-// VerifyResourceParsedEntitlements the gate uses — and falls back to
-// firstAuthorizedPage when the list is empty/unset or nothing in it is
-// reachable. The returned value is a bare basePath (no language prefix); the
-// caller applies the /<lang> prefix, exactly as it does for firstAuthorizedPage.
+// first entry the caller is entitled to render, by the same visibleInTree
+// check the tree uses — and falls back to firstAuthorizedPage when the list
+// is empty/unset or nothing in it is reachable. The returned value is a bare
+// basePath (no language prefix); the caller applies the /<lang> prefix,
+// exactly as it does for firstAuthorizedPage.
 // See docs/superpowers/specs/2026-09-10-default-landing-paths-design.md.
-func (hh *HostHandler) discoverLandingPage(
-	ctx context.Context,
-	l *language.Tag,
-	isDefaultLanguage bool,
-	userEntitlements *entitlements.ParsedEntitlements,
-) string {
+func (hh *HostHandler) discoverLandingPage(userEntitlements *entitlements.ParsedEntitlements) string {
 	if hh.host != nil && hh.host.Auth != nil {
 		for _, candidate := range hh.host.Auth.DefaultLandingPaths {
-			for _, handler := range hh.Pages.List() {
-				if handler.BasePath() != candidate {
-					continue
-				}
-				// A page with requirements is a candidate only when the caller
-				// satisfies them — the same check the gate runs. A checker
-				// fault or a denial drops this candidate (try the next path); a
-				// page with no requirements is reachable by everyone.
-				if hh.IsAuthEnabled() && hh.authChecker != nil &&
-					userEntitlements != nil && handler.ParsedRequirements != nil {
-					access, err := hh.authChecker.VerifyResourceParsedEntitlements(
-						"pages", candidate, *userEntitlements, *handler.ParsedRequirements)
-					if err != nil || !access {
-						break
-					}
-				}
+			if handler, ok := hh.tree.byBasePath[candidate]; ok && hh.visibleInTree(handler, userEntitlements) {
 				return candidate
 			}
 		}
 	}
-	return hh.firstAuthorizedPage(ctx, l, isDefaultLanguage)
+	return hh.firstAuthorizedPage(userEntitlements)
 }
 
 // visibleInTree reports whether a page tree built for parsedUserEntitlements
-// lists handler: the same check the page gate runs. Caller holds
-// hh.mu.RLock.
+// lists handler. It runs the page gate's entitlement check, with one
+// difference: a page whose requirements are not parsed yet is hidden, where
+// the gate would let it through, because a tree can be cached and shared
+// (#283). A checker error hides the page. Caller holds hh.mu.RLock.
 func (hh *HostHandler) visibleInTree(
 	handler page.PageHandler,
 	parsedUserEntitlements *entitlements.ParsedEntitlements,
 ) bool {
-	if !hh.IsAuthEnabled() || hh.authChecker == nil {
+	if !hh.IsAuthEnabled() || hh.authChecker == nil || parsedUserEntitlements == nil {
 		return true
 	}
 	if handler.ParsedRequirements == nil {
-		// Pages.Set stores a page before RebuildMux parses its requirements.
-		// Until then nothing says who may see it, so it stays out of every
-		// tree: a sitemap cached in that window would otherwise list a gated
-		// page to anonymous callers (#283).
 		return false
-	}
-	if parsedUserEntitlements == nil {
-		return true
 	}
 	access, _ := hh.authChecker.VerifyResourceParsedEntitlements(
 		"pages", handler.Page.BasePath, *parsedUserEntitlements, *handler.ParsedRequirements)
 	return access
 }
 
+// pageModeOf is a KDexPage's operating mode, by the fields its spec sets.
+// The CRD makes them mutually exclusive.
+func pageModeOf(spec *kdexv1alpha1.KDexPageSpec) render.PageType {
+	switch {
+	case spec == nil:
+		return render.PageTypeHTML
+	case spec.Rewrite != nil:
+		return render.PageTypeRewrite
+	case spec.MimeType != "":
+		return render.PageTypeText
+	default:
+		return render.PageTypeHTML
+	}
+}
+
 // rewriteEntry describes an alias's target for its tree entry (#284). Href is
-// the path the alias's own Href dispatches to, built the way
-// rewriteHandlerFunc builds it for a request at the alias's basePath (where
-// no wildcard has a value), so a sitemap can list the canonical URL instead
-// of the alias. It is empty when the target is not servable, or is a page
-// this tree does not list: an alias does not disclose a target the caller
-// cannot see. Caller holds hh.mu.RLock.
+// the path a request at the alias's own Href ends up served from: the target
+// path rewriteHandlerFunc builds for it (where no wildcard has a value),
+// after the trailing-slash redirect the runtime follows internally. A
+// sitemap can list it as the canonical URL instead of the alias. Href is
+// empty when the target is not servable, when the path cannot be built, or
+// when the target is a page this tree hides, so a sitemap never lists a
+// gated target. Kind and Name are always set: /-/openapi already publishes
+// them. Caller holds hh.mu.RLock.
 func (hh *HostHandler) rewriteEntry(
 	alias page.PageHandler,
 	l *language.Tag,
-	isDefaultLanguage bool,
 	parsedUserEntitlements *entitlements.ParsedEntitlements,
 ) *render.PageRewrite {
 	rw := alias.Page.Rewrite
@@ -199,63 +192,56 @@ func (hh *HostHandler) rewriteEntry(
 		Kind:      rw.TargetRef.Kind,
 		Name:      rw.TargetRef.Name,
 	}
-
-	pagesByName := map[string]page.PageHandler{}
 	if rw.TargetRef.Kind == "KDexPage" {
-		target, ok := hh.Pages.Get(rw.TargetRef.Name)
+		target, ok := hh.tree.byName[rw.TargetRef.Name]
 		if !ok || !hh.visibleInTree(target, parsedUserEntitlements) {
 			return entry
 		}
-		pagesByName[target.Name] = target
 	}
-	resolved, ok := resolveRewriteTarget(rw.TargetRef, pagesByName, hh.functions)
+	resolved, ok := resolveRewriteTarget(rw.TargetRef, hh.tree.byName, hh.functions)
 	if !ok {
 		return entry
 	}
-	href, err := rewrite.Target(resolved.basePath, resolved.exact, rw.Path, alias.Page.PatternPath,
-		func(string) string { return "" })
+	// A localized: false alias registers only its bare route, which serves
+	// the default language whatever tree lists it.
+	lang := *l
+	if !isLocalized(alias.Page.Localized) {
+		lang = language.Make(hh.defaultLanguage)
+	}
+	href, err := rewriteTargetPath(resolved, rw, alias.Page.PatternPath, func(string) string { return "" }, lang, hh.defaultLanguage)
 	if err != nil {
 		return entry
 	}
-	if resolved.localized && !isDefaultLanguage {
-		href = "/" + l.String() + href
+	if strings.HasSuffix(href, "/") && href != resolved.basePath && href != "/" {
+		href = strings.TrimSuffix(href, "/")
 	}
 	entry.Href = href
 	return entry
 }
 
+// buildMenuEntriesRecursive adds parentName's visible children to entry and
+// recurses into each. Only pages reachable from the root are listed, so a
+// page naming itself (or a cycle) as its parent never is.
 func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 	l *language.Tag,
 	isDefaultLanguage bool,
-	parent *page.PageHandler,
+	parentName string,
 	parsedUserEntitlements *entitlements.ParsedEntitlements,
 	children map[string][]page.PageHandler,
 ) {
-	parentName := ""
-	if parent != nil {
-		parentName = parent.Name
-	}
 	for _, handler := range children[parentName] {
 		ph := handler.Page
-
-		// A page naming itself as its parent is never its own child.
-		if parent != nil && parent.Name == handler.Name {
-			continue
-		}
 
 		if entry.Children == nil {
 			entry.Children = &map[string]any{}
 		}
 
+		// Entries are keyed by label, so two siblings with one label cannot
+		// both be listed. The bucket is in name order, so the page whose name
+		// sorts first keeps the slot on every render and every replica.
+		// RebuildMux logs the collision (#286).
 		label := ph.Label
-		if existing, taken := (*entry.Children)[label]; taken {
-			// Entries are keyed by label, so two siblings with one label
-			// cannot both be listed. The bucket is in name order, so the
-			// page whose name sorts first keeps the slot on every render
-			// and every replica (#286).
-			kept, _ := existing.(render.PageEntry)
-			hh.log.V(1).Info("page tree label collision; page left out",
-				"label", label, "kept", kept.Name, "dropped", handler.Name)
+		if _, taken := (*entry.Children)[label]; taken {
 			continue
 		}
 
@@ -271,30 +257,21 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 			Href:     href,
 			Label:    label,
 			Name:     handler.Name,
-			Type:     render.PageTypeHTML,
-			Weight:   resource.MustParse("0"),
+			Type:     pageModeOf(ph),
+			Weight:   navigationWeight(ph),
 		}
 
-		// The page's mode, by the same checks routing uses
-		// (addHandlerAndRegister, pageHandlerFunc), so a template can
-		// tell a text file or an alias from an HTML page without a tag
-		// (#284).
-		switch {
-		case ph.Rewrite != nil:
-			pageEntry.Type = render.PageTypeRewrite
-			pageEntry.Rewrite = hh.rewriteEntry(handler, l, isDefaultLanguage, parsedUserEntitlements)
-		case ph.MimeType != "":
-			pageEntry.Type = render.PageTypeText
+		// The page's mode, so a template can tell a text file or an alias
+		// from an HTML page without a tag (#284).
+		switch pageEntry.Type {
+		case render.PageTypeRewrite:
+			pageEntry.Rewrite = hh.rewriteEntry(handler, l, parsedUserEntitlements)
+		case render.PageTypeText:
 			pageEntry.MimeType = ph.MimeType
 		}
 
 		if ph.NavigationHints != nil {
 			pageEntry.Icon = ph.NavigationHints.Icon
-			// An unset weight keeps the "0" default above, which is what the
-			// zero Quantity resolved to before the field became optional.
-			if ph.NavigationHints.Weight != nil {
-				pageEntry.Weight = *ph.NavigationHints.Weight
-			}
 		}
 
 		// Project the page's spec.tags onto the nav entry so templates can
@@ -311,7 +288,7 @@ func (hh *HostHandler) buildMenuEntriesRecursive(entry *render.PageEntry,
 			}
 		}
 
-		hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, &handler, parsedUserEntitlements, children)
+		hh.buildMenuEntriesRecursive(&pageEntry, l, isDefaultLanguage, handler.Name, parsedUserEntitlements, children)
 
 		(*entry.Children)[label] = pageEntry
 	}
@@ -331,18 +308,12 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	brandName := hh.host.BrandName
 	org := hh.host.Organization
 
-	var pageHandler *page.PageHandler
-	for _, ph := range hh.Pages.List() {
-		if ph.BasePath() == basePath {
-			pageHandler = &ph
-			break
-		}
-	}
-
-	if pageHandler == nil {
+	found, ok := hh.tree.byBasePath[basePath]
+	if !ok {
 		http.Error(w, "page not found", http.StatusNotFound)
 		return
 	}
+	pageHandler := &found
 
 	l, err := kdexhttp.GetLang(r, defaultLang, translations.Languages())
 	if err != nil {
@@ -358,16 +329,14 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	// page's nav fragment invalidates only when its own observed state
 	// moves rather than on every host reconcile. The fragment renders the
 	// whole page tree, so the seed and the cache key also carry the page-set
-	// digest: the host checksum the cache cycles on does not move when
-	// another page changes (#283).
-	seed := pageHandler.Checksum() + ":" + hh.pageSetDigest
+	// digest (treeSeed, #283).
+	seed := hh.treeSeed(pageHandler.Checksum())
 	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), seed) {
 		return
 	}
 
 	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
-	userHash := hh.getUserHash(r)
-	cacheKey := fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, seed, l.String(), userHash)
+	cacheKey := navCacheKey(navKey, basePath, seed, l, hh.getUserHash(r))
 
 	rendered, ok, isCurrent, err := navCache.Get(r.Context(), cacheKey)
 	if err == nil && ok {
@@ -384,19 +353,29 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		// 2. Stale Hit (vN-1): Serve fast, migrate in background
 		log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
 
-		// Clone necessary request context or data for the goroutine.
-		// Note: we don't pass r.Context() because it cancels when the
-		// request ends. Hold hh.mu.RLock for the duration of the
-		// re-render so the goroutine sees consistent hh.*
-		// (authChecker, Pages, etc.) state vs concurrent SetHost
-		// writes. See kdex-tech/host-manager#73.
+		// The fragment is the caller's: the re-render runs with the
+		// request's auth context, detached from its cancellation, so it
+		// builds the caller's tree and Identity and not the anonymous one.
+		// Hold hh.mu.RLock for the duration of the re-render so the
+		// goroutine sees consistent hh.* state vs concurrent SetHost
+		// writes (#73). One migration per key at a time (#285), and none
+		// is stored once the page set has moved past the key's seed.
+		migrationKey := navCacheClass + "\x00" + cacheKey
+		if _, running := hh.pageMigrations.LoadOrStore(migrationKey, struct{}{}); running {
+			return
+		}
+		callerCtx := context.WithoutCancel(r.Context())
 		go func() {
+			defer hh.pageMigrations.Delete(migrationKey)
 			hh.mu.RLock()
 			defer hh.mu.RUnlock()
 
-			bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			bgCtx, cancel := context.WithTimeout(callerCtx, 15*time.Second)
 			defer cancel()
 
+			if hh.treeSeed(pageHandler.Checksum()) != seed {
+				return
+			}
 			newRender, err := hh.performNavigationRender(
 				bgCtx,
 				l,
@@ -442,6 +421,20 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	if _, err = w.Write([]byte(rendered)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// navCacheKey is a navigation fragment's cache key: the fragment, the page
+// hosting it, its tree seed, the language and the caller.
+func navCacheKey(navKey, basePath, seed string, l language.Tag, userHash string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:%s", navKey, basePath, seed, l.String(), userHash)
+}
+
+// treeSeed extends a render's per-page seed with the page-set digest, for a
+// render that reads the whole page tree: the host checksum the caches cycle
+// on does not move when another page changes (#283). Caller holds
+// hh.mu.RLock.
+func (hh *HostHandler) treeSeed(pageChecksum string) string {
+	return pageChecksum + ":" + hh.pageSetDigest
 }
 
 // Helper method to encapsulate the rendering logic for both Sync and Async paths

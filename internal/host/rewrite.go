@@ -15,6 +15,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/rewrite"
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"kdex.dev/crds/render"
 )
 
 // rewriteTarget is a rewrite page's target as resolved for one mux snapshot
@@ -33,7 +34,56 @@ type rewriteTarget struct {
 // rewriteMarkerKey marks a request already re-dispatched by a rewrite, so a
 // second rewrite hop answers 508 instead of looping. The page controller
 // forbids that topology; this guards the window before it re-reconciles.
+// Its value is the rewriteOrigin.
 type rewriteMarkerKey struct{}
+
+// rewriteOrigin is the request as the client sent it, before a rewrite
+// re-dispatched it to the target path. Anything the target's handlers send
+// back to the client about "this URL" (the login return, the denied label)
+// uses it, so the client never learns the target URL.
+type rewriteOrigin struct {
+	path       string
+	requestURI string
+}
+
+// clientPath is the path the client requested: the alias's, for a request a
+// rewrite re-dispatched.
+func clientPath(r *http.Request) string {
+	if o, ok := r.Context().Value(rewriteMarkerKey{}).(rewriteOrigin); ok {
+		return o.path
+	}
+	return r.URL.Path
+}
+
+// clientRequestURI is clientPath with the query, as RequestURI gives it.
+func clientRequestURI(r *http.Request) string {
+	if o, ok := r.Context().Value(rewriteMarkerKey{}).(rewriteOrigin); ok {
+		return o.requestURI
+	}
+	return r.URL.RequestURI()
+}
+
+// rewriteTargetPath is the path an alias dispatches to, for a request on the
+// alias route registered for lang: rewrite.Target over the resolved target,
+// prefixed with lang when the target is a localized page and lang is not the
+// default. value gives each wildcard's value.
+func rewriteTargetPath(
+	resolved rewriteTarget,
+	rw *kdexv1alpha1.RewriteSpec,
+	aliasPatternPath string,
+	value func(string) string,
+	lang language.Tag,
+	defaultLang string,
+) (string, error) {
+	target, err := rewrite.Target(resolved.basePath, resolved.exact, rw.Path, aliasPatternPath, value)
+	if err != nil {
+		return "", err
+	}
+	if resolved.localized && lang.String() != defaultLang {
+		target = "/" + lang.String() + target
+	}
+	return target, nil
+}
 
 // resolveRewriteTarget finds ref among this snapshot's pages and functions.
 // A rewrite-mode page, a missing page, and a function that is not Ready or is
@@ -46,7 +96,7 @@ func resolveRewriteTarget(
 	switch ref.Kind {
 	case "KDexPage":
 		ph, ok := pagesByName[ref.Name]
-		if !ok || ph.Page == nil || ph.Page.Rewrite != nil {
+		if !ok || ph.Page == nil || pageModeOf(ph.Page) == render.PageTypeRewrite {
 			return rewriteTarget{}, false
 		}
 		bp := ph.Page.BasePath
@@ -97,7 +147,7 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			return
 		}
 
-		target, err := rewrite.Target(pr.rewrite.basePath, pr.rewrite.exact, rw.Path, ph.Page.PatternPath, r.PathValue)
+		target, err := rewriteTargetPath(pr.rewrite, rw, ph.Page.PatternPath, r.PathValue, lang, defaultLang)
 		switch {
 		case errors.Is(err, rewrite.ErrNotFound):
 			hh.serveError(w, r, http.StatusNotFound, "not found")
@@ -110,11 +160,9 @@ func (hh *HostHandler) rewriteHandlerFunc(pr pageRender, lang language.Tag, mux 
 			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
-		if pr.rewrite.localized && lang.String() != defaultLang {
-			target = "/" + lang.String() + target
-		}
 
-		r2 := r.Clone(context.WithValue(r.Context(), rewriteMarkerKey{}, true))
+		r2 := r.Clone(context.WithValue(r.Context(), rewriteMarkerKey{},
+			rewriteOrigin{path: r.URL.Path, requestURI: r.URL.RequestURI()}))
 		r2.URL.Path = target
 		r2.URL.RawPath = ""
 

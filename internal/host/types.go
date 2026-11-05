@@ -127,13 +127,16 @@ type HostHandler struct {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
 		DocsHandler(http.ResponseWriter, *http.Request)
 	}
-	// pageSetDigest is a digest of every page's spec, set by RebuildMux. A
-	// render that reads the whole page tree (a text page's .PageMap, a
-	// navigation fragment) folds it into its cache key and ETag, so adding,
-	// removing, relabeling, re-parenting or gating ANY page invalidates it:
-	// the host checksum the caches cycle on does not move for a page change
-	// (#283).
+	// pageSetDigest is computePageSetDigest over tree, and tree is the page
+	// index every page tree is built from. RebuildMux publishes both
+	// together under hh.mu.Lock, so a tree always matches the digest a
+	// render's cache key carries. A render that reads the whole page tree
+	// (a text page's .PageMap, a navigation fragment) folds the digest into
+	// its cache key and ETag (treeSeed), so adding, removing, relabeling,
+	// re-parenting or gating ANY page invalidates it: the host checksum the
+	// caches cycle on does not move for a page change (#283).
 	pageSetDigest string
+	tree          pageIndex
 	// pageRenders coalesces concurrent cache-miss renders of one page cache
 	// key into one render, and pageMigrations makes at most one background
 	// stale-entry migration run per key (#285). Zero values are ready.

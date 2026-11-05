@@ -15,6 +15,7 @@ import (
 	"github.com/kdex-tech/host-manager/internal/utils"
 	"golang.org/x/text/language"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
+	"kdex.dev/crds/render"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -144,7 +145,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 	// only: text pages (robots.txt) never had a meaningful slash form, and a
 	// slash-terminated basePath is already its own slash form.
 	legacySlash := !strings.HasSuffix(basePath, "/") &&
-		(pr.ph.Page == nil || pr.ph.Page.MimeType == "")
+		pageModeOf(pr.ph.Page) != render.PageTypeText
 	label := pr.ph.Label()
 
 	// regFunc registers OpenAPI docs for one concrete route. lang is the
@@ -213,7 +214,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 		}
 
 		itemDesc := fmt.Sprintf("HTML page %s%s%s", l, utils.IfElse(pattern, " (pattern)", ""), langSuffix)
-		if pr.ph.Page.Rewrite != nil {
+		if pageModeOf(pr.ph.Page) == render.PageTypeRewrite {
 			itemDesc = op.Description
 		}
 
@@ -323,7 +324,7 @@ func (hh *HostHandler) addHandlerAndRegister(
 		// rewrite alias is not: its target may be a function streaming
 		// text/event-stream (see compressibleHandler).
 		handler := compressible(http.HandlerFunc(hh.pageHandlerFunc(pr.ph, translations, lang)))
-		if pr.ph.Page != nil && pr.ph.Page.Rewrite != nil {
+		if pageModeOf(pr.ph.Page) == render.PageTypeRewrite {
 			handler = hh.rewriteHandlerFunc(pr, lang, mux)
 		}
 
