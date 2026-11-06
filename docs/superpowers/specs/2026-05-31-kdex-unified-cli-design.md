@@ -1,7 +1,7 @@
 # `kdex` — Unified CLI Design Spec
 
 **Date:** 2026-05-31
-**Status:** Draft, pending implementation plan
+**Status:** Draft, pending implementation plan. Amended 2026-10-28 by [2026-10-28-kdex-dev-design.md](2026-10-28-kdex-dev-design.md): `kdex dev` (the former v2 `kdex preview --fn`) moves into v1, and that spec proposes that `kdex codegen go` wrap fngogen's now-importable pipeline instead of re-implementing it (its §9).
 **Repo:** kdex-tech/host-manager (in-tree alongside the existing operator binary)
 **Supersedes:** [2026-05-19-kcnas-preview-design.md](2026-05-19-kcnas-preview-design.md)
 
@@ -21,7 +21,7 @@ The unified `kdex` CLI addresses three developer-experience friction points acro
 ### v2 territory (out of v1 scope; named here to prevent feature creep)
 
 - `kdex codegen node` — defer until the first KDex Node function lands. No current usage of kdex-fnnodejsgen.
-- `kdex preview --fn name=URL` — proxy preview requests to a locally-running function process; closes the editor→browser SDLC loop.
+- ~~`kdex preview --fn name=URL` — proxy preview requests to a locally-running function process; closes the editor→browser SDLC loop.~~ Promoted to v1 as `kdex dev`; see [2026-10-28-kdex-dev-design.md](2026-10-28-kdex-dev-design.md).
 - `kdex package` — port of kdex-cli-tools (OCI artifact packaging).
 - Bash script-bundle tools (kdex-node-tools).
 
