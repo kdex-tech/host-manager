@@ -135,7 +135,10 @@ func TestUnauthorizedOAuth2PathReturns401Challenge(t *testing.T) {
 // with a realm challenge instead.
 func TestUnauthorizedBearerOnlyPathReturns401WithRealm(t *testing.T) {
 	h := newBearerOnlyHandler(t, "dev.knowdrive.ai", "/v1/admin")
-	req := httptest.NewRequest("GET", "/v1/admin", nil)
+	// The fixture declares POST on the basePath and nothing else, so the
+	// request has to use POST: an undeclared method is refused with 405 ahead
+	// of the gate and would never reach the challenge this test is about.
+	req := httptest.NewRequest("POST", "/v1/admin", nil)
 	req.Host = "dev.knowdrive.ai"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

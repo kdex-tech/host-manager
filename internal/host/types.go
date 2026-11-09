@@ -348,6 +348,13 @@ type KDexFunctionHandler struct {
 	// malformed. Such a route binds nothing: falling back to the same-named
 	// path parameter would bind a source the author did not declare.
 	invalidBindings map[string]struct{}
+	// declaredMethods maps a declared pattern to every method declared on it
+	// (plus HEAD wherever GET is declared). A request whose pattern is in this
+	// map but whose method is not is a route the function never declared: there
+	// are no requirements to apply to it, so it is REFUSED rather than admitted
+	// under the empty-requirements fall-through, which gated it on identity
+	// alone. An unmatched pattern is absent from the map and untouched by it.
+	declaredMethods map[string][]string
 	patternMux      *http.ServeMux
 	// acceptsAPIKey is set at handler-build time when at least one operation
 	// on the function's API declares an apiKey* security scheme (apiKeyCookie /

@@ -375,6 +375,11 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
 	bindingSpecs := make(map[string]bindingSpec)
 	invalidBindings := make(map[string]struct{})
+	// declaredMethods[pattern] is every method the function declares on that
+	// pattern. It is what makes an UNDECLARED method refusable: without it, the
+	// gate below could not tell "this route declares no requirements" from
+	// "this route was never declared at all", and answered both the same way.
+	declaredMethods := make(map[string][]string)
 
 	// acceptsAPIKey opts this function into the PASETO->authContext bridge when
 	// any operation declares an apiKey* security scheme. Per-function (not
@@ -392,6 +397,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				continue
 			}
 			key := method + " " + p
+			declaredMethods[p] = append(declaredMethods[p], method)
 
 			// Parse the binding declaration even when the op has no security
 			// block: a malformed declaration is an authoring error worth
@@ -420,11 +426,25 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		}
 	}
 
+	// RFC 9110 §9.3.2: a resource that supports GET supports HEAD. OpenAPI has
+	// no `head:` in practice, so a HEAD on a read route is answered rather than
+	// refused -- but it is answered UNDER THE GET OPERATION'S REQUIREMENTS, not
+	// on identity alone, which is what the fall-through used to give it. Reading
+	// a route's headers is reading the route.
+	for p, methods := range declaredMethods {
+		if slices.Contains(methods, http.MethodGet) && !slices.Contains(methods, http.MethodHead) {
+			methods = append(methods, http.MethodHead)
+		}
+		slices.Sort(methods)
+		declaredMethods[p] = methods
+	}
+
 	fh := &KDexFunctionHandler{
 		Function:           fn,
 		parsedRequirements: parsedRequirements,
 		bindingSpecs:       bindingSpecs,
 		invalidBindings:    invalidBindings,
+		declaredMethods:    declaredMethods,
 		patternMux:         patternMux,
 		acceptsAPIKey:      acceptsAPIKey,
 		issuer:             issuer,
@@ -603,9 +623,49 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			auth.EnrichAuthContext(ac, mapper)
 		}
 
+		// A method the function never declared carries no declared
+		// authorization, so there is nothing to enforce on it and nothing safe
+		// to fall back to. It used to take the empty-requirements path below --
+		// "allows access if identity matches" -- so any authenticated caller
+		// could POST, PUT, PATCH or DELETE a read-only route and be proxied to
+		// the backend with none of the route's own entitlements checked; a
+		// read grant was enough to reach a write method. The refusal is here,
+		// ahead of the gate, so it holds whether or not an authorization
+		// checker is configured, and the backend is never reached.
+		//
+		// This keys on a DECLARED pattern. A request matching no declared path
+		// is absent from the map and left exactly as it was; that
+		// fall-through is a separate question, because a subtree pass-through
+		// may be load-bearing for an existing function.
+		_, pattern := fh.patternMux.Handler(r)
+		if methods, declared := fh.declaredMethods[pattern]; declared && !slices.Contains(methods, r.Method) {
+			w.Header().Set("Allow", strings.Join(methods, ", "))
+			if r.Method == http.MethodOptions {
+				// OPTIONS is answered rather than refused: Allow is precisely
+				// what it asks for (RFC 9110 §9.3.7). It is still not proxied,
+				// so a backend that wants to answer its own OPTIONS -- a CORS
+				// preflight, say -- has to declare the operation.
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			log.V(1).Info("undeclared method refused",
+				"function", fn.Name, "method", r.Method, "pattern", pattern)
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed),
+				http.StatusMethodNotAllowed)
+			return
+		}
+
 		if authChecker != nil {
-			_, pattern := fh.patternMux.Handler(r)
 			key := r.Method + " " + pattern
+			if r.Method == http.MethodHead {
+				if _, ok := fh.parsedRequirements[key]; !ok {
+					// HEAD rides on GET (see the declaredMethods build), so it
+					// is verified against the GET operation's requirements --
+					// and its binding spec, keyed identically -- rather than
+					// falling through to empty ones.
+					key = http.MethodGet + " " + pattern
+				}
+			}
 			var reqs entitlements.ParsedRequirements
 			if pr, ok := fh.parsedRequirements[key]; ok {
 				reqs = pr
