@@ -153,8 +153,8 @@ type Config struct {
 // attenuation-safe (only ADDS mapped output, never removes a claim, and a
 // downscoped capability token carries no source claims to re-expand); fail-safe
 // (a mapping error leaves the context unchanged). ClaimMappings are the generic
-// enrichment mechanism; the exceptions are mintDecidedClaims, which a mapping
-// can neither change, add nor remove.
+// enrichment mechanism; the exceptions are the reserved claims
+// (sign.ReservedClaims), which a mapping can neither change, add nor remove.
 func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if mapper == nil || ac == nil {
 		return
@@ -163,37 +163,17 @@ func EnrichAuthContext(ac AuthContext, mapper *dmapper.Mapper) {
 	if err != nil {
 		return
 	}
-	kept := map[string]any{}
-	for _, claim := range mintDecidedClaims {
-		if v, had := ac[claim]; had {
-			kept[claim] = v
-		}
-	}
+	// A mapping never sets a reserved claim (sign.ReservedClaims): the
+	// credential decided it, and the gate, the revocation cutoff and the FAT
+	// all read it from here. That covers the mint-decided claims (auth_method
+	// and the subject kind, which roles are resolved with) and the context's
+	// own issue time, ClaimIssuedAt, which the subject-revocation cutoff
+	// compares (CredentialPredatesRevocation, #257). The proxy runs the
+	// function's rules here too, so without this a function author's rule
+	// could rename the caller or widen the FAT's audience (#211).
+	sign.DropReservedClaims(extra)
 	maps.Copy(ac, extra)
-	for _, claim := range mintDecidedClaims {
-		if v, had := kept[claim]; had {
-			ac[claim] = v
-		} else {
-			delete(ac, claim)
-		}
-	}
 }
-
-// mintDecidedClaims are the context claims the credential decides, not a
-// mapping: every claim the signer's mint decides (sign.MintDecidedClaims),
-// because the proxy projects the FAT from this context, plus the context's
-// own issue time. That is:
-//   - auth_method, as in sign.Signer.Project;
-//   - ClaimSubjectKind, which roles are resolved with: a mapping that set it
-//     to User on a client's context would grant it every [User] binding
-//     (kdex-tech/host-manager#255);
-//   - ClaimIssuedAt, which the subject-revocation cutoff compares
-//     (CredentialPredatesRevocation, kdex-tech/host-manager#257). The signer
-//     stamps iat itself on every token, so it is not on the signer's list.
-//
-// Built from the signer's list, so a mint-decided claim added there cannot
-// stay mapper-writable here.
-var mintDecidedClaims = append(sign.MintDecidedClaims(), ClaimIssuedAt)
 
 type ConfigBuilder struct {
 	APITokenManagerLoader  func() (*apitoken.TokenManager, error)
@@ -329,6 +309,7 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 
 		var mapper *dmapper.Mapper
 		if len(auth.ClaimMappings) > 0 {
+			sign.WarnReservedTargets(auth.ClaimMappings, "source", "KDexHost spec.auth.claimMappings")
 			mapper, err = dmapper.NewMapper(auth.ClaimMappings)
 			if err != nil {
 				return nil, err

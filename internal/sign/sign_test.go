@@ -500,15 +500,6 @@ func TestSigner_SignProjected_RefusesNonExpiringToken(t *testing.T) {
 	}
 }
 
-// The real route to a non-expiring token: a host ClaimMappings rule that
-// writes exp. The mapper runs in Project, so Sign must refuse it too.
-func TestSigner_Sign_RefusesClaimMappingThatZeroesExp(t *testing.T) {
-	s := testSignerWithMapper(t, []dmapper.MappingRule{{SourceExpression: "0", TargetPropPath: "exp"}})
-	tok, err := s.Sign(jwt.MapClaims{"sub": "user-42"})
-	assert.ErrorIs(t, err, sign.ErrNonExpiringToken)
-	assert.Empty(t, tok)
-}
-
 // TestSigner_Project_CarriesAuthMethod pins that auth_method, the login method
 // a token was minted for, is a signed claim. The DCR consent gate tells a
 // person's browser session from an OAuth client's token by it, so a token that

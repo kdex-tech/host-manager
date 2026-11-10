@@ -141,6 +141,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	// merges bridge-resolved grants never runs at FAT mint and the grant is
 	// dropped by the projection allowlist. See kdex-tech/host-manager#138.
 	var mapper *dmapper.Mapper
+	// The host's own rules were reported when its auth config was built.
+	sign.WarnReservedTargets(fn.Spec.ClaimMappings, "source", "KDexFunction spec.claimMappings", "function", fn.Name)
 	claimMappings := append(slices.Clone(hh.authConfig.ClaimMappings), fn.Spec.ClaimMappings...)
 	if len(claimMappings) > 0 {
 		mapper, err = dmapper.NewMapper(claimMappings)

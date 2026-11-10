@@ -96,16 +96,16 @@ func TestSigner_Project_ClaimMappingsReplaceNarrows(t *testing.T) {
 }
 
 // TestSigner_Project_MapperSeesOutboundAudience pins that a claimMappings rule
-// targeting aud builds on the audience THIS token carries, never the inbound
-// context's. On the FAT path the signing context is the caller's host session
-// (aud = the host); under list accumulation a rule writing aud would otherwise
-// union the host audience into the FAT, letting it be replayed against the
-// host. Project already treats sub/iss/aud as authoritative; the mapper must
-// see those outbound values. See kdex-tech/host-manager#229 final review.
+// reads the audience THIS token carries, never the inbound context's. On the
+// FAT path the signing context is the caller's host session (aud = the host);
+// a rule that read aud and wrote it anywhere would otherwise carry the host
+// audience into the FAT. Project treats sub/iss/aud as authoritative, so the
+// mapper sees those outbound values -- and since #211 it cannot write aud at
+// all. See kdex-tech/host-manager#229 final review.
 func TestSigner_Project_MapperSeesOutboundAudience(t *testing.T) {
 	s := testSignerWithMapper(t, []dmapper.MappingRule{{
-		SourceExpression: "['https://peer']",
-		TargetPropPath:   "aud",
+		SourceExpression: "self.aud",
+		TargetPropPath:   "seen_aud",
 	}})
 	p, err := s.Project(jwt.MapClaims{
 		"sub": "alice",
@@ -113,7 +113,7 @@ func TestSigner_Project_MapperSeesOutboundAudience(t *testing.T) {
 		"aud": []any{"https://host"},
 	})
 	require.NoError(t, err)
-	aud := asStrings(t, p["aud"])
-	assert.NotContains(t, aud, "https://host", "the inbound host audience must never reach a projected token")
-	assert.Equal(t, []string{"aud-test", "https://peer"}, aud)
+	assert.Equal(t, []string{"aud-test"}, asStrings(t, p["seen_aud"]),
+		"the mapper must see the outbound audience, never the inbound host one")
+	assert.Equal(t, []string{"aud-test"}, asStrings(t, p["aud"]))
 }

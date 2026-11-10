@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/kdex-tech/dmapper"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
+	"github.com/kdex-tech/host-manager/internal/sign"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -623,6 +625,43 @@ func TestEnrichAuthContext(t *testing.T) {
 		EnrichAuthContext(ac, setter)
 		assert.NotContains(t, ac, ClaimIssuedAt)
 	})
+
+	// The proxy enriches the caller's context with the host AND the
+	// function's claimMappings before the gate and the FAT read it, so a
+	// function author's rule that wrote sub, aud or scope here would rename
+	// the caller or widen what the FAT is good for. Every reserved claim is
+	// the mint's, as in sign.Signer.Project (kdex-tech/host-manager#211).
+	t.Run("a mapping cannot change, add or remove a reserved claim", func(t *testing.T) {
+		for _, claim := range sign.ReservedClaims() {
+			for _, target := range []string{claim, claim + ".nested"} {
+				t.Run(target, func(t *testing.T) {
+					setter, err := dmapper.NewMapper([]dmapper.MappingRule{
+						{SourceExpression: `"forged"`, TargetPropPath: target},
+						{SourceExpression: `["pages:a:read"]`, TargetPropPath: "entitlements"},
+					})
+					require.NoError(t, err)
+
+					ac := AuthContext{"sub": "alice", "aud": []any{"https://host"}, "scope": "openid"}
+					want := maps.Clone(ac)
+					EnrichAuthContext(ac, setter)
+					assert.Equal(t, want[claim], ac[claim], "a mapping must not set %s", target)
+					assert.Equal(t, []string{"pages:a:read"}, claimStrings(ac["entitlements"]),
+						"the rule beside it still applies")
+				})
+			}
+		}
+	})
+}
+
+// expiredToken signs a session token for claims that expired a minute ago. A
+// claimMappings rule can no longer write exp (#211), so the expiry goes on the
+// projection, which SignProjected lets have the last word on it.
+func expiredToken(t *testing.T, cfg *Config, claims jwt.MapClaims) (string, error) {
+	t.Helper()
+	projected, err := cfg.Signer.Project(claims)
+	require.NoError(t, err)
+	projected["exp"] = time.Now().Add(-time.Minute).Unix()
+	return cfg.Signer.SignProjected(projected)
 }
 
 // authCookieCleared reports whether the response clears the named cookie
@@ -836,16 +875,8 @@ func TestConfig_AddAuthentication(t *testing.T) {
 		{
 			name: "authentication - Cookie token expired",
 			args: testargs{
-				c: nil,
-				auth: &kdexv1alpha1.Auth{
-					ClaimMappings: []dmapper.MappingRule{
-						{
-							SourceExpression: "-1",
-							TargetPropPath:   "exp",
-							Required:         true,
-						},
-					},
-				},
+				c:         nil,
+				auth:      &kdexv1alpha1.Auth{},
 				namespace: "foo",
 				devMode:   true,
 			},
@@ -858,7 +889,7 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/foo", http.NoBody)
 
-				token, err := got.Signer.Sign(jwt.MapClaims{
+				token, err := expiredToken(t, got, jwt.MapClaims{
 					"sub":   "foo",
 					"email": "foo@foo.bar",
 					"iss":   got.Issuer,
@@ -877,12 +908,8 @@ func TestConfig_AddAuthentication(t *testing.T) {
 		{
 			name: "authentication - #141 expired cookie lets authorize redirect to login not root",
 			args: testargs{
-				c: nil,
-				auth: &kdexv1alpha1.Auth{
-					ClaimMappings: []dmapper.MappingRule{
-						{SourceExpression: "-1", TargetPropPath: "exp", Required: true},
-					},
-				},
+				c:         nil,
+				auth:      &kdexv1alpha1.Auth{},
 				namespace: "foo",
 				devMode:   true,
 			},
@@ -900,11 +927,11 @@ func TestConfig_AddAuthentication(t *testing.T) {
 				w := httptest.NewRecorder()
 				r := httptest.NewRequest("GET", "/-/oauth/authorize?client_id=mcp&response_type=code", http.NoBody)
 
-				token, err := got.Signer.Sign(jwt.MapClaims{
+				token, err := expiredToken(t, got, jwt.MapClaims{
 					"sub": "foo", "iss": got.Issuer, "aud": got.Audience,
 				})
 				assert.Nil(t, err)
-				r.Header.Set(COOKIE, "auth_token="+token) // expired via the exp=-1 mapping
+				r.Header.Set(COOKIE, "auth_token="+token)
 
 				handler.ServeHTTP(w, r)
 

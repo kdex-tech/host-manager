@@ -51,9 +51,9 @@ const ClaimIssuedAt = "iat"
 // carried from then on. Only the host sets it: a mint, and a context built
 // from a credential the host issued, from the kind that credential records
 // (Exchanger.PATAuthContext from a PAT, TransferGet from a /-/transfer/
-// link's record). No claim from outside sets it: it is in mintDecidedClaims
-// and reservedMintClaims, stripped from an upstream id_token, and re-asserted
-// by the signer after claimMappings. Exchanger.ContextSubjectKind reads it.
+// link's record). No claim from outside sets it: it is reserved
+// (sign.ReservedClaims), so it is stripped from an upstream id_token and
+// dropped from every claimMappings result. Exchanger.ContextSubjectKind reads it.
 // See kdex-tech/host-manager#255.
 const ClaimSubjectKind = sign.ClaimSubjectKind
 

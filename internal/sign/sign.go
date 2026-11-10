@@ -12,6 +12,7 @@ import (
 	"math"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -58,9 +59,10 @@ var signerLog = logf.Log.WithName("signer")
 // that never expires: `exp` missing, null, non-numeric, or zero. golang-jwt
 // reads `exp: 0` as absent, and a verifier without WithExpirationRequired
 // accepts an absent `exp` forever. The signer's default exp can only be lost
-// this way through a projection override -- in practice a host ClaimMappings
-// rule that writes `exp`. A past exp is NOT refused: an already-expired token
-// is harmless. See kdex-tech/host-manager#227.
+// this way through a projection a caller built and handed to SignProjected; a
+// claimMappings rule cannot write `exp` (it is reserved, #211). A past exp is
+// NOT refused: an already-expired token is harmless. See
+// kdex-tech/host-manager#227.
 var ErrNonExpiringToken = errors.New("refusing to sign a token that never expires: `exp` is missing, null, non-numeric or zero")
 
 var ErrSubjectlessCredential = errors.New(
@@ -105,6 +107,63 @@ var projectedClaims = append(slices.Clone(mintDecidedClaims),
 func MintDecidedClaims() []string {
 	return slices.Clone(mintDecidedClaims)
 }
+
+// reservedClaims are the claims the mint and the signer control
+// authoritatively. A credential store, a backend lookup and a claimMappings
+// rule may supplement ANY other claim -- that is the feature -- but never
+// these: the JWT envelope (sub/iss/aud and the mint-time exp/nbf/iat/jti),
+// the auth-flow claims (scope/scp, grant_type, the identity provider and the
+// RFC 8693 delegation actor) and every mint-decided claim. The
+// KDexHostExtension admission rule refuses the same targets.
+// See kdex-tech/host-manager#140 and #211.
+var reservedClaims = append([]string{
+	"sub", claimIssuer, "aud", "exp", "nbf", "iat", "jti",
+	"scope", "scp", "grant_type", "idp", "act",
+}, mintDecidedClaims...)
+
+// claimIssuer is the JWT issuer claim, which Project sets authoritatively.
+const claimIssuer = "iss"
+
+// ReservedClaims returns a copy of the claims nothing but the mint may set.
+func ReservedClaims() []string {
+	return slices.Clone(reservedClaims)
+}
+
+// DropReservedClaims deletes every reserved claim from a claimMappings
+// result, so whatever the mapping's input held for it stands. A mapper's
+// result is keyed by each rule's top-level target, so a rule writing beneath
+// a reserved claim (act.sub) is dropped with it.
+func DropReservedClaims(mapped map[string]any) {
+	for _, claim := range reservedClaims {
+		delete(mapped, claim)
+	}
+}
+
+// ReservedTargets returns the targetPropPath of every rule that writes a
+// reserved claim or beneath one -- the rules DropReservedClaims will discard.
+func ReservedTargets(rules []dmapper.MappingRule) []string {
+	var targets []string
+	for _, rule := range rules {
+		top, _, _ := strings.Cut(rule.TargetPropPath, ".")
+		if slices.Contains(reservedClaims, top) {
+			targets = append(targets, rule.TargetPropPath)
+		}
+	}
+	return targets
+}
+
+// WarnReservedTargets logs, once per call, the rules among these that write a
+// reserved claim. Call it where a mapper is built from configuration: the
+// mint drops such a rule's output on every token, and this is where an
+// operator learns why it has no effect. keysAndValues name the configuration.
+func WarnReservedTargets(rules []dmapper.MappingRule, keysAndValues ...any) {
+	if targets := ReservedTargets(rules); len(targets) > 0 {
+		signerLog.Error(errReservedTarget, "claimMappings rules target a reserved claim and have no effect",
+			append([]any{"targets", targets, "reserved", reservedClaims}, keysAndValues...)...)
+	}
+}
+
+var errReservedTarget = errors.New("a claimMappings rule may not set a claim the mint decides")
 
 type Signer struct {
 	audience   string
@@ -205,9 +264,9 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	}
 
 	projected := jwt.MapClaims{
-		"sub": sub,
-		"iss": s.issuer,
-		"aud": []string{s.audience},
+		"sub":       sub,
+		claimIssuer: s.issuer,
+		"aud":       []string{s.audience},
 	}
 
 	// custom claims
@@ -260,22 +319,20 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 		// into the FAT (dmapper unions list targets by default), making it
 		// replayable against the host. See kdex-tech/host-manager#229.
 		mapperInput := maps.Clone(signingContext)
-		maps.Copy(mapperInput, jwt.MapClaims{"sub": projected["sub"], "iss": projected["iss"], "aud": projected["aud"]})
+		maps.Copy(mapperInput, jwt.MapClaims{"sub": projected["sub"], claimIssuer: projected[claimIssuer], "aud": projected["aud"]})
 		extra, err := s.mapper.Execute(mapperInput)
 		if err != nil {
 			return nil, fmt.Errorf("failed to map claims: %w", err)
 		}
 
+		// The mint decides the reserved claims, never a claimMappings rule: a
+		// host or KDexFunction rule that wrote aud would make a FAT
+		// replayable against the host, and one that wrote sub would rename
+		// the caller. Every mint-decided claim is reserved, and was copied
+		// from the signing context above, so it stands as the mint set it.
+		// See kdex-tech/host-manager#211.
+		DropReservedClaims(extra)
 		maps.Copy(projected, extra)
-
-		// The mint decides these, never a claimMappings rule.
-		for _, claim := range mintDecidedClaims {
-			if v, ok := signingContext[claim]; ok {
-				projected[claim] = v
-			} else {
-				delete(projected, claim)
-			}
-		}
 	}
 
 	// Compact the entitlements claim before it is signed. Role flattening (a
@@ -358,7 +415,7 @@ func (s *Signer) SignProjected(projected jwt.MapClaims) (string, error) {
 	// The projection had the last word on exp; make sure it still expires.
 	if !expires(outboundClaims["exp"]) {
 		signerLog.Error(ErrNonExpiringToken,
-			"refusing to sign; check the host's claimMappings for a rule that writes `exp`",
+			"refusing to sign a projection whose exp never expires",
 			"exp", outboundClaims["exp"], "issuer", s.issuer, "audience", s.audience)
 		return "", ErrNonExpiringToken
 	}

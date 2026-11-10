@@ -2017,36 +2017,18 @@ func (e *Exchanger) subjectSigningContext(subject string, bs BindingSubject) (ro
 	return roles, entitlements, e.ResolveSubjectClaims(subject), nil
 }
 
-// reservedMintClaims are claims the mint and signer control authoritatively; the
-// authoritative user store (ResolveClaims / FindInternal) and ClaimMappings may
-// supplement ANY other claim (roles, entitlements, email, custom
-// …) — that is the feature — but must never set these. They split into
-// auth-flow / identity claims (a backend-supplied `scope` would hijack scope
-// confinement, `sub`/`idp` would rebind identity) and server-controlled mint-time
-// values (`iat`/`exp`/`jti`/…). See kdex-tech/host-manager#140 (review hardening).
-//
-// Every claim the mint decides (sign.MintDecidedClaims) is reserved too, from
-// that one list: `auth_method`, which the DCR consent gate trusts, and the
-// subject's kind (#255), which chooses the KDexRoleBindings a credential
-// gets, so a backend, an IdP snapshot or a stored claim must never set it.
+// reservedMintClaims are the claims the mint and signer control
+// authoritatively (sign.ReservedClaims): the authoritative user store
+// (ResolveClaims / FindInternal), a data-driven backend Lookup and
+// ClaimMappings may supplement ANY other claim (roles, entitlements, email,
+// custom ...) -- that is the feature -- but never these. A backend-supplied
+// `scope` would hijack scope confinement, `sub`/`idp` would rebind identity,
+// `act` would stamp a delegation actor, and `iat`/`exp`/`jti`/... are mint-time
+// values. The signer drops the same claims from claimMappings output (#211).
+// See kdex-tech/host-manager#140 and the #206 quad (SEC-2).
 var reservedMintClaims = func() map[string]struct{} {
-	reserved := map[string]struct{}{
-		"scope": {}, "scp": {}, "sub": {}, "grant_type": {}, "idp": {},
-		"iat": {}, "exp": {}, "jti": {}, "iss": {}, "aud": {}, "nbf": {},
-		// `act` is the RFC 8693 delegation-actor claim, set authoritatively by the
-		// token-exchange mint. Reserving it stops a data-driven backend Lookup response
-		// (the attacker-influenceable path, e.g. via JIT provisioning) from stamping a
-		// delegation actor onto a token, since mergeBackendClaims skips reserved claims.
-		// NOTE: this does NOT constrain a host ClaimMappings rule -- sign.Signer.Project
-		// applies the mapper output last and does not consult reservedMintClaims (the
-		// same pre-existing property that lets a mapper override sub/iss/aud). Filtering
-		// the mapper output against reserved claims in Project is tracked separately;
-		// the mint-decided claims are already re-asserted there, since the DCR consent
-		// gate and role resolution trust them.
-		// See the #206 quad (SEC-2) and its re-review (RR-2).
-		"act": {},
-	}
-	for _, claim := range sign.MintDecidedClaims() {
+	reserved := map[string]struct{}{}
+	for _, claim := range sign.ReservedClaims() {
 		reserved[claim] = struct{}{}
 	}
 	return reserved

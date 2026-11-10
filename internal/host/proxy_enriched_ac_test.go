@@ -185,3 +185,35 @@ func TestProxy_PATBridge_EnrichmentAccumulatesHostAndFunctionMappings(t *testing
 }
 
 func (c *recordingAuthChecker) HoldsScope(context.Context, string) bool { return false }
+
+// TestProxy_FunctionClaimMappingCannotWidenOrRenameTheFAT pins
+// kdex-tech/host-manager#211 end to end. A KDexFunction author writes the
+// function's claimMappings; a rule that added the HOST audience to the FAT would
+// let that function's backend replay every caller's FAT against the host, and
+// one that wrote sub would rename the caller. Both are dropped, on the enriched
+// context and on the FAT, while the author's ordinary rule still applies.
+func TestProxy_FunctionClaimMappingCannotWidenOrRenameTheFAT(t *testing.T) {
+	fn := apiKeySecuredFunction("/v1/api", true)
+	fn.Spec.ClaimMappings = []dmapper.MappingRule{
+		{SourceExpression: `["` + apitokenBridgeHostAudience + `"]`, TargetPropPath: "aud"},
+		{SourceExpression: `"mallory"`, TargetPropPath: "sub"},
+		{SourceExpression: `["resource:fn-mapped:all"]`, TargetPropPath: "entitlements"},
+	}
+	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
+	handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
+
+	token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "scope:abc", time.Hour)
+	require.NoError(t, err)
+	req := httptest.NewRequest("GET", "/v1/api", nil)
+	req.AddCookie(&http.Cookie{Name: "X-API-TOKEN", Value: token})
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	claims := decodeFAT(t, *fatHeader)
+	aud, err := claims.GetAudience()
+	require.NoError(t, err)
+	assert.Equal(t, jwt.ClaimStrings{fatAudienceFor(fn)}, aud,
+		"a function rule must not add the host audience to its FAT")
+	assert.Equal(t, "api-bob", claims["sub"], "a function rule must not rename the caller")
+	assert.Contains(t, stringSliceFromClaim(claims["entitlements"]), "resource:fn-mapped:all",
+		"the author's ordinary rule still applies")
+}
