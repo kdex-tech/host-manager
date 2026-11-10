@@ -47,6 +47,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	// +kubebuilder:scaffold:imports
 )
@@ -161,7 +162,11 @@ var _ = BeforeSuite(func() {
 			Logger: logger,
 		},
 		Logger: logger,
-		Scheme: scheme.Scheme,
+		// No metrics server: nothing reads it, and its default :8080 collides
+		// with anything else on the machine using that port -- including a
+		// second module's suite run in parallel -- failing every spec.
+		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:  scheme.Scheme,
 	})
 	Expect(err).NotTo(HaveOccurred())
 
