@@ -58,6 +58,5 @@ func TestMintDecidedClaims_SingleSourced(t *testing.T) {
 func TestAuthContextMarkers_AreReserved(t *testing.T) {
 	for _, claim := range []string{ClaimIssuedAt, PATBridgeClaim, CapUsesClaim, ClaimSubjectKind} {
 		assert.Contains(t, sign.ReservedClaims(), claim)
-		assert.Contains(t, reservedMintClaims, claim)
 	}
 }

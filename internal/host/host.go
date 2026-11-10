@@ -982,7 +982,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 			Description: "Stateless API Token in 'api_token' query parameter",
 			Type:        "apiKey",
 			In:          "query",
-			Name:        "api_token",
+			Name:        apiTokenQueryParam,
 		},
 	}
 

@@ -19,7 +19,7 @@ import (
 // so admission refuses exactly what the mint drops.
 func TestReservedClaims_AreTheAdmissionRulesTargets(t *testing.T) {
 	assert.ElementsMatch(t, kdexv1alpha1.ReservedClaimTargets(), sign.ReservedClaims())
-	for _, c := range append(sign.MintDecidedClaims(), sign.ClaimSubjectKind) {
+	for _, c := range sign.MintDecidedClaims() {
 		assert.Contains(t, sign.ReservedClaims(), c, "every mint-decided claim is reserved")
 	}
 }

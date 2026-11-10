@@ -31,11 +31,11 @@ func (c *CookieIDTokenStore) Set(w http.ResponseWriter, r *http.Request, rawIDTo
 		MaxAge:   int(c.TTL.Seconds()),
 	}
 
-	return c.encryptAndSplit(w, r, hintName, rawIDToken, options)
+	return c.encryptAndSplit(w, r, HintCookieName, rawIDToken, options)
 }
 
 func (c *CookieIDTokenStore) Get(r *http.Request) (string, error) {
-	return c.getAndDecryptToken(r, hintName)
+	return c.getAndDecryptToken(r, HintCookieName)
 }
 
 func NewCookieIDTokenStore(blockKey string, ttl time.Duration) IDTokenStore {

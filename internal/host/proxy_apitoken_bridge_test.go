@@ -63,8 +63,9 @@ const apitokenBridgeHostAudience = "https://api-host.example.com"
 
 // apitokenBridgeFixture builds a HostHandler + reverse-proxy handler for a
 // function and returns the handler plus a TokenManager minting tokens the host
-// will accept. The upstream echoes back the inbound Authorization (FAT) and the
-// preserved X-API-TOKEN cookie so the test can inspect what the function sees.
+// will accept. The upstream echoes back the inbound Authorization (FAT) and any
+// API token that reached it -- as the X-API-TOKEN cookie or header, or the
+// api_token query -- so the test can inspect what the function sees.
 func apitokenBridgeFixture(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp auth.InternalIdentityProvider, checker ...testAuthChecker) (http.Handler, *apitoken.TokenManager, *string, *string) {
 	t.Helper()
 	return apitokenBridgeFixtureWith(t, fn, idp, enrichmentClaimMapping(), checker...)
@@ -89,6 +90,12 @@ func apitokenBridgeFixtureFor(t *testing.T, fn *kdexv1alpha1.KDexFunction, idp a
 		*fatHeader = r.Header.Get("Authorization")
 		if c, err := r.Cookie("X-API-TOKEN"); err == nil {
 			*apiTokenCookie = c.Value
+		}
+		if h := r.Header.Get("X-API-TOKEN"); h != "" {
+			*apiTokenCookie = h
+		}
+		if q := r.URL.Query().Get("api_token"); q != "" {
+			*apiTokenCookie = q
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -176,7 +183,8 @@ func decodeFAT(t *testing.T, header string) jwt.MapClaims {
 // kdex-tech/host-manager#103: a valid PASETO X-API-TOKEN on an apiKey-declaring
 // function is bridged into authContext, the proxy mints a FAT carrying the
 // subject's resolved roles/entitlements (plus the token's static scope), and
-// the raw PASETO is still forwarded to the backend.
+// the FAT replaces the raw PASETO: forwarded beside it, the backend could replay
+// the host-audience token as the caller.
 func TestProxy_APITokenBridge_MintsFAT(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
@@ -196,7 +204,7 @@ func TestProxy_APITokenBridge_MintsFAT(t *testing.T) {
 	assert.Contains(t, jwtClaimsToString(t, claims), "functions:read",
 		"FAT must carry the subject's resolved entitlements")
 	assert.Equal(t, "scope:abc", claims["scp"], "FAT must preserve the token's static scope")
-	assert.Equal(t, token, *apiTokenCookie, "raw PASETO must still be forwarded to the backend")
+	assert.Empty(t, *apiTokenCookie, "the raw PASETO must not reach a backend that has the FAT")
 }
 
 // TestProxy_APITokenBridge_HeaderAndQuery verifies the bridge accepts the token
@@ -207,23 +215,25 @@ func TestProxy_APITokenBridge_HeaderAndQuery(t *testing.T) {
 
 	t.Run("header", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
-		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
+		handler, tm, fatHeader, apiToken := apitokenBridgeFixture(t, fn, idp)
 		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api", nil)
 		req.Header.Set("X-API-TOKEN", token)
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 		assert.Equal(t, "api-bob", decodeFAT(t, *fatHeader)["sub"])
+		assert.Empty(t, *apiToken, "the header must not reach a backend that has the FAT")
 	})
 
 	t.Run("query", func(t *testing.T) {
 		fn := apiKeySecuredFunction("/v1/api", true)
-		handler, tm, fatHeader, _ := apitokenBridgeFixture(t, fn, idp)
+		handler, tm, fatHeader, apiToken := apitokenBridgeFixture(t, fn, idp)
 		token, err := tm.MintStatelessKey(apitokenBridgeHostAudience, "api-bob", "User", "act", "s", time.Hour)
 		require.NoError(t, err)
 		req := httptest.NewRequest("GET", "/v1/api?api_token="+token, nil)
 		handler.ServeHTTP(httptest.NewRecorder(), req)
 		assert.Equal(t, "api-bob", decodeFAT(t, *fatHeader)["sub"])
+		assert.Empty(t, *apiToken, "the query parameter must not reach a backend that has the FAT")
 	})
 }
 
@@ -261,7 +271,8 @@ func TestProxy_APITokenBridge_InvalidToken(t *testing.T) {
 
 // TestProxy_APITokenBridge_JWTWins verifies JWT precedence on mixed-token
 // requests: when WithAuthentication already populated authContext, the bridge
-// no-ops (the FAT carries the JWT subject) while the raw PASETO still forwards.
+// no-ops (the FAT carries the JWT subject), and the PASETO does not reach the
+// backend beside it.
 func TestProxy_APITokenBridge_JWTWins(t *testing.T) {
 	fn := apiKeySecuredFunction("/v1/api", true)
 	idp := stubInternalIdentityProvider{roles: []string{"api-role"}, ents: []string{"functions:read"}}
@@ -279,5 +290,5 @@ func TestProxy_APITokenBridge_JWTWins(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	assert.Equal(t, "jwt-alice", decodeFAT(t, *fatHeader)["sub"], "JWT identity must win over PASETO")
-	assert.Equal(t, token, *apiTokenCookie, "raw PASETO must still be forwarded alongside the JWT-derived FAT")
+	assert.Empty(t, *apiTokenCookie, "the raw PASETO must not reach the backend beside the JWT-derived FAT")
 }

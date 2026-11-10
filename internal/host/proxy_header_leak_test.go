@@ -226,3 +226,63 @@ func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
 	}
 	assert.Equal(t, "dark", claims["theme"], "a cookie that is not a host credential still maps")
 }
+
+// The API token travels as a header too, and the header snapshot is what a
+// `self.headers` rule reads: it must not carry the token any more than the
+// cookie jar does.
+func TestProxy_FATDoesNotLeakTheAPITokenHeader(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+
+	var fatHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fatHeader = r.Header.Get("Authorization")
+	}))
+	t.Cleanup(upstream.Close)
+
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-header-leak", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/leak"},
+			ClaimMappings: []dmapper.MappingRule{
+				{SourceExpression: `self.headers["X-Api-Token"][0]`, TargetPropPath: "leak_api_token"},
+			},
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
+	}
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	var signerKey crypto.Signer = priv
+	cacheManager, _ := cache.NewCacheManager("", "api-token-header-leak-test", nil)
+	hh := &HostHandler{
+		log:          logr.Discard(),
+		cacheManager: cacheManager,
+		authConfig: &auth.Config{
+			CookieName: "auth_token",
+			ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
+		},
+	}
+	handler := hh.reverseProxyHandler(fn, "https://test-host.example.com")
+
+	req := httptest.NewRequest("GET", "/v1/leak", nil).WithContext(
+		auth.SetAuthContext(t.Context(), auth.AuthContext{"sub": "alice"}))
+	req.Header.Set("X-API-TOKEN", "API-TOKEN-HEADER")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.True(t, strings.HasPrefix(fatHeader, "Bearer "), "upstream did not receive a FAT")
+	parsed, _, err := jwt.NewParser().ParseUnverified(strings.TrimPrefix(fatHeader, "Bearer "), jwt.MapClaims{})
+	require.NoError(t, err)
+	assert.NotContains(t, jwtClaimsToString(t, parsed.Claims.(jwt.MapClaims)), "API-TOKEN-HEADER")
+}
+
+func TestWithoutQueryParam(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                              "",
+		"api_token=x":                   "",
+		"a=1&api_token=x&b=%2F":         "a=1&b=%2F",
+		"api%5Ftoken=x&api_token=y&c=3": "c=3",
+		"api_tokens=x&b":                "api_tokens=x&b",
+	} {
+		assert.Equal(t, want, withoutQueryParam(in, "api_token"), in)
+	}
+}

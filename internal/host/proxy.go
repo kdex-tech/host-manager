@@ -99,7 +99,7 @@ func extractAPIToken(r *http.Request) string {
 	if h := r.Header.Get(apiTokenName); h != "" {
 		return h
 	}
-	if q := r.URL.Query().Get("api_token"); q != "" {
+	if q := r.URL.Query().Get(apiTokenQueryParam); q != "" {
 		return q
 	}
 	return ""
@@ -144,10 +144,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	var mapper *dmapper.Mapper
 	// The host's session cookie name, which its other credential cookies are
 	// named from; see hostCredentialCookie.
-	sessionCookie := ""
-	if hh.authConfig != nil {
-		sessionCookie = hh.authConfig.CookieName
-	}
+	sessionCookie := hh.authConfig.CookieName
 
 	// The host's own rules were reported when its auth config was built.
 	sign.WarnReservedTargets(fn.Spec.ClaimMappings, "source", "KDexFunction spec.claimMappings", "function", fn.Name)
@@ -219,6 +216,10 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// This copies the encoded query string (e.g., ?user=123&sort=asc)
 			preq.Out.URL.RawQuery = preq.In.URL.RawQuery
 
+			// fatAttached reports whether the backend gets a FAT for this
+			// caller, which then stands in for every credential the caller
+			// presented to the host.
+			fatAttached := false
 			authContext, isLoggedIn := auth.GetAuthContext(preq.In.Context())
 			if isLoggedIn {
 				cookies := map[string]any{}
@@ -243,13 +244,14 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					// extract `self.headers.<name>`. Specifically:
 					//   - Authorization: the user's host-audience token
 					//   - Cookie: the user's whole session cookie jar
+					//   - X-Api-Token: the caller's API token
 					//   - X-Forwarded-*: attacker-spoofable on the
 					//     inbound request (SetXForwarded appends the
 					//     true chain to preq.Out, but the snapshot here
 					//     is preq.In and runs before that).
 					// See kdex-tech/host-manager#90.
 					canonical := http.CanonicalHeaderKey(key)
-					if canonical == "Authorization" || canonical == "Cookie" || canonical == "Set-Cookie" {
+					if canonical == "Authorization" || canonical == "Cookie" || canonical == "Set-Cookie" || canonical == apiTokenHeader {
 						continue
 					}
 					if strings.HasPrefix(canonical, "X-Forwarded-") || canonical == "Forwarded" {
@@ -267,6 +269,10 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// (Traceparent, X-Request-Id, If-None-Match, …) that invalidate
 				// the cache on every call in OTel-instrumented call paths. See
 				// kdex-tech/host-manager#37.
+				// Only a FAT reaches the backend as Authorization: should
+				// minting fail, the caller's own host-audience bearer must not
+				// go in its place.
+				preq.Out.Header.Del("Authorization")
 				projected, err := signer.Project(jwt.MapClaims(authContext))
 				if err != nil {
 					log.Error(err, "failed to project claims")
@@ -275,6 +281,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 					if token, exists, isCurrent, _ := tokenCache.Get(preq.In.Context(), tokenKey); exists && isCurrent {
 						preq.Out.Header.Set("Authorization", "Bearer "+token)
+						fatAttached = true
 					} else {
 						token, err := signer.SignProjected(projected)
 						if err != nil {
@@ -284,6 +291,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 								log.Error(err, "failed to set token in cache")
 							}
 							preq.Out.Header.Set("Authorization", "Bearer "+token)
+							fatAttached = true
 						}
 					}
 				}
@@ -291,12 +299,21 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				preq.Out.Header.Del("Authorization")
 			}
 
-			// Delete all cookies but preserve X-API-TOKEN
+			// Delete all cookies but preserve X-API-TOKEN, unless the caller
+			// has a FAT. A bridged API token is a host-audience credential:
+			// forwarded beside the FAT minted from it, the backend could
+			// replay it at the host, or at any other function, as the caller.
+			// Functions accept only the FAT (fngogen#18), so once there is one
+			// the token goes from all three places it can travel.
 			apiTokenCookie, err := preq.In.Cookie(apiTokenName)
-			if err == nil && apiTokenCookie != nil && apiTokenCookie.Value != "" {
+			if !fatAttached && err == nil && apiTokenCookie != nil && apiTokenCookie.Value != "" {
 				preq.Out.Header.Set("Cookie", apiTokenCookie.String())
 			} else {
 				preq.Out.Header.Del("Cookie")
+			}
+			if fatAttached {
+				preq.Out.Header.Del(apiTokenName)
+				preq.Out.URL.RawQuery = withoutQueryParam(preq.Out.URL.RawQuery, apiTokenQueryParam)
 			}
 
 			// 4. Standard Proxy Headers
@@ -527,10 +544,12 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// could POST, PUT, PATCH or DELETE a read-only route and be proxied to
 		// the backend with none of the route's own entitlements checked; a
 		// read grant was enough to reach a write method. The refusal comes
-		// first, ahead of authentication and the gate: it depends only on the
-		// pattern and the method, so it holds whether or not an authorization
-		// checker is configured, no token is validated and no mapper is run
-		// for it, and the backend is never reached.
+		// first, ahead of the API-token bridge, the claimMappings enrichment and
+		// the gate: it depends only on the pattern and the method, so it holds
+		// whether or not an authorization checker is configured, the bridge
+		// and the mapper never run for it, and the backend is never reached.
+		// (A session or capability JWT was already verified by the outer
+		// authentication middleware, which also spends a capability's use.)
 		//
 		// This keys on a DECLARED pattern. A request matching no declared path
 		// is absent from the map and left exactly as it was; that
@@ -580,8 +599,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// carries a structured authContext (sub/roles/entitlements/scp) derived
 		// from the token subject, so the identity gate below and the FAT mint in
 		// the proxy Rewrite treat the API-token caller exactly like a JWT-authed
-		// one — the raw PASETO is still forwarded (cookie preserved in Rewrite;
-		// X-API-TOKEN header and api_token query pass through untouched). See
+		// one. The FAT then replaces the raw PASETO, which the Rewrite strips
+		// from the cookie, the header and the query. See
 		// kdex-tech/host-manager#103.
 		//
 		// An oauth2-protected function may declare no apiKey* scheme at all
@@ -1009,5 +1028,30 @@ func hostCredentialCookie(name, sessionCookie string) bool {
 	return sessionCookie != "" && strings.HasPrefix(name, sessionCookie)
 }
 
-// apiTokenName is the cookie and header a stateless API token travels in.
-const apiTokenName = "X-API-TOKEN"
+// apiTokenName is the cookie and header a stateless API token travels in, and
+// apiTokenQueryParam the query parameter.
+const (
+	apiTokenName       = "X-API-TOKEN"
+	apiTokenQueryParam = "api_token"
+)
+
+// apiTokenHeader is apiTokenName as a canonical header key.
+var apiTokenHeader = http.CanonicalHeaderKey(apiTokenName)
+
+// withoutQueryParam drops every occurrence of the named parameter from a raw
+// query string, leaving the others byte for byte as they were.
+func withoutQueryParam(rawQuery, name string) string {
+	if rawQuery == "" {
+		return rawQuery
+	}
+	parts := strings.Split(rawQuery, "&")
+	kept := parts[:0]
+	for _, part := range parts {
+		key, _, _ := strings.Cut(part, "=")
+		if k, err := url.QueryUnescape(key); err == nil && k == name {
+			continue
+		}
+		kept = append(kept, part)
+	}
+	return strings.Join(kept, "&")
+}

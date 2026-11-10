@@ -16,6 +16,9 @@ func TestWarnReservedTargets_OncePerConfiguration(t *testing.T) {
 	saved := signerLog
 	signerLog = funcr.New(func(string, string) { lines++ }, funcr.Options{})
 	t.Cleanup(func() { signerLog = saved })
+	// The set is process-wide; start from an empty one so -count=N repeats.
+	warnedReservedTargets.Clear()
+	t.Cleanup(warnedReservedTargets.Clear)
 
 	rules := []dmapper.MappingRule{{SourceExpression: `"x"`, TargetPropPath: "aud"}}
 	for range 3 {

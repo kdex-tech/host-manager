@@ -21,7 +21,7 @@ func (c *CacheIDTokenStore) Set(w http.ResponseWriter, r *http.Request, rawIDTok
 
 	// set the cookie
 	cookie := &http.Cookie{
-		Name:     hintName,
+		Name:     HintCookieName,
 		Value:    oidcSessionId,
 		Path:     "/",
 		HttpOnly: true,
@@ -35,7 +35,7 @@ func (c *CacheIDTokenStore) Set(w http.ResponseWriter, r *http.Request, rawIDTok
 }
 
 func (c *CacheIDTokenStore) Get(r *http.Request) (string, error) {
-	cookie, err := r.Cookie(hintName)
+	cookie, err := r.Cookie(HintCookieName)
 	if err != nil {
 		return "", err
 	}
@@ -51,7 +51,7 @@ func (c *CacheIDTokenStore) Get(r *http.Request) (string, error) {
 
 func NewCacheIDTokenStore(cacheManager cache.CacheManager, ttl time.Duration) IDTokenStore {
 	return &CacheIDTokenStore{
-		cache: cacheManager.GetCache(hintName, cache.CacheOptions{
+		cache: cacheManager.GetCache(HintCookieName, cache.CacheOptions{
 			Uncycled: true,
 			TTL:      &ttl,
 		}),
