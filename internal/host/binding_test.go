@@ -2,6 +2,7 @@ package host
 
 import (
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
@@ -243,4 +244,14 @@ func TestPlaceholderKeys(t *testing.T) {
 	t.Run("no spec and no params yields empty", func(t *testing.T) {
 		assert.Empty(t, placeholderKeys(nil, "/v1/ingest"))
 	})
+}
+
+// A bound name that is bracketed itself is matched whole, so its sibling
+// filter[...] parameters are not its aliases; a plain bound name still folds
+// store[...] into store.
+func TestAmbiguousName_BracketedBoundName(t *testing.T) {
+	q := url.Values{"filter[store]": {"s1"}, "filter[status]": {"open"}}
+	assert.False(t, ambiguousName(q, "filter[store]", foldQueryNameWhole), "siblings are distinct")
+	assert.True(t, ambiguousName(url.Values{"filter[store]": {"s1"}, "FILTER[STORE]": {"s2"}}, "filter[store]", foldQueryNameWhole))
+	assert.True(t, ambiguousName(url.Values{"store": {"a"}, "store[]": {"b"}}, "store", foldQueryName))
 }

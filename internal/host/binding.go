@@ -240,7 +240,8 @@ func hasCallerSuppliableSource(chain []bindingSource) bool {
 // gate resolved first.
 //
 // The aliases are the names a permissive backend folds into the bound one.
-// PHP reads '.', ' ' and '[' in a query key as '_', and store[...] as store;
+// PHP drops leading spaces, ends a key at a NUL, reads '.', ' ' and an
+// unmatched '[' in it as '_', and store[...] as store;
 // ASP.NET matches query keys without regard to case; CGI-style servers read
 // '_' in a header name as '-'. Go parses each as a distinct name, so the gate
 // would bind one value -- or fall through to the next source in the chain --
@@ -255,7 +256,14 @@ func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bo
 				if query == nil {
 					query = r.URL.Query()
 				}
-				if ambiguousName(query, src.Name, foldQueryName) {
+				// A bound name that is itself bracketed (filter[store]) is
+				// matched whole: cutting it at '[' would make every sibling
+				// filter[...] parameter its alias.
+				fold := foldQueryName
+				if strings.ContainsRune(src.Name, '[') {
+					fold = foldQueryNameWhole
+				}
+				if ambiguousName(query, src.Name, fold) {
 					return true
 				}
 			case bindingInHeader:
@@ -284,12 +292,32 @@ func ambiguousName(values map[string][]string, name string, fold func(string) st
 }
 
 // foldQueryName is a query key as the most permissive backend reads it: PHP
-// takes store[...] as store, and '.', ' ' and an unmatched '[' as '_'; ASP.NET
-// ignores case.
+// drops leading spaces, ends the key at a NUL, takes store[...] as store, and
+// reads '.', ' ' and an unmatched '[' as '_'; ASP.NET ignores case.
 func foldQueryName(name string) string {
+	name = trimQueryName(name)
 	if open := strings.IndexByte(name, '['); open > 0 && strings.IndexByte(name[open:], ']') > 0 {
 		name = name[:open]
 	}
+	return foldQueryChars(name)
+}
+
+// foldQueryNameWhole is foldQueryName without the store[...] cut, for a bound
+// name that is bracketed itself.
+func foldQueryNameWhole(name string) string {
+	return foldQueryChars(trimQueryName(name))
+}
+
+// trimQueryName drops what PHP never sees of a key: leading spaces, and
+// anything from a NUL on.
+func trimQueryName(name string) string {
+	if nul := strings.IndexByte(name, 0); nul >= 0 {
+		name = name[:nul]
+	}
+	return strings.TrimLeft(name, " ")
+}
+
+func foldQueryChars(name string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case '.', ' ', '[':

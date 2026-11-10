@@ -322,7 +322,10 @@ func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
 
 	// An alias sent alone is refused too: the gate would find no
 	// vector_store_id and bind the header, while the backend read the alias.
-	for _, query := range []string{"VECTOR_STORE_ID=vs_victim", "vector.store.id=vs_victim"} {
+	for _, query := range []string{
+		"VECTOR_STORE_ID=vs_victim", "vector.store.id=vs_victim",
+		"%20vector_store_id=vs_victim", "vector_store_id%00x=vs_victim",
+	} {
 		code = requestAs(t, h, "GET", "/api/v1/search?"+query, held, map[string]string{"X-Store": "vs_alice"})
 		assert.Equal(t, http.StatusBadRequest, code, "an alias alone: "+query)
 	}
@@ -341,6 +344,15 @@ func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
 	code = requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice&vector_store_id=vs_victim",
 		held, map[string]string{"X-Store": "vs_alice"})
 	assert.Equal(t, http.StatusBadRequest, code, "a repeated source later in the chain")
+
+	// A header alias sent alone: the gate would bind nothing from X-Store
+	// and fall through to the query, while a CGI backend read X_Store.
+	req = httptest.NewRequest("GET", "/api/v1/search?vector_store_id=vs_alice", nil)
+	req.Header["X_Store"] = []string{"vs_victim"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{"sub": "tester", "entitlements": held}))
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "a header alias alone")
 
 	assert.Equal(t, http.StatusOK, requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice", held, nil),
 		"one value still binds")
