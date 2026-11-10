@@ -232,6 +232,32 @@ func hasCallerSuppliableSource(chain []bindingSource) bool {
 	return false
 }
 
+// ambiguousBindingSource reports whether the request carries more than one
+// value for a query parameter or header that the binding of keys may read.
+// Every source in a chain counts, not only the one that would bind, since a
+// backend reads its own source whichever the gate resolved first.
+func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bool {
+	var query url.Values
+	for _, key := range keys {
+		for _, src := range spec[key] {
+			switch src.In {
+			case bindingInQuery:
+				if query == nil {
+					query = r.URL.Query()
+				}
+				if len(query[src.Name]) > 1 {
+					return true
+				}
+			case bindingInHeader:
+				if len(r.Header.Values(src.Name)) > 1 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (string, bool) {
 	if chain, ok := spec[key]; ok {
 		for _, src := range chain {

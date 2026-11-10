@@ -214,11 +214,11 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 
 			// 3. Query parameters: Out already carries the inbound query, less
 			// the pairs Go cannot parse (a ';', a bad escape), which
-			// ReverseProxy drops before calling Rewrite. Copying the raw
-			// inbound query back restored them, so a backend that splits on
-			// ';' saw parameters the host never parsed -- an api_token the
-			// strip below missed, or a second value for a parameter a
-			// requirement was bound to.
+			// ReverseProxy drops before calling Rewrite. Never copy the raw
+			// inbound query back: a backend that splits on ';' would see
+			// parameters the host never parsed -- an api_token the strip below
+			// misses, or a second value for a parameter a requirement is bound
+			// to.
 
 			// Only a FAT reaches the backend as Authorization. The caller's
 			// own bearer is a host credential: dropped here, it cannot reach
@@ -591,8 +591,8 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// carries a structured authContext (sub/roles/entitlements/scp) derived
 		// from the token subject, so the identity gate below and the FAT mint in
 		// the proxy Rewrite treat the API-token caller exactly like a JWT-authed
-		// one. The FAT then replaces the raw PASETO, which the Rewrite never
-		// forwards, from the cookie, the header or the query. See
+		// one. The FAT then stands in for the raw PASETO, which the Rewrite
+		// never forwards in a cookie, a header or the query. See
 		// kdex-tech/host-manager#103.
 		//
 		// An oauth2-protected function may declare no apiKey* scheme at all
@@ -726,6 +726,15 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// parameter -- a source the author did not declare, while the
 			// backend reads the declared one.
 			_, malformedBinding := fh.invalidBindings[key]
+			// A query parameter or header a binding reads must have one value:
+			// the gate checks the first, and a backend that takes the last
+			// (Django, PHP) would act on one the gate never checked.
+			if !malformedBinding && ambiguousBindingSource(r, spec, pkeys) {
+				log.V(1).Info("requirement binding refused: a bound source has more than one value",
+					"function", fn.Name, "route", key)
+				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+				return
+			}
 			var binding entitlements.Binding
 			if !malformedBinding {
 				binding = resolveBinding(r, pattern, spec, pkeys)

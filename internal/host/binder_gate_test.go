@@ -262,6 +262,56 @@ func TestGate_BoundValueIsNotTrimmed(t *testing.T) {
 	assert.False(t, *reached)
 }
 
+// A bound source with two values is refused: the gate checks the first, and a
+// backend that takes the last would act on the instance the gate never
+// checked.
+func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-search", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: "/api/v1/search",
+				Paths: map[string]kdexv1alpha1.PathItem{
+					"/api/v1/search": {
+						Get: &runtime.RawExtension{Raw: []byte(`{
+							"operationId": "search",
+							"security": [{"bearer": [
+								"functions:/api/v1/search:read",
+								"vector_stores:{vector_store_id}:read"
+							]}],
+							"x-entitlement-binding": {
+								"vector_store_id": [
+									{"in": "header", "name": "X-Store"},
+									{"in": "query", "name": "vector_store_id"}
+								]
+							}
+						}`)},
+					},
+				},
+			},
+		},
+	}
+	h, reached := binderFixture(t, fn)
+	held := []string{"functions:/api/v1/search:read", "vector_stores:vs_alice:read"}
+
+	code := requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice&vector_store_id=vs_victim", held, nil)
+	assert.Equal(t, http.StatusBadRequest, code, "a repeated query source")
+	assert.False(t, *reached)
+
+	req := httptest.NewRequest("GET", "/api/v1/search", nil)
+	req.Header.Add("X-Store", "vs_alice")
+	req.Header.Add("X-Store", "vs_victim")
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{"sub": "tester", "entitlements": held}))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "a repeated header source")
+	assert.False(t, *reached)
+
+	assert.Equal(t, http.StatusOK, requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice", held, nil),
+		"one value still binds")
+}
+
 // A malformed x-entitlement-binding must not fall back to binding the
 // same-named path parameter: the author declared a different source (here a
 // header the backend reads first), so binding the path would authorize one
