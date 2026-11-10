@@ -308,8 +308,35 @@ func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code, "a repeated header source")
 	assert.False(t, *reached)
 
+	// A name a backend folds into the bound one counts as the same source:
+	// PHP reads vector.store.id as vector_store_id, ASP.NET ignores case.
+	for _, query := range []string{
+		"vector_store_id=vs_alice&vector.store.id=vs_victim",
+		"vector_store_id=vs_alice&VECTOR_STORE_ID=vs_victim",
+	} {
+		code = requestAs(t, h, "GET", "/api/v1/search?"+query, held, nil)
+		assert.Equal(t, http.StatusBadRequest, code, query)
+	}
+
+	// A CGI-style server reads X_Store as X-Store.
+	req = httptest.NewRequest("GET", "/api/v1/search", nil)
+	req.Header.Set("X-Store", "vs_alice")
+	req.Header["X_Store"] = []string{"vs_victim"}
+	req = req.WithContext(auth.SetAuthContext(req.Context(), auth.AuthContext{"sub": "tester", "entitlements": held}))
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "a header a backend folds into the bound one")
+
+	// A repeated source the gate does not bind from still counts: the header
+	// binds first here, but the backend may read the query.
+	code = requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice&vector_store_id=vs_victim",
+		held, map[string]string{"X-Store": "vs_alice"})
+	assert.Equal(t, http.StatusBadRequest, code, "a repeated source later in the chain")
+
 	assert.Equal(t, http.StatusOK, requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice", held, nil),
 		"one value still binds")
+	assert.Equal(t, http.StatusOK, requestAs(t, h, "GET", "/api/v1/search?vector_store_id=vs_alice&other=1&Other=2", held, nil),
+		"a repeated parameter no binding reads is the backend's business")
 }
 
 // A malformed x-entitlement-binding must not fall back to binding the

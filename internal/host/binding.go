@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
 )
@@ -235,27 +236,61 @@ func hasCallerSuppliableSource(chain []bindingSource) bool {
 // ambiguousBindingSource reports whether the request carries more than one
 // value for a query parameter or header that the binding of keys may read.
 // Every source in a chain counts, not only the one that would bind, since a
-// backend reads its own source whichever the gate resolved first.
+// backend reads its own source whichever the gate resolved first. So does
+// every name a backend would read as the bound one: PHP folds '.', ' ' and '['
+// in a query key to '_', ASP.NET matches query keys without regard to case,
+// and CGI-style servers read '_' in a header name as '-'. Go parses those as
+// distinct names, so without folding, ?store=mine&STORE=theirs bound "mine"
+// while such a backend acted on "theirs".
 func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bool {
-	var query url.Values
+	var query map[string]int
+	var header map[string]int
 	for _, key := range keys {
 		for _, src := range spec[key] {
 			switch src.In {
 			case bindingInQuery:
 				if query == nil {
-					query = r.URL.Query()
+					query = foldedCounts(r.URL.Query(), foldQueryName)
 				}
-				if len(query[src.Name]) > 1 {
+				if query[foldQueryName(src.Name)] > 1 {
 					return true
 				}
 			case bindingInHeader:
-				if len(r.Header.Values(src.Name)) > 1 {
+				if header == nil {
+					header = foldedCounts(r.Header, foldHeaderName)
+				}
+				if header[foldHeaderName(src.Name)] > 1 {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// foldedCounts counts the values under each folded name.
+func foldedCounts(values map[string][]string, fold func(string) string) map[string]int {
+	counts := make(map[string]int, len(values))
+	for name, vs := range values {
+		counts[fold(name)] += len(vs)
+	}
+	return counts
+}
+
+// foldQueryName is a query key as the most permissive backend reads it.
+func foldQueryName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '.', ' ', '[':
+			return '_'
+		}
+		return unicode.ToLower(r)
+	}, name)
+}
+
+// foldHeaderName is a header name as a CGI-style server reads it.
+func foldHeaderName(name string) string {
+	return strings.ToLower(strings.ReplaceAll(name, "_", "-"))
 }
 
 func resolveKey(r *http.Request, pattern string, spec bindingSpec, key string) (string, bool) {
