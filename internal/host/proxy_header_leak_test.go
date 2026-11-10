@@ -147,3 +147,82 @@ func jwtClaimsToString(t *testing.T, claims jwt.MapClaims) string {
 	}
 	return b.String()
 }
+
+// The #90 fix stripped the Cookie header from the snapshot the mapper reads,
+// but the proxy also parses the cookie jar into authContext["cookies"], and a
+// function author's claimMappings run over it. A rule reading
+// `self.cookies.auth_token` would put every caller's HttpOnly session token
+// (or refresh token) into the FAT, and the backend could replay it at the host
+// as that caller. The host's own credential cookies never reach the mapper;
+// any other cookie still does.
+func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
+	logf.SetLogger(logr.Discard())
+
+	var fatHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fatHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	credentials := map[string]string{
+		"auth_token":          "SESSION-TOKEN",
+		"auth_token_refresh":  "REFRESH-TOKEN",
+		"auth_token_oidc_abc": "LOGIN-STATE",
+		"oidc_hint_0":         "ID-TOKEN-CHUNK",
+		"X-API-TOKEN":         "API-TOKEN",
+	}
+	var rules []dmapper.MappingRule
+	for name := range credentials {
+		rules = append(rules, dmapper.MappingRule{
+			SourceExpression: `self.cookies["` + name + `"]`, TargetPropPath: "leak_" + strings.ReplaceAll(name, "-", "_"),
+		})
+	}
+	rules = append(rules, dmapper.MappingRule{SourceExpression: `self.cookies["theme"]`, TargetPropPath: "theme"})
+
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-cookie-leak", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef:       corev1.LocalObjectReference{Name: "h"},
+			API:           kdexv1alpha1.API{BasePath: "/v1/leak"},
+			ClaimMappings: rules,
+		},
+		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
+	}
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	var signerKey crypto.Signer = priv
+	cacheManager, _ := cache.NewCacheManager("", "cookie-leak-test", nil)
+	hh := &HostHandler{
+		log:          logr.Discard(),
+		cacheManager: cacheManager,
+		authConfig: &auth.Config{
+			CookieName: "auth_token",
+			ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
+		},
+	}
+	handler := hh.reverseProxyHandler(fn, "https://test-host.example.com")
+
+	authedCtx := auth.SetAuthContext(t.Context(), auth.AuthContext{
+		"sub":          "alice",
+		"entitlements": []any{"pages:read"},
+	})
+	req := httptest.NewRequest("GET", "/v1/leak", nil).WithContext(authedCtx)
+	for name, value := range credentials {
+		req.AddCookie(&http.Cookie{Name: name, Value: value})
+	}
+	req.AddCookie(&http.Cookie{Name: "theme", Value: "dark"})
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.True(t, strings.HasPrefix(fatHeader, "Bearer "), "upstream did not receive a FAT")
+	parsed, _, err := jwt.NewParser().ParseUnverified(strings.TrimPrefix(fatHeader, "Bearer "), jwt.MapClaims{})
+	require.NoError(t, err)
+	claims := parsed.Claims.(jwt.MapClaims)
+
+	serialized := jwtClaimsToString(t, claims)
+	for name, value := range credentials {
+		assert.NotContains(t, serialized, value, "the FAT must not carry the %s cookie", name)
+	}
+	assert.Equal(t, "dark", claims["theme"], "a cookie that is not a host credential still maps")
+}

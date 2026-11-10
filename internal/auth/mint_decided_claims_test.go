@@ -47,3 +47,17 @@ func TestMintDecidedClaims_SingleSourced(t *testing.T) {
 		})
 	}
 }
+
+// The auth context carries markers the host itself decides and then trusts:
+// the issue time the subject-revocation cutoff compares, the PAT bridge flag
+// that mirrors a bridged PAT's grants into the oauth2 bucket, the capability
+// use-budget flag, and the subject kind. A claimMappings rule runs over this
+// context (EnrichAuthContext), so each must be reserved, or a host, extension
+// or function author could set one -- kdx_cap on every session, say, which
+// locks every user out (#211 quad).
+func TestAuthContextMarkers_AreReserved(t *testing.T) {
+	for _, claim := range []string{ClaimIssuedAt, PATBridgeClaim, CapUsesClaim, ClaimSubjectKind} {
+		assert.Contains(t, sign.ReservedClaims(), claim)
+		assert.Contains(t, reservedMintClaims, claim)
+	}
+}

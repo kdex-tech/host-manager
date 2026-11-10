@@ -964,7 +964,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 			Description: "Stateless API Token in 'X-API-TOKEN' cookie",
 			Type:        "apiKey",
 			In:          "cookie",
-			Name:        "X-API-TOKEN",
+			Name:        apiTokenName,
 		},
 	}
 
@@ -973,7 +973,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 			Description: "Stateless API Token in 'X-API-TOKEN' header",
 			Type:        "apiKey",
 			In:          "header",
-			Name:        "X-API-TOKEN",
+			Name:        apiTokenName,
 		},
 	}
 

@@ -8,21 +8,18 @@ import (
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 )
 
 // The claims a claimMappings rule may never set. A host or KDexFunction author
 // writes those rules; on the FAT path a rule that wrote `aud` would make the
 // token minted for a function replayable against the host by that function's
-// backend, and one that wrote `sub` would rename the caller. The list is the
-// KDexHostExtension admission rule's, plus the subject kind (#255).
-var reservedTargets = []string{
-	"sub", "iss", "aud", "exp", "nbf", "iat", "jti", "scope", "scp", "act",
-	"grant_type", "auth_method", "idp", sign.ClaimSubjectKind,
-}
-
-func TestReservedClaims_CoversEveryReservedTarget(t *testing.T) {
-	assert.ElementsMatch(t, reservedTargets, sign.ReservedClaims())
-	for _, c := range sign.MintDecidedClaims() {
+// backend, and one that wrote `sub` would rename the caller. The list is
+// kdex-crds' ReservedClaimTargets, the one the admission rules are pinned to,
+// so admission refuses exactly what the mint drops.
+func TestReservedClaims_AreTheAdmissionRulesTargets(t *testing.T) {
+	assert.ElementsMatch(t, kdexv1alpha1.ReservedClaimTargets(), sign.ReservedClaims())
+	for _, c := range append(sign.MintDecidedClaims(), sign.ClaimSubjectKind) {
 		assert.Contains(t, sign.ReservedClaims(), c, "every mint-decided claim is reserved")
 	}
 }
@@ -34,7 +31,7 @@ func TestSigner_Project_ClaimMappingCannotSetReservedClaims(t *testing.T) {
 		"sub": "alice", "iss": "https://host", "aud": []any{"https://host"},
 		"scope": "openid", "act": map[string]any{"sub": "svc"},
 	}
-	for _, claim := range reservedTargets {
+	for _, claim := range sign.ReservedClaims() {
 		for _, target := range []string{claim, claim + ".nested"} {
 			t.Run(target, func(t *testing.T) {
 				s := testSignerWithMapper(t, []dmapper.MappingRule{{

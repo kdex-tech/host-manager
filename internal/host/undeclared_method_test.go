@@ -213,7 +213,7 @@ func TestGate_DeclaredWriteMethodStillWorks(t *testing.T) {
 
 // A path the function never declared keeps today's behaviour. This is NOT a
 // claim that it is correct -- it is the deliberate boundary of this change: the
-// undeclared-PATH fall-through is filed separately, because unlike a method a
+// undeclared-PATH fall-through is filed separately (#293), because unlike a method a
 // subtree pass-through may be load-bearing for an existing function. The
 // assertion is here so that closing the path hole is a visible, intentional
 // change to this test rather than a silent one.

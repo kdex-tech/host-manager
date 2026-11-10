@@ -13,11 +13,13 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kdex-tech/dmapper"
 	entitlements "github.com/kdex-tech/entitlements/go"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -84,16 +86,14 @@ const SubjectlessRemedy = "a credential that names nobody is not a supported con
 const ClaimSubjectKind = "knd"
 
 // mintDecidedClaims are the claims the mint decides and a claimMappings rule
-// can neither change, add nor remove; Project re-asserts them after the
-// mapper:
+// can neither change, add nor remove: Project carries them from the signing
+// context, and they are reserved, so a rule's write to one is dropped
+// (DropReservedClaims):
 //   - auth_method: the DCR consent gate admits only a browser session by it,
 //     so a rule that wrote "local" into an OAuth client's token would make it
 //     pass as one;
 //   - ClaimSubjectKind: roles are resolved with it, so a rule that wrote
 //     "User" into a client's token would hand it every [User] binding.
-//
-// internal/auth's context list is this one plus the context's issue time
-// (MintDecidedClaims), so a claim added here is mint-decided on both paths.
 var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
 
 // projectedClaims are the inline claims Project copies from the signing
@@ -101,25 +101,24 @@ var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
 var projectedClaims = append(slices.Clone(mintDecidedClaims),
 	"email", "email_verified", "entitlements", "idp", "roles", "scope", "scp", "grant_type", "act")
 
-// MintDecidedClaims returns a copy of the claims the mint decides, for the
-// auth context's own list to build on; the copy keeps the signer's list out
-// of any caller's reach.
+// MintDecidedClaims returns a copy of the claims the mint decides, so a test
+// outside this package can pin each one as reserved and carried through
+// Project; the copy keeps the signer's list out of any caller's reach.
 func MintDecidedClaims() []string {
 	return slices.Clone(mintDecidedClaims)
 }
 
-// reservedClaims are the claims the mint and the signer control
+// reservedClaims are the claims the mint and the host control
 // authoritatively. A credential store, a backend lookup and a claimMappings
 // rule may supplement ANY other claim -- that is the feature -- but never
 // these: the JWT envelope (sub/iss/aud and the mint-time exp/nbf/iat/jti),
 // the auth-flow claims (scope/scp, grant_type, the identity provider and the
-// RFC 8693 delegation actor) and every mint-decided claim. The
-// KDexHostExtension admission rule refuses the same targets.
-// See kdex-tech/host-manager#140 and #211.
-var reservedClaims = append([]string{
-	"sub", claimIssuer, "aud", "exp", "nbf", "iat", "jti",
-	"scope", "scp", "grant_type", "idp", "act",
-}, mintDecidedClaims...)
+// RFC 8693 delegation actor), every mint-decided claim, and the auth-context
+// markers the host trusts on a request (pat_bridge, kdx_cap). The list is
+// kdex-crds' ReservedClaimTargets, which the claimMappings admission rules on
+// KDexHost, KDexFunction and KDexHostExtension are pinned to, so admission and
+// the mint refuse the same targets. See kdex-tech/host-manager#140 and #211.
+var reservedClaims = kdexv1alpha1.ReservedClaimTargets()
 
 // claimIssuer is the JWT issuer claim, which Project sets authoritatively.
 const claimIssuer = "iss"
@@ -152,16 +151,25 @@ func ReservedTargets(rules []dmapper.MappingRule) []string {
 	return targets
 }
 
-// WarnReservedTargets logs, once per call, the rules among these that write a
-// reserved claim. Call it where a mapper is built from configuration: the
-// mint drops such a rule's output on every token, and this is where an
-// operator learns why it has no effect. keysAndValues name the configuration.
+// WarnReservedTargets logs the rules among these that write a reserved claim,
+// once per process for each distinct configuration and target set. Call it
+// where a mapper is built from configuration: the mint drops such a rule's
+// output on every token, and this is where an operator learns why it has no
+// effect. keysAndValues name the configuration. Mappers are rebuilt on every
+// page change and host reconcile, so without the once a single stored rule
+// would repeat the error on each of them.
 func WarnReservedTargets(rules []dmapper.MappingRule, keysAndValues ...any) {
 	if targets := ReservedTargets(rules); len(targets) > 0 {
+		if _, warned := warnedReservedTargets.LoadOrStore(fmt.Sprint(targets, keysAndValues), struct{}{}); warned {
+			return
+		}
 		signerLog.Error(errReservedTarget, "claimMappings rules target a reserved claim and have no effect",
 			append([]any{"targets", targets, "reserved", reservedClaims}, keysAndValues...)...)
 	}
 }
+
+// warnedReservedTargets holds what WarnReservedTargets has already reported.
+var warnedReservedTargets sync.Map
 
 var errReservedTarget = errors.New("a claimMappings rule may not set a claim the mint decides")
 
@@ -289,15 +297,14 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// "auth_method" is how the token was obtained (local or OIDC browser
 	// login, or an OAuth grant). The DCR consent gate admits only a browser
 	// session, and a token handed to an OAuth client can be put in the session
-	// cookie, so the method has to travel in the signature. It is re-asserted
-	// after the mapper below.
+	// cookie, so the method has to travel in the signature.
 	//
 	// ClaimSubjectKind is the subject's kind, which every resolution of roles
-	// from this token (the FAT, a token exchange of it) uses; it is
-	// re-asserted after the mapper too (#255).
+	// from this token (the FAT, a token exchange of it) uses (#255).
 	//
 	// Both are mint-decided (mintDecidedClaims), which projectedClaims is
-	// built from, so a claim the mint decides is always carried through.
+	// built from, so a claim the mint decides is always carried through, and
+	// reserved, so the mapper below cannot overwrite it.
 	for _, claim := range projectedClaims {
 		if val, ok := signingContext[claim]; ok {
 			projected[claim] = val

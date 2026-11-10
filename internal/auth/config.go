@@ -309,7 +309,7 @@ func (cb *ConfigBuilder) Build(auth *kdexv1alpha1.Auth) (*Config, error) {
 
 		var mapper *dmapper.Mapper
 		if len(auth.ClaimMappings) > 0 {
-			sign.WarnReservedTargets(auth.ClaimMappings, "source", "KDexHost spec.auth.claimMappings")
+			sign.WarnReservedTargets(auth.ClaimMappings, "source", "KDexHost spec.auth.claimMappings and its applied KDexHostExtensions")
 			mapper, err = dmapper.NewMapper(auth.ClaimMappings)
 			if err != nil {
 				return nil, err

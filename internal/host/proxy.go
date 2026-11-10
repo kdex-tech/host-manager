@@ -19,6 +19,7 @@ import (
 	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
+	"github.com/kdex-tech/host-manager/internal/auth/idtoken"
 	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/sign"
 	"github.com/kdex-tech/host-manager/internal/utils"
@@ -92,10 +93,10 @@ func isAPIKeyScheme(name string) bool {
 // query parameter — the three apiKey* scheme locations the host advertises.
 // Returns "" when none is present.
 func extractAPIToken(r *http.Request) string {
-	if c, err := r.Cookie("X-API-TOKEN"); err == nil && c.Value != "" {
+	if c, err := r.Cookie(apiTokenName); err == nil && c.Value != "" {
 		return c.Value
 	}
-	if h := r.Header.Get("X-API-TOKEN"); h != "" {
+	if h := r.Header.Get(apiTokenName); h != "" {
 		return h
 	}
 	if q := r.URL.Query().Get("api_token"); q != "" {
@@ -141,6 +142,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	// merges bridge-resolved grants never runs at FAT mint and the grant is
 	// dropped by the projection allowlist. See kdex-tech/host-manager#138.
 	var mapper *dmapper.Mapper
+	// The host's session cookie name, which its other credential cookies are
+	// named from; see hostCredentialCookie.
+	sessionCookie := ""
+	if hh.authConfig != nil {
+		sessionCookie = hh.authConfig.CookieName
+	}
+
 	// The host's own rules were reported when its auth config was built.
 	sign.WarnReservedTargets(fn.Spec.ClaimMappings, "source", "KDexFunction spec.claimMappings", "function", fn.Name)
 	claimMappings := append(slices.Clone(hh.authConfig.ClaimMappings), fn.Spec.ClaimMappings...)
@@ -215,6 +223,14 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			if isLoggedIn {
 				cookies := map[string]any{}
 				for _, cookie := range preq.In.Cookies() {
+					// The mapper below runs the function author's rules, so
+					// a host credential here would let one copy every
+					// caller's session or refresh token into the FAT for
+					// the backend to replay at the host (#90 stripped only
+					// the Cookie header).
+					if hostCredentialCookie(cookie.Name, sessionCookie) {
+						continue
+					}
 					cookies[cookie.Name] = cookie.Value
 				}
 				if len(cookies) > 0 {
@@ -276,7 +292,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			}
 
 			// Delete all cookies but preserve X-API-TOKEN
-			apiTokenCookie, err := preq.In.Cookie("X-API-TOKEN")
+			apiTokenCookie, err := preq.In.Cookie(apiTokenName)
 			if err == nil && apiTokenCookie != nil && apiTokenCookie.Value != "" {
 				preq.Out.Header.Set("Cookie", apiTokenCookie.String())
 			} else {
@@ -504,6 +520,40 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			return
 		}
 
+		// A method the function never declared carries no declared
+		// authorization, so there is nothing to enforce on it and nothing safe
+		// to fall back to. It used to take the empty-requirements path below --
+		// "allows access if identity matches" -- so any authenticated caller
+		// could POST, PUT, PATCH or DELETE a read-only route and be proxied to
+		// the backend with none of the route's own entitlements checked; a
+		// read grant was enough to reach a write method. The refusal comes
+		// first, ahead of authentication and the gate: it depends only on the
+		// pattern and the method, so it holds whether or not an authorization
+		// checker is configured, no token is validated and no mapper is run
+		// for it, and the backend is never reached.
+		//
+		// This keys on a DECLARED pattern. A request matching no declared path
+		// is absent from the map and left exactly as it was; that
+		// fall-through is a separate question (#293), because a subtree
+		// pass-through may be load-bearing for an existing function.
+		_, pattern := fh.patternMux.Handler(r)
+		if methods, declared := fh.declaredMethods[pattern]; declared && !slices.Contains(methods, r.Method) {
+			w.Header().Set("Allow", strings.Join(methods, ", "))
+			if r.Method == http.MethodOptions {
+				// OPTIONS is answered rather than refused: Allow is precisely
+				// what it asks for (RFC 9110 §9.3.7). It is still not proxied,
+				// so a backend that wants to answer its own OPTIONS -- a CORS
+				// preflight, say -- has to declare the operation.
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			log.V(1).Info("undeclared method refused",
+				"function", fn.Name, "method", r.Method, "pattern", pattern)
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed),
+				http.StatusMethodNotAllowed)
+			return
+		}
+
 		// Snapshot the only hh field this handler reads (authChecker)
 		// under a tight RLock, then release before doing the auth check
 		// and proxy round-trip. Pre-fix the RLock was held across
@@ -623,38 +673,6 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// is the authContext-enrichment invariant; no claim is special-cased. #142
 		if ac, ok := auth.GetAuthContext(r.Context()); ok {
 			auth.EnrichAuthContext(ac, mapper)
-		}
-
-		// A method the function never declared carries no declared
-		// authorization, so there is nothing to enforce on it and nothing safe
-		// to fall back to. It used to take the empty-requirements path below --
-		// "allows access if identity matches" -- so any authenticated caller
-		// could POST, PUT, PATCH or DELETE a read-only route and be proxied to
-		// the backend with none of the route's own entitlements checked; a
-		// read grant was enough to reach a write method. The refusal is here,
-		// ahead of the gate, so it holds whether or not an authorization
-		// checker is configured, and the backend is never reached.
-		//
-		// This keys on a DECLARED pattern. A request matching no declared path
-		// is absent from the map and left exactly as it was; that
-		// fall-through is a separate question, because a subtree pass-through
-		// may be load-bearing for an existing function.
-		_, pattern := fh.patternMux.Handler(r)
-		if methods, declared := fh.declaredMethods[pattern]; declared && !slices.Contains(methods, r.Method) {
-			w.Header().Set("Allow", strings.Join(methods, ", "))
-			if r.Method == http.MethodOptions {
-				// OPTIONS is answered rather than refused: Allow is precisely
-				// what it asks for (RFC 9110 §9.3.7). It is still not proxied,
-				// so a backend that wants to answer its own OPTIONS -- a CORS
-				// preflight, say -- has to declare the operation.
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			log.V(1).Info("undeclared method refused",
-				"function", fn.Name, "method", r.Method, "pattern", pattern)
-			http.Error(w, http.StatusText(http.StatusMethodNotAllowed),
-				http.StatusMethodNotAllowed)
-			return
 		}
 
 		if authChecker != nil {
@@ -978,3 +996,18 @@ func hasDotDotSegment(decodedPath string) bool {
 	}
 	return false
 }
+
+// hostCredentialCookie reports whether a cookie carries one of the host's own
+// credentials: the session and refresh tokens and the OIDC login state, which
+// are all named from the host's session cookie name; the chunks of a session's
+// id token; and a stateless API token. None of them may reach a claimMappings
+// rule.
+func hostCredentialCookie(name, sessionCookie string) bool {
+	if name == apiTokenName || strings.HasPrefix(name, idtoken.HintCookieName) {
+		return true
+	}
+	return sessionCookie != "" && strings.HasPrefix(name, sessionCookie)
+}
+
+// apiTokenName is the cookie and header a stateless API token travels in.
+const apiTokenName = "X-API-TOKEN"
