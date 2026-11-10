@@ -961,7 +961,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 
 	(*req)["apiKeyCookie"] = &openapi.SecuritySchemeRef{
 		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'X-API-TOKEN' cookie",
+			Description: "Stateless API Token in '" + apiTokenName + "' cookie",
 			Type:        "apiKey",
 			In:          "cookie",
 			Name:        apiTokenName,
@@ -970,7 +970,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 
 	(*req)["apiKeyHeader"] = &openapi.SecuritySchemeRef{
 		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'X-API-TOKEN' header",
+			Description: "Stateless API Token in '" + apiTokenName + "' header",
 			Type:        "apiKey",
 			In:          "header",
 			Name:        apiTokenName,
@@ -979,7 +979,7 @@ func (hh *HostHandler) SecuritySchemes() *openapi.SecuritySchemes {
 
 	(*req)["apiKeyQuery"] = &openapi.SecuritySchemeRef{
 		Value: &openapi.SecurityScheme{
-			Description: "Stateless API Token in 'api_token' query parameter",
+			Description: "Stateless API Token in '" + apiTokenQueryParam + "' query parameter",
 			Type:        "apiKey",
 			In:          "query",
 			Name:        apiTokenQueryParam,

@@ -156,15 +156,6 @@ func jwtClaimsToString(t *testing.T, claims jwt.MapClaims) string {
 // as that caller. The host's own credential cookies never reach the mapper;
 // any other cookie still does.
 func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
-	logf.SetLogger(logr.Discard())
-
-	var fatHeader string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fatHeader = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(upstream.Close)
-
 	credentials := map[string]string{
 		"auth_token":          "SESSION-TOKEN",
 		"auth_token_refresh":  "REFRESH-TOKEN",
@@ -180,29 +171,7 @@ func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
 	}
 	rules = append(rules, dmapper.MappingRule{SourceExpression: `self.cookies["theme"]`, TargetPropPath: "theme"})
 
-	fn := &kdexv1alpha1.KDexFunction{
-		ObjectMeta: metav1.ObjectMeta{Name: "fn-cookie-leak", Namespace: "default"},
-		Spec: kdexv1alpha1.KDexFunctionSpec{
-			HostRef:       corev1.LocalObjectReference{Name: "h"},
-			API:           kdexv1alpha1.API{BasePath: "/v1/leak"},
-			ClaimMappings: rules,
-		},
-		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
-	}
-
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	var signerKey crypto.Signer = priv
-	cacheManager, _ := cache.NewCacheManager("", "cookie-leak-test", nil)
-	hh := &HostHandler{
-		log:          logr.Discard(),
-		cacheManager: cacheManager,
-		authConfig: &auth.Config{
-			CookieName: "auth_token",
-			ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
-		},
-	}
-	handler := hh.reverseProxyHandler(fn, "https://test-host.example.com")
+	handler, fatHeader := leakFixture(t, "fn-cookie-leak", rules)
 
 	authedCtx := auth.SetAuthContext(t.Context(), auth.AuthContext{
 		"sub":          "alice",
@@ -215,11 +184,7 @@ func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "theme", Value: "dark"})
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	require.True(t, strings.HasPrefix(fatHeader, "Bearer "), "upstream did not receive a FAT")
-	parsed, _, err := jwt.NewParser().ParseUnverified(strings.TrimPrefix(fatHeader, "Bearer "), jwt.MapClaims{})
-	require.NoError(t, err)
-	claims := parsed.Claims.(jwt.MapClaims)
-
+	claims := decodeFAT(t, *fatHeader)
 	serialized := jwtClaimsToString(t, claims)
 	for name, value := range credentials {
 		assert.NotContains(t, serialized, value, "the FAT must not carry the %s cookie", name)
@@ -229,31 +194,50 @@ func TestProxy_FATDoesNotLeakHostCredentialCookies(t *testing.T) {
 
 // The API token travels as a header too, and the header snapshot is what a
 // `self.headers` rule reads: it must not carry the token any more than the
-// cookie jar does.
+// cookie jar does. An ordinary header beside it still maps, so a rule that
+// silently read nothing cannot pass for the strip.
 func TestProxy_FATDoesNotLeakTheAPITokenHeader(t *testing.T) {
+	handler, fatHeader := leakFixture(t, "fn-header-leak", []dmapper.MappingRule{
+		{SourceExpression: `self.headers["X-Api-Token"][0]`, TargetPropPath: "leak_api_token"},
+		{SourceExpression: `self.headers["X-Theme"][0]`, TargetPropPath: "theme"},
+	})
+
+	req := httptest.NewRequest("GET", "/v1/leak", nil).WithContext(
+		auth.SetAuthContext(t.Context(), auth.AuthContext{"sub": "alice"}))
+	req.Header.Set("X-API-TOKEN", "API-TOKEN-HEADER")
+	req.Header.Set("X-Theme", "dark")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	claims := decodeFAT(t, *fatHeader)
+	assert.NotContains(t, jwtClaimsToString(t, claims), "API-TOKEN-HEADER")
+	assert.Equal(t, "dark", claims["theme"], "an ordinary header still maps")
+}
+
+// leakFixture is a proxy handler for a function with these claimMappings, and
+// the Authorization (the FAT) its upstream last received.
+func leakFixture(t *testing.T, name string, rules []dmapper.MappingRule) (http.Handler, *string) {
+	t.Helper()
 	logf.SetLogger(logr.Discard())
 
-	var fatHeader string
+	fatHeader := new(string)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fatHeader = r.Header.Get("Authorization")
+		*fatHeader = r.Header.Get("Authorization")
 	}))
 	t.Cleanup(upstream.Close)
 
 	fn := &kdexv1alpha1.KDexFunction{
-		ObjectMeta: metav1.ObjectMeta{Name: "fn-header-leak", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
-			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/leak"},
-			ClaimMappings: []dmapper.MappingRule{
-				{SourceExpression: `self.headers["X-Api-Token"][0]`, TargetPropPath: "leak_api_token"},
-			},
+			HostRef:       corev1.LocalObjectReference{Name: "h"},
+			API:           kdexv1alpha1.API{BasePath: "/v1/leak"},
+			ClaimMappings: rules,
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
 	}
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	var signerKey crypto.Signer = priv
-	cacheManager, _ := cache.NewCacheManager("", "api-token-header-leak-test", nil)
+	cacheManager, _ := cache.NewCacheManager("", name+"-test", nil)
 	hh := &HostHandler{
 		log:          logr.Discard(),
 		cacheManager: cacheManager,
@@ -262,17 +246,7 @@ func TestProxy_FATDoesNotLeakTheAPITokenHeader(t *testing.T) {
 			ActivePair: &keys.KeyPair{ActiveKey: true, KeyId: "test-kid", Private: signerKey},
 		},
 	}
-	handler := hh.reverseProxyHandler(fn, "https://test-host.example.com")
-
-	req := httptest.NewRequest("GET", "/v1/leak", nil).WithContext(
-		auth.SetAuthContext(t.Context(), auth.AuthContext{"sub": "alice"}))
-	req.Header.Set("X-API-TOKEN", "API-TOKEN-HEADER")
-	handler.ServeHTTP(httptest.NewRecorder(), req)
-
-	require.True(t, strings.HasPrefix(fatHeader, "Bearer "), "upstream did not receive a FAT")
-	parsed, _, err := jwt.NewParser().ParseUnverified(strings.TrimPrefix(fatHeader, "Bearer "), jwt.MapClaims{})
-	require.NoError(t, err)
-	assert.NotContains(t, jwtClaimsToString(t, parsed.Claims.(jwt.MapClaims)), "API-TOKEN-HEADER")
+	return hh.reverseProxyHandler(fn, "https://test-host.example.com"), fatHeader
 }
 
 func TestWithoutQueryParam(t *testing.T) {
