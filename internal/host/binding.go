@@ -256,14 +256,7 @@ func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bo
 				if query == nil {
 					query = r.URL.Query()
 				}
-				// A bound name that is itself bracketed (filter[store]) is
-				// matched whole: cutting it at '[' would make every sibling
-				// filter[...] parameter its alias.
-				fold := foldQueryName
-				if strings.ContainsRune(src.Name, '[') {
-					fold = foldQueryNameWhole
-				}
-				if ambiguousName(query, src.Name, fold) {
+				if ambiguousQueryName(query, src.Name) {
 					return true
 				}
 			case bindingInHeader:
@@ -291,40 +284,84 @@ func ambiguousName(values map[string][]string, name string, fold func(string) st
 	return false
 }
 
-// foldQueryName is a query key as the most permissive backend reads it: PHP
-// drops leading spaces, ends the key at a NUL, takes store[...] as store, and
-// reads '.', ' ' and an unmatched '[' as '_'; ASP.NET ignores case.
-func foldQueryName(name string) string {
-	name = trimQueryName(name)
-	if open := strings.IndexByte(name, '['); open > 0 && strings.IndexByte(name[open:], ']') > 0 {
-		name = name[:open]
+// ambiguousQueryName reports whether query holds name more than once, or
+// holds another key a backend could read as name or overwrite it with. Keys
+// are compared as PHP parses them (phpQueryKey), case-folded for ASP.NET:
+//   - a plain name's alias is any key with the same base, bracketed or not
+//     (store[x] and STORE both reach $_GET['store']);
+//   - a bracketed name's alias is the bare base, which replaces the whole
+//     array, or a key whose segments agree with it wherever both have one
+//     (filter[store]x, filter[store][y], filter[]); a sibling such as
+//     filter[status] is not.
+func ambiguousQueryName(query url.Values, name string) bool {
+	if len(query[name]) > 1 {
+		return true
 	}
-	return foldQueryChars(name)
-}
-
-// foldQueryNameWhole is foldQueryName without the store[...] cut, for a bound
-// name that is bracketed itself.
-func foldQueryNameWhole(name string) string {
-	return foldQueryChars(trimQueryName(name))
-}
-
-// trimQueryName drops what PHP never sees of a key: leading spaces, and
-// anything from a NUL on.
-func trimQueryName(name string) string {
-	if nul := strings.IndexByte(name, 0); nul >= 0 {
-		name = name[:nul]
+	base, segs := phpQueryKey(name)
+	for other := range query {
+		if other == name {
+			continue
+		}
+		otherBase, otherSegs := phpQueryKey(other)
+		if otherBase != base {
+			continue
+		}
+		if len(segs) == 0 || len(otherSegs) == 0 || segmentsOverlap(segs, otherSegs) {
+			return true
+		}
 	}
-	return strings.TrimLeft(name, " ")
+	return false
 }
 
-func foldQueryChars(name string) string {
+// segmentsOverlap reports whether two bracket paths under one base can name
+// the same value: equal wherever both have a segment, an empty [] matching
+// any.
+func segmentsOverlap(a, b []string) bool {
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] && a[i] != "" && b[i] != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// phpQueryKey parses a query key as PHP's php_register_variable_ex does, then
+// lowercases it for ASP.NET. PHP drops leading spaces and ends the key at a
+// NUL; in the base it reads '.' and ' ' as '_'; it reads [seg] groups as
+// array segments, stops at a ']' not followed by '[' and discards the rest,
+// and reads an unmatched '[' as '_' in the base.
+func phpQueryKey(key string) (string, []string) {
+	if nul := strings.IndexByte(key, 0); nul >= 0 {
+		key = key[:nul]
+	}
+	key = strings.TrimLeft(key, " ")
+	open := strings.IndexByte(key, '[')
+	if open <= 0 || strings.IndexByte(key[open:], ']') < 0 {
+		return phpBase(key), nil
+	}
+	base := phpBase(key[:open])
+	var segs []string
+	rest := key[open:]
+	for len(rest) > 0 && rest[0] == '[' {
+		end := strings.IndexByte(rest, ']')
+		if end < 0 {
+			break
+		}
+		segs = append(segs, strings.ToLower(rest[1:end]))
+		rest = rest[end+1:]
+	}
+	return base, segs
+}
+
+// phpBase is a key's base as PHP reads it, case-folded.
+func phpBase(base string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case '.', ' ', '[':
 			return '_'
 		}
 		return unicode.ToLower(r)
-	}, name)
+	}, base)
 }
 
 // foldHeaderName is a header name as a CGI-style server reads it.

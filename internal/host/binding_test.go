@@ -246,12 +246,37 @@ func TestPlaceholderKeys(t *testing.T) {
 	})
 }
 
-// A bound name that is bracketed itself is matched whole, so its sibling
-// filter[...] parameters are not its aliases; a plain bound name still folds
-// store[...] into store.
-func TestAmbiguousName_BracketedBoundName(t *testing.T) {
-	q := url.Values{"filter[store]": {"s1"}, "filter[status]": {"open"}}
-	assert.False(t, ambiguousName(q, "filter[store]", foldQueryNameWhole), "siblings are distinct")
-	assert.True(t, ambiguousName(url.Values{"filter[store]": {"s1"}, "FILTER[STORE]": {"s2"}}, "filter[store]", foldQueryNameWhole))
-	assert.True(t, ambiguousName(url.Values{"store": {"a"}, "store[]": {"b"}}, "store", foldQueryName))
+// A bracketed bound name's aliases are the keys PHP reads as it -- text after
+// its ']' is dropped, an empty [] matches any index -- and the bare base that
+// replaces the array; its sibling segments are not aliases. A plain bound
+// name's alias is any key with the same base.
+func TestAmbiguousQueryName(t *testing.T) {
+	for _, tc := range []struct {
+		bound, other string
+		alias        bool
+	}{
+		{"filter[store]", "filter[status]", false},
+		{"filter[store]", "filter[store]x", true},
+		{"filter[store]", "filter[store]]", true},
+		{"filter[store]", "FILTER[STORE]", true},
+		{"filter[store]", "filter[store][y]", true},
+		{"filter[store]", "filter[store][]", true},
+		{"filter[store]", "filter[]", true},
+		{"filter[store]", "filter", true},
+		{"filter[store]", "filters[store]", false},
+		{"ids[]", "ids[0]", true},
+		{"store", "store[]", true},
+		{"store", "store[x]", true},
+		{"store", "STORE", true},
+		{"store", "st.ore", false},
+		{"vector_store_id", "vector.store.id", true},
+		{"vector_store_id", " vector_store_id", true},
+		{"vector_store_id", "vector_store_id\x00x", true},
+		{"vector_store_id", "vector_store", false},
+	} {
+		q := url.Values{tc.bound: {"mine"}, tc.other: {"theirs"}}
+		assert.Equal(t, tc.alias, ambiguousQueryName(q, tc.bound), "%s vs %q", tc.bound, tc.other)
+	}
+	assert.True(t, ambiguousQueryName(url.Values{"store": {"a", "b"}}, "store"), "a repeated name")
+	assert.False(t, ambiguousQueryName(url.Values{"store": {"a"}, "other": {"b"}}, "store"))
 }

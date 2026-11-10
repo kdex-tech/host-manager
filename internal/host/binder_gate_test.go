@@ -360,6 +360,44 @@ func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
 		"a repeated parameter no binding reads is the backend's business")
 }
 
+// A bracketed bound name: PHP reads filter[store]x as filter[store], so it is
+// refused as an alias, while a sibling filter[status] is an ordinary parameter.
+func TestGate_BracketedBoundSource(t *testing.T) {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "fn-search", Namespace: "default"},
+		Spec: kdexv1alpha1.KDexFunctionSpec{
+			HostRef: corev1.LocalObjectReference{Name: "h"},
+			API: kdexv1alpha1.API{
+				BasePath: "/api/v1/search",
+				Paths: map[string]kdexv1alpha1.PathItem{
+					"/api/v1/search": {
+						Get: &runtime.RawExtension{Raw: []byte(`{
+							"operationId": "search",
+							"security": [{"bearer": [
+								"functions:/api/v1/search:read",
+								"vector_stores:{vector_store_id}:read"
+							]}],
+							"x-entitlement-binding": {
+								"vector_store_id": [{"in": "query", "name": "filter[store]"}]
+							}
+						}`)},
+					},
+				},
+			},
+		},
+	}
+	h, reached := binderFixture(t, fn)
+	held := []string{"functions:/api/v1/search:read", "vector_stores:vs_alice:read"}
+
+	assert.Equal(t, http.StatusOK,
+		requestAs(t, h, "GET", "/api/v1/search?filter[store]=vs_alice&filter[status]=open", held, nil),
+		"a sibling segment is not an alias")
+	*reached = false
+	code := requestAs(t, h, "GET", "/api/v1/search?filter[store]=vs_alice&filter[store]x=vs_victim", held, nil)
+	assert.Equal(t, http.StatusBadRequest, code, "PHP drops the text after ']'")
+	assert.False(t, *reached)
+}
+
 // A malformed x-entitlement-binding must not fall back to binding the
 // same-named path parameter: the author declared a different source (here a
 // header the backend reads first), so binding the path would authorize one
