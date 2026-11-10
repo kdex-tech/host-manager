@@ -301,11 +301,13 @@ func ambiguousHeaderName(header http.Header, name string) bool {
 //     (store[x] and STORE both reach $_GET['store']);
 //   - a bracketed name's alias is the bare base, which replaces the whole
 //     array, or a key whose segments agree with it wherever both have one
-//     (filter[store]x, filter[store][y], filter[]); a sibling such as
-//     filter[status] is not.
+//     (filter[store]x, filter[store][y], filter[]), or any key under the
+//     base nested past PHP's max_input_nesting_level, which deletes the
+//     base; a sibling such as filter[status] is not.
 //
 // Another key is never parsed past what the comparison needs: its base first,
-// then at most as many segments as the bound name has, in place. The query is
+// then at most as many segments as the bound name has, or one past PHP's
+// nesting limit, in place. The query is
 // the caller's, and a key of a million empty [] must cost no more than reading
 // it once.
 func ambiguousQueryName(query url.Values, name string) bool {
@@ -364,7 +366,8 @@ func phpSegments(rest string) []string {
 
 // phpMaxInputNestingLevel is PHP's default max_input_nesting_level. A key
 // nested deeper makes PHP delete the whole base -- the bound value with it --
-// so under a bracketed bound name such a key is an alias too.
+// so under a bracketed bound name such a key is an alias too. The setting is
+// per directory in php.ini; a backend that lowers it is assumed not to.
 const phpMaxInputNestingLevel = 64
 
 // exceedsPHPNesting reports whether bracket text nests deeper than PHP keeps,

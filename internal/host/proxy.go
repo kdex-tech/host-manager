@@ -730,7 +730,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			// the gate checks the first, and a backend that takes the last
 			// (Django, PHP) would act on one the gate never checked.
 			if !malformedBinding && ambiguousBindingSource(r, spec, pkeys) {
-				log.V(1).Info("requirement binding refused: a bound source has more than one value",
+				log.V(1).Info("requirement binding refused: a bound source is ambiguous or the query is malformed",
 					"function", fn.Name, "route", key)
 				http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 				return
