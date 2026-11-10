@@ -254,13 +254,22 @@ func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bo
 			switch src.In {
 			case bindingInQuery:
 				if query == nil {
-					query = r.URL.Query()
+					// A pair Go cannot decode (a bad escape, a ';') is
+					// dropped from Query() but kept by PHP's lenient
+					// decoder, which would then read a key the check never
+					// saw. The proxy forwards Go's cleaned query, so such a
+					// pair should never reach the backend; refusing it here
+					// keeps the gate closed whatever the forwarding does.
+					var err error
+					if query, err = url.ParseQuery(r.URL.RawQuery); err != nil {
+						return true
+					}
 				}
 				if ambiguousQueryName(query, src.Name) {
 					return true
 				}
 			case bindingInHeader:
-				if ambiguousName(r.Header, http.CanonicalHeaderKey(src.Name), foldHeaderName) {
+				if ambiguousHeaderName(r.Header, http.CanonicalHeaderKey(src.Name)) {
 					return true
 				}
 			}
@@ -269,15 +278,15 @@ func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bo
 	return false
 }
 
-// ambiguousName reports whether values hold name more than once, or hold any
-// other name that folds to it.
-func ambiguousName(values map[string][]string, name string, fold func(string) string) bool {
-	if len(values[name]) > 1 {
+// ambiguousHeaderName reports whether header holds name more than once, or
+// holds any other name a CGI-style server reads as it.
+func ambiguousHeaderName(header http.Header, name string) bool {
+	if len(header[name]) > 1 {
 		return true
 	}
-	folded := fold(name)
-	for other := range values {
-		if other != name && fold(other) == folded {
+	folded := foldHeaderName(name)
+	for other := range header {
+		if other != name && foldHeaderName(other) == folded {
 			return true
 		}
 	}
@@ -286,62 +295,62 @@ func ambiguousName(values map[string][]string, name string, fold func(string) st
 
 // ambiguousQueryName reports whether query holds name more than once, or
 // holds another key a backend could read as name or overwrite it with. Keys
-// are compared as PHP parses them (phpQueryKey), case-folded for ASP.NET:
+// are compared as PHP's php_register_variable_ex parses them, case-folded for
+// ASP.NET:
 //   - a plain name's alias is any key with the same base, bracketed or not
 //     (store[x] and STORE both reach $_GET['store']);
 //   - a bracketed name's alias is the bare base, which replaces the whole
 //     array, or a key whose segments agree with it wherever both have one
 //     (filter[store]x, filter[store][y], filter[]); a sibling such as
 //     filter[status] is not.
+//
+// Another key is never parsed past what the comparison needs: its base first,
+// then at most as many segments as the bound name has, in place. The query is
+// the caller's, and a key of a million empty [] must cost no more than reading
+// it once.
 func ambiguousQueryName(query url.Values, name string) bool {
 	if len(query[name]) > 1 {
 		return true
 	}
-	base, segs := phpQueryKey(name)
+	base, rest := phpKeyBase(name)
+	segs := phpSegments(rest)
 	for other := range query {
 		if other == name {
 			continue
 		}
-		otherBase, otherSegs := phpQueryKey(other)
+		otherBase, otherRest := phpKeyBase(other)
 		if otherBase != base {
 			continue
 		}
-		if len(segs) == 0 || len(otherSegs) == 0 || segmentsOverlap(segs, otherSegs) {
+		if len(segs) == 0 || otherRest == "" || segmentsAgree(segs, otherRest) ||
+			exceedsPHPNesting(otherRest) {
 			return true
 		}
 	}
 	return false
 }
 
-// segmentsOverlap reports whether two bracket paths under one base can name
-// the same value: equal wherever both have a segment, an empty [] matching
-// any.
-func segmentsOverlap(a, b []string) bool {
-	for i := range min(len(a), len(b)) {
-		if a[i] != b[i] && a[i] != "" && b[i] != "" {
-			return false
-		}
-	}
-	return true
-}
-
-// phpQueryKey parses a query key as PHP's php_register_variable_ex does, then
-// lowercases it for ASP.NET. PHP drops leading spaces and ends the key at a
-// NUL; in the base it reads '.' and ' ' as '_'; it reads [seg] groups as
-// array segments, stops at a ']' not followed by '[' and discards the rest,
-// and reads an unmatched '[' as '_' in the base.
-func phpQueryKey(key string) (string, []string) {
+// phpKeyBase splits a query key as PHP reads it into its case-folded base and
+// the bracket text after it ("" when PHP reads no array segments). PHP drops
+// leading spaces and ends the key at a NUL; in the base it reads '.' and ' '
+// as '_', and an unmatched '[' as '_' too.
+func phpKeyBase(key string) (string, string) {
 	if nul := strings.IndexByte(key, 0); nul >= 0 {
 		key = key[:nul]
 	}
 	key = strings.TrimLeft(key, " ")
 	open := strings.IndexByte(key, '[')
 	if open <= 0 || strings.IndexByte(key[open:], ']') < 0 {
-		return phpBase(key), nil
+		return phpBase(key), ""
 	}
-	base := phpBase(key[:open])
+	return phpBase(key[:open]), key[open:]
+}
+
+// phpSegments lists the array segments PHP reads from a key's bracket text,
+// case-folded: [seg] groups, ending at a ']' with no '[' after it. Only the
+// bound name, which the function's author wrote, is parsed whole.
+func phpSegments(rest string) []string {
 	var segs []string
-	rest := key[open:]
 	for len(rest) > 0 && rest[0] == '[' {
 		end := strings.IndexByte(rest, ']')
 		if end < 0 {
@@ -350,7 +359,48 @@ func phpQueryKey(key string) (string, []string) {
 		segs = append(segs, strings.ToLower(rest[1:end]))
 		rest = rest[end+1:]
 	}
-	return base, segs
+	return segs
+}
+
+// phpMaxInputNestingLevel is PHP's default max_input_nesting_level. A key
+// nested deeper makes PHP delete the whole base -- the bound value with it --
+// so under a bracketed bound name such a key is an alias too.
+const phpMaxInputNestingLevel = 64
+
+// exceedsPHPNesting reports whether bracket text nests deeper than PHP keeps,
+// reading no further than one segment past the limit.
+func exceedsPHPNesting(rest string) bool {
+	for depth := 0; len(rest) > 0 && rest[0] == '['; depth++ {
+		if depth >= phpMaxInputNestingLevel {
+			return true
+		}
+		end := strings.IndexByte(rest, ']')
+		if end < 0 {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+	return false
+}
+
+// segmentsAgree reports whether a key's bracket text can name the same value
+// as segs under one base: equal, case-folded, wherever both have a segment,
+// an empty [] matching any. It reads at most len(segs) segments of rest.
+func segmentsAgree(segs []string, rest string) bool {
+	for _, seg := range segs {
+		if len(rest) == 0 || rest[0] != '[' {
+			return true
+		}
+		end := strings.IndexByte(rest, ']')
+		if end < 0 {
+			return true
+		}
+		if other := rest[1:end]; seg != "" && other != "" && strings.ToLower(other) != seg {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+	return true
 }
 
 // phpBase is a key's base as PHP reads it, case-folded.

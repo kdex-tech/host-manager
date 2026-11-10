@@ -396,6 +396,13 @@ func TestGate_BracketedBoundSource(t *testing.T) {
 	code := requestAs(t, h, "GET", "/api/v1/search?filter[store]=vs_alice&filter[store]x=vs_victim", held, nil)
 	assert.Equal(t, http.StatusBadRequest, code, "PHP drops the text after ']'")
 	assert.False(t, *reached)
+
+	// A pair Go cannot decode is invisible to Query() but not to PHP.
+	for _, query := range []string{"filter[store]%=vs_victim", "filter[store];=vs_victim"} {
+		code = requestAs(t, h, "GET", "/api/v1/search?filter[store]=vs_alice&"+query, held, nil)
+		assert.Equal(t, http.StatusBadRequest, code, query)
+	}
+	assert.False(t, *reached)
 }
 
 // A malformed x-entitlement-binding must not fall back to binding the

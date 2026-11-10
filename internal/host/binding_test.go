@@ -3,6 +3,7 @@ package host
 import (
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	entitlements "github.com/kdex-tech/entitlements/go"
@@ -273,10 +274,28 @@ func TestAmbiguousQueryName(t *testing.T) {
 		{"vector_store_id", " vector_store_id", true},
 		{"vector_store_id", "vector_store_id\x00x", true},
 		{"vector_store_id", "vector_store", false},
+		{"filter[store]", "filter" + strings.Repeat("[x]", 65), true},
+		{"filter[store]", "filter" + strings.Repeat("[x]", 64), false},
 	} {
 		q := url.Values{tc.bound: {"mine"}, tc.other: {"theirs"}}
 		assert.Equal(t, tc.alias, ambiguousQueryName(q, tc.bound), "%s vs %q", tc.bound, tc.other)
 	}
 	assert.True(t, ambiguousQueryName(url.Values{"store": {"a", "b"}}, "store"), "a repeated name")
 	assert.False(t, ambiguousQueryName(url.Values{"store": {"a"}, "other": {"b"}}, "store"))
+}
+
+// The query is the caller's, so another key is parsed only as far as the
+// comparison needs: a key of a million bytes of [] costs a scan, not a slice
+// per segment.
+func TestAmbiguousQueryName_DoesNotParseOtherKeysWhole(t *testing.T) {
+	q := url.Values{
+		"vector_store_id":                                {"mine"},
+		"z" + strings.Repeat("[]", 500_000):              {"x"},
+		"filter" + strings.Repeat("[]", 500_000):         {"x"},
+		"Vector_Store_Id_X" + strings.Repeat("[a]", 100): {"x"},
+	}
+	for _, bound := range []string{"vector_store_id", "filter[store]"} {
+		allocs := testing.AllocsPerRun(5, func() { ambiguousQueryName(q, bound) })
+		assert.Less(t, allocs, 20.0, "bound %s: allocations must not grow with the size of another key", bound)
+	}
 }
