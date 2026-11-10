@@ -233,33 +233,33 @@ func hasCallerSuppliableSource(chain []bindingSource) bool {
 	return false
 }
 
-// ambiguousBindingSource reports whether the request carries more than one
-// value for a query parameter or header that the binding of keys may read.
-// Every source in a chain counts, not only the one that would bind, since a
-// backend reads its own source whichever the gate resolved first. So does
-// every name a backend would read as the bound one: PHP folds '.', ' ' and '['
-// in a query key to '_', ASP.NET matches query keys without regard to case,
-// and CGI-style servers read '_' in a header name as '-'. Go parses those as
-// distinct names, so without folding, ?store=mine&STORE=theirs bound "mine"
-// while such a backend acted on "theirs".
+// ambiguousBindingSource reports whether a query parameter or header that the
+// binding of keys may read is ambiguous: sent more than once, or sent under
+// another name a backend would read as it. Every source in a chain counts, not
+// only the one that binds, since a backend reads its own source whichever the
+// gate resolved first.
+//
+// The aliases are the names a permissive backend folds into the bound one.
+// PHP reads '.', ' ' and '[' in a query key as '_', and store[...] as store;
+// ASP.NET matches query keys without regard to case; CGI-style servers read
+// '_' in a header name as '-'. Go parses each as a distinct name, so the gate
+// would bind one value -- or fall through to the next source in the chain --
+// while such a backend acted on another. An alias is refused even when sent
+// alone: ?STORE=theirs with X-Store: mine bound "mine" from the header.
 func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bool {
-	var query map[string]int
-	var header map[string]int
+	var query url.Values
 	for _, key := range keys {
 		for _, src := range spec[key] {
 			switch src.In {
 			case bindingInQuery:
 				if query == nil {
-					query = foldedCounts(r.URL.Query(), foldQueryName)
+					query = r.URL.Query()
 				}
-				if query[foldQueryName(src.Name)] > 1 {
+				if ambiguousName(query, src.Name, foldQueryName) {
 					return true
 				}
 			case bindingInHeader:
-				if header == nil {
-					header = foldedCounts(r.Header, foldHeaderName)
-				}
-				if header[foldHeaderName(src.Name)] > 1 {
+				if ambiguousName(r.Header, http.CanonicalHeaderKey(src.Name), foldHeaderName) {
 					return true
 				}
 			}
@@ -268,17 +268,28 @@ func ambiguousBindingSource(r *http.Request, spec bindingSpec, keys []string) bo
 	return false
 }
 
-// foldedCounts counts the values under each folded name.
-func foldedCounts(values map[string][]string, fold func(string) string) map[string]int {
-	counts := make(map[string]int, len(values))
-	for name, vs := range values {
-		counts[fold(name)] += len(vs)
+// ambiguousName reports whether values hold name more than once, or hold any
+// other name that folds to it.
+func ambiguousName(values map[string][]string, name string, fold func(string) string) bool {
+	if len(values[name]) > 1 {
+		return true
 	}
-	return counts
+	folded := fold(name)
+	for other := range values {
+		if other != name && fold(other) == folded {
+			return true
+		}
+	}
+	return false
 }
 
-// foldQueryName is a query key as the most permissive backend reads it.
+// foldQueryName is a query key as the most permissive backend reads it: PHP
+// takes store[...] as store, and '.', ' ' and an unmatched '[' as '_'; ASP.NET
+// ignores case.
 func foldQueryName(name string) string {
+	if open := strings.IndexByte(name, '['); open > 0 && strings.IndexByte(name[open:], ']') > 0 {
+		name = name[:open]
+	}
 	return strings.Map(func(r rune) rune {
 		switch r {
 		case '.', ' ', '[':

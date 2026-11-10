@@ -309,13 +309,22 @@ func TestGate_BoundSourceWithTwoValuesIs400(t *testing.T) {
 	assert.False(t, *reached)
 
 	// A name a backend folds into the bound one counts as the same source:
-	// PHP reads vector.store.id as vector_store_id, ASP.NET ignores case.
+	// PHP reads vector.store.id as vector_store_id and vector_store_id[x] as
+	// an array of it, ASP.NET ignores case.
 	for _, query := range []string{
 		"vector_store_id=vs_alice&vector.store.id=vs_victim",
 		"vector_store_id=vs_alice&VECTOR_STORE_ID=vs_victim",
+		"vector_store_id=vs_alice&vector_store_id[]=vs_victim",
 	} {
 		code = requestAs(t, h, "GET", "/api/v1/search?"+query, held, nil)
 		assert.Equal(t, http.StatusBadRequest, code, query)
+	}
+
+	// An alias sent alone is refused too: the gate would find no
+	// vector_store_id and bind the header, while the backend read the alias.
+	for _, query := range []string{"VECTOR_STORE_ID=vs_victim", "vector.store.id=vs_victim"} {
+		code = requestAs(t, h, "GET", "/api/v1/search?"+query, held, map[string]string{"X-Store": "vs_alice"})
+		assert.Equal(t, http.StatusBadRequest, code, "an alias alone: "+query)
 	}
 
 	// A CGI-style server reads X_Store as X-Store.
