@@ -197,9 +197,10 @@ namespace.
   operator extends it by applying a labelled ClusterRole (the delta-replicator
   case). No configuration field, no nexus code.
 - **Lifecycle (no ownerRefs):** several hosts may share a namespace, so the
-  installer SA and RoleBinding are not owned by a host. nexus puts a finalizer on
-  the installer RoleBinding and releases it after the last host in the namespace
-  has finished teardown. When the namespace is terminating, nexus skips the Helm
+  installer SA and RoleBinding are not owned by a host. nexus removes them
+  after the last host in the namespace has finished teardown. (Quad B1: no
+  finalizer on the installer RoleBinding -- it protected nothing, and a nexus
+  rollback would leave it holding namespace deletion.) When the namespace is terminating, nexus skips the Helm
   uninstall (the namespace deletion removes everything) and only removes what it
   owns outside the namespace (the cluster-reader subject).
 - nexus's new grants: `impersonate` on serviceaccounts with
@@ -313,6 +314,18 @@ Make-before-break; no window without RBAC.
    `meta.helm.sh/release-namespace=<ns>`) and, for the binding,
    `roleRef.name == <host>`, so a same-named host in another namespace is never
    touched. A `LegacyRBACPresent` condition stays on the host until both are gone.
+   **Teardown of a host whose release record still lists the legacy RBAC**
+   (quad A1): there is no operator Helm identity; every Helm action, uninstall
+   included, impersonates the namespace's installer. nexus first deletes the
+   legacy objects itself (UID-pinned, matched as above, never by the record),
+   then rewrites the latest release revision's stored manifest through the
+   installer's Helm storage, dropping its ClusterRole, ClusterRoleBinding and
+   list-typed documents, then uninstalls as the installer. The rewrite only
+   keeps the uninstall from tripping over what is already gone; it authorizes
+   nothing: the record is a Secret whoever writes Secrets in the namespace can
+   forge, and a record re-forged after it acts with the installer's
+   namespace-bounded rights only -- one listing anything else fails the
+   uninstall closed (finalizer kept, "Deletion is blocked").
 4. **Remove the migration.** A follow-up nexus release deletes the cleanup step,
    the `LegacyRBACPresent` condition and nexus's remaining `delete` on
    clusterroles/clusterrolebindings, once infra confirms none remain
