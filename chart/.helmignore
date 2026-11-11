@@ -21,3 +21,5 @@
 .idea/
 *.tmproj
 .vscode/
+# Go sources next to the chart (its render tests) are not chart content.
+*.go

@@ -55,8 +55,9 @@ func reservedServiceAccountIn(ctx context.Context, c client.Reader, namespace, s
 	return reservedServiceAccount(sa, hostManagerSA, deployerSA, account)
 }
 
-// reservedServiceAccountMessage is the refusal text for a reserved account;
-// field names the spec field.
-func reservedServiceAccountMessage(field, sa string) string {
-	return fmt.Sprintf("%s %q is a reserved ServiceAccount (host-manager, function-deployer or kdex-installer); a function must run as its own", field, sa)
+// reservedServiceAccountMessage is the refusal text for a reserved account:
+// subject names what was refused ("a function", "a backend"), field the spec
+// field naming the account.
+func reservedServiceAccountMessage(subject, field, sa string) string {
+	return fmt.Sprintf("%s %q is a reserved ServiceAccount (host-manager, function-deployer or kdex-installer); %s must run as its own", field, sa, subject)
 }

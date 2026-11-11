@@ -113,3 +113,41 @@ func TestFaaSAdaptor_OtherNamespaceRefused(t *testing.T) {
 	require.NoError(t, c.List(context.Background(), jobs))
 	assert.Empty(t, jobs.Items)
 }
+
+// No function or build may run as a reserved ServiceAccount -- a host-manager
+// one, this host's or any other host's (the chart labels every one) -- and the
+// refusal says a function must run as its own.
+func TestFunctionRefusesReservedServiceAccount(t *testing.T) {
+	scheme := functionTestScheme(t)
+	other := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "other-host", Namespace: "dev",
+		Labels: map[string]string{"app.kubernetes.io/name": "host-manager", "helm.sh/chart": "host-manager-0.30.1"}}}
+	plain := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "user-service-sa", Namespace: "dev"}}
+	r := &KDexFunctionReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(other, plain).Build(), Scheme: scheme}
+
+	check := func(sa string) (error, *kdexv1alpha1.KDexFunction) {
+		fn := &kdexv1alpha1.KDexFunction{ObjectMeta: metav1.ObjectMeta{Name: "f", Namespace: "dev"}}
+		return r.refuseReservedServiceAccount(handlerContext{ctx: context.Background(), function: fn, serviceAccount: "rsi-dev"}, "spec.serviceAccountName", sa), fn
+	}
+
+	for _, sa := range []string{"rsi-dev", "other-host"} {
+		err, fn := check(sa)
+		require.Error(t, err, sa)
+		degraded := meta.FindStatusCondition(fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
+		require.NotNil(t, degraded, sa)
+		assert.Contains(t, degraded.Message, "reserved ServiceAccount")
+		assert.Contains(t, degraded.Message, "a function must run as its own")
+	}
+	for _, sa := range []string{"user-service-sa", "missing-sa"} {
+		err, _ := check(sa)
+		assert.NoError(t, err, sa)
+	}
+}
+
+// The refusal names what it refused: a backend's message must not say a
+// function must run as its own.
+func TestReservedServiceAccountMessageNamesItsSubject(t *testing.T) {
+	msg := reservedServiceAccountMessage("a backend", "backendDefault.deployment spec.template.spec.serviceAccountName", "rsi-dev")
+	assert.Contains(t, msg, `backendDefault.deployment spec.template.spec.serviceAccountName "rsi-dev" is a reserved ServiceAccount`)
+	assert.Contains(t, msg, "a backend must run as its own")
+	assert.NotContains(t, msg, "a function must")
+}

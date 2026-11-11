@@ -1604,7 +1604,7 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 		ctx, r.Client, internalHost.Namespace, sa, r.HostManagerServiceAccount, r.DeployerServiceAccount,
 	) {
 		return nil, r.returnDegraged(internalHost, errors.New(
-			reservedServiceAccountMessage("backendDefault.deployment spec.template.spec.serviceAccountName", sa)))
+			reservedServiceAccountMessage("a backend", "backendDefault.deployment spec.template.spec.serviceAccountName", sa)))
 	}
 
 	_, err := ctrl.CreateOrUpdate(

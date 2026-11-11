@@ -1579,7 +1579,7 @@ func (r *KDexFunctionReconciler) refuseReservedServiceAccount(hc handlerContext,
 	if !reservedServiceAccountIn(hc.ctx, r.Client, hc.function.Namespace, sa, hc.serviceAccount, hc.deployerServiceAccount) {
 		return nil
 	}
-	err := errors.New(reservedServiceAccountMessage(field, sa))
+	err := errors.New(reservedServiceAccountMessage("a function", field, sa))
 	kdexv1alpha1.SetConditions(
 		&hc.function.Status.Conditions,
 		kdexv1alpha1.ConditionStatuses{

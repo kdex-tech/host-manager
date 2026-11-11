@@ -134,30 +134,3 @@ func TestPackageRefsForIPR(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "two versions")
 }
-
-// No function or build may run as a host-manager ServiceAccount: this
-// host's, or any other host's (the chart labels every one).
-func TestRefuseHostManagerServiceAccount(t *testing.T) {
-	scheme := functionTestScheme(t)
-	other := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "other-host", Namespace: "dev",
-		Labels: map[string]string{"app.kubernetes.io/name": "host-manager", "helm.sh/chart": "host-manager-0.30.1"}}}
-	plain := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "user-service-sa", Namespace: "dev"}}
-	r := &KDexFunctionReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(other, plain).Build(), Scheme: scheme}
-
-	check := func(sa string) (error, *kdexv1alpha1.KDexFunction) {
-		fn := &kdexv1alpha1.KDexFunction{ObjectMeta: metav1.ObjectMeta{Name: "f", Namespace: "dev"}}
-		return r.refuseReservedServiceAccount(handlerContext{ctx: context.Background(), function: fn, serviceAccount: "rsi-dev"}, "spec.serviceAccountName", sa), fn
-	}
-
-	for _, sa := range []string{"rsi-dev", "other-host"} {
-		err, fn := check(sa)
-		require.Error(t, err, sa)
-		degraded := meta.FindStatusCondition(fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
-		require.NotNil(t, degraded, sa)
-		assert.Contains(t, degraded.Message, "reserved ServiceAccount")
-	}
-	for _, sa := range []string{"user-service-sa", "missing-sa"} {
-		err, _ := check(sa)
-		assert.NoError(t, err, sa)
-	}
-}
