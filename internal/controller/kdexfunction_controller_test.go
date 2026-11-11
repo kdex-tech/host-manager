@@ -398,8 +398,9 @@ var _ = Describe("KDexFunction Controller", func() {
 				Spec: kdexv1alpha1.KDexFaaSAdaptorSpec{
 					Builders: []kdexv1alpha1.Builder{
 						{
-							Languages: []string{"go"},
-							Name:      "tiny",
+							Languages:          []string{"go"},
+							Name:               "tiny",
+							ServiceAccountName: "kdex-builder",
 							BuilderRef: kdexv1alpha1.KDexObjectReference{
 								Kind: "ClusterBuilder",
 								Name: "tiny",
@@ -845,8 +846,9 @@ var _ = Describe("KDexFunction Controller", func() {
 				Spec: kdexv1alpha1.KDexFaaSAdaptorSpec{
 					Builders: []kdexv1alpha1.Builder{
 						{
-							Languages: []string{"go"},
-							Name:      "tiny",
+							Languages:          []string{"go"},
+							Name:               "tiny",
+							ServiceAccountName: "kdex-builder",
 							BuilderRef: kdexv1alpha1.KDexObjectReference{
 								Kind: "ClusterBuilder",
 								Name: "tiny",
@@ -962,9 +964,10 @@ var _ = Describe("KDexFunction Controller", func() {
 				},
 				Spec: kdexv1alpha1.KDexFaaSAdaptorSpec{
 					Builders: []kdexv1alpha1.Builder{{
-						Languages:  []string{"go"},
-						Name:       "tiny",
-						BuilderRef: kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny"},
+						Languages:          []string{"go"},
+						Name:               "tiny",
+						ServiceAccountName: "kdex-builder",
+						BuilderRef:         kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny"},
 					}},
 					DefaultBuilderGenerator: "tiny/go",
 					Deployer:                kdexv1alpha1.Deployer{Image: "deployer"},
@@ -1056,9 +1059,10 @@ var _ = Describe("KDexFunction Controller", func() {
 				},
 				Spec: kdexv1alpha1.KDexFaaSAdaptorSpec{
 					Builders: []kdexv1alpha1.Builder{{
-						Languages:  []string{"go"},
-						Name:       "tiny",
-						BuilderRef: kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny-fallback"},
+						Languages:          []string{"go"},
+						Name:               "tiny",
+						ServiceAccountName: "kdex-builder",
+						BuilderRef:         kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny-fallback"},
 					}},
 					DefaultBuilderGenerator: "tiny/go",
 					Deployer:                kdexv1alpha1.Deployer{Image: "deployer"},
@@ -1139,9 +1143,10 @@ var _ = Describe("KDexFunction Controller", func() {
 				},
 				Spec: kdexv1alpha1.KDexFaaSAdaptorSpec{
 					Builders: []kdexv1alpha1.Builder{{
-						Languages:  []string{"go"},
-						Name:       "tiny",
-						BuilderRef: kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny"},
+						Languages:          []string{"go"},
+						Name:               "tiny",
+						ServiceAccountName: "kdex-builder",
+						BuilderRef:         kdexv1alpha1.KDexObjectReference{Kind: "ClusterBuilder", Name: "tiny"},
 					}},
 					DefaultBuilderGenerator: "tiny/go",
 					Deployer:                kdexv1alpha1.Deployer{Image: "deployer"},

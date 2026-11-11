@@ -24,6 +24,8 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtimeschemepkg "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -188,5 +190,44 @@ var _ = Describe("createOrUpdateBackendDeployment template propagation", func() 
 		var second appsv1.Deployment
 		Expect(c.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: hostNamespace}, &second)).To(Succeed())
 		Expect(second.Spec.Selector).To(Equal(initialSelector))
+	})
+
+	It("never mounts the ServiceAccount token into the backend pod", func() {
+		scheme := buildScheme()
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r := &KDexInternalHostReconciler{Client: c, Scheme: scheme}
+		tmpl := newBackendTemplate(8080, true)
+		tmpl.Template.Spec.AutomountServiceAccountToken = ptr.To(true)
+		r.memoizedDeployment = tmpl
+
+		_, err := r.createOrUpdateBackendDeployment(ctx, internalHost(), deploymentName, resolved, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployed appsv1.Deployment
+		Expect(c.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: hostNamespace}, &deployed)).To(Succeed())
+		Expect(deployed.Spec.Template.Spec.AutomountServiceAccountToken).NotTo(BeNil())
+		Expect(*deployed.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
+	})
+
+	It("refuses a template that runs as a reserved ServiceAccount", func() {
+		scheme := buildScheme()
+		c := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r := &KDexInternalHostReconciler{Client: c, Scheme: scheme, HostManagerServiceAccount: "rsi-dev"}
+		tmpl := newBackendTemplate(8080, true)
+		tmpl.Template.Spec.ServiceAccountName = "rsi-dev"
+		r.memoizedDeployment = tmpl
+
+		ih := internalHost()
+		_, err := r.createOrUpdateBackendDeployment(ctx, ih, deploymentName, resolved, nil)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.template.spec.serviceAccountName"))
+
+		var deployed appsv1.Deployment
+		Expect(apierrors.IsNotFound(c.Get(ctx, client.ObjectKey{Name: deploymentName, Namespace: hostNamespace}, &deployed))).To(BeTrue())
+
+		cond := meta.FindStatusCondition(ih.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Message).To(ContainSubstring("spec.template.spec.serviceAccountName"))
 	})
 })

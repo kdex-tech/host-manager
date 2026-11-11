@@ -146,7 +146,7 @@ func TestRefuseHostManagerServiceAccount(t *testing.T) {
 
 	check := func(sa string) (error, *kdexv1alpha1.KDexFunction) {
 		fn := &kdexv1alpha1.KDexFunction{ObjectMeta: metav1.ObjectMeta{Name: "f", Namespace: "dev"}}
-		return r.refuseHostManagerServiceAccount(handlerContext{ctx: context.Background(), function: fn, serviceAccount: "rsi-dev"}, "spec.serviceAccountName", sa), fn
+		return r.refuseReservedServiceAccount(handlerContext{ctx: context.Background(), function: fn, serviceAccount: "rsi-dev"}, "spec.serviceAccountName", sa), fn
 	}
 
 	for _, sa := range []string{"rsi-dev", "other-host"} {
@@ -154,7 +154,7 @@ func TestRefuseHostManagerServiceAccount(t *testing.T) {
 		require.Error(t, err, sa)
 		degraded := meta.FindStatusCondition(fn.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
 		require.NotNil(t, degraded, sa)
-		assert.Contains(t, degraded.Message, "host-manager ServiceAccount")
+		assert.Contains(t, degraded.Message, "reserved ServiceAccount")
 	}
 	for _, sa := range []string{"user-service-sa", "missing-sa"} {
 		err, _ := check(sa)

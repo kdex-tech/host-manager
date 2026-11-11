@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -44,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,13 +66,18 @@ type KDexInternalHostReconciler struct {
 	client.Client
 	Configuration       configuration.NexusConfiguration
 	ControllerNamespace string
-	FocalHost           string
-	HostHandler         *host.HostHandler
-	Port                int32
-	RefreshGraceWindow  time.Duration
-	RequeueDelay        time.Duration
-	Scheme              *runtime.Scheme
-	ServiceName         string
+	// DeployerServiceAccount and HostManagerServiceAccount are the
+	// ServiceAccounts a backend Deployment may not run as (see
+	// reservedServiceAccount).
+	DeployerServiceAccount    string
+	FocalHost                 string
+	HostHandler               *host.HostHandler
+	HostManagerServiceAccount string
+	Port                      int32
+	RefreshGraceWindow        time.Duration
+	RequeueDelay              time.Duration
+	Scheme                    *runtime.Scheme
+	ServiceName               string
 
 	mu                 sync.RWMutex
 	memoizedDeployment *appsv1.DeploymentSpec
@@ -974,9 +981,6 @@ func (r *KDexInternalHostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				}
 			})).
 		Watches(
-			&corev1.ServiceAccount{},
-			MakeHandlerByReferencePath(r.Client, r.Scheme, &kdexv1alpha1.KDexInternalHost{}, &kdexv1alpha1.KDexInternalHostList{}, "{.Spec.ServiceAccountRef}")).
-		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
 				secret, ok := obj.(*corev1.Secret)
@@ -1593,6 +1597,16 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 		},
 	}
 
+	// A backend must not run as a ServiceAccount whose rights it must never
+	// hold (config.backendDefault.deployment is operator-set, but a template
+	// naming host-manager's account would hand it host-manager's token).
+	if sa := r.getMemoizedBackendDeployment().Template.Spec.ServiceAccountName; reservedServiceAccountIn(
+		ctx, r.Client, internalHost.Namespace, sa, r.HostManagerServiceAccount, r.DeployerServiceAccount,
+	) {
+		return nil, r.returnDegraged(internalHost, errors.New(
+			reservedServiceAccountMessage("backendDefault.deployment spec.template.spec.serviceAccountName", sa)))
+	}
+
 	_, err := ctrl.CreateOrUpdate(
 		ctx,
 		r.Client,
@@ -1647,6 +1661,9 @@ func (r *KDexInternalHostReconciler) createOrUpdateBackendDeployment(
 			deployment.Spec.Template.Labels["kdex.dev/kind"] = resolvedBackend.Kind
 
 			deployment.Spec.Template.Spec.Containers[0].Name = "backend"
+
+			// A backend serves static assets; it never calls the API server.
+			deployment.Spec.Template.Spec.AutomountServiceAccountToken = ptr.To(false)
 
 			// Rebuild env, imagePullSecrets, volumes, and volumeMounts from scratch
 			// each reconcile so removals in the desired spec propagate to the live

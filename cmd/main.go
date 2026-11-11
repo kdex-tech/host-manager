@@ -384,16 +384,18 @@ func main() {
 	requeueDelay := time.Duration(requeueDelaySeconds) * time.Second
 
 	if err := (&controller.KDexInternalHostReconciler{
-		Client:              mgr.GetClient(),
-		ControllerNamespace: controllerNamespace,
-		Configuration:       conf,
-		FocalHost:           focalHost,
-		HostHandler:         hostHandler,
-		Port:                webserverPort(webserverAddr),
-		RefreshGraceWindow:  refreshGraceWindow,
-		RequeueDelay:        requeueDelay,
-		Scheme:              mgr.GetScheme(),
-		ServiceName:         serviceName,
+		Client:                    mgr.GetClient(),
+		ControllerNamespace:       controllerNamespace,
+		Configuration:             conf,
+		DeployerServiceAccount:    os.Getenv("FUNCTION_DEPLOYER_SERVICE_ACCOUNT"),
+		FocalHost:                 focalHost,
+		HostHandler:               hostHandler,
+		HostManagerServiceAccount: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
+		Port:                      webserverPort(webserverAddr),
+		RefreshGraceWindow:        refreshGraceWindow,
+		RequeueDelay:              requeueDelay,
+		Scheme:                    mgr.GetScheme(),
+		ServiceName:               serviceName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "KDexInternalHost")
 		os.Exit(1)
