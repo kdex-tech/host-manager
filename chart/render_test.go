@@ -249,7 +249,7 @@ func TestRender_NoClusterScopedRBAC(t *testing.T) {
 // Role to the ServiceAccount the chart actually renders.
 func TestRender_RoleBindingNamesChartServiceAccount(t *testing.T) {
 	out := renderChart(t, "serviceAccount.name=custom")
-	rb := docOfKind(out, "RoleBinding")
+	rb := docNamed(out, "RoleBinding", "t-host-manager")
 	if rb == "" {
 		t.Fatalf("no RoleBinding rendered:\n%s", out)
 	}
@@ -258,7 +258,7 @@ func TestRender_RoleBindingNamesChartServiceAccount(t *testing.T) {
 			t.Errorf("RoleBinding missing %q:\n%s", want, rb)
 		}
 	}
-	if !strings.Contains(docOfKind(out, "Role"), "name: t-host-manager\n") {
+	if !strings.Contains(docNamed(out, "Role", "t-host-manager"), "name: t-host-manager\n") {
 		t.Errorf("Role/t-host-manager not rendered")
 	}
 }
@@ -266,11 +266,83 @@ func TestRender_RoleBindingNamesChartServiceAccount(t *testing.T) {
 // TestRender_RoleOmitsClusterKinds: cluster-scoped kdexcluster* reads cannot be
 // granted by a namespaced Role; nexus's cluster-reader ClusterRole provides them.
 func TestRender_RoleOmitsClusterKinds(t *testing.T) {
-	role := docOfKind(renderChart(t), "Role")
+	role := docNamed(renderChart(t), "Role", "t-host-manager")
 	if role == "" {
 		t.Fatal("no Role rendered")
 	}
 	if strings.Contains(role, "kdexcluster") {
 		t.Errorf("Role mentions kdexcluster* resources:\n%s", role)
+	}
+}
+
+// rulesOf returns the "rules:" section of a rendered Role, whitespace-trimmed
+// per line, so assertions do not depend on indentation.
+func rulesOf(t *testing.T, role string) []string {
+	t.Helper()
+	_, rules, ok := strings.Cut(role, "\nrules:\n")
+	if !ok {
+		t.Fatalf("no rules in:\n%s", role)
+	}
+	var lines []string
+	for _, l := range strings.Split(rules, "\n") {
+		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// docNamed returns the rendered document of kind and metadata.name name.
+func docNamed(manifests, kind, name string) string {
+	for _, d := range splitDocs(manifests) {
+		if strings.Contains(d, "\nkind: "+kind+"\n") && strings.Contains(d, "\n  name: "+name+"\n") {
+			return d
+		}
+	}
+	return ""
+}
+
+// TestRender_FunctionDeployerRBAC pins D3: the deployer Job and observer
+// CronJob run as their own ServiceAccount, with exactly the rights the
+// kdex-knative-deployer binary uses.
+func TestRender_FunctionDeployerRBAC(t *testing.T) {
+	out := renderChart(t)
+	const name = "t-host-manager-function-deployer"
+
+	if docNamed(out, "ServiceAccount", name) == "" {
+		t.Errorf("ServiceAccount/%s not rendered", name)
+	}
+
+	role := docNamed(out, "Role", name)
+	if role == "" {
+		t.Fatalf("Role/%s not rendered", name)
+	}
+	got := strings.Join(rulesOf(t, role), " ")
+	want := strings.Join([]string{
+		"- apiGroups: - serving.knative.dev resources: - services verbs: - create - get - patch",
+		"- apiGroups: - kdex.dev resources: - kdexfunctions verbs: - get - list",
+		"- apiGroups: - kdex.dev resources: - kdexfunctions/status verbs: - patch",
+		"- apiGroups: - kpack.io resources: - images verbs: - get - patch",
+		"- apiGroups: - kpack.io resources: - builds verbs: - get",
+		`- apiGroups: - "" resources: - pods verbs: - get`,
+	}, " ")
+	if got != want {
+		t.Errorf("function-deployer rules\n got: %s\nwant: %s", got, want)
+	}
+
+	rb := docNamed(out, "RoleBinding", name)
+	if rb == "" {
+		t.Fatalf("RoleBinding/%s not rendered", name)
+	}
+	for _, w := range []string{"kind: Role\n", "name: " + name + "\n", "kind: ServiceAccount\n"} {
+		if !strings.Contains(rb, w) {
+			t.Errorf("RoleBinding missing %q:\n%s", w, rb)
+		}
+	}
+
+	dep := docOfKind(out, "Deployment")
+	if !strings.Contains(dep, "name: FUNCTION_DEPLOYER_SERVICE_ACCOUNT\n") ||
+		!strings.Contains(dep, "value: "+name+"\n") {
+		t.Errorf("Deployment lacks FUNCTION_DEPLOYER_SERVICE_ACCOUNT=%s:\n%s", name, dep)
 	}
 }

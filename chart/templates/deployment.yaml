@@ -74,6 +74,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.serviceAccountName
+            # The ServiceAccount the deployer Job and observer CronJob run as.
+            - name: FUNCTION_DEPLOYER_SERVICE_ACCOUNT
+              value: {{ include "host-manager.fullname" . }}-function-deployer
             {{- if .Values.valkey.enabled }}
             - name: CACHE_ADDRESS
               value: {{ include "host-manager.fullname" . }}-valkey:6379

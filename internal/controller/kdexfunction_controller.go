@@ -102,14 +102,18 @@ type KDexFunctionReconciler struct {
 }
 
 type handlerContext struct {
-	ctx              context.Context
-	faasAdaptorSpec  kdexv1alpha1.KDexFaaSAdaptorSpec
-	function         *kdexv1alpha1.KDexFunction
-	gitSecret        *corev1.Secret
-	host             kdexv1alpha1.KDexInternalHost
-	imagePullSecrets []corev1.Secret
-	req              ctrl.Request
-	serviceAccount   string
+	ctx             context.Context
+	faasAdaptorSpec kdexv1alpha1.KDexFaaSAdaptorSpec
+	function        *kdexv1alpha1.KDexFunction
+	gitSecret       *corev1.Secret
+	host            kdexv1alpha1.KDexInternalHost
+	// deployerServiceAccount is the ServiceAccount the deployer Job and
+	// observer CronJob run as (FUNCTION_DEPLOYER_SERVICE_ACCOUNT); empty
+	// when the chart predates it.
+	deployerServiceAccount string
+	imagePullSecrets       []corev1.Secret
+	req                    ctrl.Request
+	serviceAccount         string
 }
 
 //nolint:gocyclo
@@ -267,8 +271,9 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				return s.Type == corev1.SecretTypeDockerConfigJson
 			},
 		),
-		req:            req,
-		serviceAccount: os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
+		req:                    req,
+		serviceAccount:         os.Getenv("KUBERNETES_SERVICE_ACCOUNT"),
+		deployerServiceAccount: os.Getenv("FUNCTION_DEPLOYER_SERVICE_ACCOUNT"),
 	}
 
 	// Pick up asynchronous builder updates (e.g. from KPack git polling)
@@ -1609,8 +1614,28 @@ func (r *KDexFunctionReconciler) deployer(hc handlerContext) deploy.Deployer {
 			}
 		}),
 		Scheme:         r.Scheme,
-		ServiceAccount: hc.serviceAccount,
+		ServiceAccount: hc.deployerServiceAccount,
 	}
+}
+
+// refuseMissingDeployerServiceAccount marks the function Degraded and returns
+// true when the chart did not provide the deployer ServiceAccount (an old
+// chart): the caller must not deploy or observe.
+func (r *KDexFunctionReconciler) refuseMissingDeployerServiceAccount(hc handlerContext) bool {
+	if hc.deployerServiceAccount != "" {
+		return false
+	}
+	kdexv1alpha1.SetConditions(
+		&hc.function.Status.Conditions,
+		kdexv1alpha1.ConditionStatuses{
+			Degraded:    metav1.ConditionTrue,
+			Progressing: metav1.ConditionFalse,
+			Ready:       metav1.ConditionFalse,
+		},
+		kdexv1alpha1.ConditionReasonReconcileError,
+		"FUNCTION_DEPLOYER_SERVICE_ACCOUNT is not set; upgrade the host-manager chart",
+	)
+	return true
 }
 
 func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (ctrl.Result, error) {
@@ -1638,6 +1663,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		if err := r.refuseHostManagerServiceAccount(hc, "spec.serviceAccountName", sa); err != nil {
 			return ctrl.Result{}, nil
 		}
+	}
+
+	if r.refuseMissingDeployerServiceAccount(hc) {
+		return ctrl.Result{}, nil
 	}
 
 	deployer := r.deployer(hc)
@@ -1764,6 +1793,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 func (r *KDexFunctionReconciler) handleFunctionDeployed(hc handlerContext) (ctrl.Result, error) {
 	log := logf.FromContext(hc.ctx)
 
+	if r.refuseMissingDeployerServiceAccount(hc) {
+		return ctrl.Result{}, nil
+	}
+
 	deployer := r.deployer(hc)
 
 	_, err := deployer.Observe(hc.ctx, hc.function)
@@ -1820,6 +1853,10 @@ func (r *KDexFunctionReconciler) handleReady(hc handlerContext) (ctrl.Result, er
 		log.V(2).Info("Source is nil on a source-authoritative Ready function, re-deriving from Spec.Origin.Source")
 		hc.function.Status.Source = hc.function.Spec.GetOrigin().Source
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+	}
+
+	if r.refuseMissingDeployerServiceAccount(hc) {
+		return ctrl.Result{}, nil
 	}
 
 	deployer := r.deployer(hc)
