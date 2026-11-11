@@ -57,6 +57,11 @@ const ClaimIssuedAt = "iat"
 // See kdex-tech/host-manager#255.
 const ClaimSubjectKind = sign.ClaimSubjectKind
 
+// ClaimClientID is the RFC 9068 client_id claim (sign.ClaimClientID): the
+// client the credential was issued to, mint-decided and reserved. See
+// kdex-tech/host-manager#295.
+const ClaimClientID = sign.ClaimClientID
+
 // SetAuthContext sets the auth context in the context.
 func SetAuthContext(ctx context.Context, ac AuthContext) context.Context {
 	return context.WithValue(ctx, authContextKey, ac)

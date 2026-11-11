@@ -85,6 +85,12 @@ const SubjectlessRemedy = "a credential that names nobody is not a supported con
 // auth context spell it one way. See kdex-tech/host-manager#255.
 const ClaimSubjectKind = "knd"
 
+// ClaimClientID is the RFC 9068 client_id claim: the client a token was
+// issued to (an OAuth client's id, or "pat:<jti>" for an API token, which
+// acts as its own client). The mint decides it, and a backend partitions
+// per-client state by it. See kdex-tech/host-manager#295.
+const ClaimClientID = "client_id"
+
 // mintDecidedClaims are the claims the mint decides and a claimMappings rule
 // can neither change, add nor remove: Project carries them from the signing
 // context, and they are reserved, so a rule's write to one is dropped
@@ -93,8 +99,11 @@ const ClaimSubjectKind = "knd"
 //     so a rule that wrote "local" into an OAuth client's token would make it
 //     pass as one;
 //   - ClaimSubjectKind: roles are resolved with it, so a rule that wrote
-//     "User" into a client's token would hand it every [User] binding.
-var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind}
+//     "User" into a client's token would hand it every [User] binding;
+//   - ClaimClientID: a backend partitions per-client state by it (knowdb's
+//     watches), so a rule that wrote another client's id would read that
+//     client's state (#295).
+var mintDecidedClaims = []string{"auth_method", ClaimSubjectKind, ClaimClientID}
 
 // projectedClaims are the inline claims Project copies from the signing
 // context (see Project): every mint-decided claim, plus the rest.
@@ -302,7 +311,10 @@ func (s *Signer) Project(signingContext jwt.MapClaims) (jwt.MapClaims, error) {
 	// ClaimSubjectKind is the subject's kind, which every resolution of roles
 	// from this token (the FAT, a token exchange of it) uses (#255).
 	//
-	// Both are mint-decided (mintDecidedClaims), which projectedClaims is
+	// ClaimClientID is the client the token was issued to (RFC 9068), which a
+	// backend partitions per-client state by (#295).
+	//
+	// All three are mint-decided (mintDecidedClaims), which projectedClaims is
 	// built from, so a claim the mint decides is always carried through, and
 	// reserved, so the mapper below cannot overwrite it.
 	for _, claim := range projectedClaims {

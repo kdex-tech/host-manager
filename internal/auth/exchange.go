@@ -554,6 +554,11 @@ func (e *Exchanger) ExchangeSubjectToken(subjectToken, targetAudience string) (T
 	if actorAud != "" {
 		signingContext["act"] = map[string]any{"sub": actorAud}
 	}
+	// The exchanged token is the same caller's, so it names the client the
+	// subject_token was issued to (#295). The subject_token's signature is
+	// verified above and the claim is mint-decided, so it is the mint's.
+	clientID, _ := claims[ClaimClientID].(string)
+	setClientID(signingContext, clientID)
 	// Fold in the data-driven backend claims (guarded: skips reservedMintClaims,
 	// never overwrites an existing key); the signer's Project then runs the
 	// ClaimMappings mapper over the enriched context.
@@ -728,6 +733,10 @@ func (e *Exchanger) ExchangeToken(ctx context.Context, oidcTokens OIDCExchange) 
 	// asserting `knd: Client` must not get a person a client's bindings. It
 	// is set below, from the binding subject (#255).
 	delete(signingContext, ClaimSubjectKind)
+	// A browser login is issued to no OAuth client of this host, so the
+	// session names none; an IdP's client_id (its own client, this host) is
+	// not ours to carry, and is mint-decided (#295).
+	delete(signingContext, ClaimClientID)
 
 	sub, err := signingContext.GetSubject()
 	// `err != nil` alone never fired for the case this check was written for.
@@ -1081,6 +1090,7 @@ func (e *Exchanger) buildClientSigningContext(ctx context.Context, clientID, cli
 		"auth_method":    string(AuthMethodOAuth2),
 		"grant_type":     GRANT_TYPE_CLIENT_CREDENTIALS,
 		ClaimSubjectKind: string(clientBindingSubject(clientID).Kind),
+		ClaimClientID:    clientID,
 	}
 
 	// Determine granted scopes, filtered by the client's AllowedScopes if configured.
@@ -1308,6 +1318,8 @@ func (e *Exchanger) LoginLocal(ctx context.Context, username, password, scope, c
 	// the strip above removed any knd it supplied, and a sub naming a client
 	// was refused (#243, #255).
 	signingContext[ClaimSubjectKind] = string(kdexv1alpha1.SubjectKindUser)
+	// The password grant's client; the host's own login form has none (#295).
+	setClientID(signingContext, clientID)
 
 	// Determine granted scopes; claim confinement of the scope-controlled
 	// families (email/profile/entitlements/roles) happens post-mapper in
@@ -2051,6 +2063,17 @@ func mergeBackendClaims(signingContext, backend jwt.MapClaims) {
 	}
 }
 
+// setClientID records the client a token is issued to in its RFC 9068
+// client_id claim (ClaimClientID), which Project carries into every FAT. A
+// token issued to no client (a browser session: the host's own login form or
+// an OIDC login, and the session that refreshes from it) names none, so an
+// empty clientID sets nothing. See kdex-tech/host-manager#295.
+func setClientID(signingContext jwt.MapClaims, clientID string) {
+	if clientID != "" {
+		signingContext[ClaimClientID] = clientID
+	}
+}
+
 // sourcedIdentityProvider is the optional capability of reporting which lookup
 // vouched for a credential (scopeProvider.FindInternalWithSource). A provider
 // without it reports no source, which keeps every login it vouches for gated.
@@ -2180,6 +2203,7 @@ func (e *Exchanger) mintTokensFromCode(ctx context.Context, claims Authorization
 		"entitlements":   entitlements,
 		ClaimSubjectKind: string(bs.Kind),
 	}
+	setClientID(signingContext, claims.ClientID)
 	mergeBackendClaims(signingContext, backend)
 
 	grantedScopes := applyScopeFilter(signingContext, claims.Scope, nil)
@@ -2271,6 +2295,9 @@ func (e *Exchanger) mintTokensFromSubject(subject, clientID, scope string, authM
 		"sub":            subject,
 		ClaimSubjectKind: string(bs.Kind),
 	}
+	// The refresh record's client, so a rotated session names the client the
+	// one it replaces did (#295).
+	setClientID(signingContext, clientID)
 
 	// Replay what the IdP asserted at login, then union its roles/entitlements
 	// with the FRESHLY-resolved internal ones -- the same merge ExchangeToken

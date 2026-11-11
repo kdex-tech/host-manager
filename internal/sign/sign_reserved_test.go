@@ -87,3 +87,29 @@ func TestReservedTargets(t *testing.T) {
 	assert.Equal(t, []string{"aud", "act.sub"}, got)
 	assert.Empty(t, sign.ReservedTargets(nil))
 }
+
+// kdex-tech/host-manager#295: client_id names the client a token was issued
+// to. It is mint-decided, so Project carries it from the signing context into
+// every FAT, and reserved, so a claimMappings rule can neither override it
+// nor add one to a token issued to no client.
+func TestSigner_Project_ClientIDIsMintDecided(t *testing.T) {
+	assert.Contains(t, sign.MintDecidedClaims(), sign.ClaimClientID)
+	assert.Contains(t, kdexv1alpha1.ReservedClaimTargets(), sign.ClaimClientID)
+
+	forger := testSignerWithMapper(t, []dmapper.MappingRule{{
+		SourceExpression: `"forged-client"`, TargetPropPath: sign.ClaimClientID,
+	}})
+	for name, s := range map[string]*sign.Signer{"without a mapper": testSigner(t), "with a forging rule": forger} {
+		got, err := s.Project(jwt.MapClaims{"sub": "alice", sign.ClaimClientID: "dcr_abc"})
+		require.NoError(t, err, name)
+		assert.Equal(t, "dcr_abc", got[sign.ClaimClientID], name)
+	}
+
+	got, err := forger.Project(jwt.MapClaims{"sub": "alice"})
+	require.NoError(t, err)
+	assert.NotContains(t, got, sign.ClaimClientID, "a rule cannot add one")
+
+	assert.Equal(t, []string{sign.ClaimClientID}, sign.ReservedTargets([]dmapper.MappingRule{
+		{SourceExpression: `"x"`, TargetPropPath: sign.ClaimClientID},
+	}), "the reconcile reports the rule it will drop")
+}
