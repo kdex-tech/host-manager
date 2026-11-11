@@ -218,3 +218,59 @@ func TestRefreshGraceWindowArg(t *testing.T) {
 		t.Errorf("refreshGraceWindow=0 must render explicitly, not be dropped:\n%s", got)
 	}
 }
+
+// splitDocs splits rendered helm output into its YAML documents.
+func splitDocs(manifests string) []string {
+	return strings.Split(manifests, "\n---\n")
+}
+
+// docOfKind returns the first rendered document whose kind is kind, or "".
+func docOfKind(manifests, kind string) string {
+	for _, d := range splitDocs(manifests) {
+		if strings.Contains(d, "\nkind: "+kind+"\n") {
+			return d
+		}
+	}
+	return ""
+}
+
+// TestRender_NoClusterScopedRBAC pins D1: the chart never renders cluster-scoped
+// RBAC; host-manager's permissions are a namespaced Role.
+func TestRender_NoClusterScopedRBAC(t *testing.T) {
+	out := renderChart(t)
+	for _, kind := range []string{"ClusterRole", "ClusterRoleBinding"} {
+		if strings.Contains(out, "kind: "+kind+"\n") {
+			t.Errorf("chart renders cluster-scoped kind %s; want namespaced Role/RoleBinding only", kind)
+		}
+	}
+}
+
+// TestRender_RoleBindingNamesChartServiceAccount: the RoleBinding must bind the
+// Role to the ServiceAccount the chart actually renders.
+func TestRender_RoleBindingNamesChartServiceAccount(t *testing.T) {
+	out := renderChart(t, "serviceAccount.name=custom")
+	rb := docOfKind(out, "RoleBinding")
+	if rb == "" {
+		t.Fatalf("no RoleBinding rendered:\n%s", out)
+	}
+	for _, want := range []string{"kind: Role\n", "name: t-host-manager\n", "name: custom\n"} {
+		if !strings.Contains(rb, want) {
+			t.Errorf("RoleBinding missing %q:\n%s", want, rb)
+		}
+	}
+	if !strings.Contains(docOfKind(out, "Role"), "name: t-host-manager\n") {
+		t.Errorf("Role/t-host-manager not rendered")
+	}
+}
+
+// TestRender_RoleOmitsClusterKinds: cluster-scoped kdexcluster* reads cannot be
+// granted by a namespaced Role; nexus's cluster-reader ClusterRole provides them.
+func TestRender_RoleOmitsClusterKinds(t *testing.T) {
+	role := docOfKind(renderChart(t), "Role")
+	if role == "" {
+		t.Fatal("no Role rendered")
+	}
+	if strings.Contains(role, "kdexcluster") {
+		t.Errorf("Role mentions kdexcluster* resources:\n%s", role)
+	}
+}

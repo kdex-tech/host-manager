@@ -46,6 +46,9 @@ jobs:
         go mod tidy
         make test
 
+    - name: Check generated RBAC is up to date
+      run: git diff --exit-code config/rbac chart/templates/role.yaml
+
   test-chart:
     name: Test Chart
     needs: ci

@@ -5,17 +5,36 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - kdex.dev
+  resources:
+  - kdexclusterapps
+  - kdexclusterfaasadaptors
+  - kdexclusterpagearchetypes
+  - kdexclusterpagefooters
+  - kdexclusterpageheaders
+  - kdexclusterpagenavigations
+  - kdexclusterscriptlibraries
+  - kdexclusterthemes
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: host-namespace
+rules:
+- apiGroups:
   - ""
   resources:
   - configmaps
   - secrets
-  - services
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -28,6 +47,17 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -36,21 +66,28 @@ rules:
   - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
   - batch
   resources:
   - cronjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
   - jobs
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - discovery.k8s.io
@@ -63,36 +100,19 @@ rules:
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
-  - gateways
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
   - httproutes
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
   - kdex.dev
   resources:
   - kdexapps
-  - kdexclusterapps
-  - kdexclusterfaasadaptors
-  - kdexclusterpagearchetypes
-  - kdexclusterpagefooters
-  - kdexclusterpageheaders
-  - kdexclusterpagenavigations
-  - kdexclusterscriptlibraries
-  - kdexclusterthemes
   - kdexfaasadaptors
+  - kdexinternalhosts
   - kdexpagearchetypes
   - kdexpagefooters
   - kdexpageheaders
@@ -109,14 +129,8 @@ rules:
   - kdex.dev
   resources:
   - kdexfunctions
-  - kdexinternalhosts
-  - kdexinternalpackagereferences
-  - kdexinternaltranslations
-  - kdexinternalutilitypages
-  - kdexpages
   verbs:
   - create
-  - delete
   - get
   - list
   - patch
@@ -128,15 +142,19 @@ rules:
   - kdexfunctions/finalizers
   - kdexinternalhosts/finalizers
   - kdexinternalpackagereferences/finalizers
-  - kdexinternaltranslations/finalizers
-  - kdexinternalutilitypages/finalizers
-  - kdexpages/finalizers
   verbs:
   - update
 - apiGroups:
   - kdex.dev
   resources:
   - kdexfunctions/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - kdex.dev
+  resources:
   - kdexinternalhosts/status
   - kdexinternalpackagereferences/status
   - kdexinternaltranslations/status
@@ -144,8 +162,30 @@ rules:
   - kdexpages/status
   verbs:
   - get
+  - update
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexinternalpackagereferences
+  verbs:
+  - create
+  - delete
+  - get
+  - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexinternaltranslations
+  - kdexinternalutilitypages
+  - kdexpages
+  verbs:
+  - get
+  - list
+  - update
+  - watch
 - apiGroups:
   - kpack.io
   resources:
@@ -156,43 +196,14 @@ rules:
   - get
   - list
   - patch
-  - update
   - watch
-- apiGroups:
-  - kpack.io
-  resources:
-  - images/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - kpack.io
-  resources:
-  - images/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - networking.k8s.io
   resources:
   - ingresses
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - serving.knative.dev
-  resources:
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
   - update
   - watch

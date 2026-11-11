@@ -55,6 +55,13 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@$(MAKE) --no-print-directory chart-rbac
+
+.PHONY: chart-rbac
+chart-rbac: ## Regenerate chart/templates/role.yaml from config/rbac/role.yaml.
+	@{ cat hack/chart-role-header.yaml; echo "rules:"; \
+	  yq 'select(.kind == "Role") | .rules' config/rbac/role.yaml | sed 's/^/  /'; \
+	} > chart/templates/role.yaml
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
