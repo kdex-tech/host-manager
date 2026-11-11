@@ -44,8 +44,14 @@ package controller
 // +kubebuilder:rbac:groups=kpack.io,resources=images,verbs=get;list;watch;create;patch;delete,namespace=host-namespace
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update,namespace=host-namespace
 
-// Cluster-scoped reads: emitted as a ClusterRole in config/rbac/role.yaml for local `make run` only.
-// In production nexus-manager's kcnas-operator-host-manager-cluster-reader ClusterRole provides them.
+// Cluster-scoped reads. controller-gen emits these into a ClusterRole in
+// config/rbac/role.yaml, which nothing deploys: they declare what host-manager
+// reads cluster-wide. In a cluster, nexus-manager's fixed
+// kcnas-operator-host-manager-cluster-reader ClusterRole grants get/list/watch
+// on every KDexCluster* kind, and nexus binds it to each host-manager
+// ServiceAccount. So only get/list/watch on a kdexcluster* resource may be
+// declared here (TestClusterScopedRBACMarkersAreKDexClusterReads): anything
+// else would be a grant host-manager needs and never receives.
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexclusterapps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexclusterfaasadaptors,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kdex.dev,resources=kdexclusterpagearchetypes,verbs=get;list;watch
