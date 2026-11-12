@@ -110,6 +110,11 @@ func BenchmarkValidateToken_Kind(b *testing.B) {
 // signedPAT is a PAT for alice signed with tm's own key, carrying every claim
 // MintStatelessKey writes except knd, which it sets to knd unless knd is nil.
 func signedPAT(tm *TokenManager, knd any) string {
+	return signedPATWith(tm, knd, nil)
+}
+
+// signedPATWith is signedPAT with extra claims set as given.
+func signedPATWith(tm *TokenManager, knd any, extra map[string]any) string {
 	now := time.Now()
 	tok := paseto.NewToken()
 	tok.SetAudience("https://a.example")
@@ -126,6 +131,49 @@ func signedPAT(tm *TokenManager, knd any) string {
 			panic(err)
 		}
 	}
+	for name, value := range extra {
+		if err := tok.Set(name, value); err != nil {
+			panic(err)
+		}
+	}
 	tok.SetFooter([]byte(`{"kid":"` + tm.activeKey.KeyId + `"}`))
 	return tm.wrap(tok.V4Sign(*tm.activeKey.SecretKey, nil))
+}
+
+// MintClientKey records the OAuth client a resource PAT was issued to, and
+// ValidateToken hands it back; MintStatelessKey records none, and a client
+// key for no client is refused. The client is not part of the jti (#295).
+func TestMintClientKey_RecordsClient(t *testing.T) {
+	tm := subjectlessTokenManager(t)
+
+	signed, err := tm.MintClientKey("https://a.example", "alice", kdexv1alpha1.SubjectKindUser, "mcp", "s", "dcr_abc", time.Hour)
+	require.NoError(t, err)
+	data, err := tm.ValidateToken(context.Background(), signed, "https://a.example")
+	require.NoError(t, err)
+	assert.Equal(t, "dcr_abc", data.ClientID)
+	assert.Equal(t, GenerateJTI("https://a.example", "alice", "mcp"), data.JTI)
+
+	signed, err = tm.MintStatelessKey("https://a.example", "alice", kdexv1alpha1.SubjectKindUser, "mcp", "s", time.Hour)
+	require.NoError(t, err)
+	data, err = tm.ValidateToken(context.Background(), signed, "https://a.example")
+	require.NoError(t, err)
+	assert.Empty(t, data.ClientID)
+
+	_, err = tm.MintClientKey("https://a.example", "alice", kdexv1alpha1.SubjectKindUser, "mcp", "s", "", time.Hour)
+	assert.Error(t, err)
+}
+
+// TestValidateToken_RefusesMalformedClientID: a client_id that is present but
+// not a non-empty string is malformed, and refused, unlike an absent one.
+func TestValidateToken_RefusesMalformedClientID(t *testing.T) {
+	tm := subjectlessTokenManager(t)
+
+	for name, clientID := range map[string]any{
+		"a number": 7, "an object": map[string]any{"c": "x"}, "a list": []string{"x"},
+		"null": json.RawMessage("null"), "empty": "",
+	} {
+		data, err := tm.ValidateToken(context.Background(), signedPATWith(tm, "User", map[string]any{sign.ClaimClientID: clientID}), "https://a.example")
+		assert.Error(t, err, name)
+		assert.Nil(t, data, name)
+	}
 }

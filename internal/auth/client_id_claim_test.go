@@ -76,7 +76,7 @@ func TestIssuedTokens_CarryClientID(t *testing.T) {
 	t.Run("client credentials for a resource", func(t *testing.T) {
 		ts, err := ex.LoginClientResource(ctx, kindsClientID, "s3cret", "", "https://fn-a.example")
 		require.NoError(t, err)
-		assert.Equal(t, kindsClientID, claimsOf(t, ts.AccessToken)[ClaimClientID])
+		expect(t, ts.AccessToken, kindsClientID)
 	})
 
 	t.Run("password grant", func(t *testing.T) {

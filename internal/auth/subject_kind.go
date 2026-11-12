@@ -128,11 +128,15 @@ func (e *Exchanger) PATAuthContext(data *apitoken.TokenData, site string) (AuthC
 		ClaimIssuedAt:    float64(data.IssuedAt),
 		ClaimSubjectKind: string(kind),
 	}
-	// An API token is issued to no OAuth client (the PAT records none), so
-	// each key acts as its own: "pat:<jti>". Set here, where both PAT paths
-	// build their context, so a FAT minted for a host-audience PAT and for a
-	// bridged one name the same client (#295).
-	if data.JTI != "" {
+	// The client the PAT was issued to: an MCP resource PAT records the OAuth
+	// client its grant authenticated; any other API token is issued to no
+	// OAuth client, so each key acts as its own, "pat:<jti>". Set here, where
+	// both PAT paths build their context, so a FAT minted for a host-audience
+	// PAT and for a bridged one name the same client (#295).
+	switch {
+	case data.ClientID != "":
+		setClientID(jwt.MapClaims(ac), data.ClientID)
+	case data.JTI != "":
 		setClientID(jwt.MapClaims(ac), "pat:"+data.JTI)
 	}
 	// Resolved fresh, so a backend grant made since the PAT was minted

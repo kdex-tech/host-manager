@@ -53,7 +53,7 @@ func newTestExchangerWithTokenManager(t *testing.T) *Exchanger {
 func TestMintResourcePATSetsAudience(t *testing.T) {
 	e := newTestExchangerWithTokenManager(t)
 	resource := "https://dev.knowdrive.ai/api/v1/mcp"
-	pat, _, err := e.MintResourcePAT(resource, "alice@example.com", "functions:/api/v1/mcp:read", time.Hour)
+	pat, _, err := e.MintResourcePAT(resource, "alice@example.com", "valid-client", "functions:/api/v1/mcp:read", time.Hour)
 	if err != nil {
 		t.Fatalf("MintResourcePAT: %v", err)
 	}

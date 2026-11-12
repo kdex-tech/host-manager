@@ -79,7 +79,7 @@ type Exchanger struct {
 	// TTL keeps grants fresh (the point of #138). Keyed by subject.
 	subjectResolveCache cache.Cache
 	// grantCache memoizes projected browser-session grants (#203), keyed by
-	// "<generation>|<subject>". grantGenCache holds the current generation
+	// "<generation>|<quoted subject>|<quoted client_id>" (#295). grantGenCache holds the current generation
 	// token; a membership mutation bumps it so stale-generation entries are
 	// naturally missed. Both are shared (Valkey) so invalidation is fleet-wide.
 	grantCache    cache.Cache
@@ -90,7 +90,7 @@ type Exchanger struct {
 	grantGenNonce string
 	grantGenSeq   atomic.Uint64
 	// grantGroup coalesces concurrent miss-path resolves for the same
-	// "<generation>|<subject>" key so a burst of parallel requests from one
+	// grantCache key so a burst of parallel requests from one
 	// subject (e.g. a page's fan-out right after a generation bump) fires a
 	// single live ResolveClaims/Project instead of one per request (#203).
 	// Zero-value singleflight.Group is ready to use. It coalesces within this
@@ -632,12 +632,18 @@ func (e *Exchanger) Roles() []RoleInfo {
 // ttl is the server's choice, not a caller's, so it is capped at the host's
 // maximum API token lifetime rather than refused; the returned duration is the
 // lifetime actually minted, for expires_in (host-manager#238).
-func (e *Exchanger) MintResourcePAT(resource, subject, scope string, ttl time.Duration) (string, time.Duration, error) {
+//
+// clientID is the OAuth client the grant authenticated, which the PAT records
+// (apitoken.MintClientKey), so the FAT minted for it names that client. The
+// PAT's jti is sha256(resource:sub:"mcp"), the same for every client of one
+// subject on one resource, so "pat:<jti>" could not tell those clients apart
+// (#295).
+func (e *Exchanger) MintResourcePAT(resource, subject, clientID, scope string, ttl time.Duration) (string, time.Duration, error) {
 	if e.config.TokenManager == nil {
 		return "", 0, fmt.Errorf("no token manager configured")
 	}
 	ttl = e.config.TokenManager.CapTTL(ttl)
-	pat, err := e.config.TokenManager.MintStatelessKey(resource, subject, kdexv1alpha1.SubjectKindUser, "mcp", scope, ttl)
+	pat, err := e.config.TokenManager.MintClientKey(resource, subject, kdexv1alpha1.SubjectKindUser, "mcp", scope, clientID, ttl)
 	return pat, ttl, err
 }
 

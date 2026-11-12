@@ -99,6 +99,12 @@ type TokenData struct {
 	// SubjectKind is the kind of Subject the mint recorded (sign.ClaimSubjectKind).
 	// It is "" for a PAT minted before PATs recorded one (LEGACY(#268)).
 	SubjectKind kdexv1alpha1.SubjectKind `json:"knd,omitempty"`
+	// ClientID is the OAuth client the PAT was issued to (sign.ClaimClientID),
+	// recorded only by MintClientKey: an RFC 8707 resource PAT minted at the
+	// token endpoint for an authorization_code or refresh_token grant. It is
+	// "" for every other PAT (a user-minted API key), which acts as its own
+	// client. See kdex-tech/host-manager#295.
+	ClientID string `json:"client_id,omitempty"`
 }
 
 type KeyPair struct {
@@ -599,6 +605,24 @@ func revokedNoEarlierThan(revokedAt string, issuedAt time.Time) bool {
 // kind for its whole life, so a kind this release does not know (or none) is
 // refused with ErrUnknownSubjectKind rather than recorded.
 func (tm *TokenManager) MintStatelessKey(aud, sub string, kind kdexv1alpha1.SubjectKind, action, scope string, ttl time.Duration) (string, error) {
+	return tm.mintKey(aud, sub, kind, action, scope, "", ttl)
+}
+
+// MintClientKey is MintStatelessKey for a PAT issued to an OAuth client: it
+// also records clientID in sign.ClaimClientID, so the FAT minted for the PAT
+// names that client rather than the key (#295). Only the token endpoint's
+// resource-PAT mint calls it, with the client the grant authenticated; no
+// caller-facing mint surface takes a client, so a caller cannot choose one.
+// The client is not part of the jti, so revocation keys do not change with it.
+func (tm *TokenManager) MintClientKey(aud, sub string, kind kdexv1alpha1.SubjectKind, action, scope, clientID string, ttl time.Duration) (string, error) {
+	if clientID == "" {
+		return "", fmt.Errorf("refusing to mint a client API token for no client")
+	}
+	return tm.mintKey(aud, sub, kind, action, scope, clientID, ttl)
+}
+
+// mintKey mints a PASETO API token, recording clientID when it is non-empty.
+func (tm *TokenManager) mintKey(aud, sub string, kind kdexv1alpha1.SubjectKind, action, scope, clientID string, ttl time.Duration) (string, error) {
 	// FAIL CLOSED, the PASETO half of the JWT rule in sign.Signer. A PAT is a
 	// credential; a credential that names nobody is not a supported
 	// configuration. paseto.Token.SetSubject would happily write `sub: ""`,
@@ -656,6 +680,9 @@ func (tm *TokenManager) MintStatelessKey(aud, sub string, kind kdexv1alpha1.Subj
 	token.SetString("scp", scope)
 	// Not part of the jti, so revocation keys do not change with it.
 	token.SetString(sign.ClaimSubjectKind, string(kind))
+	if clientID != "" {
+		token.SetString(sign.ClaimClientID, clientID)
+	}
 
 	token.SetFooter([]byte(`{"kid":"` + tm.activeKey.KeyId + `"}`))
 
@@ -792,21 +819,22 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 	// refused now.
 	//
 	// Every live PAT is kind-less on the day this ships, so the absent case
-	// must be as cheap as the present one. Token.Get into a json.RawMessage
-	// is the presence check: it fails only when the claim is absent (every
-	// stored claim is valid JSON), and copies just that claim's bytes, never
-	// decoding any other. go-paseto has no dedicated presence check; it is
-	// pinned at v1.6.0, its latest release, and this needs none.
-	var rawKind json.RawMessage
-	var kind string
-	if token.Get(sign.ClaimSubjectKind, &rawKind) == nil {
-		if string(rawKind) == "null" {
-			return nil, fmt.Errorf("api token claim %s is null", sign.ClaimSubjectKind)
-		}
-		if err := json.Unmarshal(rawKind, &kind); err != nil {
-			return nil, fmt.Errorf("api token claim %s is not a string: %w", sign.ClaimSubjectKind, err)
-		}
-	} // else LEGACY(#268): absent, kind stays ""
+	// must be as cheap as the present one (optionalStringClaim).
+	kind, _, err := optionalStringClaim(token, sign.ClaimSubjectKind)
+	if err != nil {
+		return nil, err
+	}
+
+	// The client a resource PAT was issued to (MintClientKey), absent from
+	// every other PAT. A present one that is not a non-empty string is
+	// malformed, and refused like a malformed knd (#295).
+	clientID, present, err := optionalStringClaim(token, sign.ClaimClientID)
+	if err != nil {
+		return nil, err
+	}
+	if present && clientID == "" {
+		return nil, fmt.Errorf("api token claim %s is empty", sign.ClaimClientID)
+	}
 
 	return &TokenData{
 		Audience:    audience,
@@ -820,7 +848,29 @@ func (tm *TokenManager) ValidateToken(ctx context.Context, signed, expectedAudie
 		Action:      action,
 		Scope:       scope,
 		SubjectKind: kdexv1alpha1.SubjectKind(kind),
+		ClientID:    clientID,
 	}, nil
+}
+
+// optionalStringClaim reads a claim that may be absent ("", false, nil)
+// but, when present, must be a string: null or any other JSON type is
+// malformed and refused. Token.Get into a json.RawMessage is the presence
+// check: it fails only when the claim is absent (every stored claim is valid
+// JSON), and copies just that claim's bytes, never decoding any other.
+// go-paseto has no dedicated presence check; it is pinned at v1.6.0, its
+// latest release, and this needs none.
+func optionalStringClaim(token *paseto.Token, name string) (value string, present bool, err error) {
+	var raw json.RawMessage
+	if token.Get(name, &raw) != nil {
+		return "", false, nil
+	}
+	if string(raw) == "null" {
+		return "", true, fmt.Errorf("api token claim %s is null", name)
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", true, fmt.Errorf("api token claim %s is not a string: %w", name, err)
+	}
+	return value, true, nil
 }
 
 func GenerateJTI(aud, sub, act string) string {

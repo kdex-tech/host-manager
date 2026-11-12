@@ -151,8 +151,14 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 		return
 	}
 
-	gen := e.grantGeneration(ctx)
-	key := gen + "|" + subject
+	// The client is part of the key: the cached projection ran the host
+	// claimMappings over the session's whole context, client_id included, so
+	// a rule deriving a grant from it must not hand one client's grants to
+	// another client's session, or to a browser session, which has none
+	// (#295). Both parts are quoted so no subject or client id can forge
+	// another pair's key.
+	clientID, _ := ac[ClaimClientID].(string)
+	key := e.grantGeneration(ctx) + "|" + strconv.Quote(subject) + "|" + strconv.Quote(clientID)
 
 	// Fast path: current-generation cache hit.
 	if e.grantCache != nil {
@@ -166,9 +172,10 @@ func (c *Config) refreshSessionGrants(reqCtx context.Context, ac AuthContext, e 
 	}
 
 	// Miss / stale generation: resolve fresh against live membership. Coalesced
-	// per "<generation>|<subject>" so a parallel fan-out of requests from one
-	// subject (e.g. right after a generation bump) collapses to a single live
-	// resolve; each caller still overlays onto its own ac/scope below.
+	// per key (generation, subject, client) so a parallel fan-out of requests
+	// from one session (e.g. right after a generation bump) collapses to a
+	// single live resolve; each caller still overlays onto its own ac/scope
+	// below.
 
 	result, rerr, _ := e.grantGroup.Do(key, func() (any, error) {
 		roles, ents, rerr := e.ResolveInternalRolesAndEntitlements(bs)

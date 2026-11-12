@@ -686,7 +686,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	// RFC 8707 resource-bound access token path. Handled returns true when the
 	// grant/resource pair is oauth2-protected and the response has already been
 	// written (success or error); fall through only for standard-JWT grants.
-	if handled, herr := o.writeResourcePATResponse(w, grantType, resource, ts); handled {
+	if handled, herr := o.writeResourcePATResponse(w, grantType, resource, clientId, ts); handled {
 		err = herr
 		return
 	}
@@ -724,7 +724,11 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 // grant/resource pair is not resource-bound and the caller should fall through
 // to the standard JWT response. When true, any returned error is for audit
 // logging only — the HTTP response has already been written.
-func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, resource string, ts TokenSet) (bool, error) {
+//
+// clientID is the client the grant authenticated: the code's client for
+// authorization_code, and for refresh_token the client RedeemRefreshToken
+// has checked against the refresh record's. The PAT records it (#295).
+func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, resource, clientID string, ts TokenSet) (bool, error) {
 	if grantType != GRANT_TYPE_AUTHORIZATION_CODE && grantType != GRANT_TYPE_REFRESH_TOKEN {
 		return false, nil
 	}
@@ -732,7 +736,7 @@ func (o *OAuth2) writeResourcePATResponse(w http.ResponseWriter, grantType, reso
 		return false, nil
 	}
 
-	pat, ttl, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, ts.Scope, o.AccessTokenTTL)
+	pat, ttl, err := o.AuthExchanger.MintResourcePAT(resource, ts.Subject, clientID, ts.Scope, o.AccessTokenTTL)
 	if err != nil {
 		// This is the SAME token response MCP clients receive from the
 		// standard-JWT path just below — the exact client class #168 was
