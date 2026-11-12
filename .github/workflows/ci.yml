@@ -109,6 +109,14 @@ jobs:
       run: |
         make install-crds
 
+    # The chart never renders cluster-scoped RBAC; in production nexus binds
+    # host-manager to its cluster-reader ClusterRole. Grant the stand-in before
+    # install so the KDexCluster* informers sync on first start.
+    - name: Grant the cluster-reader a standalone install lacks
+      run: |
+        kubectl apply -f test/fixtures/ci-cluster-reader-clusterrole.yaml
+        kubectl apply -f test/fixtures/ci-cluster-reader-clusterrolebinding.yaml
+
     - name: Install Helm chart for project
       run: |
         helm dependency update ./chart

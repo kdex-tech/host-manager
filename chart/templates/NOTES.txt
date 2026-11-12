@@ -14,3 +14,11 @@
   echo "Visit http://127.0.0.1:8080 to use your application"
   kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
 {{- end }}
+
+2. Cluster-scoped reads: this chart renders only namespaced RBAC. host-manager
+   also needs get/list/watch on the cluster-scoped kdexcluster* kinds, which
+   nexus (kcnas-operator) grants through its
+   kcnas-operator-host-manager-cluster-reader ClusterRoleBinding. A standalone
+   install (not managed by nexus) must grant it itself, or no controller starts:
+  kubectl create clusterrole {{ include "host-manager.fullname" . }}-cluster-reader --verb=get,list,watch --resource=kdexclusterapps.kdex.dev,kdexclusterfaasadaptors.kdex.dev,kdexclusterpagearchetypes.kdex.dev,kdexclusterpagefooters.kdex.dev,kdexclusterpageheaders.kdex.dev,kdexclusterpagenavigations.kdex.dev,kdexclusterscriptlibraries.kdex.dev,kdexclusterthemes.kdex.dev,kdexclustertranslations.kdex.dev,kdexclusterutilitypages.kdex.dev
+  kubectl create clusterrolebinding {{ include "host-manager.fullname" . }}-cluster-reader --clusterrole={{ include "host-manager.fullname" . }}-cluster-reader --serviceaccount={{ .Release.Namespace }}:{{ include "host-manager.serviceAccountName" . }}

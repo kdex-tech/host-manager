@@ -1,0 +1,16 @@
+# Stands in for nexus's `kcnas-operator-host-manager-cluster-reader`
+# ClusterRoleBinding, to which nexus adds each host-manager ServiceAccount as a
+# subject. Binds the CI release's ServiceAccount (fullnameOverride=ci,
+# namespace ci).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ci-host-manager-cluster-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ci-host-manager-cluster-reader
+subjects:
+- kind: ServiceAccount
+  name: ci
+  namespace: ci

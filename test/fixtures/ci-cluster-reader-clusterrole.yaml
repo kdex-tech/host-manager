@@ -1,0 +1,27 @@
+# Stands in for nexus's `kcnas-operator-host-manager-cluster-reader`
+# ClusterRole, which a standalone chart install (CI, local dev) lacks. The
+# chart never renders cluster-scoped RBAC (D1); in production nexus owns this
+# grant. Rules copied from kdex-nexus-manager
+# config/rbac/fixed/cluster_reader_role.yaml — keep them in step.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ci-host-manager-cluster-reader
+rules:
+- apiGroups:
+  - kdex.dev
+  resources:
+  - kdexclusterapps
+  - kdexclusterfaasadaptors
+  - kdexclusterpagearchetypes
+  - kdexclusterpagefooters
+  - kdexclusterpageheaders
+  - kdexclusterpagenavigations
+  - kdexclusterscriptlibraries
+  - kdexclusterthemes
+  - kdexclustertranslations
+  - kdexclusterutilitypages
+  verbs:
+  - get
+  - list
+  - watch
