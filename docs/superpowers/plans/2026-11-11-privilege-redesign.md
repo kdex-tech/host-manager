@@ -322,5 +322,5 @@
 - [ ] **Step 2:** Run the quad over each repo's range since its last `Quad-Range` marker; fix, mark.
 - [ ] **Step 3:** Tag in order: kdex-host-manager `v0.33.0` and kdex-knative-deployer (next patch), then kdex-nexus-manager (next minor). Confirm CI publishes images and charts.
 - [ ] **Step 4:** Relay to infra: dev+prod first — nexus pin, `hostDefault.chart.version: 0.33.0`, deployer chart pin, in one commit; tenants (public, smg, spike2) afterwards in one commit. Ask infra to verify per cluster: `kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/name=host-manager` empty, hosts Ready, functions deploy.
-- [ ] **Step 5:** File the release-B issue on kdex-tech/nexus-manager: delete `legacy_rbac.go` and the `HelmAsOperator` uninstall path, trim nexus's role per spec §D8 (all escalation-mirror and companion-only grants, clusterroles/clusterrolebindings delete), once infra confirms no legacy objects on any cluster. Paste its number into the `legacy_rbac.go` comments and commit.
+- [ ] **Step 5:** File the release-B issue on kdex-tech/nexus-manager with the body from nexus `docs/release-b-privilege-cleanup.md`, and replace the marker text `(privilege-redesign follow-up issue)` with the issue reference everywhere it appears.
 - [ ] **Step 6:** Close nexus #61, #62, #63, #64 citing the commits.

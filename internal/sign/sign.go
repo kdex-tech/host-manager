@@ -86,8 +86,8 @@ const SubjectlessRemedy = "a credential that names nobody is not a supported con
 const ClaimSubjectKind = "knd"
 
 // ClaimClientID is the RFC 9068 client_id claim: the client a token was
-// issued to (an OAuth client's id, or "pat:<jti>" for an API token, which
-// acts as its own client). The mint decides it, and a backend partitions
+// issued to (an OAuth client's id, or "pat:<jti>" for an API token and
+// "cap:<jti>" for a capability, which each act as their own client). The mint decides it, and a backend partitions
 // per-client state by it. See kdex-tech/host-manager#295.
 const ClaimClientID = "client_id"
 

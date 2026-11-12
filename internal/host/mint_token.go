@@ -269,8 +269,7 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 		}
 	}
 
-	// Signing (and the jti-extraction-by-reparsing-the-JWT that follows) only
-	// matters for bearer delivery, whose caller-facing result IS the signed
+	// Signing only matters for bearer delivery, whose caller-facing result IS the signed
 	// token. URL delivery never returns a Token — its jti is purely an
 	// internal cache key (uses:<jti> + transferRecord.JTI), never embedded in
 	// a JWT and never verified, so signing a token just to throw it away is
@@ -329,8 +328,9 @@ func (hh *HostHandler) mintCapabilityTokenWithCap(ctx context.Context, sub strin
 //
 // Bearer delivery's caller-facing result IS the signed token, so it signs a
 // host-audience JWT (with the auth.CapUsesClaim marker injected past the
-// projection allowlist) and extracts its jti by re-parsing the token
-// unverified — the signer doesn't hand back the jti it generated internally.
+// projection allowlist) under a jti generated here, which the projection
+// carries (SignProjected gives it the last word), so the token can name
+// itself as its client before it is signed (capabilityClientID).
 //
 // URL delivery returns no Token — its jti is only ever used as a cache key
 // (uses:<jti>) and a transferRecord.JTI field, never a JWT and never
@@ -355,36 +355,37 @@ func (hh *HostHandler) mintTokenOrJTI(cfg *auth.Config, isURL bool, sub string, 
 	}
 
 	// signer.Project runs the claim allowlist (which passes "entitlements",
-	// "sub" and the kind, but NOT auth.CapUsesClaim). Inject the capability
-	// marker into the PROJECTED claims so it survives into the signed token —
-	// SignProjected gives the projection the last word. (signer.Sign would
-	// drop auth.CapUsesClaim.)
+	// "sub", the kind and the client, but NOT auth.CapUsesClaim). Inject the
+	// capability marker and the jti into the PROJECTED claims so they survive
+	// into the signed token — SignProjected gives the projection the last
+	// word. (signer.Sign would drop auth.CapUsesClaim.)
+	jti = rand.Text()
 	signingContext := jwt.MapClaims{
 		"sub":                 sub,
 		"entitlements":        reqEntitlements,
 		auth.ClaimSubjectKind: string(kind),
+		auth.ClaimClientID:    capabilityClientID(jti),
 	}
 	projected, err := signer.Project(signingContext)
 	if err != nil {
 		return "", "", fmt.Errorf("mint project: %w", err)
 	}
 	projected[auth.CapUsesClaim] = true
+	projected["jti"] = jti
 	token, err = signer.SignProjected(projected)
 	if err != nil {
 		return "", "", fmt.Errorf("mint sign: %w", err)
 	}
-
-	if hh.cacheManager != nil {
-		parsed, _, perr := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
-		if perr == nil {
-			if mc, ok := parsed.Claims.(jwt.MapClaims); ok {
-				if j, ok := mc["jti"].(string); ok && j != "" {
-					jti = j
-				}
-			}
-		}
-	}
 	return token, jti, nil
+}
+
+// capabilityClientID is the RFC 9068 client_id (auth.ClaimClientID) of a
+// capability, bearer or transfer link, with that jti. A capability is issued
+// to no OAuth client, so it acts as its own, as an API token acts as
+// "pat:<jti>"; without one a backend would fall back to a client the caller
+// names (knowdb's clientInfo.name). See kdex-tech/host-manager#295.
+func capabilityClientID(jti string) string {
+	return "cap:" + jti
 }
 
 type jsonRPCRequest struct {

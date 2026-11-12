@@ -155,6 +155,9 @@ namespace.
   entry per host-manager SA), adding on host install and removing in the host
   finalizer. nexus may only `get/update/patch` that one ClusterRoleBinding
   (`resourceNames`). No per-host ClusterRoleBinding exists.
+  The binding watch also needs list/watch on it: release A grants those through
+  the broad clusterrolebindings line; release B must add `list;watch` to the
+  `resourceNames` line.
 - Deleted from host-manager's chart: `clusterrole.yaml`, `clusterrolebinding.yaml`,
   the `roleRef` value and its `if not .Values.roleRef.name` branch. Deleted from
   nexus: the `HOST_MANAGER_CLUSTER_ROLE` env var and its gated chart block,
@@ -207,7 +210,8 @@ namespace.
   `resourceNames: [kdex-installer]`; get/list/watch/create/update/delete on
   serviceaccounts and rolebindings; `bind` on clusterroles with
   `resourceNames: [kcnas-operator-installer]`; get/update/patch on the
-  cluster-reader ClusterRoleBinding (`resourceNames`).
+  cluster-reader ClusterRoleBinding (`resourceNames`), plus list/watch on it for
+  the binding watch (release A: the broad line; release B: add to this one).
 - **nexus cache:** everything nexus creates carries a nexus-owned label, and
   `CacheOptions.ByObject` adds label-selected entries for ServiceAccount,
   RoleBinding and ClusterRoleBinding, so no cluster-wide informer on those kinds.
@@ -313,7 +317,9 @@ Make-before-break; no window without RBAC.
    ownership annotations (`meta.helm.sh/release-name=<host>`,
    `meta.helm.sh/release-namespace=<ns>`) and, for the binding,
    `roleRef.name == <host>`, so a same-named host in another namespace is never
-   touched. A `LegacyRBACPresent` condition stays on the host until both are gone.
+   touched. Cleanup also requires the release's latest revision to be `deployed`
+   and the host-manager Deployment's ServiceAccount, as recorded by nexus, to be
+   a subject of the cluster-reader binding. A `LegacyRBACPresent` condition stays on the host until both are gone.
    **Teardown of a host whose release record still lists the legacy RBAC**
    (quad A1): there is no operator Helm identity; every Helm action, uninstall
    included, impersonates the namespace's installer. nexus first deletes the

@@ -214,6 +214,10 @@ func (hh *HostHandler) TransferGet(w http.ResponseWriter, r *http.Request) {
 	if rec.Kind != "" { // LEGACY(#268): else the context is kind-less
 		ac[auth.ClaimSubjectKind] = string(rec.Kind)
 	}
+	// The link acts as its own client, as its bearer twin does (#295).
+	if rec.JTI != "" {
+		ac[auth.ClaimClientID] = capabilityClientID(rec.JTI)
+	}
 	// The link is a credential, so it is vetoed (#255) like every other: the
 	// kind its context resolves to and its issue time, before a use is spent,
 	// so a refused link keeps its budget. The answer is the same 410; the
