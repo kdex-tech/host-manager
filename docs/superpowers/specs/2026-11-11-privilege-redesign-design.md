@@ -332,7 +332,9 @@ Make-before-break; no window without RBAC.
    forge, and a record re-forged after it acts with the installer's
    namespace-bounded rights only -- one listing anything else fails the
    uninstall closed (finalizer kept, "Deletion is blocked").
-4. **Remove the migration.** A follow-up nexus release deletes the cleanup step,
+4. **Remove the migration.** *Done in nexus-manager v0.9.0
+   (kdex-tech/nexus-manager#65), after infra confirmed no legacy object remained
+   on any cluster (2026-11-12).* A follow-up nexus release deletes the cleanup step,
    the `LegacyRBACPresent` condition and nexus's remaining `delete` on
    clusterroles/clusterrolebindings, once infra confirms none remain
    (`kubectl get clusterrolebinding,clusterrole -l app.kubernetes.io/name=host-manager`
