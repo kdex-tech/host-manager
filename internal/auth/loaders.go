@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"strings"
@@ -12,13 +13,18 @@ import (
 
 func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, error) {
 	clients := make(map[string]AuthClient)
+	// owners records which Secret supplied each id so a second Secret claiming
+	// it can be rejected by name. Last-one-wins is not a tie-break an operator
+	// can reason about: it depends on list order, so the effective credential
+	// can also change between reconciles. See kdex-tech/host-manager#297.
+	owners := make(map[string]string)
 
 	authClientSecrets := secrets.Filter(func(s corev1.Secret) bool { return s.Annotations["kdex.dev/secret-type"] == "auth-client" })
 
 	for _, secret := range authClientSecrets {
-		clientID := string(secret.Data["client_id"])
-		if clientID == "" {
-			clientID = string(secret.Data["client-id"])
+		clientID, err := aliasValue(secret, "client_id", "client-id")
+		if err != nil {
+			return nil, err
 		}
 
 		// Fail closed on an id-less client rather than load it under the ""
@@ -30,12 +36,26 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 		// refresh token away from a caller that never owned the session.
 		// See kdex-tech/host-manager#173.
 		if clientID == "" {
-			return nil, fmt.Errorf("auth-client secret %q has no client_id", secret.Name)
+			return nil, fmt.Errorf("auth-client secret %q has no client_id", secretRef(secret))
 		}
 
-		clientSecret := string(secret.Data["client_secret"])
-		if clientSecret == "" {
-			clientSecret = string(secret.Data["client-secret"])
+		// Fail closed on a duplicate client id. The two Secrets disagree about
+		// one client's credential, redirects and grants, and nothing else in
+		// the system can say which one the token endpoint is checking: the
+		// loser is silently inert, so rotating it "does nothing" and a leaked
+		// secret keeps authenticating. Name both objects — an operator cannot
+		// act on "invalid client_secret". See kdex-tech/host-manager#297.
+		if owner, ok := owners[clientID]; ok && owner != secretRef(secret) {
+			return nil, fmt.Errorf(
+				"auth-client %q is declared by two Secrets, %q and %q: exactly one Secret may own a client id, "+
+					"because the loader keeps one and silently discards the other",
+				clientID, owner, secretRef(secret))
+		}
+		owners[clientID] = secretRef(secret)
+
+		clientSecret, err := aliasValue(secret, "client_secret", "client-secret")
+		if err != nil {
+			return nil, err
 		}
 
 		public := false
@@ -44,12 +64,12 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 		}
 
 		if !public && clientSecret == "" {
-			return nil, fmt.Errorf("client %s is not public but has no client secret", clientID)
+			return nil, fmt.Errorf("client %s (secret %q) is not public but has no client secret", clientID, secretRef(secret))
 		}
 
-		redirectURIsStr := string(secret.Data["redirect_uris"])
-		if redirectURIsStr == "" {
-			redirectURIsStr = string(secret.Data["redirect-uris"])
+		redirectURIsStr, err := aliasValue(secret, "redirect_uris", "redirect-uris")
+		if err != nil {
+			return nil, err
 		}
 
 		redirectURIs := []string{}
@@ -57,27 +77,27 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 			redirectURIs = strings.Split(redirectURIsStr, ",")
 		}
 
-		allowedGrantTypesStr := string(secret.Data["allowed_grant_types"])
-		if allowedGrantTypesStr == "" {
-			allowedGrantTypesStr = string(secret.Data["allowed-grant-types"])
+		allowedGrantTypesStr, err := aliasValue(secret, "allowed_grant_types", "allowed-grant-types")
+		if err != nil {
+			return nil, err
 		}
 		allowedGrantTypes := []string{}
 		if allowedGrantTypesStr != "" {
 			allowedGrantTypes = strings.Split(allowedGrantTypesStr, ",")
 		}
 
-		allowedScopesStr := string(secret.Data["allowed_scopes"])
-		if allowedScopesStr == "" {
-			allowedScopesStr = string(secret.Data["allowed-scopes"])
+		allowedScopesStr, err := aliasValue(secret, "allowed_scopes", "allowed-scopes")
+		if err != nil {
+			return nil, err
 		}
 		allowedScopes := []string{}
 		if allowedScopesStr != "" {
 			allowedScopes = strings.Split(allowedScopesStr, ",")
 		}
 
-		allowedResourcesStr := string(secret.Data["allowed_resources"])
-		if allowedResourcesStr == "" {
-			allowedResourcesStr = string(secret.Data["allowed-resources"])
+		allowedResourcesStr, err := aliasValue(secret, "allowed_resources", "allowed-resources")
+		if err != nil {
+			return nil, err
 		}
 		// Spec: "space/comma-separated" -- split on either, dropping empty
 		// elements (and thus any surrounding whitespace around commas) so
@@ -94,10 +114,15 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 		description := string(secret.Data["description"])
 		name := string(secret.Data["name"])
 
-		requirePKCE := false
-		if string(secret.Data["require_pkce"]) == TRUE || string(secret.Data["require-pkce"]) == TRUE {
-			requirePKCE = true
+		// require_pkce/require-pkce used to be OR-ed, so "false" in one spelling
+		// and "true" in the other loaded as enabled with nothing said. Treat it
+		// like every other alias pair: two spellings that disagree are an
+		// ambiguity to report, not a value to guess.
+		requirePKCEStr, err := aliasValue(secret, "require_pkce", "require-pkce")
+		if err != nil {
+			return nil, err
 		}
+		requirePKCE := requirePKCEStr == TRUE
 
 		// Footgun guard: a public client whose redirect uses an RFC 8252
 		// private-use (custom) URI scheme is open to authorization-code
@@ -129,12 +154,55 @@ func AuthClientLoader(secrets kdexv1alpha1.Secrets) (map[string]AuthClient, erro
 			Public:            public,
 			RedirectURIs:      redirectURIs,
 			RequirePKCE:       requirePKCE,
+			Source:            secretRef(secret),
 		}
 
 		clients[clientID] = client
 	}
 
 	return clients, nil
+}
+
+// secretRef names a Secret the way an operator resolves it with kubectl:
+// namespace/name when the namespace is known, the bare name otherwise. Errors
+// that ask someone to fix an object must carry this, because "auth-client" or a
+// client id alone does not say which of several similarly named Secrets to
+// look at.
+func secretRef(s corev1.Secret) string {
+	if s.Namespace == "" {
+		return s.Name
+	}
+	return s.Namespace + "/" + s.Name
+}
+
+// aliasValue reads a Secret field that may be spelled with underscores or with
+// hyphens (client_id / client-id, redirect_uris / redirect-uris, ...).
+//
+// One spelling always won silently: the underscore form was read first and the
+// hyphenated one consulted only when it was empty. A Secret carrying
+// client_secret: <old> beside a freshly added client-secret: <new> therefore
+// loaded the OLD credential forever, and the only symptom was the token
+// endpoint answering "invalid client_secret" while the host log said
+// client_secret_present=true — indistinguishable from a client that simply
+// presents the wrong password. See kdex-tech/host-manager#297.
+//
+// Two spellings that agree are harmless and load. Two that disagree are an
+// ambiguity only the operator can resolve, so this fails closed and names both
+// keys rather than guessing which one was meant.
+func aliasValue(s corev1.Secret, underscore, hyphen string) (string, error) {
+	u, h := s.Data[underscore], s.Data[hyphen]
+	switch {
+	case len(u) == 0:
+		return string(h), nil
+	case len(h) == 0:
+		return string(u), nil
+	case !bytes.Equal(u, h):
+		return "", fmt.Errorf(
+			"secret %q sets both %q and %q to different values: keep one spelling, "+
+				"because which one applies is otherwise decided silently",
+			secretRef(s), underscore, hyphen)
+	}
+	return string(u), nil
 }
 
 // isPrivateUseScheme reports whether a redirect URI uses an RFC 8252 §7.1
@@ -163,27 +231,31 @@ func OIDCConfigLoader(secrets kdexv1alpha1.Secrets, devMode bool) (*OIDCClientCo
 		return nil, fmt.Errorf("missing secret of type 'oidc-client' required for OIDC provider")
 	}
 
-	clientSecret := string(oidcSecret.Data["client_secret"])
-	if clientSecret == "" {
-		clientSecret = string(oidcSecret.Data["client-secret"])
+	// Same silent alias precedence as auth-client secrets, and the same reason
+	// to refuse it: a shadowed block_key leaves the old key decrypting login
+	// state with nothing in the system saying so. See
+	// kdex-tech/host-manager#297.
+	clientSecret, err := aliasValue(*oidcSecret, "client_secret", "client-secret")
+	if err != nil {
+		return nil, err
 	}
 
 	if clientSecret == "" {
 		return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
 	}
 
-	clientID := string(oidcSecret.Data["client_id"])
-	if clientID == "" {
-		clientID = string(oidcSecret.Data["client-id"])
+	clientID, err := aliasValue(*oidcSecret, "client_id", "client-id")
+	if err != nil {
+		return nil, err
 	}
 
 	if clientID == "" {
 		return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
 	}
 
-	blockKey := string(oidcSecret.Data["block_key"])
-	if blockKey == "" {
-		blockKey = string(oidcSecret.Data["block-key"])
+	blockKey, err := aliasValue(*oidcSecret, "block_key", "block-key")
+	if err != nil {
+		return nil, err
 	}
 
 	if blockKey == "" && !devMode {

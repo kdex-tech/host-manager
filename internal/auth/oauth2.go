@@ -488,6 +488,10 @@ func (o *OAuth2) clientCredentialsGrant(w http.ResponseWriter, r *http.Request, 
 
 func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 	var clientId, clientSecret, code, codeVerifier, grantType, password, redirectURI, resource, scope, username string
+	// clientSource is the Secret that supplied the client (namespace/name) for
+	// a statically configured one; empty for DCR clients and for a client id
+	// that was never found. It is metadata, never a value from the Secret.
+	var clientSource string
 	var ts TokenSet
 	var err error
 
@@ -496,9 +500,14 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		// Intentionally omitted from the log: client_secret, code, code_verifier,
 		// id_token, password. These are secrets or live credentials and must never
 		// appear in logs (#11). Log only structural metadata.
+		// client_source names the Secret the credential was checked against.
+		// Without it "invalid client_secret" cannot be told apart from a
+		// shadowed key or from another Secret owning this client id — the two
+		// ways a correct rotation still fails. See kdex-tech/host-manager#297.
 		log.V(1).Info(
 			"OAuth2 token exchange",
 			"client_id", clientId,
+			"client_source", clientSource,
 			"client_secret_present", clientSecret != "",
 			"code_verifier_present", codeVerifier != "",
 			"error", err,
@@ -565,6 +574,7 @@ func (o *OAuth2) OAuth2TokenHandler(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, errCodeInvalidClient, "unknown client_id")
 		return
 	}
+	clientSource = client.Source
 
 	if !client.Public {
 		if clientSecret == "" {

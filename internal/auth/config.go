@@ -56,6 +56,13 @@ type AuthClient struct {
 	Name              string
 	Public            bool
 	RedirectURIs      []string
+	// Source is the Secret that supplied this client (namespace/name), for a
+	// statically configured client; empty for one from the DCR store. It is
+	// carried so a failed client authentication can log WHICH object was
+	// checked — the diagnostic that tells "the caller sent a stale secret"
+	// apart from "another Secret owns this id" — and it never holds a value
+	// from the Secret. See kdex-tech/host-manager#297.
+	Source string
 	// RequireConsent is set only for dynamically registered clients: they are
 	// registered anonymously, so a code is issued to them only after the
 	// user allows the client at that redirect (/-/oauth/consent).

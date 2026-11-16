@@ -26,6 +26,166 @@ func authClientSecret(data map[string]string) corev1.Secret {
 	}
 }
 
+// authClientSecretNamed is authClientSecret with an explicit namespace/name, so
+// a test can prove an error names BOTH objects that collide. A duplicate client
+// id is only actionable when the message says which two Secrets to look at.
+func authClientSecretNamed(namespace, name string, data map[string]string) corev1.Secret {
+	s := authClientSecret(data)
+	s.Namespace = namespace
+	s.Name = name
+	return s
+}
+
+// TestAuthClientLoaderRejectsDuplicateClientID pins kdex-tech/host-manager#297.
+//
+// The loader builds map[clientID]client with no duplicate detection, so two
+// Secrets declaring one client id resolve last-one-wins. The loser is inert: an
+// operator rotating its client-secret changes nothing, the token endpoint keeps
+// comparing against the winner's value and answers invalid_client /
+// "client authentication failed", and the host log says only
+// "invalid client_secret" — which reads as "rotated but stale" and is really
+// "you edited a shadow". Which Secret wins depends on list order, so the
+// effective credential can also flap between reconciles.
+//
+// Fail closed at load time, naming both objects, rather than serve a credential
+// nothing in the system reports.
+func TestAuthClientLoaderRejectsDuplicateClientID(t *testing.T) {
+	first := authClientSecretNamed("spike2", "troubleshooting-spike2", map[string]string{
+		"client-id":     "troubleshooting-spike2",
+		"client-secret": "first",
+		"redirect-uris": "https://example.test/callback",
+	})
+	second := authClientSecretNamed("spike2", "troubleshooting-spike2-client", map[string]string{
+		"client-id":     "troubleshooting-spike2",
+		"client-secret": "second",
+		"redirect-uris": "https://example.test/callback",
+	})
+
+	// Both orders: the pairing is what is wrong, not which object came first.
+	for name, secrets := range map[string]kdexv1alpha1.Secrets{
+		"registered first": {first, second},
+		"client first":     {second, first},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := AuthClientLoader(secrets)
+			require.Error(t, err, "a client id declared by two Secrets must not load")
+			for _, want := range []string{
+				"spike2/troubleshooting-spike2",
+				"spike2/troubleshooting-spike2-client",
+				"troubleshooting-spike2",
+			} {
+				assert.Contains(t, err.Error(), want,
+					"the error must name both Secrets and the id so an operator can find them")
+			}
+		})
+	}
+}
+
+// TestAuthClientLoaderAcceptsDistinctClientIDs proves the duplicate guard is
+// specific to a collision and does not reject a host with many clients — the
+// ordinary case, including two Secrets that share a description or grants.
+func TestAuthClientLoaderAcceptsDistinctClientIDs(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{
+		authClientSecretNamed("ns", "one", map[string]string{
+			"client-id": "one", "client-secret": "s1", "redirect-uris": "https://example.test/cb",
+		}),
+		authClientSecretNamed("ns", "two", map[string]string{
+			"client-id": "two", "client-secret": "s2", "redirect-uris": "https://example.test/cb",
+		}),
+	}
+	clients, err := AuthClientLoader(secrets)
+	require.NoError(t, err)
+	assert.Len(t, clients, 2)
+}
+
+// TestAuthClientLoaderRejectsDisagreeingAliases pins the second half of #297.
+//
+// Every field accepts an underscore and a hyphenated spelling. The underscore
+// form wins unconditionally and nothing says so, so a Secret carrying
+// client_secret: <old> and client-secret: <new> (the natural result of adding
+// the "new" key beside the old one) reads as unchanged forever.
+//
+// Two spellings that agree are harmless and must keep loading; two that differ
+// are an ambiguity only the operator can resolve, so fail closed rather than
+// pick silently.
+func TestAuthClientLoaderRejectsDisagreeingAliases(t *testing.T) {
+	for name, data := range map[string]map[string]string{
+		"client secret": {
+			"client-id":     "c",
+			"client_secret": "old",
+			"client-secret": "new",
+			"redirect-uris": "https://example.test/cb",
+		},
+		"client id": {
+			"client_id":     "a",
+			"client-id":     "b",
+			"client-secret": "s3cret",
+			"redirect-uris": "https://example.test/cb",
+		},
+		"redirect uris": {
+			"client-id":     "c",
+			"client-secret": "s3cret",
+			"redirect_uris": "https://example.test/old",
+			"redirect-uris": "https://example.test/new",
+		},
+		"allowed grant types": {
+			"client-id":           "c",
+			"client-secret":       "s3cret",
+			"redirect-uris":       "https://example.test/cb",
+			"allowed_grant_types": "client_credentials",
+			"allowed-grant-types": "refresh_token",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := AuthClientLoader(kdexv1alpha1.Secrets{
+				authClientSecretNamed("ns", "shadowed", data),
+			})
+			require.Error(t, err, "two different values under one field's two spellings must not load")
+			assert.Contains(t, err.Error(), "shadowed",
+				"the error must name the Secret that carries the ambiguity")
+		})
+	}
+}
+
+// TestAuthClientLoaderAcceptsAgreeingAliases proves the guard above only fires
+// on disagreement: a Secret that carries both spellings with the same value
+// (harmless, and what a client-side apply can produce) must still load.
+func TestAuthClientLoaderAcceptsAgreeingAliases(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{authClientSecret(map[string]string{
+		"client_id":      "c",
+		"client-id":      "c",
+		"client_secret":  "s3cret",
+		"client-secret":  "s3cret",
+		"redirect_uris":  "https://example.test/cb",
+		"redirect-uris":  "https://example.test/cb",
+		"allowed_scopes": "openid",
+		"allowed-scopes": "openid",
+	})}
+	clients, err := AuthClientLoader(secrets)
+	require.NoError(t, err)
+	require.Contains(t, clients, "c")
+	assert.Equal(t, "s3cret", clients["c"].ClientSecret)
+	assert.Equal(t, []string{"https://example.test/cb"}, clients["c"].RedirectURIs)
+}
+
+// TestAuthClientLoaderRecordsSource proves each static client remembers which
+// Secret supplied it, so a failed client authentication can say which object
+// was consulted. Without it the token endpoint's log cannot distinguish "the
+// caller presented a stale secret" from "a shadowed key won" from "another
+// Secret owns this id".
+func TestAuthClientLoaderRecordsSource(t *testing.T) {
+	secrets := kdexv1alpha1.Secrets{
+		authClientSecretNamed("spike2", "troubleshooting-spike2", map[string]string{
+			"client-id":     "troubleshooting-spike2",
+			"client-secret": "s3cret",
+			"redirect-uris": "https://example.test/cb",
+		}),
+	}
+	clients, err := AuthClientLoader(secrets)
+	require.NoError(t, err)
+	assert.Equal(t, "spike2/troubleshooting-spike2", clients["troubleshooting-spike2"].Source)
+}
+
 // TestAuthClientLoaderRejectsEmptyClientID pins the guard from
 // kdex-tech/host-manager#173.
 //
