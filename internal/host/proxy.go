@@ -54,7 +54,7 @@ func shouldInvalidateGrants(fn *kdexv1alpha1.KDexFunction, method string, status
 // For Service-backed functions (Spec.Backend.Type=Service), multiple sibling
 // KDexFunction CRs commonly proxy to the same backend Service — typically
 // the case when one upstream API is split across resource-family CRs to
-// fit under the Spec.API.Paths MaxProperties=16 cap. The backend's JWT
+// fit under the Spec.API.Paths MaxProperties cap. The backend's JWT
 // validator usually has a single audience configured; to satisfy it from
 // any of those siblings' FATs, the audience is the Service origin
 // (scheme + host[:port]) without the Spec.Backend.Service.Path suffix. All
@@ -402,11 +402,23 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	parsedRequirements := make(map[string]entitlements.ParsedRequirements)
 	bindingSpecs := make(map[string]bindingSpec)
 	invalidBindings := make(map[string]struct{})
-	// declaredMethods[pattern] is every method the function declares on that
-	// pattern. It is what makes an UNDECLARED method refusable: without it, the
+	// declaredOps is every operation the spec declares, keyed method + " " +
+	// pattern. It is what makes an UNDECLARED route refusable: without it, the
 	// gate below could not tell "this route declares no requirements" from
 	// "this route was never declared at all", and answered both the same way.
-	declaredMethods := make(map[string][]string)
+	// It records declarations, not requirements: an operation with no security
+	// block is in it and absent from parsedRequirements.
+	declaredOps := make(map[string]struct{})
+
+	// failClosed is the handler for a function that cannot be routed safely.
+	// It is not a *KDexFunctionHandler, so rebuildMuxSnapshot skips the route
+	// (it 404s) while every other function on the host keeps serving.
+	failClosed := func(err error, msg string, keysAndValues ...any) http.Handler {
+		hh.log.Error(err, msg, append([]any{"function", fn.Name}, keysAndValues...)...)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "invalid function", http.StatusInternalServerError)
+		})
+	}
 
 	// acceptsAPIKey opts this function into the PASETO->authContext bridge when
 	// any operation declares an apiKey* security scheme. Per-function (not
@@ -415,16 +427,23 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 	acceptsAPIKey := false
 
 	for p, item := range fn.Spec.API.Paths {
-		// Use empty handler, we only care about the pattern match
-		patternMux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {})
+		// An empty handler: only the pattern match is used. A key ServeMux
+		// refuses -- an invalid pattern ("/a/{", "/a/{rest...}/x") or one
+		// conflicting with a sibling key ("/a/{a}/x" beside "/a/x/{b}") --
+		// panics in Handle. Unrecovered, that panic escaped every RebuildMux,
+		// so one tenant's KDexFunction stopped the whole host's route rebuild.
+		// The function is refused instead; nothing else is affected.
+		if err := handleRecovered(patternMux, p, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})); err != nil {
+			return failClosed(err, "invalid or conflicting spec.api.paths key; function not routed", "key", p)
+		}
 
-		for _, method := range []string{"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"} {
+		for _, method := range httpMethods {
 			op := item.GetOp(method)
 			if op == nil {
 				continue
 			}
 			key := method + " " + p
-			declaredMethods[p] = append(declaredMethods[p], method)
+			declaredOps[key] = struct{}{}
 
 			// Parse the binding declaration even when the op has no security
 			// block: a malformed declaration is an authoring error worth
@@ -438,6 +457,13 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			}
 
 			if op.Security != nil {
+				// The gate is skipped when there is no checker, so a secured
+				// operation would be proxied ungated: fail closed rather than
+				// nil-guard. Unreachable in production (SetHost sets the
+				// checker together with the authConfig this handler needs).
+				if hh.authChecker == nil {
+					return failClosed(nil, "operation declares security but no authorization checker is configured; function not routed", "route", key)
+				}
 				raw := make([]kdexv1alpha1.SecurityRequirement, 0, len(*op.Security))
 				for _, s := range *op.Security {
 					sr := kdexv1alpha1.SecurityRequirement(s)
@@ -453,17 +479,17 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		}
 	}
 
-	// RFC 9110 §9.3.2: a resource that supports GET supports HEAD. OpenAPI has
-	// no `head:` in practice, so a HEAD on a read route is answered rather than
-	// refused -- but it is answered UNDER THE GET OPERATION'S REQUIREMENTS, not
-	// on identity alone, which is what the fall-through used to give it. Reading
-	// a route's headers is reading the route.
-	for p, methods := range declaredMethods {
-		if slices.Contains(methods, http.MethodGet) && !slices.Contains(methods, http.MethodHead) {
-			methods = append(methods, http.MethodHead)
+	// declaredMethods[pattern] is every method a request may use on pattern:
+	// each one operationKey resolves, so an implicit HEAD (riding on GET) is
+	// listed in Allow exactly when the gate would admit it. httpMethods is
+	// sorted, so Allow is too.
+	declaredMethods := make(map[string][]string)
+	for p := range fn.Spec.API.Paths {
+		for _, method := range httpMethods {
+			if _, ok := operationKey(declaredOps, method, p); ok {
+				declaredMethods[p] = append(declaredMethods[p], method)
+			}
 		}
-		slices.Sort(methods)
-		declaredMethods[p] = methods
 	}
 
 	fh := &KDexFunctionHandler{
@@ -471,6 +497,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		parsedRequirements: parsedRequirements,
 		bindingSpecs:       bindingSpecs,
 		invalidBindings:    invalidBindings,
+		declaredOps:        declaredOps,
 		declaredMethods:    declaredMethods,
 		patternMux:         patternMux,
 		acceptsAPIKey:      acceptsAPIKey,
@@ -529,46 +556,31 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 			return
 		}
 
-		// A method the function never declared carries no declared
-		// authorization, so there is nothing to enforce on it and nothing safe
-		// to fall back to. It used to take the empty-requirements path below --
-		// "allows access if identity matches" -- so any authenticated caller
-		// could POST, PUT, PATCH or DELETE a read-only route and be proxied to
-		// the backend with none of the route's own entitlements checked; a
-		// read grant was enough to reach a write method. The refusal comes
-		// first, ahead of the API-token bridge, the claimMappings enrichment and
-		// the gate: it depends only on the pattern and the method, so it holds
-		// whether or not an authorization checker is configured, the bridge
-		// and the mapper never run for it, and the backend is never reached.
-		// (A session or capability JWT was already verified by the outer
-		// authentication middleware, which also spends a capability's use.)
+		// Route shape is settled before anything else runs: the API-token
+		// bridge, the claimMappings mapper, the gate and the proxy all see
+		// only a declared pattern and method. Both refusals depend on the
+		// spec alone, so they hold with or without an authorization checker,
+		// and the backend is never reached. (A session or capability JWT was
+		// already verified by the outer authentication middleware.)
 		//
-		// A PATH the function never declared is refused the same way, and for
-		// the same reasons, one step earlier (#293). It used to take that same
-		// empty-requirements fall-through, so a backend that grew a route
-		// under an existing basePath was exposed through the host the day it
-		// shipped, gated on the function-level grant alone and never on the
-		// route's own requirements. A function that means to pass a subtree
-		// through declares it: a key ending in a ServeMux catch-all
-		// ({name...}) is a pattern like any other, gated by its own
-		// operations' security.
+		// An undeclared PATH is the host mux's own 404 (#293),
+		// indistinguishable from an unrouted one. It is route shape, not
+		// authorization, so it offers no challenge -- re-authorizing cannot
+		// make a path exist -- and leaks nothing: /-/openapi already publishes
+		// every Ready function's paths. A function passing a subtree through
+		// declares it with a {name...} catch-all key, gated by that
+		// operation's own security.
 		//
-		// The answer is the host mux's own 404, so an undeclared path under a
-		// basePath is indistinguishable from an unrouted one. It is route
-		// shape, not authorization, so it is decided before the gate and
-		// offers no challenge -- re-authorizing cannot make a path exist --
-		// and it leaks nothing: /-/openapi already publishes every Ready
-		// function's paths to anonymous callers.
+		// The pattern is "" exactly when nothing declared matches. A
+		// trailing-slash redirect does report a pattern: "/x" when only
+		// "/x/{rest...}" is declared names that subtree, so it is gated by its
+		// operation's security and proxied like the subtree. Unclean paths
+		// ("//", "/./") never arrive: the host mux redirects them first
+		// (CONNECT, which ServeMux never cleans, matches nothing and 404s).
 		//
-		// The pattern ServeMux reports is "" exactly when nothing declared
-		// matches. Two ServeMux redirects report a pattern and need no special
-		// case here: a trailing-slash redirect ("/x" when only "/x/..." is
-		// declared) names the declared subtree it redirects to, so it is gated
-		// by that operation's requirements and proxied, as it always was; an
-		// unclean path ("//", "/./") never arrives, because the host mux
-		// redirects it to its clean form before any function handler runs
-		// (CONNECT, which ServeMux never cleans, matches nothing and lands
-		// here).
+		// An undeclared METHOD on a declared pattern is a 405 (#291): it has
+		// no requirements of its own, and falling back to the function-level
+		// grant let a read grant reach a write method.
 		_, pattern := fh.patternMux.Handler(r)
 		if pattern == "" {
 			log.V(1).Info("undeclared path refused",
@@ -715,17 +727,10 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		}
 
 		if authChecker != nil {
-			key := r.Method + " " + pattern
-			if r.Method == http.MethodHead {
-				if _, ok := fh.parsedRequirements[key]; !ok {
-					// HEAD rides on GET (see the declaredMethods build), so it
-					// is verified against the GET operation's requirements --
-					// and its binding spec, keyed identically -- rather than
-					// falling through to empty ones.
-					key = http.MethodGet + " " + pattern
-				}
-			}
-			reqs, declared := fh.routeRequirements(authChecker, key, pattern)
+			// key is the operation the request resolves to -- GET's for an
+			// implicit HEAD -- and selects its binding spec below as well as
+			// its requirements.
+			reqs, key, declared := fh.routeRequirements(authChecker, r.Method, pattern)
 			if !declared {
 				// Unreachable: the 404 and 405 above admit only a declared
 				// pattern and method. Should a later change open a path
@@ -733,7 +738,7 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 				// admitted on the function-level grant -- the very hole those
 				// refusals close -- so this fails closed, as a server fault.
 				log.Error(nil, "no declared operation for a gated request; refusing",
-					"function", fn.Name, "route", key)
+					"function", fn.Name, "method", r.Method, "pattern", pattern)
 				http.Error(w, http.StatusText(http.StatusInternalServerError),
 					http.StatusInternalServerError)
 				return
@@ -990,13 +995,44 @@ func newProxyTransport(t ProxyTimeouts) *http.Transport {
 	}
 }
 
-// routeRequirements returns the parsed requirements for key (method + " " +
-// pattern), and whether key names an operation the function declared.
+// httpMethods is every method an OpenAPI path item can declare, sorted.
+var httpMethods = []string{"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
+
+// operationKey resolves a request's method on pattern to the declared
+// operation that governs it, keyed method + " " + pattern, and whether there
+// is one.
+//
+// An explicitly declared operation governs itself. RFC 9110 §9.3.2: a
+// resource that supports GET supports HEAD, so an UNDECLARED HEAD resolves to
+// GET -- answered under the GET operation's requirements and binding, never on
+// identity alone; reading a route's headers is reading the route. A HEAD the
+// spec declares is its own operation, with its own (possibly empty)
+// requirements, and does not inherit GET's.
+func operationKey(declaredOps map[string]struct{}, method, pattern string) (string, bool) {
+	if pattern == "" {
+		return "", false
+	}
+	key := method + " " + pattern
+	if _, ok := declaredOps[key]; ok {
+		return key, true
+	}
+	if method == http.MethodHead {
+		key = http.MethodGet + " " + pattern
+		if _, ok := declaredOps[key]; ok {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// routeRequirements returns the parsed requirements of the operation a request
+// with method on pattern resolves to (see operationKey), that operation's key,
+// and whether there is one.
 //
 // A declared operation with no security block has no parsedRequirements entry:
 // it gets EMPTY requirements, which still demand the function-level grant
 // (functions:<basePath>:<verb>) -- that is what declaring no security means
-// for a function. A key whose method is not declared on pattern gets nothing
+// for a function. A request resolving to no declared operation gets nothing
 // and false: there is no authorization to apply to a route that does not
 // exist, so the caller must refuse it rather than fall back to the
 // function-level grant (#291, #293).
@@ -1004,17 +1040,17 @@ func (fh *KDexFunctionHandler) routeRequirements(
 	checker interface {
 		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 	},
-	key, pattern string,
-) (entitlements.ParsedRequirements, bool) {
-	if pr, ok := fh.parsedRequirements[key]; ok {
-		return pr, true
-	}
-	method, _, _ := strings.Cut(key, " ")
-	if pattern == "" || !slices.Contains(fh.declaredMethods[pattern], method) {
+	method, pattern string,
+) (entitlements.ParsedRequirements, string, bool) {
+	key, ok := operationKey(fh.declaredOps, method, pattern)
+	if !ok {
 		var none entitlements.ParsedRequirements
-		return none, false
+		return none, "", false
 	}
-	return checker.ParseRequirements(nil), true
+	if pr, ok := fh.parsedRequirements[key]; ok {
+		return pr, key, true
+	}
+	return checker.ParseRequirements(nil), key, true
 }
 
 // upstreamEscapedPath returns the ESCAPED path to send upstream: the backend

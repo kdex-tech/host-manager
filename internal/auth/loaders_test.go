@@ -325,3 +325,32 @@ func TestAuthClientLoaderParsesAllowedResources(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, clients2["x"].AllowedResources)
 }
+
+// An OIDC secret missing a required field is only fixable when the error says
+// WHICH Secret to edit, as every auth-client error already does.
+func TestOIDCConfigLoaderMissingFieldNamesTheSecret(t *testing.T) {
+	for name, data := range map[string]map[string]string{
+		"client_secret": {"client_id": "id", "block_key": "k"},
+		"client_id":     {"client_secret": "s", "block_key": "k"},
+		"block_key":     {"client_id": "id", "client_secret": "s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := map[string][]byte{}
+			for k, v := range data {
+				d[k] = []byte(v)
+			}
+			s := corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "tenant-a",
+					Name:        "oidc",
+					Annotations: map[string]string{"kdex.dev/secret-type": "oidc-client"},
+				},
+				Data: d,
+			}
+			_, err := OIDCConfigLoader(kdexv1alpha1.Secrets{s}, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tenant-a/oidc")
+			assert.Contains(t, err.Error(), name)
+		})
+	}
+}

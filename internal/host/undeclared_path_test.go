@@ -3,7 +3,6 @@ package host
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -47,22 +46,6 @@ func catchAllFn() *kdexv1alpha1.KDexFunction {
 			},
 		},
 	}
-}
-
-// passThroughPaths declares basePath and everything beneath it, every common
-// method, no security: the #293 migration for a function that relied on
-// implicit subtree pass-through. Fixtures that exercise the proxy rather than
-// the gate use it, since an undeclared path is now a 404.
-func passThroughPaths(basePath string) map[string]kdexv1alpha1.PathItem {
-	op := func() *runtime.RawExtension { return &runtime.RawExtension{Raw: []byte(`{}`)} }
-	item := kdexv1alpha1.PathItem{Get: op(), Post: op(), Put: op(), Patch: op(), Delete: op()}
-	paths := map[string]kdexv1alpha1.PathItem{
-		strings.TrimSuffix(basePath, "/") + "/{rest...}": item,
-	}
-	if basePath != "/" {
-		paths[basePath] = item
-	}
-	return paths
 }
 
 func serve(h http.Handler, method, target string, held []string) *httptest.ResponseRecorder {
@@ -239,20 +222,42 @@ func TestRouteRequirements_UndeclaredIsNeverEmptyRequirements(t *testing.T) {
 		parsedRequirements: map[string]entitlements.ParsedRequirements{
 			"POST /x": checker.ParseRequirements([]kdexv1alpha1.SecurityRequirement{{"bearer": {"x:a:write"}}}),
 		},
-		declaredMethods: map[string][]string{"/x": {"GET", "HEAD", "POST"}},
+		declaredOps: map[string]struct{}{"GET /x": {}, "POST /x": {}},
 	}
 
-	_, ok := fh.routeRequirements(checker, "POST /x", "/x")
+	_, key, ok := fh.routeRequirements(checker, "POST", "/x")
 	assert.True(t, ok, "a secured declared operation")
-	_, ok = fh.routeRequirements(checker, "GET /x", "/x")
+	assert.Equal(t, "POST /x", key)
+	_, key, ok = fh.routeRequirements(checker, "GET", "/x")
 	assert.True(t, ok, "a declared operation without security gets empty requirements")
+	assert.Equal(t, "GET /x", key)
+	_, key, ok = fh.routeRequirements(checker, "HEAD", "/x")
+	assert.True(t, ok, "an undeclared HEAD rides on GET")
+	assert.Equal(t, "GET /x", key, "and uses GET's requirements and binding")
 
-	_, ok = fh.routeRequirements(checker, "DELETE /x", "/x")
+	_, _, ok = fh.routeRequirements(checker, "DELETE", "/x")
 	assert.False(t, ok, "an undeclared method has no requirements to fall back to")
-	_, ok = fh.routeRequirements(checker, "GET /y", "/y")
+	_, _, ok = fh.routeRequirements(checker, "GET", "/y")
 	assert.False(t, ok, "an undeclared pattern has no requirements to fall back to")
-	_, ok = fh.routeRequirements(checker, "GET ", "")
+	_, _, ok = fh.routeRequirements(checker, "GET", "")
 	assert.False(t, ok, "no matched pattern has no requirements to fall back to")
+}
+
+// An explicitly declared HEAD resolves to itself even when it declares no
+// security and GET does: the lookup is on declarations, not on which
+// operations happen to have parsed requirements.
+func TestRouteRequirements_ExplicitHeadDoesNotInheritGet(t *testing.T) {
+	checker := auth.NewAuthorizationChecker(nil, logr.Discard())
+	fh := &KDexFunctionHandler{
+		parsedRequirements: map[string]entitlements.ParsedRequirements{
+			"GET /x": checker.ParseRequirements([]kdexv1alpha1.SecurityRequirement{{"bearer": {"x:a:read"}}}),
+		},
+		declaredOps: map[string]struct{}{"GET /x": {}, "HEAD /x": {}},
+	}
+	reqs, key, ok := fh.routeRequirements(checker, "HEAD", "/x")
+	assert.True(t, ok)
+	assert.Equal(t, "HEAD /x", key)
+	assert.Equal(t, checker.ParseRequirements(nil), reqs, "HEAD's own, empty, requirements")
 }
 
 // Mounted the way the host mounts it -- basePath and basePath+"/" on the host

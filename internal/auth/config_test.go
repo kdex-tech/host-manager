@@ -121,7 +121,7 @@ func TestNewConfig(t *testing.T) {
 			},
 			assertions: func(t *testing.T, got *Config, gotErr error) {
 				assert.NotNil(t, gotErr)
-				assert.Contains(t, gotErr.Error(), `OIDC secret does not contain 'client_id' or 'client-id'`)
+				assert.Contains(t, gotErr.Error(), `OIDC secret "foo/foo" does not contain 'client_id' or 'client-id'`)
 			},
 		},
 		{
@@ -196,7 +196,7 @@ func TestNewConfig(t *testing.T) {
 			},
 			assertions: func(t *testing.T, got *Config, gotErr error) {
 				assert.NotNil(t, gotErr)
-				assert.Contains(t, gotErr.Error(), `OIDC secret does not contain 'client_secret' or 'client-secret'`)
+				assert.Contains(t, gotErr.Error(), `OIDC secret "foo/foo" does not contain 'client_secret' or 'client-secret'`)
 			},
 		},
 		{

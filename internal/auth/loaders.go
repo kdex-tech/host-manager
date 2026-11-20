@@ -241,7 +241,7 @@ func OIDCConfigLoader(secrets kdexv1alpha1.Secrets, devMode bool) (*OIDCClientCo
 	}
 
 	if clientSecret == "" {
-		return nil, fmt.Errorf("OIDC secret does not contain 'client_secret' or 'client-secret'")
+		return nil, fmt.Errorf("OIDC secret %q does not contain 'client_secret' or 'client-secret'", secretRef(*oidcSecret))
 	}
 
 	clientID, err := aliasValue(*oidcSecret, "client_id", "client-id")
@@ -250,7 +250,7 @@ func OIDCConfigLoader(secrets kdexv1alpha1.Secrets, devMode bool) (*OIDCClientCo
 	}
 
 	if clientID == "" {
-		return nil, fmt.Errorf("OIDC secret does not contain 'client_id' or 'client-id'")
+		return nil, fmt.Errorf("OIDC secret %q does not contain 'client_id' or 'client-id'", secretRef(*oidcSecret))
 	}
 
 	blockKey, err := aliasValue(*oidcSecret, "block_key", "block-key")
@@ -259,7 +259,7 @@ func OIDCConfigLoader(secrets kdexv1alpha1.Secrets, devMode bool) (*OIDCClientCo
 	}
 
 	if blockKey == "" && !devMode {
-		return nil, fmt.Errorf("a 'block_key' or 'block-key' was not found in the OIDC secret, generating a new one is not supported in production")
+		return nil, fmt.Errorf("a 'block_key' or 'block-key' was not found in OIDC secret %q, generating a new one is not supported in production", secretRef(*oidcSecret))
 	}
 
 	name := string(oidcSecret.Data["name"])
