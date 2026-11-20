@@ -353,7 +353,8 @@ type KDexFunctionHandler struct {
 	// map but whose method is not is a route the function never declared: there
 	// are no requirements to apply to it, so it is REFUSED rather than admitted
 	// under the empty-requirements fall-through, which gated it on identity
-	// alone. An unmatched pattern is absent from the map and untouched by it.
+	// alone. A request matching no declared pattern at all never gets this
+	// far: it is answered 404 before the lookup (#293).
 	declaredMethods map[string][]string
 	patternMux      *http.ServeMux
 	// acceptsAPIKey is set at handler-build time when at least one operation

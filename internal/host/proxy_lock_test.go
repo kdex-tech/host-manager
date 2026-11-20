@@ -86,7 +86,7 @@ func TestReverseProxyHandler_DoesNotPinHostLockDuringUpstream(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "slow-fn", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/slow"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/slow", Paths: passThroughPaths("/v1/slow")},
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL, State: kdexv1alpha1.KDexFunctionStateReady},
 	}

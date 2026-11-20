@@ -185,7 +185,7 @@ func TestProxy_FATAudience_ServiceBacked_IsServiceOrigin_NotStatusURL(t *testing
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-aud", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/api/v1/vector_stores"},
+			API:     kdexv1alpha1.API{BasePath: "/api/v1/vector_stores", Paths: passThroughPaths("/api/v1/vector_stores")},
 			Backend: &kdexv1alpha1.FunctionBackend{
 				Type: kdexv1alpha1.FunctionBackendTypeService,
 				Service: &kdexv1alpha1.ServiceBackend{

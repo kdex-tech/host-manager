@@ -308,7 +308,7 @@ func TestURLDelivery_ThroughRealProxy(t *testing.T) {
 	fn := &kdexv1alpha1.KDexFunction{
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-files", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
-			API: kdexv1alpha1.API{BasePath: "/api/v1/files"},
+			API: kdexv1alpha1.API{BasePath: "/api/v1/files", Paths: passThroughPaths("/api/v1/files")},
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
 	}

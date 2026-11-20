@@ -188,7 +188,7 @@ func leakFixture(t *testing.T, name string, rules []dmapper.MappingRule) (http.H
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef:       corev1.LocalObjectReference{Name: "h"},
-			API:           kdexv1alpha1.API{BasePath: "/v1/leak"},
+			API:           kdexv1alpha1.API{BasePath: "/v1/leak", Paths: passThroughPaths("/v1/leak")},
 			ClaimMappings: rules,
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},

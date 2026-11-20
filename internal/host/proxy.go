@@ -543,11 +543,39 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 		// (A session or capability JWT was already verified by the outer
 		// authentication middleware, which also spends a capability's use.)
 		//
-		// This keys on a DECLARED pattern. A request matching no declared path
-		// is absent from the map and left exactly as it was; that
-		// fall-through is a separate question (#293), because a subtree
-		// pass-through may be load-bearing for an existing function.
+		// A PATH the function never declared is refused the same way, and for
+		// the same reasons, one step earlier (#293). It used to take that same
+		// empty-requirements fall-through, so a backend that grew a route
+		// under an existing basePath was exposed through the host the day it
+		// shipped, gated on the function-level grant alone and never on the
+		// route's own requirements. A function that means to pass a subtree
+		// through declares it: a key ending in a ServeMux catch-all
+		// ({name...}) is a pattern like any other, gated by its own
+		// operations' security.
+		//
+		// The answer is the host mux's own 404, so an undeclared path under a
+		// basePath is indistinguishable from an unrouted one. It is route
+		// shape, not authorization, so it is decided before the gate and
+		// offers no challenge -- re-authorizing cannot make a path exist --
+		// and it leaks nothing: /-/openapi already publishes every Ready
+		// function's paths to anonymous callers.
+		//
+		// The pattern ServeMux reports is "" exactly when nothing declared
+		// matches. Two ServeMux redirects report a pattern and need no special
+		// case here: a trailing-slash redirect ("/x" when only "/x/..." is
+		// declared) names the declared subtree it redirects to, so it is gated
+		// by that operation's requirements and proxied, as it always was; an
+		// unclean path ("//", "/./") never arrives, because the host mux
+		// redirects it to its clean form before any function handler runs
+		// (CONNECT, which ServeMux never cleans, matches nothing and lands
+		// here).
 		_, pattern := fh.patternMux.Handler(r)
+		if pattern == "" {
+			log.V(1).Info("undeclared path refused",
+				"function", fn.Name, "method", r.Method, "path", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
 		if methods, declared := fh.declaredMethods[pattern]; declared && !slices.Contains(methods, r.Method) {
 			w.Header().Set("Allow", strings.Join(methods, ", "))
 			if r.Method == http.MethodOptions {
@@ -697,12 +725,18 @@ func (hh *HostHandler) reverseProxyHandler(fn *kdexv1alpha1.KDexFunction, issuer
 					key = http.MethodGet + " " + pattern
 				}
 			}
-			var reqs entitlements.ParsedRequirements
-			if pr, ok := fh.parsedRequirements[key]; ok {
-				reqs = pr
-			} else {
-				// Default to empty requirements (allows access if identity matches)
-				reqs = authChecker.ParseRequirements(nil)
+			reqs, declared := fh.routeRequirements(authChecker, key, pattern)
+			if !declared {
+				// Unreachable: the 404 and 405 above admit only a declared
+				// pattern and method. Should a later change open a path
+				// around them, a route with nothing declared must not be
+				// admitted on the function-level grant -- the very hole those
+				// refusals close -- so this fails closed, as a server fault.
+				log.Error(nil, "no declared operation for a gated request; refusing",
+					"function", fn.Name, "route", key)
+				http.Error(w, http.StatusText(http.StatusInternalServerError),
+					http.StatusInternalServerError)
+				return
 			}
 
 			// Bind {param} requirements from the request before verifying, so the
@@ -954,6 +988,33 @@ func newProxyTransport(t ProxyTimeouts) *http.Transport {
 		ResponseHeaderTimeout: respHeader,
 		IdleConnTimeout:       idleConn,
 	}
+}
+
+// routeRequirements returns the parsed requirements for key (method + " " +
+// pattern), and whether key names an operation the function declared.
+//
+// A declared operation with no security block has no parsedRequirements entry:
+// it gets EMPTY requirements, which still demand the function-level grant
+// (functions:<basePath>:<verb>) -- that is what declaring no security means
+// for a function. A key whose method is not declared on pattern gets nothing
+// and false: there is no authorization to apply to a route that does not
+// exist, so the caller must refuse it rather than fall back to the
+// function-level grant (#291, #293).
+func (fh *KDexFunctionHandler) routeRequirements(
+	checker interface {
+		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
+	},
+	key, pattern string,
+) (entitlements.ParsedRequirements, bool) {
+	if pr, ok := fh.parsedRequirements[key]; ok {
+		return pr, true
+	}
+	method, _, _ := strings.Cut(key, " ")
+	if pattern == "" || !slices.Contains(fh.declaredMethods[pattern], method) {
+		var none entitlements.ParsedRequirements
+		return none, false
+	}
+	return checker.ParseRequirements(nil), true
 }
 
 // upstreamEscapedPath returns the ESCAPED path to send upstream: the backend

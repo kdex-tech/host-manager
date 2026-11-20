@@ -131,7 +131,7 @@ func TestRegisterFunctionRoutes_DuplicateFunctionBasePath(t *testing.T) {
 func readyFunction(name, basePath, upstream string) kdexv1alpha1.KDexFunction {
 	return kdexv1alpha1.KDexFunction{
 		ObjectMeta: metav1ObjectMeta(name),
-		Spec:       kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: basePath}},
+		Spec:       kdexv1alpha1.KDexFunctionSpec{API: kdexv1alpha1.API{BasePath: basePath, Paths: passThroughPaths(basePath)}},
 		Status:     kdexv1alpha1.KDexFunctionStatus{State: kdexv1alpha1.KDexFunctionStateReady, URL: upstream},
 	}
 }

@@ -567,7 +567,9 @@ func muxPatternsConflict(a, b string) bool {
 }
 
 // registerFunctionRoutes registers a function's exact path and its prefix
-// path (with trailing slash, so every sub-path is proxied).
+// path (with trailing slash, so every sub-path reaches the function's handler,
+// which proxies only the paths the function declares and answers 404 for the
+// rest -- #293).
 //
 // Function routes are not method-scoped, so ServeMux panics when one
 // conflicts with a page route (any-method "/x/v1/" vs "GET /x/{path...}":

@@ -98,7 +98,7 @@ func TestProxy_KnativeFunction_PassesPathThrough(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-knative", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/docs"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/docs", Paths: passThroughPaths("/v1/docs")},
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: "http://fn-xyz.kdex-knative.svc.cluster.local"},
 	}
@@ -112,7 +112,7 @@ func TestProxy_ServiceBacked_StripsBasePathAndPrependsBackendPath(t *testing.T) 
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-knowdb", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/docs"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/docs", Paths: passThroughPaths("/v1/docs")},
 			Backend: &kdexv1alpha1.FunctionBackend{
 				Type:    kdexv1alpha1.FunctionBackendTypeService,
 				Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080), Path: "/api"},
@@ -133,7 +133,7 @@ func TestProxy_ServiceBacked_NoBackendPath_DefaultsToRoot(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-knowdb-root", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/docs"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/docs", Paths: passThroughPaths("/v1/docs")},
 			Backend: &kdexv1alpha1.FunctionBackend{
 				Type:    kdexv1alpha1.FunctionBackendTypeService,
 				Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080)},
@@ -159,7 +159,7 @@ func TestProxy_UpstreamGetsTheEscapedPathTheGateMatched(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "fn-knative", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
 				HostRef: corev1.LocalObjectReference{Name: "h"},
-				API:     kdexv1alpha1.API{BasePath: "/v1/roles"},
+				API:     kdexv1alpha1.API{BasePath: "/v1/roles", Paths: passThroughPaths("/v1/roles")},
 			},
 			Status: kdexv1alpha1.KDexFunctionStatus{URL: "http://fn-xyz.kdex-knative.svc.cluster.local"},
 		}
@@ -169,7 +169,7 @@ func TestProxy_UpstreamGetsTheEscapedPathTheGateMatched(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "fn-svc", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
 				HostRef: corev1.LocalObjectReference{Name: "h"},
-				API:     kdexv1alpha1.API{BasePath: "/v1/roles"},
+				API:     kdexv1alpha1.API{BasePath: "/v1/roles", Paths: passThroughPaths("/v1/roles")},
 				Backend: &kdexv1alpha1.FunctionBackend{
 					Type:    kdexv1alpha1.FunctionBackendTypeService,
 					Service: &kdexv1alpha1.ServiceBackend{Name: "svc", Port: intstr.FromInt(8080), Path: "/api"},
@@ -211,7 +211,7 @@ func TestProxy_RefusesDotDotSegments(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "fn-svc", Namespace: "default"},
 			Spec: kdexv1alpha1.KDexFunctionSpec{
 				HostRef: corev1.LocalObjectReference{Name: "h"},
-				API:     kdexv1alpha1.API{BasePath: "/api/v1/files"},
+				API:     kdexv1alpha1.API{BasePath: "/api/v1/files", Paths: passThroughPaths("/api/v1/files")},
 				Backend: &kdexv1alpha1.FunctionBackend{
 					Type:    kdexv1alpha1.FunctionBackendTypeService,
 					Service: &kdexv1alpha1.ServiceBackend{Name: "knowdb", Port: intstr.FromInt(8080), Path: "/v1/files"},
@@ -317,7 +317,7 @@ func TestProxy_FATCacheHitsWhenOnlyVolatileHeadersVary(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "fn-cache", Namespace: "default"},
 		Spec: kdexv1alpha1.KDexFunctionSpec{
 			HostRef: corev1.LocalObjectReference{Name: "h"},
-			API:     kdexv1alpha1.API{BasePath: "/v1/cache"},
+			API:     kdexv1alpha1.API{BasePath: "/v1/cache", Paths: passThroughPaths("/v1/cache")},
 		},
 		Status: kdexv1alpha1.KDexFunctionStatus{URL: upstream.URL},
 	}

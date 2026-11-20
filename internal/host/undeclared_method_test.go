@@ -211,21 +211,28 @@ func TestGate_DeclaredWriteMethodStillWorks(t *testing.T) {
 	assert.False(t, *reached2)
 }
 
-// A path the function never declared keeps today's behaviour. This is NOT a
-// claim that it is correct -- it is the deliberate boundary of this change: the
-// undeclared-PATH fall-through is filed separately (#293), because unlike a method a
-// subtree pass-through may be load-bearing for an existing function. The
-// assertion is here so that closing the path hole is a visible, intentional
-// change to this test rather than a silent one.
-func TestGate_UndeclaredPathIsNotYetRefused(t *testing.T) {
-	h, _ := binderFixture(t, getOnlyFn())
+// A path the function never declared is REFUSED with a 404 (#293). It used to
+// fall through to EMPTY requirements -- the function-level grant alone -- and
+// be proxied, so a backend that grew a route under an existing basePath was
+// exposed through the host the day it shipped, gated on identity rather than
+// on anything the route itself requires. Like the 405, the refusal is about
+// route shape, not authorization, so it is decided before the gate: an
+// anonymous caller gets the same 404 an authenticated one does, and no
+// challenge -- no credential can make an undeclared path exist.
+func TestGate_UndeclaredPathIs404(t *testing.T) {
+	h, reached := binderFixture(t, getOnlyFn())
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/notes/deeper/unknown", nil)
-	req = withHeld(req, nil)
-	h.ServeHTTP(rr, req)
+	// No auth context at all: an anonymous caller.
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/v1/notes/deeper/unknown", nil))
 
-	assert.NotEqual(t, http.StatusMethodNotAllowed, rr.Code,
-		"the 405 must key on a DECLARED path, so an unmatched path is untouched by it")
+	assert.Equal(t, http.StatusNotFound, rr.Code,
+		"a path matching no declared pattern must be refused, not proxied on identity alone")
+	assert.Equal(t, "404 page not found\n", rr.Body.String(),
+		"the refusal is the host mux's own 404, indistinguishable from an unrouted path")
+	assert.Empty(t, rr.Header().Get("WWW-Authenticate"),
+		"no credential can make an undeclared path exist, so no challenge is offered")
+	assert.Empty(t, rr.Header().Get("Allow"), "a 404 names no methods: there is no route to describe")
+	assert.False(t, *reached, "an undeclared path must never reach the backend")
 }
 
 // The ORDER is deliberate, not incidental: the refusal is decided before the
