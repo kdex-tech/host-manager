@@ -28,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const goodDigest = "sha256:fbc036ef0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+
 func idempotentTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -72,7 +74,7 @@ func TestGetOrCreatePackRefJob_SkipsRebuildWhenImageRecordedForCurrentGen(t *tes
 		ObjectMeta: metav1.ObjectMeta{Name: "ipr", Namespace: "dev", Generation: 5, UID: "u-ipr"},
 	}
 	ipr.Status.Attributes = map[string]string{
-		"image":     fmt.Sprintf("example.com/%s/packages:%d@sha256:deadbeef", ipr.Name, ipr.Generation),
+		"image":     fmt.Sprintf("example.com/%s/packages:%d@%s", ipr.Name, ipr.Generation, goodDigest),
 		"importmap": `{"imports":{}}`,
 	}
 
@@ -112,7 +114,7 @@ func TestGetOrCreatePackRefJob_RebuildsWhenRecordedImageIsStale(t *testing.T) {
 	}
 	// Image recorded for generation 5, but the IPR is now at generation 6.
 	ipr.Status.Attributes = map[string]string{
-		"image":     fmt.Sprintf("example.com/%s/packages:%d@sha256:deadbeef", ipr.Name, 5),
+		"image":     fmt.Sprintf("example.com/%s/packages:%d@%s", ipr.Name, 5, goodDigest),
 		"importmap": `{"imports":{}}`,
 	}
 
@@ -120,4 +122,49 @@ func TestGetOrCreatePackRefJob_RebuildsWhenRecordedImageIsStale(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, job, "a stale (older-generation) recorded image must not suppress the rebuild")
 	assert.Equal(t, 1, countPackagerJobs(t, p, "dev"))
+}
+
+// TestGetOrCreatePackRefJob_RebuildsWhenRecordedImageIsCorrupt pins
+// kdex-tech/host-manager#301: a recorded image whose digest is not a
+// well-formed sha256 digest (pre-#301 a Failed pod's runc error was recorded
+// as the digest) must not count as "built", or it sticks forever. A rebuild
+// self-heals it.
+func TestGetOrCreatePackRefJob_RebuildsWhenRecordedImageIsCorrupt(t *testing.T) {
+	for name, digest := range map[string]string{
+		"runc error text":   "failed to create containerd task: failed to create shim task: OCI runtime create failed",
+		"short hex":         "sha256:deadbeef",
+		"uppercase hex":     "sha256:FBC036EF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF01234567",
+		"trailing garbage":  goodDigest + " extra",
+		"empty digest":      "",
+		"wrong algorithm":   "md5:0123456789abcdef0123456789abcdef",
+		"digest of 65 hex":  goodDigest + "8",
+		"good then garbage": goodDigest + "@" + goodDigest,
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheme := idempotentTestScheme(t)
+			p := newIdempotentPackRef(t, scheme)
+			ipr := &kdexv1alpha1.KDexInternalPackageReferences{
+				ObjectMeta: metav1.ObjectMeta{Name: "rsi-dev", Namespace: "dev", Generation: 449, UID: "u-ipr"},
+			}
+			ipr.Status.Attributes = map[string]string{
+				"image":     "example.com/rsi-dev/packages:449@" + digest,
+				"importmap": `{"imports":{}}`,
+			}
+			job, err := p.GetOrCreatePackRefJob(context.Background(), ipr)
+			require.NoError(t, err)
+			require.NotNil(t, job, "a corrupt recorded digest must not suppress the rebuild (#301)")
+			assert.Equal(t, 1, countPackagerJobs(t, p, "dev"))
+		})
+	}
+}
+
+func TestIsValidImageDigest(t *testing.T) {
+	assert.True(t, IsValidImageDigest(goodDigest))
+	for _, bad := range []string{
+		"", "sha256:", "sha256:deadbeef", goodDigest + "\n", " " + goodDigest,
+		"sha256:FBC036EF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF01234567",
+		"failed to create containerd task: failed to create shim task",
+	} {
+		assert.False(t, IsValidImageDigest(bad), "%q", bad)
+	}
 }

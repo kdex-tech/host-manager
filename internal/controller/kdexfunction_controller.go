@@ -34,7 +34,6 @@ import (
 	"github.com/kdex-tech/host-manager/internal/deploy"
 	"github.com/kdex-tech/host-manager/internal/generate"
 	"github.com/kdex-tech/host-manager/internal/host"
-	kjob "github.com/kdex-tech/host-manager/internal/job"
 	"github.com/kdex-tech/host-manager/internal/utils"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1187,7 +1186,10 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 			return ctrl.Result{}, err
 		}
 
-		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+		// Harvest only from the Succeeded pod; a mid-retry Job (Failed>0
+		// under its BackoffLimit) is still in progress. See #301.
+		pod, waiting, podErr := harvestablePod(hc.ctx, r.Client, job, time.Now())
+		if waiting {
 			kdexv1alpha1.SetConditions(
 				&hc.function.Status.Conditions,
 				kdexv1alpha1.ConditionStatuses{
@@ -1207,8 +1209,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		} else {
-			pod, err := kjob.GetPodForJob(hc.ctx, r.Client, job)
-			if err != nil {
+			if podErr != nil {
 				kdexv1alpha1.SetConditions(
 					&hc.function.Status.Conditions,
 					kdexv1alpha1.ConditionStatuses{
@@ -1217,7 +1218,7 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 						Ready:       metav1.ConditionFalse,
 					},
 					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
+					podErr.Error(),
 				)
 
 				if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
@@ -1682,7 +1683,10 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 		return ctrl.Result{}, err
 	}
 
-	if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+	// Harvest only from the Succeeded pod; a mid-retry Job (Failed>0 under
+	// its BackoffLimit) is still in progress. See #301.
+	pod, waiting, podErr := harvestablePod(hc.ctx, r.Client, job, time.Now())
+	if waiting {
 		kdexv1alpha1.SetConditions(
 			&hc.function.Status.Conditions,
 			kdexv1alpha1.ConditionStatuses{
@@ -1702,8 +1706,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	} else {
-		pod, err := kjob.GetPodForJob(hc.ctx, r.Client, job)
-		if err != nil {
+		if podErr != nil {
 			kdexv1alpha1.SetConditions(
 				&hc.function.Status.Conditions,
 				kdexv1alpha1.ConditionStatuses{
@@ -1712,7 +1715,7 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 					Ready:       metav1.ConditionFalse,
 				},
 				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
+				podErr.Error(),
 			)
 
 			if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {

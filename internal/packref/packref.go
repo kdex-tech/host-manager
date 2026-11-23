@@ -3,6 +3,7 @@ package packref
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/go-logr/logr"
@@ -32,11 +33,17 @@ type PackRef struct {
 }
 
 // imageBuiltForCurrentGeneration reports whether status already records a
-// packages image (and importmap) whose tag matches the IPR's current
-// generation. The recorded image is written by the controller as
+// packages image (and importmap) for the IPR's current generation. The
+// recorded image is written by the controller as
 // "<registry>/<name>/packages:<generation>@<digest>" on a successful build, so
-// a matching ":<generation>@" prefix means this exact generation has already
-// produced an image — no rebuild is required. See kdex-tech/host-manager#111.
+// a "/<name>/packages:<generation>@" tag followed by a well-formed digest (and
+// nothing else) means this exact generation has already produced an image —
+// no rebuild is required. See kdex-tech/host-manager#111.
+//
+// The digest must be well-formed: pre-#301 a Failed pod's runc error was
+// recorded as the digest, and a bare tag-prefix check counted that as built
+// forever. Treating it as unbuilt makes the corrupt value self-heal by
+// rebuilding. See kdex-tech/host-manager#301.
 func (p *PackRef) imageBuiltForCurrentGeneration(ipr *kdexv1alpha1.KDexInternalPackageReferences) bool {
 	if ipr.Status.Attributes == nil {
 		return false
@@ -46,7 +53,19 @@ func (p *PackRef) imageBuiltForCurrentGeneration(ipr *kdexv1alpha1.KDexInternalP
 		return false
 	}
 	wantTag := fmt.Sprintf("/%s/packages:%d@", ipr.Name, ipr.Generation)
-	return strings.Contains(image, wantTag)
+	i := strings.Index(image, wantTag)
+	if i < 0 {
+		return false
+	}
+	return IsValidImageDigest(image[i+len(wantTag):])
+}
+
+var imageDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// IsValidImageDigest reports whether s is exactly a well-formed OCI sha256
+// digest ("sha256:" + 64 lowercase hex), as the packager emits on success.
+func IsValidImageDigest(s string) bool {
+	return imageDigestRE.MatchString(s)
 }
 
 func (p *PackRef) GetOrCreatePackRefJob(ctx context.Context, ipr *kdexv1alpha1.KDexInternalPackageReferences) (*batchv1.Job, error) {

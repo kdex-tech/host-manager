@@ -26,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	kjob "github.com/kdex-tech/host-manager/internal/job"
 	"github.com/kdex-tech/host-manager/internal/packref"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -307,49 +306,15 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 
 	case packRefJobSucceeded:
-		// Harvest results from the successful pod.
-		pod, err := kjob.GetPodForJob(ctx, r.Client, job)
+		// Harvest results from the Succeeded pod (#301).
+		h, err := r.harvestPackagesJob(ctx, &ipr, job, internalHost.Spec.GetRegistries().ImageRegistry, time.Now())
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&ipr.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			return ctrl.Result{}, err
 		}
-
-		var imageDigest string
-		for _, containerStatus := range pod.Status.ContainerStatuses {
-			if containerStatus.Name == "packager" && containerStatus.State.Terminated != nil {
-				imageDigest = strings.TrimSpace(containerStatus.State.Terminated.Message)
-				break
-			}
+		if h.result != nil {
+			return *h.result, nil
 		}
-
-		var importmap string
-		for _, containerStatus := range pod.Status.InitContainerStatuses {
-			if containerStatus.Name == "importmap-generator" && containerStatus.State.Terminated != nil {
-				importmap = containerStatus.State.Terminated.Message
-				break
-			}
-		}
-
-		if imageDigest == "" || importmap == "" {
-			// Job reported success but we can't find the outputs yet? Wait a bit.
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
-		}
-
-		builtImage := fmt.Sprintf(
-			"%s/%s/packages:%d@%s", internalHost.Spec.GetRegistries().ImageRegistry, ipr.Name, ipr.Generation, imageDigest,
-		)
+		builtImage, importmap := h.builtImage, h.importmap
 
 		// The Job reported success, but "success" has been observed to mean
 		// "shipped the PREVIOUS version's bytes": during the npm propagation
