@@ -965,24 +965,21 @@ func isCodegenJobTerminal(job *batchv1.Job) (bool, string) {
 }
 
 // markCodegenJobTerminallyFailed sets the function's conditions to indicate
-// a permanent codegen-Job failure and returns a no-requeue ctrl.Result.
-// Centralised so both handleBuildValid and handleExecutableAvailable use
-// the same shape — and so the cyclomatic complexity of those handlers
-// doesn't accumulate the SetConditions block twice. See
-// kdex-tech/host-manager#27.
-func markCodegenJobTerminallyFailed(fn *kdexv1alpha1.KDexFunction, job *batchv1.Job, msg string) (ctrl.Result, error) {
-	err := fmt.Errorf("code generation job %s/%s exhausted retries: %s — inspect pods for details (Job is NOT auto-deleted)", job.Namespace, job.Name, msg)
-	kdexv1alpha1.SetConditions(
-		&fn.Status.Conditions,
-		kdexv1alpha1.ConditionStatuses{
-			Degraded:    metav1.ConditionTrue,
-			Progressing: metav1.ConditionFalse,
-			Ready:       metav1.ConditionFalse,
-		},
-		kdexv1alpha1.ConditionReasonReconcileError,
-		err.Error(),
-	)
-	return ctrl.Result{}, nil
+// a permanent codegen- or deployer-Job failure; the caller returns without
+// requeueing and never deletes the Job. Centralised (via
+// harvestFunctionJob) so both handleBuildValid and handleExecutableAvailable
+// use the same shape. See kdex-tech/host-manager#27.
+//
+// terminationText is the failed pod's termination message ("" when no pod
+// is left); it is quoted capped and with URL credentials stripped (#301).
+func markCodegenJobTerminallyFailed(fn *kdexv1alpha1.KDexFunction, job *batchv1.Job, msg, terminationText string) {
+	if terminationText != "" {
+		msg = msg + "; results: " + quoteBadOutput(terminationText)
+	}
+	setDegraded(&fn.Status.Conditions, fmt.Sprintf(
+		"code generation job %s/%s exhausted retries: %s — inspect pods for details (Job is NOT auto-deleted)",
+		job.Namespace, job.Name, msg,
+	))
 }
 
 // recordCodegenInputs persists the inputs a just-completed codegen Job
@@ -1187,9 +1184,12 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 		}
 
 		// Harvest only from the Succeeded pod; a mid-retry Job (Failed>0
-		// under its BackoffLimit) is still in progress. See #301.
-		pod, waiting, podErr := harvestablePod(hc.ctx, r.Client, job, time.Now())
-		if waiting {
+		// under its BackoffLimit) is still in progress. Terminal-Failed Jobs
+		// are surfaced as Degraded with no requeue and (critically) without
+		// deletion — the operator needs the failed pods around to diagnose
+		// (#27). See #301.
+		h, err := r.harvestFunctionJob(hc.ctx, hc.function, job, "results", time.Now())
+		if h.waiting {
 			kdexv1alpha1.SetConditions(
 				&hc.function.Status.Conditions,
 				kdexv1alpha1.ConditionStatuses{
@@ -1209,44 +1209,11 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 
 			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 		} else {
-			if podErr != nil {
-				kdexv1alpha1.SetConditions(
-					&hc.function.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					podErr.Error(),
-				)
-
-				if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-					return ctrl.Result{}, err
-				}
-
-				return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			if err != nil {
+				return ctrl.Result{}, err
 			}
-
-			var terminationMessage string
-			for _, containerStatus := range pod.Status.ContainerStatuses {
-				if containerStatus.Name == "results" && containerStatus.State.Terminated != nil {
-					terminationMessage = containerStatus.State.Terminated.Message
-					break
-				}
-			}
-
-			// Terminal-Failed Jobs are surfaced as Degraded with no requeue
-			// and (critically) without deletion — the operator needs the
-			// failed pods around to diagnose. Replaces the pre-#27
-			// `job.Status.Failed == 1` short-circuit which delete-and-
-			// recreated the Job on every reconcile, masking the failure as
-			// "still building" indefinitely. See kdex-tech/host-manager#27.
-			if terminal, msg := isCodegenJobTerminal(job); terminal {
-				if terminationMessage != "" {
-					msg = msg + "; results: " + terminationMessage
-				}
-				return markCodegenJobTerminallyFailed(hc.function, job, msg)
+			if h.result != nil {
+				return *h.result, nil
 			}
 
 			type results struct {
@@ -1255,24 +1222,13 @@ func (r *KDexFunctionReconciler) handleBuildValid(hc handlerContext) (ctrl.Resul
 				Path       string `json:"path"`
 			}
 			var res results
-			if err := json.Unmarshal([]byte(terminationMessage), &res); err != nil {
-				kdexv1alpha1.SetConditions(
-					&hc.function.Status.Conditions,
-					kdexv1alpha1.ConditionStatuses{
-						Degraded:    metav1.ConditionTrue,
-						Progressing: metav1.ConditionFalse,
-						Ready:       metav1.ConditionFalse,
-					},
-					kdexv1alpha1.ConditionReasonReconcileError,
-					err.Error(),
-				)
-
-				if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-					return ctrl.Result{}, err
-				}
-
-				return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			if err := json.Unmarshal([]byte(h.output), &res); err != nil {
+				return r.badFunctionOutput(hc.ctx, hc.function, job, fmt.Sprintf(
+					"code generation job %s/%s emitted unparseable results %s: %v",
+					job.Namespace, job.Name, quoteBadOutput(h.output), err,
+				))
 			}
+			resetBadOutputRebuilds(hc.function.Status.Attributes)
 
 			hc.function.Status.Source = &kdexv1alpha1.Source{
 				Repository: res.Repository,
@@ -1685,8 +1641,8 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 	// Harvest only from the Succeeded pod; a mid-retry Job (Failed>0 under
 	// its BackoffLimit) is still in progress. See #301.
-	pod, waiting, podErr := harvestablePod(hc.ctx, r.Client, job, time.Now())
-	if waiting {
+	h, err := r.harvestFunctionJob(hc.ctx, hc.function, job, "deployer", time.Now())
+	if h.waiting {
 		kdexv1alpha1.SetConditions(
 			&hc.function.Status.Conditions,
 			kdexv1alpha1.ConditionStatuses{
@@ -1706,66 +1662,37 @@ func (r *KDexFunctionReconciler) handleExecutableAvailable(hc handlerContext) (c
 
 		return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
 	} else {
-		if podErr != nil {
-			kdexv1alpha1.SetConditions(
-				&hc.function.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				podErr.Error(),
-			)
-
-			if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+		if err != nil {
+			return ctrl.Result{}, err
 		}
 
-		var terminationMessage string
-		for _, containerStatus := range pod.Status.ContainerStatuses {
-			if containerStatus.Name == "deployer" && containerStatus.State.Terminated != nil {
-				terminationMessage = containerStatus.State.Terminated.Message
-				break
-			}
-		}
-
-		// Terminal-Failed deployer Job: surface Degraded, no requeue, no
-		// delete — same shape as the codegen-Job path in handleBuildValid.
-		// See kdex-tech/host-manager#27.
-		if terminal, msg := isCodegenJobTerminal(job); terminal {
-			if terminationMessage != "" {
-				msg = msg + "; results: " + terminationMessage
-			}
+		// Terminal-Failed deployer Job: Degraded, no requeue, no delete —
+		// same shape as the codegen-Job path in handleBuildValid. See
+		// kdex-tech/host-manager#27.
+		if h.terminal {
 			// The failed Job stays for inspection (#27); the older ones go.
 			if err := r.cleanupJobs(hc.ctx, hc.function, internal.APP_DEPLOYER, job.Name); err != nil {
 				log.Error(err, "failed to clean up obsolete deployer Jobs")
 			}
-			return markCodegenJobTerminallyFailed(hc.function, job, msg)
+		}
+		if h.result != nil {
+			return *h.result, nil
 		}
 
-		url, err := decodeDeployerURL(terminationMessage)
+		url, err := decodeDeployerURL(h.output)
+		if errors.Is(err, errDeployerURLNotAdmitted) {
+			// Not bad output: the backend is not admitted yet, and the
+			// deployer Job is how admission is re-polled. Unbounded, as
+			// before #301.
+			return r.rebuildFunctionJob(hc.ctx, hc.function, job, err.Error())
+		}
 		if err != nil {
-			kdexv1alpha1.SetConditions(
-				&hc.function.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
-			)
-
-			if err := r.Delete(hc.ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			return r.badFunctionOutput(hc.ctx, hc.function, job, fmt.Sprintf(
+				"function deployer job %s/%s emitted %s: %v",
+				job.Namespace, job.Name, quoteBadOutput(h.output), err,
+			))
 		}
+		resetBadOutputRebuilds(hc.function.Status.Attributes)
 
 		hc.function.Status.URL = url
 	}
@@ -1954,10 +1881,14 @@ func decodeDeployerURL(terminationMessage string) (string, error) {
 		return "", fmt.Errorf("failed to parse deployer results: %w", err)
 	}
 	if res.URL == "" {
-		return "", fmt.Errorf("deployer returned empty URL; backend not admitted yet")
+		return "", errDeployerURLNotAdmitted
 	}
 	return res.URL, nil
 }
+
+// errDeployerURLNotAdmitted: the deployer ran but its backend is not admitted
+// yet. Unlike unparseable output, rebuilding the deployer Job is the retry.
+var errDeployerURLNotAdmitted = errors.New("deployer returned empty URL; backend not admitted yet")
 
 // inspectKPackImageStatus reads the kpack Image's status.conditions
 // and returns whether the build succeeded (success=true ⇔

@@ -12,9 +12,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,11 +26,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/kdex-tech/host-manager/internal"
+	kjob "github.com/kdex-tech/host-manager/internal/job"
 )
 
 const (
@@ -38,6 +44,8 @@ const (
 		`"/var/lib/kubelet/pods/x/volume-subpaths/image-push-secret/packager/4" to rootfs at "/shared/config.json": ` +
 		`no such file or directory: unknown`
 	harvestImportmap = `{"imports":{"lit":"/~/m/lit/index.js"}}`
+	harvestJobName   = "rsi-dev-packages-449"
+	harvestJobUID    = types.UID("uid-rsi-dev-packages-449")
 )
 
 var harvestNow = time.Date(2026, 11, 23, 20, 40, 0, 0, time.UTC)
@@ -56,10 +64,12 @@ func harvestScheme(t *testing.T) *runtime.Scheme {
 func harvestJob(succeeded, failed int32, completed *time.Time) *batchv1.Job {
 	j := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "rsi-dev-packages-449",
-			Namespace:   "dev",
-			Annotations: map[string]string{internal.ANNOTATION_GENERATION: "449"},
-			Labels:      map[string]string{"app": "packages", "packages": "rsi-dev", internal.ANNOTATION_GENERATION: "449"},
+			Name:              harvestJobName,
+			Namespace:         "dev",
+			UID:               harvestJobUID,
+			CreationTimestamp: metav1.NewTime(harvestNow.Add(-15 * time.Minute)),
+			Annotations:       map[string]string{internal.ANNOTATION_GENERATION: "449"},
+			Labels:            map[string]string{"app": "packages", "packages": "rsi-dev", internal.ANNOTATION_GENERATION: "449"},
 		},
 		Status: batchv1.JobStatus{Succeeded: succeeded, Failed: failed},
 	}
@@ -70,14 +80,27 @@ func harvestJob(succeeded, failed int32, completed *time.Time) *batchv1.Job {
 	return j
 }
 
+func terminalHarvestJob() *batchv1.Job {
+	j := harvestJob(0, 4, nil)
+	j.Status.Conditions = []batchv1.JobCondition{{
+		Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+		Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit",
+	}}
+	return j
+}
+
 func harvestPod(name string, phase corev1.PodPhase, created time.Time, digest, importmap string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         "dev",
-			Labels:            map[string]string{"job-name": "rsi-dev-packages-449"},
+			Labels:            map[string]string{"job-name": harvestJobName},
 			Annotations:       map[string]string{internal.ANNOTATION_GENERATION: "449"},
 			CreationTimestamp: metav1.NewTime(created),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "batch/v1", Kind: "Job", Name: harvestJobName, UID: harvestJobUID,
+				Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true),
+			}},
 		},
 		Status: corev1.PodStatus{
 			Phase: phase,
@@ -110,18 +133,46 @@ func harvestIPR() *kdexv1alpha1.KDexInternalPackageReferences {
 	return ipr
 }
 
+func harvestClient(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object) client.Client {
+	t.Helper()
+	b := fake.NewClientBuilder().WithScheme(harvestScheme(t)).WithObjects(objs...)
+	if funcs != nil {
+		b = b.WithInterceptorFuncs(*funcs)
+	}
+	return b.Build()
+}
+
+func harvestObjs(job *batchv1.Job, pods ...*corev1.Pod) []client.Object {
+	objs := []client.Object{job}
+	for _, p := range pods {
+		objs = append(objs, p.DeepCopy())
+	}
+	return objs
+}
+
+// failingPodList makes every pod List fail as a transient API error would.
+var failingPodList = &interceptor.Funcs{
+	List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		if _, ok := list.(*corev1.PodList); ok {
+			return apierrors.NewServiceUnavailable("etcd leader election")
+		}
+		return c.List(ctx, list, opts...)
+	},
+}
+
+func runHarvestOn(t *testing.T, c client.Client, ipr *kdexv1alpha1.KDexInternalPackageReferences, job *batchv1.Job) (packagesHarvest, error) {
+	t.Helper()
+	r := &KDexInternalPackageReferencesReconciler{Client: c, Scheme: c.Scheme(), RequeueDelay: time.Second}
+	return r.harvestPackagesJob(context.Background(), ipr, job, "reg.example", harvestNow)
+}
+
 func runHarvest(t *testing.T, job *batchv1.Job, pods ...*corev1.Pod) (
 	*kdexv1alpha1.KDexInternalPackageReferences, packagesHarvest, client.Client,
 ) {
 	t.Helper()
-	objs := []client.Object{job}
-	for _, p := range pods {
-		objs = append(objs, p)
-	}
-	c := fake.NewClientBuilder().WithScheme(harvestScheme(t)).WithObjects(objs...).Build()
-	r := &KDexInternalPackageReferencesReconciler{Client: c, Scheme: c.Scheme(), RequeueDelay: time.Second}
+	c := harvestClient(t, nil, harvestObjs(job, pods...)...)
 	ipr := harvestIPR()
-	h, err := r.harvestPackagesJob(context.Background(), ipr, job, "reg.example", harvestNow)
+	h, err := runHarvestOn(t, c, ipr, job)
 	require.NoError(t, err)
 	return ipr, h, c
 }
@@ -134,6 +185,14 @@ func jobExists(t *testing.T, c client.Client, job *batchv1.Job) bool {
 	}
 	require.NoError(t, err)
 	return true
+}
+
+func degradedMessage(t *testing.T, conds []metav1.Condition) string {
+	t.Helper()
+	cond := meta.FindStatusCondition(conds, string(kdexv1alpha1.ConditionTypeDegraded))
+	require.NotNil(t, cond)
+	require.Equal(t, metav1.ConditionTrue, cond.Status)
+	return cond.Message
 }
 
 // Regression for kdex-tech/host-manager#301: a Job that succeeded on retry
@@ -191,6 +250,20 @@ func TestHarvestPackagesJob_NoSucceededPodPastGraceRebuilds(t *testing.T) {
 	assert.False(t, jobExists(t, c, job))
 }
 
+// A transient API error listing pods is not "no harvestable pod": it goes
+// back to controller-runtime for backoff, and a good Job is never deleted.
+func TestHarvestPackagesJob_ListErrorIsReturnedAndKeepsJob(t *testing.T) {
+	done := harvestNow.Add(-time.Hour)
+	job := harvestJob(1, 0, &done)
+	c := harvestClient(t, failingPodList, harvestObjs(job)...)
+	ipr := harvestIPR()
+
+	_, err := runHarvestOn(t, c, ipr, job)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsServiceUnavailable(err), "got %v", err)
+	assert.True(t, jobExists(t, c, job), "an API error must never delete a good Job")
+}
+
 // A Succeeded pod whose packager emitted something that is not a digest:
 // Degraded with a clear, truncated message; status.image untouched; Job
 // deleted so the next pass rebuilds (as for the #161 verify failure).
@@ -207,16 +280,53 @@ func TestHarvestPackagesJob_MalformedDigestDegrades(t *testing.T) {
 	assert.Equal(t, "reg.example/rsi-dev/packages:448@"+harvestGoodDigest, ipr.Status.Attributes["image"],
 		"a malformed digest must never be written to status.image")
 
-	cond := meta.FindStatusCondition(ipr.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
-	assert.Contains(t, cond.Message, "not a valid image digest")
-	assert.Contains(t, cond.Message, "rsi-dev-packages-449-nflq5")
-	assert.Less(t, len(cond.Message), 500, "the bad text must be truncated")
+	msg := degradedMessage(t, ipr.Status.Conditions)
+	assert.Contains(t, msg, "not a valid image digest")
+	assert.Contains(t, msg, "rsi-dev-packages-449-nflq5")
+	assert.Contains(t, msg, "rebuild 1 of 3")
+	assert.Less(t, len(msg), 500, "the bad text must be truncated")
 	assert.False(t, jobExists(t, c, job), "the Job must be deleted so the next pass rebuilds")
+	assert.Equal(t, "449=1", ipr.Status.Attributes[attrHarvestFailures])
 }
 
-// Outputs not yet visible on a Succeeded pod: keep the existing wait.
+// A deterministic bad output must not delete+rebuild every RequeueDelay
+// forever: after maxBadOutputRebuilds rebuilds of one generation, keep the
+// Job, stay Degraded and back off.
+func TestHarvestPackagesJob_MalformedDigestRebuildsAreBounded(t *testing.T) {
+	done := harvestNow.Add(-time.Minute)
+	ipr := harvestIPR()
+	for i := 1; i <= maxBadOutputRebuilds+1; i++ {
+		job := harvestJob(1, 0, &done)
+		pod := harvestPod("rsi-dev-packages-449-nflq5", corev1.PodSucceeded, harvestNow.Add(-5*time.Minute), "garbage", harvestImportmap)
+		c := harvestClient(t, nil, harvestObjs(job, pod)...)
+		h, err := runHarvestOn(t, c, ipr, job)
+		require.NoError(t, err)
+		require.NotNil(t, h.result)
+		msg := degradedMessage(t, ipr.Status.Conditions)
+
+		if i <= maxBadOutputRebuilds {
+			assert.False(t, jobExists(t, c, job), "rebuild %d deletes the Job", i)
+			assert.Equal(t, time.Second, h.result.RequeueAfter)
+			continue
+		}
+		assert.True(t, jobExists(t, c, job), "past the bound the Job is kept for inspection")
+		assert.Equal(t, badOutputGiveUpRequeue, h.result.RequeueAfter)
+		assert.Contains(t, msg, "gave up after 3 rebuilds")
+		assert.Equal(t, "449=3", ipr.Status.Attributes[attrHarvestFailures], "giving up does not count")
+	}
+
+	// A new generation starts a fresh budget.
+	ipr.Generation = 450
+	job := harvestJob(1, 0, &done)
+	c := harvestClient(t, nil, harvestObjs(job,
+		harvestPod("rsi-dev-packages-449-nflq5", corev1.PodSucceeded, harvestNow.Add(-5*time.Minute), "garbage", harvestImportmap))...)
+	_, err := runHarvestOn(t, c, ipr, job)
+	require.NoError(t, err)
+	assert.False(t, jobExists(t, c, job))
+	assert.Equal(t, "450=1", ipr.Status.Attributes[attrHarvestFailures])
+}
+
+// Outputs not yet visible on a Succeeded pod: wait, within the grace window.
 func TestHarvestPackagesJob_EmptyOutputsWait(t *testing.T) {
 	done := harvestNow.Add(-time.Minute)
 	job := harvestJob(1, 0, &done)
@@ -229,6 +339,20 @@ func TestHarvestPackagesJob_EmptyOutputsWait(t *testing.T) {
 	assert.True(t, jobExists(t, c, job))
 }
 
+// ... but not forever: past the grace window empty outputs are bad output.
+func TestHarvestPackagesJob_EmptyOutputsPastGraceIsBadOutput(t *testing.T) {
+	done := harvestNow.Add(-time.Hour)
+	job := harvestJob(1, 0, &done)
+	ipr, h, c := runHarvest(t, job,
+		harvestPod("rsi-dev-packages-449-nflq5", corev1.PodSucceeded, harvestNow.Add(-2*time.Hour), harvestGoodDigest, ""))
+
+	require.NotNil(t, h.result)
+	assert.Empty(t, h.builtImage)
+	assert.Contains(t, degradedMessage(t, ipr.Status.Conditions), "importmap")
+	assert.False(t, jobExists(t, c, job))
+	assert.Equal(t, "449=1", ipr.Status.Attributes[attrHarvestFailures])
+}
+
 // harvestablePod is shared by the packages, codegen and deployer harvests.
 func TestHarvestablePod(t *testing.T) {
 	base := harvestNow.Add(-10 * time.Minute)
@@ -236,18 +360,25 @@ func TestHarvestablePod(t *testing.T) {
 	old := harvestNow.Add(-time.Hour)
 	failed := failedHarvestPod("p-failed", base)
 	good := harvestPod("p-good", corev1.PodSucceeded, base.Add(time.Minute), harvestGoodDigest, harvestImportmap)
-	terminal := harvestJob(0, 4, nil)
-	terminal.Status.Conditions = []batchv1.JobCondition{
-		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
+
+	noCompletionRecentCreate := harvestJob(1, 1, nil)
+	noCompletionRecentCreate.CreationTimestamp = metav1.NewTime(recent)
+	noCompletionOldCreate := harvestJob(1, 1, nil)
+	noCompletionOldCreate.CreationTimestamp = metav1.NewTime(old)
+	completeCondRecent := harvestJob(1, 1, nil)
+	completeCondRecent.CreationTimestamp = metav1.NewTime(old)
+	completeCondRecent.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(recent)},
 	}
 
 	tests := []struct {
 		name     string
 		job      *batchv1.Job
 		pods     []*corev1.Pod
+		funcs    *interceptor.Funcs
 		wantPod  string
 		wantWait bool
-		wantErr  bool
+		wantErr  error
 	}{
 		{name: "not started: wait", job: harvestJob(0, 0, nil), wantWait: true},
 		{name: "mid-retry (Failed>0, not terminal): wait, never harvest the failed pod",
@@ -256,27 +387,38 @@ func TestHarvestablePod(t *testing.T) {
 			pods: []*corev1.Pod{failed, good}, wantPod: "p-good"},
 		{name: "succeeded, pod cache lagging: wait", job: harvestJob(1, 1, &recent),
 			pods: []*corev1.Pod{failed}, wantWait: true},
-		{name: "succeeded, no CompletionTime yet: wait", job: harvestJob(1, 1, nil),
+		{name: "succeeded, no CompletionTime, created recently: wait", job: noCompletionRecentCreate,
 			pods: []*corev1.Pod{failed}, wantWait: true},
-		{name: "succeeded long ago, succeeded pod gone: error", job: harvestJob(1, 1, &old),
-			pods: []*corev1.Pod{failed}, wantErr: true},
-		{name: "terminal failed: any pod, for diagnostics", job: terminal,
+		{name: "succeeded, no CompletionTime, created long ago: grace measured from creation", job: noCompletionOldCreate,
+			pods: []*corev1.Pod{failed}, wantErr: errNoSucceededPodSentinel},
+		{name: "succeeded, no CompletionTime, recent Complete condition: wait", job: completeCondRecent,
+			pods: []*corev1.Pod{failed}, wantWait: true},
+		{name: "succeeded long ago, succeeded pod gone: ErrNoSucceededPod", job: harvestJob(1, 1, &old),
+			pods: []*corev1.Pod{failed}, wantErr: errNoSucceededPodSentinel},
+		{name: "succeeded, list fails: the API error, never ErrNoSucceededPod", job: harvestJob(1, 0, &old),
+			funcs: failingPodList, wantErr: errServiceUnavailable},
+		{name: "terminal failed: any pod, for diagnostics", job: terminalHarvestJob(),
 			pods: []*corev1.Pod{failed}, wantPod: "p-failed"},
+		{name: "terminal failed, no pod: nothing to quote, not an error", job: terminalHarvestJob()},
+		{name: "terminal failed, list fails: the API error", job: terminalHarvestJob(),
+			funcs: failingPodList, wantErr: errServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objs := []client.Object{tt.job}
-			for _, p := range tt.pods {
-				objs = append(objs, p.DeepCopy())
-			}
-			c := fake.NewClientBuilder().WithScheme(harvestScheme(t)).WithObjects(objs...).Build()
+			c := harvestClient(t, tt.funcs, harvestObjs(tt.job, tt.pods...)...)
 			pod, wait, err := harvestablePod(context.Background(), c, tt.job, harvestNow)
 			assert.Equal(t, tt.wantWait, wait)
-			if tt.wantErr {
-				assert.Error(t, err)
+			switch tt.wantErr {
+			case nil:
+				require.NoError(t, err)
+			case errNoSucceededPodSentinel:
+				assert.True(t, isNoSucceededPod(err), "got %v", err)
+				return
+			case errServiceUnavailable:
+				assert.True(t, apierrors.IsServiceUnavailable(err), "got %v", err)
+				assert.False(t, isNoSucceededPod(err))
 				return
 			}
-			require.NoError(t, err)
 			if tt.wantPod == "" {
 				assert.Nil(t, pod)
 			} else {
@@ -285,4 +427,162 @@ func TestHarvestablePod(t *testing.T) {
 			}
 		})
 	}
+}
+
+func isNoSucceededPod(err error) bool { return errors.Is(err, kjob.ErrNoSucceededPod) }
+
+var (
+	errNoSucceededPodSentinel = errors.New("want ErrNoSucceededPod")
+	errServiceUnavailable     = errors.New("want ServiceUnavailable")
+)
+
+func TestQuoteBadOutput(t *testing.T) {
+	t.Run("short text is quoted whole", func(t *testing.T) {
+		assert.Equal(t, `"oops"`, quoteBadOutput("oops"))
+	})
+	t.Run("truncates on a rune boundary", func(t *testing.T) {
+		s := strings.Repeat("a", badOutputQuoteLimit-1) + "é" + strings.Repeat("z", 50)
+		q := quoteBadOutput(s)
+		assert.True(t, utf8.ValidString(q))
+		assert.NotContains(t, q, `\x`, "no split rune escaped as a raw byte")
+		assert.Contains(t, q, "bytes)")
+	})
+	t.Run("strips URL userinfo", func(t *testing.T) {
+		q := quoteBadOutput(`clone of https://x-access-token:ghp_s3cr3t@github.com/kdex-tech/fn.git failed; ` +
+			`retry oci://bob:p@ss@registry.example/ns/repo`)
+		assert.NotContains(t, q, "ghp_s3cr3t")
+		assert.NotContains(t, q, "x-access-token")
+		assert.NotContains(t, q, "bob")
+		assert.NotContains(t, q, "p@ss")
+		assert.Contains(t, q, "https://github.com/kdex-tech/fn.git")
+		assert.Contains(t, q, "oci://registry.example/ns/repo")
+	})
+}
+
+// --- KDexFunction codegen / deployer harvests -----------------------------
+
+func harvestFunction() *kdexv1alpha1.KDexFunction {
+	fn := &kdexv1alpha1.KDexFunction{
+		ObjectMeta: metav1.ObjectMeta{Name: "billing", Namespace: "dev", Generation: 7},
+	}
+	fn.Status.Attributes = map[string]string{}
+	return fn
+}
+
+func resultsPod(name string, phase corev1.PodPhase, msg string) *corev1.Pod {
+	p := harvestPod(name, phase, harvestNow.Add(-5*time.Minute), "", "")
+	p.Status.InitContainerStatuses = nil
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "results",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: msg}},
+	}}
+	return p
+}
+
+func runFunctionHarvest(t *testing.T, c client.Client, fn *kdexv1alpha1.KDexFunction, job *batchv1.Job) (functionHarvest, error) {
+	t.Helper()
+	r := &KDexFunctionReconciler{Client: c, Scheme: c.Scheme(), RequeueDelay: time.Second}
+	return r.harvestFunctionJob(context.Background(), fn, job, "results", harvestNow)
+}
+
+// #27 retry storm via the terminal-no-pod path: a terminally Failed Job whose
+// pods are gone (GC, or never scheduled) must be marked terminally failed
+// with the Job condition's message and KEPT, not deleted and recreated.
+func TestHarvestFunctionJob_TerminalWithoutPodKeepsJob(t *testing.T) {
+	job := terminalHarvestJob()
+	c := harvestClient(t, nil, harvestObjs(job)...)
+	fn := harvestFunction()
+
+	h, err := runFunctionHarvest(t, c, fn, job)
+	require.NoError(t, err)
+	assert.True(t, h.terminal)
+	require.NotNil(t, h.result)
+	assert.Zero(t, h.result.RequeueAfter, "terminal failure does not requeue")
+	msg := degradedMessage(t, fn.Status.Conditions)
+	assert.Contains(t, msg, "BackoffLimitExceeded")
+	assert.Contains(t, msg, "exhausted retries")
+	assert.NotContains(t, msg, "results:")
+	assert.True(t, jobExists(t, c, job), "a terminally failed Job is kept for inspection (#27)")
+}
+
+// The failed pod's termination text is attacker-influenced (repo contents,
+// clone URLs): it is capped and its URL credentials stripped.
+func TestHarvestFunctionJob_TerminalQuotesCappedRedactedText(t *testing.T) {
+	job := terminalHarvestJob()
+	long := "fatal: could not read from https://bot:hunter2@git.example/org/fn.git\n" + strings.Repeat("x", 4000)
+	c := harvestClient(t, nil, harvestObjs(job, resultsPod("p-failed", corev1.PodFailed, long))...)
+	fn := harvestFunction()
+
+	h, err := runFunctionHarvest(t, c, fn, job)
+	require.NoError(t, err)
+	assert.True(t, h.terminal)
+	msg := degradedMessage(t, fn.Status.Conditions)
+	assert.Contains(t, msg, "results:")
+	assert.Contains(t, msg, "https://git.example/org/fn.git")
+	assert.NotContains(t, msg, "hunter2")
+	assert.Less(t, len(msg), 1000, "the termination text must be capped")
+	assert.True(t, jobExists(t, c, job))
+}
+
+func TestHarvestFunctionJob_ListErrorIsReturnedAndKeepsJob(t *testing.T) {
+	done := harvestNow.Add(-time.Hour)
+	job := harvestJob(1, 0, &done)
+	c := harvestClient(t, failingPodList, harvestObjs(job)...)
+
+	_, err := runFunctionHarvest(t, c, harvestFunction(), job)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsServiceUnavailable(err), "got %v", err)
+	assert.True(t, jobExists(t, c, job), "an API error must never delete a good Job")
+}
+
+func TestHarvestFunctionJob_NoSucceededPodPastGraceRebuilds(t *testing.T) {
+	done := harvestNow.Add(-time.Hour)
+	job := harvestJob(1, 0, &done)
+	c := harvestClient(t, nil, harvestObjs(job)...)
+	fn := harvestFunction()
+
+	h, err := runFunctionHarvest(t, c, fn, job)
+	require.NoError(t, err)
+	require.NotNil(t, h.result)
+	assert.Positive(t, h.result.RequeueAfter)
+	degradedMessage(t, fn.Status.Conditions)
+	assert.False(t, jobExists(t, c, job))
+}
+
+func TestHarvestFunctionJob_SucceededReturnsOutput(t *testing.T) {
+	done := harvestNow.Add(-time.Minute)
+	job := harvestJob(1, 1, &done)
+	c := harvestClient(t, nil, harvestObjs(job,
+		resultsPod("p-failed", corev1.PodFailed, "boom"),
+		resultsPod("p-good", corev1.PodSucceeded, `{"repository":"r"}`))...)
+
+	h, err := runFunctionHarvest(t, c, harvestFunction(), job)
+	require.NoError(t, err)
+	assert.Nil(t, h.result)
+	assert.False(t, h.waiting)
+	assert.Equal(t, `{"repository":"r"}`, h.output)
+}
+
+func TestBadFunctionOutput_Bounded(t *testing.T) {
+	fn := harvestFunction()
+	for i := 1; i <= maxBadOutputRebuilds+1; i++ {
+		job := harvestJob(1, 0, nil)
+		c := harvestClient(t, nil, harvestObjs(job)...)
+		r := &KDexFunctionReconciler{Client: c, Scheme: c.Scheme(), RequeueDelay: time.Second}
+
+		res, err := r.badFunctionOutput(context.Background(), fn, job, "failed to parse results")
+		require.NoError(t, err)
+		msg := degradedMessage(t, fn.Status.Conditions)
+		if i <= maxBadOutputRebuilds {
+			assert.False(t, jobExists(t, c, job))
+			assert.Equal(t, time.Second, res.RequeueAfter)
+			continue
+		}
+		assert.True(t, jobExists(t, c, job))
+		assert.Equal(t, badOutputGiveUpRequeue, res.RequeueAfter)
+		assert.Contains(t, msg, "gave up after 3 rebuilds")
+	}
+
+	resetBadOutputRebuilds(fn.Status.Attributes)
+	assert.NotContains(t, fn.Status.Attributes, attrHarvestFailures)
 }

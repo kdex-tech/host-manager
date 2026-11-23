@@ -243,6 +243,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	// just GC superseded prior-gen Jobs and report Ready. See
 	// kdex-tech/host-manager#111.
 	if job == nil {
+		resetBadOutputRebuilds(ipr.Status.Attributes)
 		if err := r.cleanupJobs(ctx, &ipr); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -338,35 +339,29 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 				msgs = append(msgs, m.String())
 			}
 			err := fmt.Errorf(
-				"packages image %s does not match its pins: %s — refusing to publish (likely an npm propagation-window aggregation; the next reconcile rebuilds)",
+				"packages image %s does not match its pins: %s — refusing to publish (likely an npm propagation-window aggregation)",
 				builtImage, strings.Join(msgs, "; "),
-			)
-			kdexv1alpha1.SetConditions(
-				&ipr.Status.Conditions,
-				kdexv1alpha1.ConditionStatuses{
-					Degraded:    metav1.ConditionTrue,
-					Progressing: metav1.ConditionFalse,
-					Ready:       metav1.ConditionFalse,
-				},
-				kdexv1alpha1.ConditionReasonReconcileError,
-				err.Error(),
 			)
 			log.Error(err, "stale packages image rejected", "image", builtImage)
 
-			// Delete the Job so the next pass rebuilds rather than reusing this
-			// build. status.image is deliberately left untouched: the host
-			// keeps serving the last KNOWN-GOOD image instead of promoting
-			// stale bytes.
-			if delErr := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(delErr) != nil {
+			// Rebuild rather than reuse this build, within the bad-output
+			// budget: a deterministically poisoned build (a pin that never
+			// propagates, a registry serving stale bytes) would otherwise
+			// rebuild every RequeueDelay forever. status.image is
+			// deliberately left untouched: the host keeps serving the last
+			// KNOWN-GOOD image instead of promoting stale bytes.
+			h, delErr := r.badPackagesOutput(ctx, &ipr, job, err.Error())
+			if delErr != nil {
 				return ctrl.Result{}, delErr
 			}
-			return ctrl.Result{RequeueAfter: r.RequeueDelay}, nil
+			return *h.result, nil
 		} else {
 			ipr.Status.Attributes["verified"] = "pins"
 		}
 
 		ipr.Status.Attributes["image"] = builtImage
 		ipr.Status.Attributes["importmap"] = importmap
+		resetBadOutputRebuilds(ipr.Status.Attributes)
 	}
 
 	if err := r.cleanupJobs(ctx, &ipr); err != nil {
@@ -724,7 +719,10 @@ func (r *KDexInternalPackageReferencesReconciler) createOrUpdateJobSecret(
 // retired transient first-pod failures and let `Failed >= 2` fall
 // through to a bogus imageDigest extraction from a failed pod's
 // termination message. See kdex-tech/host-manager#61, and the parallel
-// fix for KDexFunction in #27 (isCodegenJobTerminal).
+// fix for KDexFunction in #27 (isCodegenJobTerminal). Succeeded Jobs are
+// harvested only from their Succeeded pod (harvestPackagesJob), and a
+// terminal-Failed Job never needs a pod: it is marked Degraded and kept.
+// See #301.
 type packRefJobState int
 
 const (
