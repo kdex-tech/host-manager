@@ -28,18 +28,7 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 			ObjectMeta: metav1.ObjectMeta{Name: "rd-archetype", Namespace: namespace},
 			Spec:       kdexv1alpha1.KDexPageArchetypeSpec{Content: "<main>[[ .Content.main ]]</main>"},
 		})
-		addOrUpdateInternalHost(ctx, k8sClient, kdexv1alpha1.KDexInternalHost{
-			ObjectMeta: metav1.ObjectMeta{Name: focalHost, Namespace: namespace},
-			Spec: kdexv1alpha1.KDexInternalHostSpec{
-				KDexHostSpec: kdexv1alpha1.KDexHostSpec{
-					BrandName:    "KDex Tech",
-					DevMode:      true,
-					ModulePolicy: kdexv1alpha1.LooseModulePolicy,
-					Organization: "KDex Tech Inc.",
-					Routing:      kdexv1alpha1.Routing{Domains: []string{"example.com"}},
-				},
-			},
-		})
+		addOrUpdateInternalHost(ctx, k8sClient, defaultInternalHost(namespace))
 	}
 	newApp := func(name, version string) {
 		Expect(k8sClient.Create(ctx, &kdexv1alpha1.KDexApp{
@@ -49,17 +38,6 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 				PackageReference: kdexv1alpha1.PackageReference{Name: "@x/" + name, Version: version},
 			},
 		})).To(Succeed())
-	}
-	// setAppReady stands in for nexus-manager, which does not run here.
-	setAppReady := func(name string, status metav1.ConditionStatus) {
-		Eventually(func(g Gomega) {
-			var app kdexv1alpha1.KDexApp
-			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &app)).To(Succeed())
-			meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
-				Type: string(kdexv1alpha1.ConditionTypeReady), Status: status, Reason: "Test",
-			})
-			g.Expect(k8sClient.Status().Update(ctx, &app)).To(Succeed())
-		}, "5s").Should(Succeed())
 	}
 	appPage := func(name, basePath, app string, parent string) *kdexv1alpha1.KDexPage {
 		p := &kdexv1alpha1.KDexPage{
@@ -119,6 +97,28 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 		}
 		return out
 	}
+	// hostPackagesReady is the focal host's PackagesReady condition, or nil.
+	hostPackagesReady := func() *metav1.Condition {
+		var h kdexv1alpha1.KDexInternalHost
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, &h); err != nil {
+			return nil
+		}
+		return meta.FindStatusCondition(h.Status.Conditions, ConditionTypePackagesReady)
+	}
+	// markKIPRBuilding stands in for the KIPR reconciler, which does not run
+	// in this suite. Ready=False is the "Building" outcome, which lets the
+	// host reconcile continue past the packages image: there is no registry
+	// here to pull an importmap from.
+	markKIPRBuilding := func() {
+		Eventually(func(g Gomega) {
+			var kipr kdexv1alpha1.KDexInternalPackageReferences
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: focalHost, Namespace: namespace}, &kipr)).To(Succeed())
+			meta.SetStatusCondition(&kipr.Status.Conditions, metav1.Condition{
+				Type: string(kdexv1alpha1.ConditionTypeReady), Status: metav1.ConditionFalse, Reason: "Building",
+			})
+			g.Expect(k8sClient.Status().Update(ctx, &kipr)).To(Succeed())
+		}, "10s").Should(Succeed())
+	}
 
 	It("lets a rewrite parent and its own child both reach Ready after a reference was not ready", func() {
 		seed()
@@ -133,13 +133,21 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 		Eventually(readyStatus("rd-group"), "10s").Should(Equal(metav1.ConditionUnknown))
 
 		By("making the app Ready: the child must no longer wait on its rewrite parent")
-		setAppReady("rd-admin", metav1.ConditionTrue)
+		setAppReady(ctx, namespace, "rd-admin", metav1.ConditionTrue)
 		Eventually(readyStatus("rd-users"), "15s").Should(Equal(metav1.ConditionTrue))
 		Eventually(readyStatus("rd-group"), "15s").Should(Equal(metav1.ConditionTrue))
 		Eventually(kiprPackages, "15s").Should(ContainElement("@x/rd-admin@0.3.1"))
 
+		By("the host not flagging its package set while every page is Ready")
+		markKIPRBuilding()
+		Eventually(func(g Gomega) {
+			c := hostPackagesReady()
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Reason).To(Equal("Building"))
+		}, "15s").Should(Succeed())
+
 		By("replaying the incident: the app blips not-ready, then ships 0.3.2")
-		setAppReady("rd-admin", metav1.ConditionFalse)
+		setAppReady(ctx, namespace, "rd-admin", metav1.ConditionFalse)
 		Eventually(readyStatus("rd-users"), "10s").Should(Equal(metav1.ConditionUnknown))
 		Eventually(readyStatus("rd-group"), "10s").Should(Equal(metav1.ConditionUnknown))
 
@@ -149,12 +157,33 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 			app.Spec.PackageReference.Version = "0.3.2"
 			g.Expect(k8sClient.Update(ctx, &app)).To(Succeed())
 		}, "5s").Should(Succeed())
-		setAppReady("rd-admin", metav1.ConditionTrue)
+
+		By("the host saying its package set may be stale while the pages are blocked")
+		// The blocked pages keep serving their last good render from the
+		// page store, so the KIPR still carries 0.3.1. The host must not
+		// claim its package set is current.
+		Eventually(func(g Gomega) {
+			c := hostPackagesReady()
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Status).To(Equal(metav1.ConditionFalse))
+			g.Expect(c.Reason).To(Equal(string(pagesNotReadyReason)))
+			g.Expect(c.Message).To(ContainSubstring("package set may be stale: pages [rd-group, rd-users] not Ready"))
+		}, "15s").Should(Succeed())
+		Expect(kiprPackages()).To(ContainElement("@x/rd-admin@0.3.1"))
+
+		setAppReady(ctx, namespace, "rd-admin", metav1.ConditionTrue)
 
 		Eventually(readyStatus("rd-users"), "15s").Should(Equal(metav1.ConditionTrue))
 		Eventually(readyStatus("rd-group"), "15s").Should(Equal(metav1.ConditionTrue))
 		Eventually(kiprPackages, "15s").Should(ContainElement("@x/rd-admin@0.3.2"))
 		Expect(kiprPackages()).NotTo(ContainElement("@x/rd-admin@0.3.1"))
+
+		By("the stale-package condition clearing once the pages are Ready")
+		Eventually(func(g Gomega) {
+			c := hostPackagesReady()
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Reason).To(Equal("Building"))
+		}, "15s").Should(Succeed())
 	})
 
 	It("tells a page blocked on a not-ready reference why, on the page itself", func() {
@@ -168,11 +197,14 @@ var _ = Describe("KDexPage readiness across a rewrite parent and its child (#300
 			degraded := meta.FindStatusCondition(p.Status.Conditions, string(kdexv1alpha1.ConditionTypeDegraded))
 			g.Expect(degraded).NotTo(BeNil())
 			g.Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(degraded.Reason).To(Equal(string(referenceNotReadyReason)))
 			g.Expect(degraded.Message).To(Equal("referenced KDexApp rd-slow is not ready"))
-			g.Expect(meta.IsStatusConditionTrue(p.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))).To(BeFalse())
+			ready := meta.FindStatusCondition(p.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady))
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionUnknown))
 		}, 10*time.Second).Should(Succeed())
 
-		setAppReady("rd-slow", metav1.ConditionTrue)
+		setAppReady(ctx, namespace, "rd-slow", metav1.ConditionTrue)
 		Eventually(readyStatus("rd-waiting"), "15s").Should(Equal(metav1.ConditionTrue))
 	})
 })

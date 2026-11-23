@@ -64,6 +64,10 @@ func (r *KDexPageReconciler) reconcileRewrite(ctx context.Context, page *kdexv1a
 	if parentPageObj != nil {
 		page.Status.Attributes["parent.page.generation"] = fmt.Sprintf("%d", parentPageObj.GetGeneration())
 	}
+	parentReason, parentMsg, err := parentPageProblem(ctx, r.Client, page, parentPageObj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	r.HostHandler.Pages.Set(pages.PageHandler{
 		Name:   page.Name,
@@ -81,6 +85,8 @@ func (r *KDexPageReconciler) reconcileRewrite(ctx context.Context, page *kdexv1a
 		kdexv1alpha1.ConditionReasonReconcileSuccess,
 		"Reconciliation successful",
 	)
+	// Last word on Degraded only: the page is served either way.
+	setParentPageDegraded(page, parentReason, parentMsg)
 	return ctrl.Result{}, nil
 }
 

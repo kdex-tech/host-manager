@@ -90,6 +90,7 @@ func (r *KDexInternalPackageReferencesReconciler) Reconcile(ctx context.Context,
 	// Defer status update
 	defer func() {
 		ipr.Status.ObservedGeneration = ipr.Generation
+		logDegradedTransition(log, observedStatus.Conditions, ipr.Status.Conditions)
 
 		// Only write status when it actually changed. The reconciler pulses a
 		// transient "Reconciling" condition every pass, which bumps

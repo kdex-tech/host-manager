@@ -157,6 +157,35 @@ func addOrUpdatePageNavigation(
 	}).Should(Succeed())
 }
 
+// defaultInternalHost is a minimal focal KDexInternalHost in namespace.
+func defaultInternalHost(namespace string) kdexv1alpha1.KDexInternalHost {
+	return kdexv1alpha1.KDexInternalHost{
+		ObjectMeta: metav1.ObjectMeta{Name: focalHost, Namespace: namespace},
+		Spec: kdexv1alpha1.KDexInternalHostSpec{
+			KDexHostSpec: kdexv1alpha1.KDexHostSpec{
+				BrandName:    "KDex Tech",
+				DevMode:      true,
+				ModulePolicy: kdexv1alpha1.LooseModulePolicy,
+				Organization: "KDex Tech Inc.",
+				Routing:      kdexv1alpha1.Routing{Domains: []string{"example.com"}},
+			},
+		},
+	}
+}
+
+// setAppReady sets a KDexApp's Ready condition, standing in for
+// nexus-manager, which does not run in this suite.
+func setAppReady(ctx context.Context, namespace, name string, status metav1.ConditionStatus) {
+	Eventually(func(g Gomega) {
+		var app kdexv1alpha1.KDexApp
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &app)).To(Succeed())
+		meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type: string(kdexv1alpha1.ConditionTypeReady), Status: status, Reason: "Test",
+		})
+		g.Expect(k8sClient.Status().Update(ctx, &app)).To(Succeed())
+	}, "5s").Should(Succeed())
+}
+
 func assertResourceReady(ctx context.Context, k8sClient client.Client, name string, namespace string, checkResource client.Object, ready bool) {
 	typeNamespacedName := types.NamespacedName{
 		Name: name,

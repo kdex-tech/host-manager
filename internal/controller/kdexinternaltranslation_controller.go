@@ -72,6 +72,7 @@ func (r *KDexInternalTranslationReconciler) Reconcile(ctx context.Context, req c
 	// Defer status update
 	defer func() {
 		translation.Status.ObservedGeneration = translation.Generation
+		logDegradedTransition(log, observedStatus.Conditions, translation.Status.Conditions)
 
 		// Only write status when it actually changed. The reconciler pulses a
 		// transient "Reconciling" condition every pass, which bumps

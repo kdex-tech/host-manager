@@ -472,6 +472,24 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// See kdex-tech/host-manager#117.
 	packagesRequeue := r1
 
+	// The KIPR is built from the page store, where a blocked page keeps its
+	// last good render and an unreconciled spec edit has not landed yet. So
+	// while any page is not current, the package set may lag what the pages
+	// now reference (an app bumped 0.3.1 -> 0.3.2 does not ship). Keep
+	// serving it, but say so on PackagesReady and requeue softly, exactly as
+	// a (re)building packages image does. The KDexPage watch wakes the host
+	// when a page's status changes, so this clears as soon as the pages are
+	// Ready. See #300.
+	if notCurrent := pagesNotCurrent(bindings.Items); len(notCurrent) > 0 {
+		msg := stalePackagesMessage(notCurrent)
+		if c := meta.FindStatusCondition(internalHost.Status.Conditions, ConditionTypePackagesReady); c != nil &&
+			c.Status == metav1.ConditionFalse && c.Reason != string(pagesNotReadyReason) {
+			msg = c.Message + "; " + msg
+		}
+		setPackagesReadyCondition(&internalHost.Status.Conditions, metav1.ConditionFalse, string(pagesNotReadyReason), msg)
+		packagesRequeue = ctrl.Result{RequeueAfter: r.RequeueDelay}
+	}
+
 	if iprBackend != nil {
 		requiredBackends = append(requiredBackends, *iprBackend)
 	}
@@ -715,11 +733,16 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log.V(3).Info("host has been set")
 
 	// Function routes are now registered (SetHost above). If the front-end
-	// packages image is still (re)building, surface the host as Progressing
+	// packages image is still (re)building, or the package set may be stale
+	// behind pages that are not current, surface the host as Progressing
 	// (the dedicated PackagesReady=False condition pinpoints the cause) and
 	// requeue — without having gated backend function delivery on it. See
-	// kdex-tech/host-manager#117.
+	// kdex-tech/host-manager#117 and #300.
 	if packagesRequeue.RequeueAfter > 0 {
+		msg := "functions registered; waiting for packages image"
+		if c := meta.FindStatusCondition(internalHost.Status.Conditions, ConditionTypePackagesReady); c != nil && c.Reason == string(pagesNotReadyReason) {
+			msg = "functions registered; " + c.Message
+		}
 		kdexv1alpha1.SetConditions(
 			&internalHost.Status.Conditions,
 			kdexv1alpha1.ConditionStatuses{
@@ -728,7 +751,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				Ready:       metav1.ConditionFalse,
 			},
 			kdexv1alpha1.ConditionReasonReconcileSuccess,
-			"functions registered; waiting for packages image",
+			msg,
 		)
 		// Runs AFTER the SetConditions above so it has the last word on
 		// Degraded specifically -- see setRouteCollisionCondition.
@@ -1163,6 +1186,43 @@ func setPackagesReadyCondition(conditions *[]metav1.Condition, status metav1.Con
 		Reason:  reason,
 		Message: message,
 	})
+}
+
+// pagesNotReadyReason is the PackagesReady reason while some of the host's
+// pages are not Ready or have an unreconciled spec edit. Controller-local:
+// ConditionReason is a bare string type (see routeCollisionConditionReason).
+const pagesNotReadyReason kdexv1alpha1.ConditionReason = "PagesNotReady"
+
+// stalePackagesMessageLimit caps how many page names the stale-package
+// message lists, so a host with many blocked pages keeps a short condition.
+const stalePackagesMessageLimit = 5
+
+// pagesNotCurrent returns, in list order, the names of the pages whose page
+// handler may not reflect their current spec and references: not Ready (a
+// blocked page keeps serving its last good render from the page store), or
+// not yet reconciled at their current generation.
+func pagesNotCurrent(pages []kdexv1alpha1.KDexPage) []string {
+	var names []string
+	for i := range pages {
+		p := &pages[i]
+		if !meta.IsStatusConditionTrue(p.Status.Conditions, string(kdexv1alpha1.ConditionTypeReady)) ||
+			p.Status.ObservedGeneration != p.Generation {
+			names = append(names, p.Name)
+		}
+	}
+	return names
+}
+
+// stalePackagesMessage names the pages, sorted, that may hold the package set
+// back, listing at most stalePackagesMessageLimit of them.
+func stalePackagesMessage(names []string) string {
+	sorted := slices.Sorted(slices.Values(names))
+	shown := sorted[:min(len(sorted), stalePackagesMessageLimit)]
+	more := ""
+	if n := len(sorted) - len(shown); n > 0 {
+		more = fmt.Sprintf(" and %d more", n)
+	}
+	return fmt.Sprintf("package set may be stale: pages [%s]%s not Ready", strings.Join(shown, ", "), more)
 }
 
 // packagesPendingOutcome builds the host's view while the front-end packages

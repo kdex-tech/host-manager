@@ -403,8 +403,10 @@ func focalHostSelectsSecret(ctx context.Context, c client.Client, namespace, foc
 }
 
 // referenceNotReadyReason is the Degraded reason on a referrer blocked on a
-// reference that exists but is not Ready. Controller-local for the same
-// reason as routeCollisionConditionReason.
+// reference that exists but is not Ready. Controller-local: ConditionReason
+// is a bare string type, so a kdex-crds constant would cost a kdex-crds
+// release for a string only this controller emits (the same call as the
+// rewrite reasons in kdexpage_rewrite.go and routeCollisionConditionReason).
 const referenceNotReadyReason kdexv1alpha1.ConditionReason = "ReferenceNotReady"
 
 // isReady reports whether referred is Ready. When it is not, the reason goes

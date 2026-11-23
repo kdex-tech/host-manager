@@ -375,6 +375,10 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if parentPageObj != nil {
 		page.Status.Attributes["parent.page.generation"] = fmt.Sprintf("%d", parentPageObj.GetGeneration())
 	}
+	parentReason, parentMsg, err := parentPageProblem(ctx, r.Client, &page, parentPageObj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	scriptLibraryObj, shouldReturn, r1, err := ResolveKDexObjectReference(ctx, r.Client, &page, &page.Status.Conditions, page.Spec.ScriptLibraryRef, r.RequeueDelay)
 	if shouldReturn {
@@ -441,6 +445,8 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		kdexv1alpha1.ConditionReasonReconcileSuccess,
 		"Reconciliation successful",
 	)
+	// Last word on Degraded only: the page is served either way.
+	setParentPageDegraded(&page, parentReason, parentMsg)
 
 	log.V(1).Info("reconciled")
 
