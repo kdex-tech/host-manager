@@ -98,16 +98,26 @@ type HostHandler struct {
 		ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
 		VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)
 	}
-	authConfig                 *auth.Config
-	authExchanger              *auth.Exchanger
-	cacheManager               cache.CacheManager
-	checksum                   string
-	client                     client.Client
-	defaultLanguage            string
-	favicon                    *ico.Ico
-	functions                  []kdexv1alpha1.KDexFunction
-	functionHandlers           map[string]*KDexFunctionHandler
-	host                       *kdexv1alpha1.KDexHostSpec
+	authConfig       *auth.Config
+	authExchanger    *auth.Exchanger
+	cacheManager     cache.CacheManager
+	checksum         string
+	client           client.Client
+	defaultLanguage  string
+	favicon          *ico.Ico
+	functions        []kdexv1alpha1.KDexFunction
+	functionHandlers map[string]*KDexFunctionHandler
+	host             *kdexv1alpha1.KDexHostSpec
+	// headDigest is computeHeadDigest over the host-wide inputs every HTML
+	// render's head is built from (importmap, host-scope package refs,
+	// scripts, theme assets). SetHost publishes it with them under
+	// hh.mu.Lock. Page and utility render cache keys and page ETags carry
+	// it, so a packages promotion (a new importmap integrity) invalidates
+	// every render, not only the renders of pages whose own state moved: a
+	// render with the previous build's integrity is not stale, it is
+	// broken, because the packages backend already serves the new build
+	// (#302).
+	headDigest                 string
 	hostScopePackageReferences []kdexv1alpha1.PackageReference
 	hstsValue                  string
 	importmap                  string

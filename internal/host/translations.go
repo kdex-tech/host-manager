@@ -116,7 +116,7 @@ func (hh *HostHandler) TranslationGet(w http.ResponseWriter, r *http.Request) {
 	// applyCachingHeadersWithLang folds the language tag into the ETag
 	// so en-CA and fr-CA responses to this URL get distinct ETags.
 	// See kdex-tech/host-manager#43.
-	if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
+	if hh.applyCachingHeadersWithLang(w, r, hh.reconcileTime, l.String()) {
 		return
 	}
 

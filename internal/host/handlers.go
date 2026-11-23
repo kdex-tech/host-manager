@@ -1008,10 +1008,11 @@ func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
 
 		l := lang
 
-		// applyCachingHeadersWithLang folds the language tag into the ETag
-		// so en-CA and fr-CA announcement renders get distinct ETags.
-		// See kdex-tech/host-manager#43.
-		if hh.applyCachingHeadersWithLang(w, r, nil, hh.reconcileTime, l.String()) {
+		// The language tag in the ETag gives en-CA and fr-CA announcement
+		// renders distinct ETags (#43); the head digest gives a packages
+		// promotion a new one, since the render carries the importmap
+		// (#302).
+		if hh.applyCachingHeadersWithSeed(w, r, nil, hh.reconcileTime, l.String(), hh.headDigest) {
 			return
 		}
 

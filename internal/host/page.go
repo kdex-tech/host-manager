@@ -113,16 +113,28 @@ func (hh *HostHandler) pageHandlerFunc(
 		// this specific KDexPage's observed state moved — not whenever
 		// any other CR triggered a host reconcile. See #44. A body that
 		// reads the whole page tree (.PageMap) also carries the page-set
-		// digest in its seed and cache key (treeSeed, #283).
+		// digest in its seed and cache key (treeSeed, #283). An HTML
+		// page's head is rendered from host-wide inputs (the importmap,
+		// whose integrity moves with every packages promotion), so its
+		// seed and cache key carry the head digest too: a page whose own
+		// apps did not change must still miss its previous render, and a
+		// client holding it must not get a 304 (#302).
 		readsTree := readsPageTree(ph)
 		pageSeed := func() string {
+			seed := ph.Checksum()
 			if readsTree {
-				return hh.treeSeed(ph.Checksum())
+				seed = hh.treeSeed(seed)
 			}
-			return ph.Checksum()
+			if !isTextPage {
+				seed += ":" + hh.headDigest
+			}
+			return seed
 		}
 		seed := pageSeed()
 		cacheKey := ph.CacheKey(l)
+		if !isTextPage {
+			cacheKey = hh.renderCacheKeyLocked(ph, l)
+		}
 		if readsTree {
 			cacheKey += ":" + hh.pageSetDigest
 		}

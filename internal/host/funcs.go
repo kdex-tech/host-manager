@@ -47,20 +47,20 @@ func (hh *HostHandler) applyCachingHeaders(
 	r *http.Request,
 	lastModified time.Time,
 ) bool {
-	return hh.applyCachingHeadersWithLang(w, r, nil, lastModified, "")
+	return hh.applyCachingHeadersWithLang(w, r, lastModified, "")
 }
 
 // applyCachingHeadersWithLang folds the resolved Accept-Language tag into
-// the ETag input. Equivalent to applyCachingHeadersWithSeed with seed="".
-// See applyCachingHeadersWithSeed for the full rationale.
+// the ETag input of a public response. Equivalent to
+// applyCachingHeadersWithSeed with no requirements and seed="". See
+// applyCachingHeadersWithSeed for the full rationale.
 func (hh *HostHandler) applyCachingHeadersWithLang(
 	w http.ResponseWriter,
 	r *http.Request,
-	requirements []kdexv1alpha1.SecurityRequirement,
 	lastModified time.Time,
 	language string,
 ) bool {
-	return hh.applyCachingHeadersWithSeed(w, r, requirements, lastModified, language, "")
+	return hh.applyCachingHeadersWithSeed(w, r, nil, lastModified, language, "")
 }
 
 // privateCacheControl is the Cache-Control of a response only its caller may

@@ -60,26 +60,29 @@ func TestHostHandler_PageCaching(t *testing.T) {
 	assert.Contains(t, body1, "Test Page")
 
 	// Verify it's in cache
-	cacheVal, found, isCurrent, err := cacheManager.GetCache(pageCacheClass, cache.CacheOptions{}).Get(context.Background(), ph.CacheKey(language.English))
+	cacheVal, found, isCurrent, err := cacheManager.GetCache(pageCacheClass, cache.CacheOptions{}).Get(context.Background(), hh.renderCacheKeyLocked(ph, language.English))
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, isCurrent)
 	assert.Equal(t, body1, cacheVal)
 
-	// 2. Test 304 logic
+	// 2. Test 304 logic. Through the mux, as the first request: with no
+	// host status hh.ServeHTTP answers a page path with the initializing
+	// announcement, whose ETag matched this page's only while neither
+	// carried a seed.
 
 	// 3. Conditional Request (If-None-Match)
 	req3 := httptest.NewRequest("GET", "/test", nil)
 	req3.Header.Set("If-None-Match", etag)
 	w3 := httptest.NewRecorder()
-	hh.ServeHTTP(w3, req3)
+	hh.Mux.ServeHTTP(w3, req3)
 	assert.Equal(t, http.StatusNotModified, w3.Code)
 
 	// 4. Conditional Request (If-Modified-Since)
 	req4 := httptest.NewRequest("GET", "/test", nil)
 	req4.Header.Set("If-Modified-Since", lastModified)
 	w4 := httptest.NewRecorder()
-	hh.ServeHTTP(w4, req4)
+	hh.Mux.ServeHTTP(w4, req4)
 	assert.Equal(t, http.StatusNotModified, w4.Code)
 }
 
@@ -200,12 +203,12 @@ func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
 
 	wEn := httptest.NewRecorder()
 	rEn := httptest.NewRequest("GET", "/", nil)
-	hh.applyCachingHeadersWithLang(wEn, rEn, nil, lastModified, "en-CA")
+	hh.applyCachingHeadersWithLang(wEn, rEn, lastModified, "en-CA")
 	etagEn := wEn.Header().Get("ETag")
 
 	wFr := httptest.NewRecorder()
 	rFr := httptest.NewRequest("GET", "/", nil)
-	hh.applyCachingHeadersWithLang(wFr, rFr, nil, lastModified, "fr-CA")
+	hh.applyCachingHeadersWithLang(wFr, rFr, lastModified, "fr-CA")
 	etagFr := wFr.Header().Get("ETag")
 
 	assert.NotEmpty(t, etagEn)
@@ -220,7 +223,7 @@ func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
 	wCross := httptest.NewRecorder()
 	rCross := httptest.NewRequest("GET", "/", nil)
 	rCross.Header.Set("If-None-Match", etagEn)
-	completed := hh.applyCachingHeadersWithLang(wCross, rCross, nil, lastModified, "fr-CA")
+	completed := hh.applyCachingHeadersWithLang(wCross, rCross, lastModified, "fr-CA")
 	assert.False(t, completed, "fr-CA request must not be answered as 304 against an en-CA ETag")
 	assert.NotEqual(t, http.StatusNotModified, wCross.Code)
 
@@ -228,7 +231,7 @@ func TestApplyCachingHeaders_ETagVariesByLanguage(t *testing.T) {
 	wSame := httptest.NewRecorder()
 	rSame := httptest.NewRequest("GET", "/", nil)
 	rSame.Header.Set("If-None-Match", etagEn)
-	completed = hh.applyCachingHeadersWithLang(wSame, rSame, nil, lastModified, "en-CA")
+	completed = hh.applyCachingHeadersWithLang(wSame, rSame, lastModified, "en-CA")
 	assert.True(t, completed, "en-CA request with matching en-CA ETag must 304")
 	assert.Equal(t, http.StatusNotModified, wSame.Code)
 
@@ -383,7 +386,7 @@ func TestRenderCaches_VersionedByRenderFormat(t *testing.T) {
 
 	// What an older binary (unversioned class) left behind, under the very
 	// key this binary computes.
-	key := ph.CacheKey(language.English)
+	key := hh.renderCacheKeyLocked(ph, language.English)
 	const oldRender = "<html><body>rendered by the previous binary</body></html>"
 	require.NoError(t, cacheManager.GetCache("page", cache.CacheOptions{}).Set(ctx, key, oldRender))
 
@@ -406,7 +409,7 @@ func TestRenderCaches_VersionedByRenderFormat(t *testing.T) {
 	hh.mu.RUnlock()
 	require.Contains(t, rendered, "announcement")
 	announcement := hh.utilityPages[kdexv1alpha1.AnnouncementUtilityPageType]
-	utilityKey := announcement.CacheKey(language.English)
+	utilityKey := hh.renderCacheKeyLocked(announcement, language.English)
 	_, found, _, err = cacheManager.GetCache(utilityCacheClass, cache.CacheOptions{}).Get(ctx, utilityKey)
 	require.NoError(t, err)
 	assert.True(t, found, "a utility render is stored under the versioned class")

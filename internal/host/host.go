@@ -147,8 +147,33 @@ func (hh *HostHandler) Checksum() string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func (hh *HostHandler) GeneratePageCacheKey(ph page.PageHandler, l language.Tag) string {
-	return fmt.Sprintf("%s:%s", ph.Name, l.String())
+// renderCacheKeyLocked is the cache key of an HTML render (a page or a
+// utility page): the page's own key plus the host's head digest. The page's
+// key moves only with that page's observed state; the head digest moves with
+// the host-wide inputs its head is rendered from, so a packages promotion
+// misses every page's previous render instead of serving it as a stale hit
+// (#302). Caller holds hh.mu.RLock.
+func (hh *HostHandler) renderCacheKeyLocked(ph page.PageHandler, l language.Tag) string {
+	return ph.CacheKey(l) + ":" + hh.headDigest
+}
+
+// computeHeadDigest digests the host-wide inputs of an HTML render's head
+// and theme (headScriptToHTMLLocked, FootScriptToHTML, ThemeAssetsToString).
+func computeHeadDigest(
+	importmap string,
+	hostScopePackageReferences []kdexv1alpha1.PackageReference,
+	scripts []kdexv1alpha1.ScriptDef,
+	themeAssets []kdexv1alpha1.Asset,
+) string {
+	h := sha256.New()
+	h.Write([]byte(importmap))
+	h.Write([]byte{0})
+	enc := json.NewEncoder(h)
+	// Encoding plain spec structs into a hash does not fail.
+	_ = enc.Encode(hostScopePackageReferences)
+	_ = enc.Encode(scripts)
+	_ = enc.Encode(themeAssets)
+	return fmt.Sprintf("%x", h.Sum(nil))[:16]
 }
 
 func (hh *HostHandler) GetStatus() HostStatus {
@@ -1138,6 +1163,7 @@ func (hh *HostHandler) SetHost(
 	hh.scripts = scripts
 	hh.status = status
 	hh.themeAssets = themeAssets
+	hh.headDigest = computeHeadDigest(importmap, hostScopePackageReferences, scripts, themeAssets)
 
 	// force=false: rotate cycled caches (rendered pages, navigation,
 	// importmap) with a prevPrefix transition window for graceful cutover.
@@ -1396,7 +1422,7 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 	}
 
 	utilityCache := hh.cacheManager.GetCache(utilityCacheClass, cache.CacheOptions{})
-	cacheKey := ph.CacheKey(l)
+	cacheKey := hh.renderCacheKeyLocked(ph, l)
 
 	// Only attempt cache logic for the plain render: the cache key does not
 	// carry dynamic extra data. (Scriptless rendering is a property of the
@@ -1424,6 +1450,12 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 				// upstream round-trip. See kdex-tech/host-manager#73.
 				hh.mu.RLock()
 				defer hh.mu.RUnlock()
+
+				// A SetHost since the hit may have moved the head
+				// inputs: this render would not match its key (#302).
+				if hh.renderCacheKeyLocked(ph, l) != cacheKey {
+					return
+				}
 
 				// Background context to ensure it lives past the request
 				bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

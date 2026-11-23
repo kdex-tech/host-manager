@@ -26,10 +26,10 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// applyCachingHeadersWithLang folds the language tag into the ETag
-	// so en-CA and fr-CA login renders get distinct ETags.
-	// See kdex-tech/host-manager#43.
-	if hh.applyCachingHeadersWithLang(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String()) {
+	// The language tag in the ETag gives en-CA and fr-CA login renders
+	// distinct ETags (#43); the head digest gives a packages promotion a
+	// new one, since the render carries the importmap (#302).
+	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), hh.headDigest) {
 		return
 	}
 
