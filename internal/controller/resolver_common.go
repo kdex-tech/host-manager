@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal/page"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -115,7 +116,7 @@ func ResolveHost(
 	}
 
 	if checkReady {
-		if isReady, r1, err := isReady(&host, &host.Status.Conditions, requeueDelay); !isReady {
+		if isReady, r1, err := isReady(&host, host.Status.Conditions, objectConditions, requeueDelay); !isReady {
 			return nil, true, r1, err
 		}
 	}
@@ -198,10 +199,12 @@ func ResolvePage(
 		return nil, true, ctrl.Result{}, err
 	}
 
-	if isReady, r1, err := isReady(&kdexPage, &kdexPage.Status.Conditions, requeueDelay); !isReady {
-		return nil, true, r1, err
-	}
-
+	// The parent need only exist, not be Ready (#300). A child reads nothing
+	// its parent's reconcile computes: the page tree is assembled at render
+	// time from the host's page store, so a parent that is not (yet) there
+	// only leaves the child out of the menu until it is. Requiring Ready here
+	// closed a cycle with a rewrite parent whose target is this child, and
+	// cascaded one page's wait to every child under it.
 	return &kdexPage, false, ctrl.Result{}, nil
 }
 
@@ -274,7 +277,7 @@ func ResolveKDexObjectReference(
 		return obj.(client.Object), true, ctrl.Result{}, fmt.Errorf("no condition field on status %v", obj)
 	}
 
-	if isReady, r1, err := isReady(obj.(client.Object), &conditions, requeueDelay); !isReady {
+	if isReady, r1, err := isReady(obj.(client.Object), conditions, referrerConditions, requeueDelay); !isReady {
 		return obj.(client.Object), true, r1, err
 	}
 
@@ -399,9 +402,25 @@ func focalHostSelectsSecret(ctx context.Context, c client.Client, namespace, foc
 	return sel.Matches(labels.Set(secret.Labels))
 }
 
+// referenceNotReadyReason is the Degraded reason on a referrer blocked on a
+// reference that exists but is not Ready. Controller-local for the same
+// reason as routeCollisionConditionReason.
+const referenceNotReadyReason kdexv1alpha1.ConditionReason = "ReferenceNotReady"
+
+// isReady reports whether referred is Ready. When it is not, the reason goes
+// on the REFERRER's conditions (#300): the object being reconciled, whose
+// status the caller's deferred write persists. It used to go on the referred
+// object's own conditions, a discarded copy, so a blocked referrer showed a
+// bare "Reconciling" with no reason anywhere.
+//
+// The referrer is left Ready=Unknown, not False: it is waiting, not failed.
+// A KDexPage whose Ready is False is dropped from the host's page store, so
+// False would stop serving the page's last good render, and stall the
+// internal host's page-count gate, over what is usually a transient wait.
 func isReady(
 	referred client.Object,
-	referredConditions *[]metav1.Condition,
+	referredConditions []metav1.Condition,
+	referrerConditions *[]metav1.Condition,
 	requeueDelay time.Duration,
 ) (bool, ctrl.Result, error) {
 	t := reflect.TypeOf(referred)
@@ -412,15 +431,15 @@ func isReady(
 		t = t.Elem()
 	}
 
-	if !meta.IsStatusConditionTrue(*referredConditions, string(kdexv1alpha1.ConditionTypeReady)) {
+	if !meta.IsStatusConditionTrue(referredConditions, string(kdexv1alpha1.ConditionTypeReady)) {
 		kdexv1alpha1.SetConditions(
-			referredConditions,
+			referrerConditions,
 			kdexv1alpha1.ConditionStatuses{
 				Degraded:    metav1.ConditionTrue,
-				Progressing: metav1.ConditionFalse,
-				Ready:       metav1.ConditionFalse,
+				Progressing: metav1.ConditionTrue,
+				Ready:       metav1.ConditionUnknown,
 			},
-			kdexv1alpha1.ConditionReasonReconcileError,
+			referenceNotReadyReason,
 			fmt.Sprintf("referenced %s %s is not ready", t.Name(), referred.GetName()),
 		)
 
@@ -428,4 +447,30 @@ func isReady(
 	}
 
 	return true, ctrl.Result{}, nil
+}
+
+// degradedTransition returns current's Degraded message when it is True and
+// differs from observed's, i.e. when this pass newly degrades the object.
+// The reconcilers re-derive the same Degraded on every requeue; comparing
+// against the persisted status keeps the log to one line per transition.
+func degradedTransition(observed, current []metav1.Condition) (string, bool) {
+	c := meta.FindStatusCondition(current, string(kdexv1alpha1.ConditionTypeDegraded))
+	if c == nil || c.Status != metav1.ConditionTrue {
+		return "", false
+	}
+	o := meta.FindStatusCondition(observed, string(kdexv1alpha1.ConditionTypeDegraded))
+	if o != nil && o.Status == metav1.ConditionTrue && o.Message == c.Message {
+		return "", false
+	}
+	return c.Message, true
+}
+
+// logDegradedTransition logs, at the default level, a Degraded condition
+// this pass newly set, so an object stuck on a reference says why in the
+// logs as well as in its status (#300).
+func logDegradedTransition(log logr.Logger, observed, current []metav1.Condition) {
+	if msg, ok := degradedTransition(observed, current); ok {
+		reason := meta.FindStatusCondition(current, string(kdexv1alpha1.ConditionTypeDegraded)).Reason
+		log.Info("degraded", "reason", reason, "message", msg)
+	}
 }

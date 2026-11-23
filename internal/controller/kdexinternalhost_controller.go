@@ -125,6 +125,7 @@ func (r *KDexInternalHostReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Defer status update
 	defer func() {
 		internalHost.Status.ObservedGeneration = internalHost.Generation
+		logDegradedTransition(log, observedStatus.Conditions, internalHost.Status.Conditions)
 		// Only write status when it actually changed. An unconditional
 		// Status().Update() bumps resourceVersion on every reconcile, and
 		// every InternalHost RV bump fans out to all controllers watching it

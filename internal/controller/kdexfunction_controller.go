@@ -157,6 +157,7 @@ func (r *KDexFunctionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Defer status update
 	defer func() {
 		function.Status.ObservedGeneration = function.Generation
+		logDegradedTransition(log, observedStatus.Conditions, function.Status.Conditions)
 
 		// Only write status when it actually changed. The origin path pulses a
 		// transient "Reconciling" condition every pass, bumping

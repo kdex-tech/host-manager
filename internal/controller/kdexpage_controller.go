@@ -85,6 +85,7 @@ func (r *KDexPageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	// Defer status update
 	defer func() {
 		page.Status.ObservedGeneration = page.Generation
+		logDegradedTransition(log, observedStatus.Conditions, page.Status.Conditions)
 
 		// Only write status when it actually changed. The reconciler pulses a
 		// transient "Reconciling" condition at the top of every pass, which
