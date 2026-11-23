@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -329,8 +330,9 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 	// page's nav fragment invalidates only when its own observed state
 	// moves rather than on every host reconcile. The fragment renders the
 	// whole page tree, so the seed and the cache key also carry the page-set
-	// digest (treeSeed, #283).
-	seed := hh.treeSeed(pageHandler.Checksum())
+	// digest (treeSeed, #283), and the host-wide inputs it renders from
+	// (navSeedLocked, #302).
+	seed := hh.navSeedLocked(pageHandler)
 	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), seed) {
 		return
 	}
@@ -378,7 +380,7 @@ func (hh *HostHandler) NavigationGet(w http.ResponseWriter, r *http.Request) {
 		log.V(2).Info("stale navigation hit, migrating in background", "key", cacheKey)
 		callerCtx := context.WithoutCancel(r.Context())
 		hh.migrateInBackground(renderKey, func() {
-			if hh.treeSeed(pageHandler.Checksum()) != seed {
+			if hh.navSeedLocked(pageHandler) != seed {
 				return
 			}
 			bgCtx, cancel := context.WithTimeout(callerCtx, 15*time.Second)
@@ -427,6 +429,15 @@ func navCacheKey(navKey, basePath, seed string, l language.Tag, userHash string)
 // hh.mu.RLock.
 func (hh *HostHandler) treeSeed(pageChecksum string) string {
 	return pageChecksum + ":" + hh.pageSetDigest
+}
+
+// navSeedLocked is a navigation fragment's ETag seed and cache-key seed: the
+// page's own state and the page set (treeSeed), the host text digest (the
+// brand, organization, default language and translations
+// performNavigationRender reads; see hostRenderInputs), and whether auth is
+// enabled (its .Extra.AuthEnabled). Caller holds hh.mu.RLock.
+func (hh *HostHandler) navSeedLocked(ph *page.PageHandler) string {
+	return hh.treeSeed(ph.Checksum()) + ":" + hh.textDigest + ":" + strconv.FormatBool(hh.IsAuthEnabled())
 }
 
 // Helper method to encapsulate the rendering logic for both Sync and Async paths

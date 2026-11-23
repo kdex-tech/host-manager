@@ -124,7 +124,9 @@ func TestHostHandler_NavigationCaching(t *testing.T) {
 	// Verify it's in cache, under main:/test:<tree seed>:en:anon (since no
 	// auth). The seed carries the page-set digest because the fragment
 	// renders the whole page tree (#283).
-	seed := hh.treeSeed(ph.Checksum())
+	hh.mu.RLock()
+	seed := hh.navSeedLocked(&ph)
+	hh.mu.RUnlock()
 	cacheKey := navCacheKey("main", ph.Page.Paths.BasePath, seed, language.English, "anon")
 	cacheVal, found, isCurrent, err := cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), cacheKey)
 	require.NoError(t, err)

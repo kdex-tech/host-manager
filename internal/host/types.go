@@ -108,16 +108,13 @@ type HostHandler struct {
 	functions        []kdexv1alpha1.KDexFunction
 	functionHandlers map[string]*KDexFunctionHandler
 	host             *kdexv1alpha1.KDexHostSpec
-	// headDigest is computeHeadDigest over the host-wide inputs every HTML
-	// render's head is built from (importmap, host-scope package refs,
-	// scripts, theme assets). SetHost publishes it with them under
-	// hh.mu.Lock. Page and utility render cache keys and page ETags carry
-	// it, so a packages promotion (a new importmap integrity) invalidates
-	// every render, not only the renders of pages whose own state moved: a
-	// render with the previous build's integrity is not stale, it is
-	// broken, because the packages backend already serves the new build
-	// (#302).
-	headDigest                 string
+	// renderDigest and textDigest are hostRenderInputs' digests; see there.
+	// refreshRenderDigestsLocked publishes them under hh.mu.Lock.
+	renderDigest string
+	textDigest   string
+	// migrationStarted, when set (tests only), runs at the start of each
+	// migrateInBackground goroutine, before it takes hh.mu.RLock.
+	migrationStarted           func()
 	hostScopePackageReferences []kdexv1alpha1.PackageReference
 	hstsValue                  string
 	importmap                  string
@@ -306,6 +303,9 @@ func (hh *HostHandler) SetPageDenialMode(m PageDenialMode) *HostHandler {
 
 type Translations struct {
 	catalog *catalog.Builder
+	// digest is a hash of the catalog's sources (NewTranslations' inputs):
+	// it moves with any language or string the catalog serves.
+	digest  string
 	keys    []string
 	skipped []SkippedTranslationValue
 }
@@ -321,6 +321,11 @@ type SkippedTranslationValue struct {
 
 func (t *Translations) Catalog() *catalog.Builder {
 	return t.catalog
+}
+
+// Digest identifies the catalog's contents; see hostRenderInputs.
+func (t *Translations) Digest() string {
+	return t.digest
 }
 
 func (t *Translations) Keys() []string {

@@ -40,8 +40,8 @@ func (hh *HostHandler) convertRequirements(in *[]kdexv1alpha1.SecurityRequiremen
 // don't gate on auth-derived requirements and don't vary by
 // Accept-Language (favicon, raw OpenAPI, schemas). Lang-varying
 // endpoints (pages, navigation, /-/translation/{lng}, login utility,
-// announcement) MUST use applyCachingHeadersWithLang or
-// applyCachingHeadersWithSeed so the ETag varies per variant.
+// announcement) MUST use applyCachingHeadersWithSeed, with the language and
+// a seed carrying every host-wide input they render from.
 func (hh *HostHandler) applyCachingHeaders(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -83,21 +83,15 @@ func (hh *HostHandler) isPrivateResponse(requirements []kdexv1alpha1.SecurityReq
 // responses to the same URL with different Accept-Language values get
 // distinct ETags (see kdex-tech/host-manager#43).
 //
-// The seed parameter is an additional per-response discriminator that
-// callers compose from the resource being served — typically
-// PageHandler.Checksum() for page and navigation renders, which is
-// itself derived from KDexPage.Status.ObservedGeneration plus a sorted
-// hash of Status.Attributes. Folding it into the ETag means the cached
-// response invalidates ONLY when that specific page actually changed,
-// not whenever any host CR triggered a reconcile (today the only
-// lastModified signal is hh.reconcileTime, which bumps on every
-// SetHost). Without the seed, an edit to one KDexPage bumps every
-// page's ETag cluster-wide; with it, each page's ETag tracks its own
-// observed state. See kdex-tech/host-manager#44.
-//
-// Pass seed="" when there is no per-response state to discriminate on
-// (translation endpoint, login utility, announcement) — the language
-// alone is enough variance.
+// The seed parameter is the per-response discriminator, and it must carry
+// every host-wide input the body renders from: lastModified is
+// second-granular and a host apply need not move it, so an input missing
+// from the seed lets a client revalidate an old body to a 304 (#302). For a
+// page that is its own observed state (PageHandler.Checksum(), so one
+// page's edit does not bump every page's ETag, #44) plus the host render
+// digest -- pageKeyAndSeedLocked composes both. A utility render on its own
+// route (login, the announcement) passes hostRenderSeedLocked(); a
+// navigation fragment, navSeedLocked().
 func (hh *HostHandler) applyCachingHeadersWithSeed(
 	w http.ResponseWriter,
 	r *http.Request,

@@ -1,6 +1,7 @@
 package host
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -47,9 +48,18 @@ func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha
 	scratch := catalog.NewBuilder()
 	var skipped []SkippedTranslationValue
 
+	// The digest hashes the sources in write order, the order that decides
+	// which value wins; json.Encoder sorts each KeysAndValues map.
+	digest := sha256.New()
+	digestEnc := json.NewEncoder(digest)
+	_ = digestEnc.Encode(defaultTag.String())
+
 	seen := map[string]bool{}
 	keys := []string{}
 	for _, name := range translationWriteOrder(translations, order) {
+		// Encoding plain spec structs into a hash does not fail.
+		_ = digestEnc.Encode(name)
+		_ = digestEnc.Encode(translations[name])
 		for _, tr := range translations[name].Translations {
 			tag := language.Make(tr.Lang)
 			for key, value := range tr.KeysAndValues {
@@ -72,6 +82,7 @@ func NewTranslations(defaultLanguage string, translations map[string]kdexv1alpha
 
 	return &Translations{
 		catalog: catalogBuilder,
+		digest:  fmt.Sprintf("%x", digest.Sum(nil))[:16],
 		keys:    keys,
 		skipped: skipped,
 	}, nil
@@ -113,10 +124,12 @@ func (hh *HostHandler) TranslationGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// applyCachingHeadersWithLang folds the language tag into the ETag
-	// so en-CA and fr-CA responses to this URL get distinct ETags.
-	// See kdex-tech/host-manager#43.
-	if hh.applyCachingHeadersWithLang(w, r, hh.reconcileTime, l.String()) {
+	// The language tag goes into the ETag so en-CA and fr-CA responses to
+	// this URL get distinct ETags (#43). The translations digest is the
+	// seed: a translation edit rebuilds the mux without moving
+	// Last-Modified, so without it a client revalidating old strings gets
+	// a 304 (#302).
+	if hh.applyCachingHeadersWithSeed(w, r, nil, hh.reconcileTime, l.String(), hh.Translations.Digest()) {
 		return
 	}
 

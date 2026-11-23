@@ -147,33 +147,112 @@ func (hh *HostHandler) Checksum() string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// renderCacheKeyLocked is the cache key of an HTML render (a page or a
-// utility page): the page's own key plus the host's head digest. The page's
-// key moves only with that page's observed state; the head digest moves with
-// the host-wide inputs its head is rendered from, so a packages promotion
-// misses every page's previous render instead of serving it as a stale hit
-// (#302). Caller holds hh.mu.RLock.
-func (hh *HostHandler) renderCacheKeyLocked(ph page.PageHandler, l language.Tag) string {
-	return ph.CacheKey(l) + ":" + hh.headDigest
+// pageKeyAndSeedLocked returns a page render's cache key and ETag seed:
+// the page's own state (ph.CacheKey / ph.Checksum, which move only with that
+// page's observed state, #44), the page-set digest for a body that reads the
+// whole page tree (#283), and the host render digest the body is rendered
+// from (hostRenderInputs; the text digest for a text-mime page, which renders
+// no head). The host digest is what makes a host-wide edit miss every page's
+// previous render instead of serving it as a stale hit under a new ETag
+// (#302). It serves pages and utility pages alike. Caller holds hh.mu.RLock.
+func (hh *HostHandler) pageKeyAndSeedLocked(ph page.PageHandler, l language.Tag) (cacheKey, seed string) {
+	digest := hh.renderDigest
+	if pageModeOf(ph.Page) == render.PageTypeText {
+		digest = hh.textDigest
+	}
+	cacheKey, seed = ph.CacheKey(l), ph.Checksum()
+	if readsPageTree(ph) {
+		cacheKey += ":" + hh.pageSetDigest
+		seed = hh.treeSeed(seed)
+	}
+	return cacheKey + ":" + digest, seed + ":" + digest
 }
 
-// computeHeadDigest digests the host-wide inputs of an HTML render's head
-// and theme (headScriptToHTMLLocked, FootScriptToHTML, ThemeAssetsToString).
-func computeHeadDigest(
-	importmap string,
-	hostScopePackageReferences []kdexv1alpha1.PackageReference,
-	scripts []kdexv1alpha1.ScriptDef,
-	themeAssets []kdexv1alpha1.Asset,
-) string {
-	h := sha256.New()
-	h.Write([]byte(importmap))
-	h.Write([]byte{0})
-	enc := json.NewEncoder(h)
-	// Encoding plain spec structs into a hash does not fail.
-	_ = enc.Encode(hostScopePackageReferences)
-	_ = enc.Encode(scripts)
-	_ = enc.Encode(themeAssets)
-	return fmt.Sprintf("%x", h.Sum(nil))[:16]
+// renderCacheKeyLocked is pageKeyAndSeedLocked's cache key. Caller holds
+// hh.mu.RLock.
+func (hh *HostHandler) renderCacheKeyLocked(ph page.PageHandler, l language.Tag) string {
+	cacheKey, _ := hh.pageKeyAndSeedLocked(ph, l)
+	return cacheKey
+}
+
+// hostRenderSeedLocked is the ETag seed of a utility render served on its
+// own route (login, the not-ready announcement): the host render digest, so
+// a host-wide edit moves the ETag even when the reconcile time does not.
+// Caller holds hh.mu.RLock.
+func (hh *HostHandler) hostRenderSeedLocked() string {
+	return hh.renderDigest
+}
+
+// hostRenderInputs are the host-wide values a page, utility page or text
+// page renders from (l10nRenderer, L10nRender, MetaToString,
+// headScriptToHTMLLocked, FootScriptToHTML, ThemeAssetsToString). Their
+// digests ride every render's cache key and ETag (pageKeyAndSeedLocked), so
+// an edit to any of them misses every previous render.
+//
+// Any new host-wide input read while rendering a page must be added here.
+//
+// Deliberately absent: the reconcile time (.LastModified), which moves on
+// every SetHost -- keying on it would re-render every page on every
+// reconcile, and it is already in every ETag through Last-Modified.
+type hostRenderInputs struct {
+	// Text inputs: read by every render, text-mime pages included.
+	BrandName       string
+	Organization    string
+	DefaultLanguage string
+	// Translations is Translations.Digest(): the catalog's sources, so the
+	// language list (.Languages) and every l10n string.
+	Translations string
+
+	// Head inputs: read only by an HTML render's head, meta and theme.
+	Importmap                  string
+	HostScopePackageReferences []kdexv1alpha1.PackageReference
+	Scripts                    []kdexv1alpha1.ScriptDef
+	ThemeAssets                []kdexv1alpha1.Asset
+	HostAssets                 kdexv1alpha1.Assets
+}
+
+// digests returns the text digest (the text inputs) and the render digest
+// (the text digest plus the head inputs). Both are a hash of a JSON
+// encoding: fields in declaration order, map keys sorted, so the digest is
+// deterministic.
+func (in hostRenderInputs) digests() (text, html string) {
+	sum := func(v any) string {
+		h := sha256.New()
+		// Encoding plain spec structs into a hash does not fail.
+		_ = json.NewEncoder(h).Encode(v)
+		return fmt.Sprintf("%x", h.Sum(nil))[:16]
+	}
+	text = sum([]string{in.BrandName, in.Organization, in.DefaultLanguage, in.Translations})
+	html = sum(struct {
+		Text                       string
+		Importmap                  string
+		HostScopePackageReferences []kdexv1alpha1.PackageReference
+		Scripts                    []kdexv1alpha1.ScriptDef
+		ThemeAssets                []kdexv1alpha1.Asset
+		HostAssets                 kdexv1alpha1.Assets
+	}{text, in.Importmap, in.HostScopePackageReferences, in.Scripts, in.ThemeAssets, in.HostAssets})
+	return text, html
+}
+
+// refreshRenderDigestsLocked recomputes hh.textDigest and hh.renderDigest
+// from the current hh.* state. SetHost (host inputs) and RebuildMux (the
+// translations) each call it after publishing their inputs. Caller holds
+// hh.mu.Lock.
+func (hh *HostHandler) refreshRenderDigestsLocked() {
+	in := hostRenderInputs{
+		BrandName:                  hh.getBrandName(),
+		Organization:               hh.getOrganization(),
+		DefaultLanguage:            hh.defaultLanguage,
+		Translations:               hh.Translations.Digest(),
+		Importmap:                  hh.importmap,
+		HostScopePackageReferences: hh.hostScopePackageReferences,
+		Scripts:                    hh.scripts,
+		ThemeAssets:                hh.themeAssets,
+	}
+	if hh.host != nil {
+		in.HostAssets = hh.host.Assets
+	}
+	hh.textDigest, hh.renderDigest = in.digests()
 }
 
 func (hh *HostHandler) GetStatus() HostStatus {
@@ -368,11 +447,11 @@ func (hh *HostHandler) L10nRender(
 // asks (#283). A text page is a public document (sitemap.xml, llms.txt,
 // robots.txt): it should list what an anonymous crawler can reach, not what
 // the caller fetching it happens to be entitled to. It is also what keeps
-// the text-page cache key -- page + language, ph.CacheKey -- correct: the
-// body depends on no caller, so every caller shares one cached copy. A
-// per-caller tree here would need getUserHash in that key, as the nav cache
-// has. The key also carries hh.pageSetDigest (pageHandlerFunc), because the
-// tree depends on every page and not only this one. A body that never
+// the text-page cache key (pageKeyAndSeedLocked) correct: the body depends
+// on no caller, so every caller shares one cached copy. A per-caller tree
+// here would need getUserHash in that key, as the nav cache has. The key
+// also carries hh.pageSetDigest, because the tree depends on every page and
+// not only this one. A body that never
 // mentions PageMap cannot read it, so the tree is not built for it. Caller
 // holds hh.mu.RLock.
 func (hh *HostHandler) L10nRenderText(
@@ -486,6 +565,7 @@ func (hh *HostHandler) RebuildMux() {
 	hh.mu.Lock()
 	defer hh.mu.Unlock()
 	hh.Translations = *snap.translations
+	hh.refreshRenderDigestsLocked()
 	hh.registeredPaths = snap.registeredPaths
 	hh.Mux = snap.mux
 	hh.routeCollisions = snap.routeCollisions
@@ -1163,7 +1243,7 @@ func (hh *HostHandler) SetHost(
 	hh.scripts = scripts
 	hh.status = status
 	hh.themeAssets = themeAssets
-	hh.headDigest = computeHeadDigest(importmap, hostScopePackageReferences, scripts, themeAssets)
+	hh.refreshRenderDigestsLocked()
 
 	// force=false: rotate cycled caches (rendered pages, navigation,
 	// importmap) with a prevPrefix transition window for graceful cutover.
@@ -1435,38 +1515,24 @@ func (hh *HostHandler) renderUtilityPage(utilityType kdexv1alpha1.KDexUtilityPag
 				return rendered // Perfect hit
 			}
 
-			// Stale Hit (vN-1): Serve fast, but migrate in background
+			// Stale Hit (vN-1): serve fast, re-render in the background
+			// under hh.mu.RLock (#73), once per key at a time (#285).
 			hh.log.Info("stale cache hit, triggering background migration", "key", cacheKey)
-			go func() {
-				// Hold the host's read lock for the duration of the
-				// re-render so the goroutine sees consistent hh.*
-				// state vs concurrent SetHost writes. Without this
-				// the goroutine races on hh.host/hh.themeAssets/...
-				// and an unlucky interleaving crashes the process via
-				// uncaught panic in a detached goroutine (net/http's
-				// per-request recover doesn't see it). Render is
-				// local CPU work — holding RLock here is fine, unlike
-				// the #59 case where the proxy held RLock across an
-				// upstream round-trip. See kdex-tech/host-manager#73.
-				hh.mu.RLock()
-				defer hh.mu.RUnlock()
-
-				// A SetHost since the hit may have moved the head
-				// inputs: this render would not match its key (#302).
-				if hh.renderCacheKeyLocked(ph, l) != cacheKey {
+			hh.migrateInBackground(utilityCacheClass+"\x00"+cacheKey, func() {
+				// A SetHost or utility-page update since the hit may have
+				// moved the page or the host render inputs: this render
+				// would not match its key (#302). Re-read the page and the
+				// translations under the lock rather than the caller's.
+				current, ok := hh.utilityPages[utilityType]
+				if !ok || hh.renderCacheKeyLocked(current, l) != cacheKey {
 					return
 				}
-
-				// Background context to ensure it lives past the request
 				bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-
-				// Re-render to ensure any CRD changes are reflected in vN
-				newRender, err := hh.L10nRender(ph, map[string]any{}, l, extraTemplateData, translations)
-				if err == nil {
-					_ = utilityCache.Set(bgCtx, cacheKey, newRender)
+				if fresh, err := hh.L10nRender(current, map[string]any{}, l, nil, &hh.Translations); err == nil {
+					_ = utilityCache.Set(bgCtx, cacheKey, fresh)
 				}
-			}()
+			})
 			return rendered
 		}
 	}

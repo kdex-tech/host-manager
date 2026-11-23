@@ -1009,10 +1009,10 @@ func (hh *HostHandler) notReadyHandlerFunc(lang language.Tag) http.HandlerFunc {
 		l := lang
 
 		// The language tag in the ETag gives en-CA and fr-CA announcement
-		// renders distinct ETags (#43); the head digest gives a packages
-		// promotion a new one, since the render carries the importmap
-		// (#302).
-		if hh.applyCachingHeadersWithSeed(w, r, nil, hh.reconcileTime, l.String(), hh.headDigest) {
+		// renders distinct ETags (#43); the host render seed gives any
+		// host-wide edit (a packages promotion's importmap, the brand) a
+		// new one (#302).
+		if hh.applyCachingHeadersWithSeed(w, r, nil, hh.reconcileTime, l.String(), hh.hostRenderSeedLocked()) {
 			return
 		}
 

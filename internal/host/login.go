@@ -27,9 +27,9 @@ func (hh *HostHandler) LoginGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The language tag in the ETag gives en-CA and fr-CA login renders
-	// distinct ETags (#43); the head digest gives a packages promotion a
-	// new one, since the render carries the importmap (#302).
-	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), hh.headDigest) {
+	// distinct ETags (#43); the host render seed gives any host-wide edit (a
+	// packages promotion's importmap, the brand) a new one (#302).
+	if hh.applyCachingHeadersWithSeed(w, r, []kdexv1alpha1.SecurityRequirement{{"bearer": {}}}, hh.reconcileTime, l.String(), hh.hostRenderSeedLocked()) {
 		return
 	}
 

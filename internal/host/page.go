@@ -71,6 +71,9 @@ func (hh *HostHandler) migrateInBackground(key string, migrate func()) {
 	}
 	go func() {
 		defer hh.pageMigrations.Delete(key)
+		if hh.migrationStarted != nil {
+			hh.migrationStarted()
+		}
 		hh.mu.RLock()
 		defer hh.mu.RUnlock()
 		migrate()
@@ -108,36 +111,11 @@ func (hh *HostHandler) pageHandlerFunc(
 		// render + serve calls differ, so those are the only branch points.
 		isTextPage := pageModeOf(ph.Page) == render.PageTypeText
 
-		// Per-page seed: ph.Checksum() is sha256(ObservedGeneration +
-		// sorted Status.Attributes), so the ETag invalidates only when
-		// this specific KDexPage's observed state moved — not whenever
-		// any other CR triggered a host reconcile. See #44. A body that
-		// reads the whole page tree (.PageMap) also carries the page-set
-		// digest in its seed and cache key (treeSeed, #283). An HTML
-		// page's head is rendered from host-wide inputs (the importmap,
-		// whose integrity moves with every packages promotion), so its
-		// seed and cache key carry the head digest too: a page whose own
-		// apps did not change must still miss its previous render, and a
-		// client holding it must not get a 304 (#302).
-		readsTree := readsPageTree(ph)
-		pageSeed := func() string {
-			seed := ph.Checksum()
-			if readsTree {
-				seed = hh.treeSeed(seed)
-			}
-			if !isTextPage {
-				seed += ":" + hh.headDigest
-			}
-			return seed
-		}
-		seed := pageSeed()
-		cacheKey := ph.CacheKey(l)
-		if !isTextPage {
-			cacheKey = hh.renderCacheKeyLocked(ph, l)
-		}
-		if readsTree {
-			cacheKey += ":" + hh.pageSetDigest
-		}
+		// The cache key and ETag seed carry this page's own state, the
+		// page set when the body reads the page tree, and the host-wide
+		// inputs the body renders from: see pageKeyAndSeedLocked (#44,
+		// #283, #302).
+		cacheKey, seed := hh.pageKeyAndSeedLocked(ph, l)
 		renderKey := pageCacheClass + "\x00" + cacheKey
 		if hh.applyCachingHeadersWithSeed(w, r, hh.pageRequirements(&ph), hh.reconcileTime, l.String(), seed) {
 			return
@@ -179,7 +157,7 @@ func (hh *HostHandler) pageHandlerFunc(
 				// page set stores nothing: its render would not match its
 				// key.
 				hh.migrateInBackground(renderKey, func() {
-					if pageSeed() != seed {
+					if _, current := hh.pageKeyAndSeedLocked(ph, l); current != seed {
 						return
 					}
 					bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

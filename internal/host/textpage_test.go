@@ -502,7 +502,7 @@ func TestNavigation_StaleMigrationKeepsTheCallersTree(t *testing.T) {
 
 	hh.mu.RLock()
 	aliceHash, _ := hh.getUserHash(alice())
-	key := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), aliceHash)
+	key := navCacheKey("main", "/home", hh.navSeedLocked(&home), language.Make("en"), aliceHash)
 	hh.mu.RUnlock()
 	navCache := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{})
 	require.Eventually(t, func() bool {
@@ -535,7 +535,7 @@ func TestNavigation_UnhashableCallerIsNeverCachedAsAnon(t *testing.T) {
 	require.Contains(t, w.Body.String(), "Admin;", "the caller still gets their own tree")
 
 	hh.mu.RLock()
-	anonKey := navCacheKey("main", "/home", hh.treeSeed(home.Checksum()), language.Make("en"), "anon")
+	anonKey := navCacheKey("main", "/home", hh.navSeedLocked(&home), language.Make("en"), "anon")
 	hh.mu.RUnlock()
 	_, found, _, err := hh.cacheManager.GetCache(navCacheClass, cache.CacheOptions{}).Get(context.Background(), anonKey)
 	require.NoError(t, err)
