@@ -622,6 +622,20 @@ func (e *Exchanger) Roles() []RoleInfo {
 	return nil
 }
 
+// Bindings returns the identity provider's binding matcher -- the compiled
+// KDexRoleBinding table role resolution itself uses -- or nil when the
+// provider has none (or there is no exchanger yet). See
+// kdex-tech/host-manager#303.
+func (e *Exchanger) Bindings() BindingMatcher {
+	if e == nil {
+		return nil
+	}
+	if bm, ok := e.sp.(BindingMatcher); ok {
+		return bm
+	}
+	return nil
+}
+
 // MintResourcePAT mints an audience-bound PASETO PAT for an oauth2 protected
 // resource. The PAT's aud is the resource URI (RFC 8707); the subject's
 // entitlements are NOT baked in — the proxy re-resolves them from the

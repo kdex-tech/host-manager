@@ -2,12 +2,17 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
 	"regexp"
+	"regexp/syntax"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
@@ -74,6 +79,7 @@ type scopeProvider struct {
 	rolesMap        map[string][]string
 	exactBindings   map[string][]compiledBinding
 	patternBindings []patternBinding
+	bindingsDigest  string
 }
 
 // compiledBinding is one KDexRoleBinding as the matcher holds it. "Any kind"
@@ -82,11 +88,16 @@ type scopeProvider struct {
 // instead of collapsing into "any". Unknown entries are kept as written; no
 // subject's kind can equal one, so they are dead without being dropped. See
 // kdex-tech/host-manager#255.
+//
+// subject is the binding's subject as written and coverAll whether it matches
+// every subject, both kept for MatchBindings (#303).
 type compiledBinding struct {
 	name     string
+	subject  string
 	roles    []string
 	narrowed bool
 	kinds    []kdexv1alpha1.SubjectKind
+	coverAll bool
 }
 
 // admits reports whether the binding may bind a subject of kind, its subject
@@ -140,10 +151,12 @@ func NewRoleProvider(
 	//    treated as Go-style regular expressions.
 	// Whatever the form, a binding with subjectKinds binds only subjects of
 	// the listed kinds; without it, a subject of any kind (#255).
+	rc.bindingsDigest = bindingsDigest(bindings.Items)
 	for _, b := range bindings.Items {
 		cb := compiledBinding{
-			name:  b.Name,
-			roles: b.Spec.Roles,
+			name:    b.Name,
+			subject: b.Spec.Subject,
+			roles:   b.Spec.Roles,
 			// Absent is the only "any kind". An empty list is refused by the
 			// CRD (MinItems=1), and read here as narrowed to nothing.
 			narrowed: b.Spec.SubjectKinds != nil,
@@ -153,6 +166,7 @@ func NewRoleProvider(
 		if sub == "*" {
 			// Wildcard match
 			re := regexp.MustCompile(".*")
+			cb.coverAll = true
 			rc.patternBindings = append(rc.patternBindings, patternBinding{re: re, compiledBinding: cb})
 		} else if strings.HasPrefix(sub, "/") && strings.HasSuffix(sub, "/") && len(sub) > 2 {
 			// Regex match
@@ -163,6 +177,7 @@ func NewRoleProvider(
 					"binding", b.Name)
 				continue
 			}
+			cb.coverAll = regexCoversAll(sub[1 : len(sub)-1])
 			rc.patternBindings = append(rc.patternBindings, patternBinding{re: re, compiledBinding: cb})
 		} else {
 			// Exact match
@@ -484,6 +499,34 @@ func (rp *scopeProvider) collectBindings() (*kdexv1alpha1.KDexRoleBindingList, e
 	return &roleBindings, nil
 }
 
+// eachMatch is THE binding matcher: it calls fn, in compiled order (exact
+// subjects, then `*` and /regex/ subjects), for every binding whose subject
+// matches key, whether or not it admits kind. resolveRoles and MatchBindings
+// are both built on it, so host-manager has exactly one implementation of
+// KDexRoleBinding subject matching (#303).
+//
+// With skipUnadmitted a pattern binding that does not admit kind is passed
+// over before its regex runs: a caller that would discard it anyway saves the
+// match. Exact bindings cost nothing to report and are always passed to fn.
+func (rp *scopeProvider) eachMatch(key string, kind kdexv1alpha1.SubjectKind, skipUnadmitted bool, fn func(cb *compiledBinding)) {
+	// 1. Exact matches (O(1))
+	exact := rp.exactBindings[key]
+	for i := range exact {
+		fn(&exact[i])
+	}
+
+	// 2. Regex/Wildcard matches (O(N)).
+	for i := range rp.patternBindings {
+		pb := &rp.patternBindings[i]
+		if skipUnadmitted && !pb.admits(kind) {
+			continue
+		}
+		if pb.re.MatchString(key) {
+			fn(&pb.compiledBinding)
+		}
+	}
+}
+
 // resolveRoles returns the roles of every binding whose subject matches bs.Key
 // and which admits bs.Kind. When names is non-nil it records each subject
 // match as contributed or skipped for kind; nil allocates nothing for that.
@@ -495,7 +538,11 @@ func (rp *scopeProvider) resolveRoles(bs BindingSubject, names *BindingNames) []
 		size += len(exact[i].roles)
 	}
 	roles := make([]string, 0, size)
-	match := func(cb *compiledBinding) {
+
+	// Without a names collector a binding that does not admit the kind
+	// contributes nothing and records nothing, so its kind is checked first
+	// and its regex never runs.
+	rp.eachMatch(bs.Key, bs.Kind, names == nil, func(cb *compiledBinding) {
 		if !cb.admits(bs.Kind) {
 			if names != nil {
 				names.SkippedForKind = append(names.SkippedForKind, cb.name)
@@ -506,27 +553,141 @@ func (rp *scopeProvider) resolveRoles(bs BindingSubject, names *BindingNames) []
 		if names != nil {
 			names.Contributed = append(names.Contributed, cb.name)
 		}
-	}
-
-	// 1. Exact matches (O(1))
-	for i := range exact {
-		match(&exact[i])
-	}
-
-	// 2. Regex/Wildcard matches (O(N)). Without a names collector a binding
-	// that does not admit the kind contributes nothing and records nothing,
-	// so its kind is checked first and its regex never runs.
-	for i := range rp.patternBindings {
-		pb := &rp.patternBindings[i]
-		if names == nil && !pb.admits(bs.Kind) {
-			continue
-		}
-		if pb.re.MatchString(bs.Key) {
-			match(&pb.compiledBinding)
-		}
-	}
+	})
 
 	return roles
+}
+
+// MatchedBinding is one KDexRoleBinding whose subject matched a subject, as
+// GET /-/rolebindings reports it (#303).
+type MatchedBinding struct {
+	// Name is the KDexRoleBinding's name.
+	Name string `json:"name"`
+	// Subject is the binding's subject pattern as written: an exact subject,
+	// `*`, or a /regex/.
+	Subject string `json:"subject"`
+	// Admitted reports whether the binding's subjectKinds admits the kind
+	// asked about. Only an admitted binding grants its roles.
+	Admitted bool `json:"admitted"`
+	// CoverAll reports that the subject matches every subject: `*`, or a
+	// regex judged conservatively to match every string (regexCoversAll).
+	CoverAll bool `json:"coverAll"`
+	// Roles are the binding's roles.
+	Roles []string `json:"roles"`
+}
+
+// BindingMatcher is the optional capability of an InternalIdentityProvider
+// that can report which KDexRoleBindings match a subject, with the matcher it
+// enforces. Only the cluster-backed scopeProvider has it.
+type BindingMatcher interface {
+	MatchBindings(key string, kind kdexv1alpha1.SubjectKind) []MatchedBinding
+	BindingsDigest() string
+}
+
+var _ BindingMatcher = (*scopeProvider)(nil)
+
+// MatchBindings returns every binding whose subject matches key, sorted by
+// name, each saying whether it admits kind. It runs the same matcher over the
+// same compiled table as role resolution, so it reports exactly the rule
+// host-manager enforces: the admitted bindings' roles are the roles key
+// resolves to for kind. The roles are copies the caller may keep.
+func (rp *scopeProvider) MatchBindings(key string, kind kdexv1alpha1.SubjectKind) []MatchedBinding {
+	out := []MatchedBinding{}
+	rp.eachMatch(key, kind, false, func(cb *compiledBinding) {
+		out = append(out, MatchedBinding{
+			Name:     cb.name,
+			Subject:  cb.subject,
+			Admitted: cb.admits(kind),
+			CoverAll: cb.coverAll,
+			Roles:    slices.Clone(cb.roles),
+		})
+	})
+	slices.SortFunc(out, func(a, b MatchedBinding) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+// BindingsDigest identifies the host's KDexRoleBindings as compiled: it moves
+// whenever a binding's name, subject, subjectKinds or roles do, and only then.
+func (rp *scopeProvider) BindingsDigest() string {
+	return rp.bindingsDigest
+}
+
+// bindingsDigest hashes the matching inputs of every binding, in name order,
+// so the digest does not depend on the order the cache lists them in. Each
+// field is length-prefixed, so no two tables hash the same input stream.
+func bindingsDigest(items []kdexv1alpha1.KDexRoleBinding) string {
+	sorted := make([]*kdexv1alpha1.KDexRoleBinding, len(items))
+	for i := range items {
+		sorted[i] = &items[i]
+	}
+	slices.SortFunc(sorted, func(a, b *kdexv1alpha1.KDexRoleBinding) int { return strings.Compare(a.Name, b.Name) })
+
+	h := sha256.New()
+	field := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	list := func(ss []string) {
+		field(strconv.Itoa(len(ss)))
+		for _, s := range ss {
+			field(s)
+		}
+	}
+	for _, b := range sorted {
+		field(b.Name)
+		field(b.Spec.Subject)
+		list(b.Spec.Roles)
+		if b.Spec.SubjectKinds == nil {
+			field("any")
+		} else {
+			kinds := make([]string, len(b.Spec.SubjectKinds))
+			for i, k := range b.Spec.SubjectKinds {
+				kinds[i] = string(k)
+			}
+			field("narrowed")
+			list(kinds)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// regexCoversAll reports, conservatively, whether the binding regex expr
+// matches every subject. It is true only when expr, simplified and with its
+// leading ^/\A and trailing $/\z anchors removed, is a single star of "any
+// character": `.*`, `^.*$`, `(?s).*`. Anything else is false, including
+// regexes that do match every string by another route (`a|.*`, or `x?`,
+// which matches the empty string at every position): a false here only
+// means the caller is not told the binding covers everyone.
+//
+// `.` without (?s) does not match a newline, so `^.*$` does not match a
+// string containing one. It is still judged cover-all: a subject identifier
+// (a sub, an email, a client id) cannot meaningfully contain a newline.
+func regexCoversAll(expr string) bool {
+	re, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	re = re.Simplify()
+	subs := []*syntax.Regexp{re}
+	if re.Op == syntax.OpConcat {
+		subs = re.Sub
+	}
+	for len(subs) > 0 && (subs[0].Op == syntax.OpBeginText || subs[0].Op == syntax.OpBeginLine) {
+		subs = subs[1:]
+	}
+	for len(subs) > 0 && (subs[len(subs)-1].Op == syntax.OpEndText || subs[len(subs)-1].Op == syntax.OpEndLine) {
+		subs = subs[:len(subs)-1]
+	}
+	if len(subs) != 1 || subs[0].Op != syntax.OpStar {
+		return false
+	}
+	switch subs[0].Sub[0].Op {
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return true
+	}
+	return false
 }
 
 type ldapLookup struct {

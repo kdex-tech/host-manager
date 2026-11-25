@@ -1,24 +1,74 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
+	entitlements "github.com/kdex-tech/entitlements/go"
 	"github.com/kdex-tech/host-manager/internal/auth"
 	"github.com/kdex-tech/host-manager/internal/auth/denial"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
+	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	kdexRolesPath     = "/-/roles"
-	kdexRolePath      = "/-/roles/{name}"
-	kdexRolesResource = "kdexroles"
-	kdexRolesVerb     = "read"
+	kdexRolesPath = "/-/roles"
+	kdexRolePath  = "/-/roles/{name}"
+	// rolesResource is the kdex-roles contract's resource: roles:<name>:read
+	// reads one role, roles::read every role.
+	rolesResource = "roles"
+	// legacyRolesResource is the deprecated alias kdexroles:<name>:read,
+	// accepted for one release (#303). Remove it, legacyRoleGrantLogged and
+	// noteLegacyRoleGrant in the next minor release.
+	legacyRolesResource = "kdexroles"
+	rolesVerb           = "read"
 	// kdexRolesItemsKey is the list body's array property (kdexRoleList.Items).
 	kdexRolesItemsKey = "items"
 )
+
+// legacyRoleGrantLogged holds the callers already told their kdexroles grant
+// is deprecated: once per process per caller, so the log names every grant
+// to migrate without growing with traffic.
+var legacyRoleGrantLogged sync.Map
+
+// roleReadChecker is the part of the host's authorization checker the role
+// gate uses.
+type roleReadChecker interface {
+	ParseRequirements([]kdexv1alpha1.SecurityRequirement) entitlements.ParsedRequirements
+	VerifyResourceParsedEntitlements(string, string, entitlements.ParsedEntitlements, entitlements.ParsedRequirements, ...string) (bool, error)
+}
+
+// canReadRole reports whether a caller holding held may read the role named
+// name, and whether only the deprecated kdexroles grant admitted it. none is
+// checker.ParseRequirements(nil), parsed once by the caller.
+func canReadRole(checker roleReadChecker, held entitlements.ParsedEntitlements, none entitlements.ParsedRequirements, name string) (ok, legacyOnly bool, err error) {
+	if ok, err := checker.VerifyResourceParsedEntitlements(rolesResource, name, held, none, rolesVerb); err != nil || ok {
+		return ok, false, err
+	}
+	ok, err = checker.VerifyResourceParsedEntitlements(legacyRolesResource, name, held, none, rolesVerb)
+	return ok, ok, err
+}
+
+// noteLegacyRoleGrant logs, once per process per caller, that a role was
+// read on the deprecated kdexroles grant alone. A context naming no subject
+// is keyed by the role instead.
+func (hh *HostHandler) noteLegacyRoleGrant(ctx context.Context, role string) {
+	key := "role:" + role
+	if ac, ok := auth.GetAuthContext(ctx); ok {
+		if sub, _ := ac.GetSubject(); sub != "" {
+			key = "sub:" + sub
+		}
+	}
+	if _, seen := legacyRoleGrantLogged.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	hh.log.Info("deprecated kdexroles entitlement used; grant roles:<name>:read instead (removed in the next minor release)",
+		"caller", key, "role", role, "grant", legacyRolesResource+":"+role+":"+rolesVerb, "replacement", rolesResource+":"+role+":"+rolesVerb)
+}
 
 // kdexRolesHandler exposes the host's KDexRoles -- their rules as stored and the
 // entitlements the compiler emits for them, i.e. what a bound subject's token
@@ -26,10 +76,15 @@ const (
 // Kubernetes API access or a copy of the role compiler. See
 // kdex-tech/host-manager#231.
 //
-// Each role is gated on its own: kdexroles:<name>:read. The resource is
-// "kdexroles", not "roles", because companion apps already use "roles" for
-// roles of their own. Bindings are deliberately not exposed: their subjects
-// are user identifiers.
+// Each role is gated on its own: roles:<name>:read. The resource is "roles",
+// unified with the kdex-roles contract (the vocabulary the role service and
+// eum implement: roles:{key}:read|update|delete|assign), so a KDexRole and an
+// app's custom role share one key space: KDexRoles are the contract's
+// built-in, statically bound roles. kdexroles:<name>:read is a deprecated
+// alias, accepted for one release and logged when it alone admits a role
+// (#303). Bindings, whose subjects are user identifiers, are not listed
+// here: GET /-/rolebindings resolves subjects against them, gated on the
+// contract's role_assignments_read scope.
 func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	if hh.authChecker == nil {
 		return // auth disabled: nothing to gate the listing on
@@ -46,14 +101,17 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 
 		visible := []auth.RoleInfo{}
 		for _, role := range roles() {
-			ok, err := hh.authChecker.VerifyResourceParsedEntitlements(kdexRolesResource, role.Name, held, none, kdexRolesVerb)
+			ok, legacyOnly, err := canReadRole(hh.authChecker, held, none, role.Name)
 			if err != nil {
-				logf.FromContext(r.Context()).Error(err, "kdexroles authorization check failed", "role", role.Name)
+				logf.FromContext(r.Context()).Error(err, "roles authorization check failed", "role", role.Name)
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 				return
 			}
 			if ok {
 				visible = append(visible, role)
+			}
+			if legacyOnly {
+				hh.noteLegacyRoleGrant(r.Context(), role.Name)
 			}
 		}
 		writeKDexRolesJSON(w, kdexRoleList{Items: visible})
@@ -65,19 +123,21 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 
 		// Authorize BEFORE looking the role up, so a denial never tells the
 		// caller whether a role of that name exists.
-		ok, err := hh.authChecker.VerifyResourceParsedEntitlements(
-			kdexRolesResource, name, held, hh.authChecker.ParseRequirements(nil), kdexRolesVerb)
+		ok, legacyOnly, err := canReadRole(hh.authChecker, held, hh.authChecker.ParseRequirements(nil), name)
 		if err != nil {
-			logf.FromContext(r.Context()).Error(err, "kdexroles authorization check failed", "role", name)
+			logf.FromContext(r.Context()).Error(err, "roles authorization check failed", "role", name)
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 		if !ok {
 			denial.Write(w, r, denial.Opts{
-				Outcome: denial.Classify(r.Context(), hh.authChecker, held, kdexRolesResource, name, kdexRolesVerb),
+				Outcome: denial.Classify(r.Context(), hh.authChecker, held, rolesResource, name, rolesVerb),
 				Issuer:  hh.issuerAddress(),
 			})
 			return
+		}
+		if legacyOnly {
+			hh.noteLegacyRoleGrant(r.Context(), name)
 		}
 
 		for _, role := range roles() {
@@ -106,7 +166,7 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 		},
 	}}
 	security := &openapi.SecurityRequirements{
-		openapi.SecurityRequirement{"bearer": {kdexRolesResource + ":{name}:" + kdexRolesVerb}},
+		openapi.SecurityRequirement{"bearer": {rolesResource + ":{name}:" + rolesVerb}},
 	}
 	denied := openapi.WithStatus(401, &openapi.ResponseRef{Ref: ko.RespRefUnauthorized})
 
@@ -118,8 +178,10 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 					Description: "Lists the host's KDexRoles the caller may read.",
 					Get: &openapi.Operation{
 						Description: "Lists the host's KDexRoles with their rules and compiled entitlements. " +
-							"Filtered per role: a role is listed only when the caller holds kdexroles:<name>:read " +
-							"(kdexroles::read lists every role). An authenticated caller who may read none gets an empty list.",
+							"Filtered per role: a role is listed only when the caller holds roles:<name>:read " +
+							"(roles::read lists every role), the kdex-roles contract's grant: KDexRole names share " +
+							"one key space with an app's custom roles. " + legacyRoleGrantNote +
+							" An authenticated caller who may read none gets an empty list.",
 						OperationID: "kdexroles-list",
 						Responses: openapi.NewResponses(
 							openapi.WithName("200", &openapi.Response{
@@ -154,7 +216,8 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 				kdexRolePath: {
 					Description: "One of the host's KDexRoles.",
 					Get: &openapi.Operation{
-						Description: "Returns one KDexRole with its rules and compiled entitlements. Authorization " +
+						Description: "Returns one KDexRole with its rules and compiled entitlements. Requires " +
+							"roles:<name>:read. " + legacyRoleGrantNote + " Authorization " +
 							"is decided before existence, so a denial does not reveal whether the role exists.",
 						OperationID: "kdexroles-get",
 						Parameters: openapi.Parameters{
@@ -184,6 +247,9 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 		Type: ko.SystemPathType,
 	}, registeredPaths)
 }
+
+// legacyRoleGrantNote names the deprecated alias in both operations' text.
+const legacyRoleGrantNote = "The legacy kdexroles:<name>:read is a deprecated alias, accepted until the next minor release."
 
 // kdexRoleList is the GET /-/roles body.
 type kdexRoleList struct {

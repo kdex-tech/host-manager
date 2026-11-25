@@ -1398,6 +1398,7 @@ func (hh *HostHandler) muxWithDefaultsLocked(registeredPaths map[string]ko.PathI
 	hh.faviconHandler(mux, registeredPaths)
 	hh.jwksHandler(mux, registeredPaths)
 	hh.kdexRolesHandler(mux, registeredPaths)
+	hh.roleBindingsHandler(mux, registeredPaths)
 	hh.loginHandler(mux, registeredPaths)
 	hh.navigationHandler(mux, registeredPaths)
 	hh.oauthHandler(mux, registeredPaths)
