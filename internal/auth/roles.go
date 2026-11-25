@@ -569,8 +569,9 @@ type MatchedBinding struct {
 	// Admitted reports whether the binding's subjectKinds admits the kind
 	// asked about. Only an admitted binding grants its roles.
 	Admitted bool `json:"admitted"`
-	// CoverAll reports that the subject matches every subject: `*`, or a
-	// regex judged conservatively to match every string (regexCoversAll).
+	// CoverAll reports that the subject matches every subject that contains
+	// no newline (subjects are identifiers): `*`, or a regex judged
+	// conservatively to cover all (regexCoversAll).
 	CoverAll bool `json:"coverAll"`
 	// Roles are the binding's roles.
 	Roles []string `json:"roles"`
@@ -654,16 +655,18 @@ func bindingsDigest(items []kdexv1alpha1.KDexRoleBinding) string {
 }
 
 // regexCoversAll reports, conservatively, whether the binding regex expr
-// matches every subject. It is true only when expr, simplified and with its
-// leading ^/\A and trailing $/\z anchors removed, is a single star of "any
-// character": `.*`, `^.*$`, `(?s).*`. Anything else is false, including
-// regexes that do match every string by another route (`a|.*`, or `x?`,
-// which matches the empty string at every position): a false here only
+// matches every subject that contains no newline -- what coverAll promises,
+// since subjects are identifiers. It is true only when expr, simplified and
+// with its leading ^/\A and trailing $/\z anchors removed, is a single star
+// of "any character": `.*`, `^.*$`, `(?s).*`. Anything else is false,
+// including regexes that do match every string by another route (`a|.*`, or
+// `x?`, which matches the empty string at every position): a false here only
 // means the caller is not told the binding covers everyone.
 //
 // `.` without (?s) does not match a newline, so `^.*$` does not match a
-// string containing one. It is still judged cover-all: a subject identifier
-// (a sub, an email, a client id) cannot meaningfully contain a newline.
+// string containing one. It is still judged cover-all, and coverAll is
+// documented as "every subject without a newline": a subject identifier (a
+// sub, an email, a client id) cannot meaningfully contain a newline.
 func regexCoversAll(expr string) bool {
 	re, err := syntax.Parse(expr, syntax.Perl)
 	if err != nil {

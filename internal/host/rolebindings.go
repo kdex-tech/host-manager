@@ -2,9 +2,13 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"slices"
+	"time"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	"github.com/kdex-tech/host-manager/internal/auth"
@@ -39,10 +43,19 @@ func canReadRoleBindings(ctx context.Context, checker roleBindingsChecker) bool 
 const (
 	roleBindingsPath = "/-/rolebindings"
 
-	// maxRoleBindingSubjects and maxRoleBindingSubjectLen bound the regex
-	// work one request can cause: every subject runs every pattern binding.
-	maxRoleBindingSubjects   = 32
-	maxRoleBindingSubjectLen = 1024
+	// maxRoleBindingSubjects, maxRoleBindingSubjectLen and
+	// maxRoleBindingSubjectBytes bound the regex work one request can cause:
+	// every subject runs every pattern binding. maxRoleBindingKindLen bounds
+	// kind, which the response echoes once per subject.
+	maxRoleBindingSubjects     = 32
+	maxRoleBindingSubjectLen   = 1024
+	maxRoleBindingSubjectBytes = 8 * 1024
+	maxRoleBindingKindLen      = 64
+
+	// noStoreCacheControl is /-/roles' and /-/rolebindings' Cache-Control:
+	// their bodies name roles and user identifiers, so no cache, a browser's
+	// included, may store them.
+	noStoreCacheControl = "private, no-store"
 )
 
 // roleBindingsResponse is the GET /-/rolebindings body.
@@ -72,8 +85,10 @@ type subjectBindings struct {
 // Bindings name user identifiers, so the route is gated, all or nothing, on
 // roleAssignmentsReadScope (canReadRoleBindings). Unauthenticated is 401; a
 // caller without the scope is 403, decided before the parameters are read; a
-// bad parameter is 400. A 200 is never a partial view: an empty answer means
-// the subject has no static roles.
+// bad parameter is 400; a host with no binding matcher is 503. A 200 is never
+// a partial view: an empty answer means the subject has no static roles.
+//
+// The ETag is decided before any matching, so a 304 costs no regex work.
 func (hh *HostHandler) roleBindingsHandler(mux *http.ServeMux, registeredPaths map[string]ko.PathInfo) {
 	if hh.authChecker == nil {
 		return // auth disabled: nothing to gate the bindings on
@@ -114,6 +129,7 @@ func (hh *HostHandler) roleBindingsHandler(mux *http.ServeMux, registeredPaths m
 			http.Error(w, "too many subjects", http.StatusBadRequest)
 			return
 		}
+		total := 0
 		for _, s := range subjects {
 			if s == "" {
 				http.Error(w, "subject must not be empty", http.StatusBadRequest)
@@ -123,6 +139,11 @@ func (hh *HostHandler) roleBindingsHandler(mux *http.ServeMux, registeredPaths m
 				http.Error(w, "subject too long", http.StatusBadRequest)
 				return
 			}
+			total += len(s)
+		}
+		if total > maxRoleBindingSubjectBytes {
+			http.Error(w, "subjects too long in total", http.StatusBadRequest)
+			return
 		}
 		kinds := query["kind"]
 		if len(kinds) > 1 {
@@ -131,34 +152,40 @@ func (hh *HostHandler) roleBindingsHandler(mux *http.ServeMux, registeredPaths m
 		}
 		var kind kdexv1alpha1.SubjectKind
 		if len(kinds) == 1 {
+			if len(kinds[0]) > maxRoleBindingKindLen {
+				http.Error(w, "kind too long", http.StatusBadRequest)
+				return
+			}
 			kind = kdexv1alpha1.SubjectKind(kinds[0])
 		}
 
 		matcher := ex.Bindings()
-		digest := ""
-		if matcher != nil {
-			digest = matcher.BindingsDigest()
+		if matcher == nil {
+			// No compiled table to match against: an empty 200 would claim
+			// the subject has no static roles.
+			w.Header().Set("Cache-Control", noStoreCacheControl)
+			http.Error(w, "role bindings are not available on this host", http.StatusServiceUnavailable)
+			return
+		}
+
+		if hh.writeRoleBindingsHeaders(w, r, matcher.BindingsDigest(), roleBindingsQuerySeed(subjects, kind)) {
+			return
 		}
 
 		body := roleBindingsResponse{Subjects: make([]subjectBindings, 0, len(subjects))}
 		for _, s := range subjects {
 			sb := subjectBindings{Subject: s, Kind: string(kind), Bindings: []auth.MatchedBinding{}, Roles: []string{}}
-			if matcher != nil {
-				for _, b := range matcher.MatchBindings(s, kind) {
-					sb.Bindings = append(sb.Bindings, b)
-					if b.Admitted {
-						sb.Roles = append(sb.Roles, b.Roles...)
-					}
+			for _, b := range matcher.MatchBindings(s, kind) {
+				sb.Bindings = append(sb.Bindings, b)
+				if b.Admitted {
+					sb.Roles = append(sb.Roles, b.Roles...)
 				}
-				slices.Sort(sb.Roles)
-				sb.Roles = slices.Compact(sb.Roles)
 			}
+			slices.Sort(sb.Roles)
+			sb.Roles = slices.Compact(sb.Roles)
 			body.Subjects = append(body.Subjects, sb)
 		}
 
-		if hh.writeRoleBindingsHeaders(w, r, digest) {
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
 	})
@@ -179,21 +206,82 @@ func (hh *HostHandler) roleBindingsHandler(mux *http.ServeMux, registeredPaths m
 }
 
 // writeRoleBindingsHeaders sets the caching headers and reports whether the
-// request was answered 304. The body depends on the binding table and is
-// served only to callers holding the scope, so it is private and revalidated:
-// the ETag carries the table's digest and, through
-// applyCachingHeadersWithSeed, the caller's identity. With auth enabled on the checker but not on the config (no
-// signing key yet) that helper would call the response public, so it is
-// sent private, no-store instead.
-func (hh *HostHandler) writeRoleBindingsHeaders(w http.ResponseWriter, r *http.Request, digest string) bool {
+// request was answered 304. It runs before any matching, so a revalidation
+// costs no regex work.
+//
+// The body names user identifiers, so it is sent private, no-store, as
+// /-/roles is: no cache, a browser's included, keeps it. It still carries an
+// ETag, because no-store does not forbid a conditional request from a caller
+// that keeps its own copy (a role service holding the last answer). The ETag
+// is the binding table's digest, the query (querySeed: the subjects in
+// request order and the kind, since the body depends on both) and, through
+// applyCachingHeadersWithSeed, the caller's identity. Its Last-Modified is
+// when this host first served that digest (roleBindingsLastModified), not
+// the reconcile time, so a reconcile that leaves the bindings as they were
+// keeps every caller's ETag. With auth enabled on the checker but not on the
+// config (no signing key yet) that helper would call the response public, so
+// no ETag is sent at all.
+func (hh *HostHandler) writeRoleBindingsHeaders(w http.ResponseWriter, r *http.Request, digest, querySeed string) bool {
+	lastModified := hh.roleBindingsLastModified(digest)
 	hh.mu.RLock()
 	defer hh.mu.RUnlock()
 	requirements := []kdexv1alpha1.SecurityRequirement{{"bearer": {roleAssignmentsReadScope}}}
 	if !hh.isPrivateResponse(requirements) {
-		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Cache-Control", noStoreCacheControl)
 		return false
 	}
-	return hh.applyCachingHeadersWithSeed(w, r, requirements, hh.reconcileTime, "", "rolebindings-"+digest)
+	notModified := hh.applyCachingHeadersWithSeed(noStoreWriter{w}, r, requirements, lastModified, "",
+		"rolebindings-"+digest+"-"+querySeed)
+	w.Header().Set("Cache-Control", noStoreCacheControl)
+	return notModified
+}
+
+// noStoreWriter sends every status with Cache-Control private, no-store, so
+// a 304 written inside applyCachingHeadersWithSeed carries the same
+// Cache-Control as the 200 it revalidates.
+type noStoreWriter struct{ http.ResponseWriter }
+
+func (w noStoreWriter) WriteHeader(code int) {
+	w.Header().Set("Cache-Control", noStoreCacheControl)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// roleBindingsQuerySeed identifies a query: its subjects in request order
+// (the response answers them in that order) and its kind. Each field is
+// length-prefixed, so no two queries hash the same input stream.
+func roleBindingsQuerySeed(subjects []string, kind kdexv1alpha1.SubjectKind) string {
+	h := sha256.New()
+	field := func(s string) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(s)))
+		h.Write(n[:])
+		h.Write([]byte(s))
+	}
+	field(string(kind))
+	for _, s := range subjects {
+		field(s)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// roleBindingsLastModified is when this host first served the binding table
+// digest: it moves when the bindings do and only then, so neither a reconcile
+// that changes nothing else nor the passage of time moves a caller's ETag.
+// It moves forward at least one second on every change, so If-Modified-Since
+// (which is second-granular) never revalidates a newer table, even one
+// compiled in the same second as the last.
+func (hh *HostHandler) roleBindingsLastModified(digest string) time.Time {
+	hh.roleBindingsMu.Lock()
+	defer hh.roleBindingsMu.Unlock()
+	if hh.roleBindingsSince.IsZero() || digest != hh.roleBindingsDigest {
+		at := time.Now().UTC().Truncate(time.Second)
+		if !hh.roleBindingsSince.IsZero() && !at.After(hh.roleBindingsSince) {
+			at = hh.roleBindingsSince.Add(time.Second)
+		}
+		hh.roleBindingsDigest = digest
+		hh.roleBindingsSince = at
+	}
+	return hh.roleBindingsSince
 }
 
 func roleBindingsOperation() *openapi.Operation {
@@ -216,8 +304,9 @@ func roleBindingsOperation() *openapi.Operation {
 			"admitted": prop(openapi.NewBoolSchema(),
 				"Whether the binding's subjectKinds admits the requested kind. Only an admitted binding grants its roles."),
 			"coverAll": prop(openapi.NewBoolSchema(),
-				"The subject matches every subject: `*`, or a regex judged conservatively to match every string "+
-					"(e.g. /.*/, /^.*$/). false does not prove a regex matches fewer subjects."),
+				"The subject matches every subject that contains no newline (subjects are identifiers): `*`, or a "+
+					"regex judged conservatively to cover all (e.g. /.*/, /^.*$/, which without (?s) do not match a "+
+					"newline). false does not prove a regex matches fewer subjects."),
 			"roles": strArray("The binding's roles."),
 		},
 	}}
@@ -244,14 +333,19 @@ func roleBindingsOperation() *openapi.Operation {
 			"the next host reconcile, and callers need no cache of their own. " +
 			"All or nothing: the caller must hold the kdex-roles contract's opaque scope " + roleAssignmentsReadScope +
 			" (matched by exact name; no wildcard implies it), else 403, which a caller should treat as \"cannot tell\". " +
-			"With it, every matching binding is returned, so an empty answer means the subject has no static roles.",
+			"With it, every matching binding is returned, so an empty answer means the subject has no static roles; " +
+			"a host with no binding matcher answers 503 instead. Pass the key the host's token path matches " +
+			"(e.g. the email when the host's role-binding claim is email, not the sub). roles is the union of the " +
+			"admitted bindings, not a token's roles claim. " +
+			"Sent Cache-Control: private, no-store, as /-/roles; the ETag (binding table, query and caller) lets a " +
+			"caller that keeps its own copy revalidate it.",
 		OperationID: "rolebindings-resolve",
 		Parameters: openapi.Parameters{
 			&openapi.ParameterRef{Value: &openapi.Parameter{
 				Name: "subject",
 				In:   "query",
-				Description: "A subject to resolve; repeat for several (at most 32, each at most 1024 bytes). " +
-					"Answered in request order.",
+				Description: "A subject to resolve; repeat for several (at most 32, each at most 1024 bytes, " +
+					"8192 bytes in total). Answered in request order.",
 				Required: true,
 				Explode:  new(true),
 				Schema: &openapi.SchemaRef{Value: &openapi.Schema{
@@ -262,8 +356,8 @@ func roleBindingsOperation() *openapi.Operation {
 			&openapi.ParameterRef{Value: &openapi.Parameter{
 				Name: "kind",
 				In:   "query",
-				Description: "The subjects' kind (User, Client). Absent is \"\", which only bindings without " +
-					"subjectKinds admit, as for any kind the host does not know.",
+				Description: "The subjects' kind (User, Client; at most 64 bytes). Absent is \"\", which only " +
+					"bindings without subjectKinds admit, as for any kind the host does not know.",
 				Schema: openapi.NewSchemaRef("", openapi.NewStringSchema()),
 			}},
 		},
@@ -282,10 +376,14 @@ func roleBindingsOperation() *openapi.Operation {
 				Description: new("Every matching binding, per requested subject."),
 			}),
 			openapi.WithStatus(400, &openapi.ResponseRef{Value: &openapi.Response{
-				Description: new("subject missing or empty, more than 32 subjects, a subject over 1024 bytes, or kind repeated"),
+				Description: new("subject missing or empty, more than 32 subjects, a subject over 1024 bytes, " +
+					"subjects over 8192 bytes in total, kind repeated, or kind over 64 bytes"),
 			}}),
 			openapi.WithStatus(401, &openapi.ResponseRef{Ref: ko.RespRefUnauthorized}),
 			openapi.WithStatus(403, &openapi.ResponseRef{Ref: ko.RespRefForbidden}),
+			openapi.WithStatus(503, &openapi.ResponseRef{Value: &openapi.Response{
+				Description: new("The host has no binding matcher, so it cannot tell which bindings match"),
+			}}),
 		),
 		Security: security,
 		Summary:  "Resolve subjects against the host's KDexRoleBindings",

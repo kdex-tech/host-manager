@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -169,4 +170,27 @@ func TestEntitlementCatalog_ClampedToCaller(t *testing.T) {
 func TestEntitlementCatalog_ClampedNeedsACaller(t *testing.T) {
 	code, _ := getCatalog(t, catalogFixture(t), "", nil)
 	assert.Equal(t, http.StatusUnauthorized, code)
+}
+
+// The catalog is derived from the real role routes: /-/roles declares the
+// contract's roles/read, /-/rolebindings the opaque role_assignments_read,
+// and the deprecated kdexroles alias is never advertised (#303 quad).
+func TestEntitlementCatalog_RoleRoutes(t *testing.T) {
+	ex, err := auth.NewExchanger(context.Background(), auth.Config{}, nil, roleListingProvider{roles: testRoles}, nil)
+	require.NoError(t, err)
+	hh := &HostHandler{
+		log:           logr.Discard(),
+		authChecker:   auth.NewAuthorizationChecker(nil, logr.Discard()),
+		authExchanger: ex,
+	}
+	mux := http.NewServeMux()
+	paths := map[string]ko.PathInfo{}
+	hh.kdexRolesHandler(mux, paths)
+	hh.roleBindingsHandler(mux, paths)
+
+	pairs, scopes := declaredEntitlements(paths)
+	require.Contains(t, pairs, rolesResource)
+	assert.Contains(t, pairs[rolesResource], rolesVerb)
+	assert.Contains(t, scopes, roleAssignmentsReadScope)
+	assert.NotContains(t, pairs, legacyRolesResource, "the deprecated alias is accepted, never declared")
 }

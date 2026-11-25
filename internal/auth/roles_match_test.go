@@ -131,6 +131,9 @@ func TestMatchBindings_AgreesWithResolveRoles(t *testing.T) {
 				}
 			}
 			assert.ElementsMatch(t, wantRoles, roles, "%s/%s", key, kind)
+			// Without a collector resolveRoles skips a kind-refused binding
+			// before its regex runs; that path must agree too.
+			assert.ElementsMatch(t, wantRoles, sp.resolveRoles(BindingSubject{Key: key, Kind: kind}, nil), "%s/%s nil names", key, kind)
 			assert.ElementsMatch(t, contributed, names.Contributed, "%s/%s", key, kind)
 			assert.ElementsMatch(t, skipped, names.SkippedForKind, "%s/%s", key, kind)
 		}

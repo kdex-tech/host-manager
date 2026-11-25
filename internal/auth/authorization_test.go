@@ -535,13 +535,13 @@ func TestAuthorizationChecker_ParseRequirements_NilSafe(t *testing.T) {
 // hold, so it is an ordinary denial -- (false, nil) -- not an error every
 // caller would turn into a 500 (#195).
 func TestAuthorizationChecker_ColonInIdentityIsADenial(t *testing.T) {
-	ac := NewAuthorizationChecker([]string{"pages::all", "kdexroles::read"}, logr.Discard())
+	ac := NewAuthorizationChecker([]string{"pages::all", "roles::read"}, logr.Discard())
 	held := ac.GetParsedEntitlements(context.Background())
 	none := ac.ParseRequirements(nil)
 
 	for _, tc := range []struct{ resource, name, verb string }{
 		{"pages", "/a:b", "read"},
-		{"kdexroles", "x@y:z", "read"},
+		{"roles", "x@y:z", "read"},
 		{"pages", "/a", "foo:read"},
 		{"a:b", "c", "read"},
 	} {

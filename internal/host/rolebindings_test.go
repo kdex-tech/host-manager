@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/kdex-tech/host-manager/internal"
 	"github.com/kdex-tech/host-manager/internal/auth"
+	"github.com/kdex-tech/host-manager/internal/cache"
 	"github.com/kdex-tech/host-manager/internal/keys"
 	ko "github.com/kdex-tech/host-manager/internal/openapi"
 	"github.com/stretchr/testify/assert"
@@ -101,6 +103,13 @@ func rbProvider(t *testing.T, bindings []*kdexv1alpha1.KDexRoleBinding) (auth.In
 func roleBindingsHandler(t *testing.T, bindings []*kdexv1alpha1.KDexRoleBinding) (*HostHandler, *http.ServeMux, map[string]ko.PathInfo, *atomic.Int32) {
 	t.Helper()
 	sp, lists := rbProvider(t, bindings)
+	hh, mux, paths := roleBindingsHandlerWith(t, sp)
+	return hh, mux, paths, lists
+}
+
+// roleBindingsHandlerWith serves /-/rolebindings over the identity provider sp.
+func roleBindingsHandlerWith(t *testing.T, sp auth.InternalIdentityProvider) (*HostHandler, *http.ServeMux, map[string]ko.PathInfo) {
+	t.Helper()
 	ex, err := auth.NewExchanger(context.Background(), auth.Config{}, nil, sp, nil)
 	require.NoError(t, err)
 	hh := &HostHandler{
@@ -117,8 +126,22 @@ func roleBindingsHandler(t *testing.T, bindings []*kdexv1alpha1.KDexRoleBinding)
 	mux := http.NewServeMux()
 	paths := map[string]ko.PathInfo{}
 	hh.roleBindingsHandler(mux, paths)
-	return hh, mux, paths, lists
+	return hh, mux, paths
 }
+
+// countingMatcher is a binding matcher that counts the subjects it matches.
+type countingMatcher struct {
+	roleListingProvider
+	digest  string
+	matched *atomic.Int32
+}
+
+func (m countingMatcher) MatchBindings(key string, kind kdexv1alpha1.SubjectKind) []auth.MatchedBinding {
+	m.matched.Add(1)
+	return []auth.MatchedBinding{{Name: "b-" + key, Subject: key, Admitted: true, Roles: []string{"r"}}}
+}
+
+func (m countingMatcher) BindingsDigest() string { return m.digest }
 
 func roleBindingsMux(t *testing.T) *http.ServeMux {
 	t.Helper()
@@ -255,6 +278,14 @@ func TestRoleBindings_BadParameters(t *testing.T) {
 		atCap.Add("subject", "alice")
 	}
 	long := strings.Repeat("x", maxRoleBindingSubjectLen+1)
+	// Each subject within its own limit, together over the total.
+	overTotal, atTotal := url.Values{}, url.Values{}
+	for i := range maxRoleBindingSubjectBytes/maxRoleBindingSubjectLen + 1 {
+		overTotal.Add("subject", strings.Repeat(string(rune('a'+i)), maxRoleBindingSubjectLen))
+	}
+	for i := range maxRoleBindingSubjectBytes / maxRoleBindingSubjectLen {
+		atTotal.Add("subject", strings.Repeat(string(rune('a'+i)), maxRoleBindingSubjectLen))
+	}
 	for name, q := range map[string]string{
 		"no subject":        "",
 		"kind only":         "?kind=User",
@@ -263,27 +294,32 @@ func TestRoleBindings_BadParameters(t *testing.T) {
 		"too many subjects": "?" + many.Encode(),
 		"subject too long":  "?subject=" + long,
 		"kind repeated":     "?subject=alice&kind=User&kind=Client",
+		"kind too long":     "?subject=alice&kind=" + strings.Repeat("k", maxRoleBindingKindLen+1),
+		"subjects too big":  "?" + overTotal.Encode(),
 	} {
 		rr := getRoleBindings(t, mux, q, rbScope)
 		assert.Equal(t, http.StatusBadRequest, rr.Code, name)
 	}
 	assert.Equal(t, http.StatusOK, getRoleBindings(t, mux, "?"+atCap.Encode(), rbScope).Code)
 	assert.Equal(t, http.StatusOK, getRoleBindings(t, mux, "?subject="+strings.Repeat("x", maxRoleBindingSubjectLen), rbScope).Code)
+	assert.Equal(t, http.StatusOK, getRoleBindings(t, mux, "?"+atTotal.Encode(), rbScope).Code)
+	assert.Equal(t, http.StatusOK, getRoleBindings(t, mux, "?subject=alice&kind="+strings.Repeat("k", maxRoleBindingKindLen), rbScope).Code)
 	// Authorization is decided first: an anonymous bad request is a 401, an
 	// unscoped one a 403.
 	assert.Equal(t, http.StatusUnauthorized, getRoleBindings(t, mux, "", nil).Code)
 	assert.Equal(t, http.StatusForbidden, getRoleBindings(t, mux, "", []string{"pages::read"}).Code)
 }
 
-// The response is private and revalidated; its ETag moves with the binding
-// table and with the caller (#303).
+// The response is private and never stored, as /-/roles; its ETag moves with
+// the binding table and with the caller (#303), so a non-browser caller that
+// keeps its own copy can still revalidate it.
 func TestRoleBindings_Caching(t *testing.T) {
 	_, mux, _, _ := roleBindingsHandler(t, rbFixture())
 	held := rbScope
 
 	rr := getRoleBindings(t, mux, "?subject=alice", held)
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, privateCacheControl, rr.Header().Get("Cache-Control"))
+	assert.Equal(t, noStoreCacheControl, rr.Header().Get("Cache-Control"), "parity with /-/roles")
 	assert.Contains(t, strings.Join(rr.Header().Values("Vary"), ","), "Authorization")
 	etag := rr.Header().Get("ETag")
 	require.NotEmpty(t, etag)
@@ -291,6 +327,7 @@ func TestRoleBindings_Caching(t *testing.T) {
 	rr = getRoleBindings(t, mux, "?subject=alice", held, "If-None-Match", etag)
 	assert.Equal(t, http.StatusNotModified, rr.Code)
 	assert.Empty(t, rr.Body.String())
+	assert.Equal(t, noStoreCacheControl, rr.Header().Get("Cache-Control"), "a 304 carries the same Cache-Control")
 
 	other := getRoleBindings(t, mux, "?subject=alice", []string{roleAssignmentsReadScope, "pages::read"})
 	assert.NotEqual(t, etag, other.Header().Get("ETag"), "another caller, another ETag")
@@ -325,6 +362,7 @@ func TestRoleBindings_OpenAPIRegistered(t *testing.T) {
 	assert.NotNil(t, op.Responses.Status(400))
 	assert.NotNil(t, op.Responses.Status(401))
 	assert.NotNil(t, op.Responses.Status(403))
+	assert.NotNil(t, op.Responses.Status(503))
 	require.NotNil(t, op.Security)
 	assert.Equal(t, []string{roleAssignmentsReadScope}, (*op.Security)[0]["bearer"])
 	assert.Contains(t, op.Description, roleAssignmentsReadScope)
@@ -349,4 +387,101 @@ func TestRoleBindings_NotRegisteredWithoutAuth(t *testing.T) {
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/-/rolebindings?subject=alice", nil))
 	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// The ETag is decided before any matching, so a revalidation that answers 304
+// costs no regex work; and it carries the query, so one query's ETag never
+// revalidates another's body (#303 quad).
+func TestRoleBindings_NotModifiedBeforeMatching(t *testing.T) {
+	matched := &atomic.Int32{}
+	_, mux, _ := roleBindingsHandlerWith(t, countingMatcher{digest: "d1", matched: matched})
+
+	rr := getRoleBindings(t, mux, "?subject=alice&subject=bob&kind=User", rbScope)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, int32(2), matched.Load())
+	etag := rr.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	rr = getRoleBindings(t, mux, "?subject=alice&subject=bob&kind=User", rbScope, "If-None-Match", etag)
+	assert.Equal(t, http.StatusNotModified, rr.Code)
+	assert.Equal(t, int32(2), matched.Load(), "a 304 must not run the matcher")
+
+	for _, q := range []string{
+		"?subject=alice",
+		"?subject=bob&subject=alice&kind=User",
+		"?subject=alice&subject=bob",
+		"?subject=alice&subject=bob&kind=Client",
+		"?subject=alice%26subject%3Dbob&kind=User",
+	} {
+		rr := getRoleBindings(t, mux, q, rbScope, "If-None-Match", etag)
+		assert.Equal(t, http.StatusOK, rr.Code, q)
+		assert.NotEqual(t, etag, rr.Header().Get("ETag"), "another query, another ETag: %s", q)
+	}
+}
+
+// A reconcile that leaves the bindings as they were keeps the ETag, so a
+// caller's copy still revalidates to a 304: the ETag is anchored to the
+// bindings, not to the host's reconcile time (#303 quad).
+func TestRoleBindings_ETagStableAcrossReconciles(t *testing.T) {
+	cacheManager, err := cache.NewCacheManager("", rbHost, nil)
+	require.NoError(t, err)
+	hh := NewHostHandler(nil, rbHost, rbNamespace, logr.Discard(), cacheManager)
+	reconcile := func(bindings []*kdexv1alpha1.KDexRoleBinding, at time.Time) {
+		sp, _ := rbProvider(t, bindings)
+		ex, err := auth.NewExchanger(context.Background(), auth.Config{}, nil, sp, nil)
+		require.NoError(t, err)
+		hh.SetHost(context.Background(), &kdexv1alpha1.KDexHostSpec{
+			Routing: kdexv1alpha1.Routing{Domains: []string{"rb.example"}},
+		}, &kdexv1alpha1.KDexObjectStatus{}, nil, nil, nil, "", nil, nil, ex,
+			&auth.Config{ActivePair: &keys.KeyPair{}}, "https", nil, at)
+	}
+	get := func(header ...string) *httptest.ResponseRecorder {
+		hh.mu.RLock()
+		mux := hh.Mux
+		hh.mu.RUnlock()
+		return getRoleBindings(t, mux, "?subject=alice&kind=User", rbScope, header...)
+	}
+
+	t0 := time.Now().Add(-time.Hour)
+	reconcile(rbFixture(), t0)
+	rr := get()
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	etag := rr.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	reconcile(rbFixture(), t0.Add(time.Minute))
+	rr = get("If-None-Match", etag)
+	assert.Equal(t, http.StatusNotModified, rr.Code, "identical bindings: same ETag")
+	assert.Equal(t, etag, rr.Header().Get("ETag"))
+
+	changed := rbFixture()
+	changed[0].Spec.Roles = []string{"viewer"}
+	reconcile(changed, t0.Add(2*time.Minute))
+	rr = get("If-None-Match", etag)
+	assert.Equal(t, http.StatusOK, rr.Code, "changed bindings: new ETag")
+	assert.NotEqual(t, etag, rr.Header().Get("ETag"))
+}
+
+// Last-Modified moves forward on every binding change, even two in one
+// second, so If-Modified-Since never revalidates a newer table (#303 quad).
+func TestRoleBindingsLastModified_Monotonic(t *testing.T) {
+	hh := &HostHandler{}
+	a := hh.roleBindingsLastModified("d1")
+	assert.Equal(t, a, hh.roleBindingsLastModified("d1"), "same digest, same time")
+	b := hh.roleBindingsLastModified("d2")
+	assert.True(t, b.After(a), "a new digest moves Last-Modified forward")
+	c := hh.roleBindingsLastModified("d1")
+	assert.True(t, c.After(b), "returning to an older digest is still a change")
+}
+
+// Without a binding matcher the host cannot tell what binds a subject: 503,
+// never a 200 that would claim "no static roles" (#303 quad).
+func TestRoleBindings_NoMatcherIs503(t *testing.T) {
+	_, mux, _ := roleBindingsHandlerWith(t, roleListingProvider{roles: testRoles})
+	rr := getRoleBindings(t, mux, "?subject=alice", rbScope)
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	assert.NotContains(t, rr.Body.String(), "subjects")
+	assert.Empty(t, rr.Header().Get("ETag"))
+	// Authorization still comes first.
+	assert.Equal(t, http.StatusForbidden, getRoleBindings(t, mux, "?subject=alice", []string{"pages::read"}).Code)
 }

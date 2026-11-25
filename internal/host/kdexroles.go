@@ -2,9 +2,10 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sync"
 
 	openapi "github.com/getkin/kin-openapi/openapi3"
 	entitlements "github.com/kdex-tech/entitlements/go"
@@ -22,18 +23,28 @@ const (
 	// reads one role, roles::read every role.
 	rolesResource = "roles"
 	// legacyRolesResource is the deprecated alias kdexroles:<name>:read,
-	// accepted for one release (#303). Remove it, legacyRoleGrantLogged and
-	// noteLegacyRoleGrant in the next minor release.
+	// accepted for one release (#303).
+	//
+	// TODO(#304, v0.36.0): remove the kdexroles alias. Delete:
+	// legacyRolesResource, legacyRoleGrantNote, maxLegacyRoleGrantCallers,
+	// noLegacySubjectKey, subjectHash, noteLegacyRoleGrant,
+	// legacyRoleGrantCallers, the legacy branch of canReadRole (and its
+	// legacyOnly result) and both handlers' legacyOnly handling, the
+	// HostHandler fields legacyRoleGrantMu, legacyRoleGrantLogged and
+	// legacyRoleGrantSuppressed, the "deprecated" sentence of both /-/roles
+	// operations, and the kdexroles cases in kdexroles_test.go.
 	legacyRolesResource = "kdexroles"
 	rolesVerb           = "read"
 	// kdexRolesItemsKey is the list body's array property (kdexRoleList.Items).
 	kdexRolesItemsKey = "items"
-)
 
-// legacyRoleGrantLogged holds the callers already told their kdexroles grant
-// is deprecated: once per process per caller, so the log names every grant
-// to migrate without growing with traffic.
-var legacyRoleGrantLogged sync.Map
+	// maxLegacyRoleGrantCallers bounds the deprecation log-once set; past it
+	// one line says further callers are suppressed.
+	maxLegacyRoleGrantCallers = 1024
+	// noLegacySubjectKey is the one log-once key of every context that names
+	// no subject.
+	noLegacySubjectKey = "no-subject"
+)
 
 // roleReadChecker is the part of the host's authorization checker the role
 // gate uses.
@@ -53,21 +64,65 @@ func canReadRole(checker roleReadChecker, held entitlements.ParsedEntitlements, 
 	return ok, ok, err
 }
 
-// noteLegacyRoleGrant logs, once per process per caller, that a role was
-// read on the deprecated kdexroles grant alone. A context naming no subject
-// is keyed by the role instead.
+// noteLegacyRoleGrant logs, once per host per caller, that a role was read on
+// the deprecated kdexroles grant alone, so the operator can find and migrate
+// every such grant without the log growing with traffic. The set lives on the
+// HostHandler, keyed by host and subject; every context naming no subject
+// shares one key; and it holds at most maxLegacyRoleGrantCallers callers,
+// after which one line says further callers are suppressed. role must name a
+// role that exists, never a caller-chosen name. The caller is logged as
+// subjectHash, not its raw subject.
 func (hh *HostHandler) noteLegacyRoleGrant(ctx context.Context, role string) {
-	key := "role:" + role
+	subject := ""
 	if ac, ok := auth.GetAuthContext(ctx); ok {
-		if sub, _ := ac.GetSubject(); sub != "" {
-			key = "sub:" + sub
-		}
+		subject, _ = ac.GetSubject()
 	}
-	if _, seen := legacyRoleGrantLogged.LoadOrStore(key, struct{}{}); seen {
+	caller := noLegacySubjectKey
+	if subject != "" {
+		caller = subjectHash(subject)
+	}
+	key := hh.Name + "\x00" + caller
+
+	hh.legacyRoleGrantMu.Lock()
+	if _, seen := hh.legacyRoleGrantLogged[key]; seen {
+		hh.legacyRoleGrantMu.Unlock()
 		return
 	}
-	hh.log.Info("deprecated kdexroles entitlement used; grant roles:<name>:read instead (removed in the next minor release)",
-		"caller", key, "role", role, "grant", legacyRolesResource+":"+role+":"+rolesVerb, "replacement", rolesResource+":"+role+":"+rolesVerb)
+	if len(hh.legacyRoleGrantLogged) >= maxLegacyRoleGrantCallers {
+		first := !hh.legacyRoleGrantSuppressed
+		hh.legacyRoleGrantSuppressed = true
+		hh.legacyRoleGrantMu.Unlock()
+		if first {
+			hh.log.Info("further deprecated-grant callers suppressed; grant roles:<name>:read instead "+
+				"(kdexroles removed in v0.36.0, kdex-tech/host-manager#304)",
+				"host", hh.Name, "logged", maxLegacyRoleGrantCallers)
+		}
+		return
+	}
+	if hh.legacyRoleGrantLogged == nil {
+		hh.legacyRoleGrantLogged = map[string]struct{}{}
+	}
+	hh.legacyRoleGrantLogged[key] = struct{}{}
+	hh.legacyRoleGrantMu.Unlock()
+
+	hh.log.Info("deprecated kdexroles entitlement used; grant roles:<name>:read instead "+
+		"(removed in v0.36.0, kdex-tech/host-manager#304)",
+		"host", hh.Name, "subjectHash", caller, "role", role,
+		"grant", legacyRolesResource+":"+role+":"+rolesVerb, "replacement", rolesResource+":"+role+":"+rolesVerb)
+}
+
+// legacyRoleGrantCallers is the size of the deprecation log-once set.
+func (hh *HostHandler) legacyRoleGrantCallers() int {
+	hh.legacyRoleGrantMu.Lock()
+	defer hh.legacyRoleGrantMu.Unlock()
+	return len(hh.legacyRoleGrantLogged)
+}
+
+// subjectHash names a caller in a log line without its raw subject: the
+// first 12 hex digits of its SHA-256.
+func subjectHash(subject string) string {
+	h := sha256.Sum256([]byte(subject))
+	return hex.EncodeToString(h[:])[:12]
 }
 
 // kdexRolesHandler exposes the host's KDexRoles -- their rules as stored and the
@@ -136,12 +191,13 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 			})
 			return
 		}
-		if legacyOnly {
-			hh.noteLegacyRoleGrant(r.Context(), name)
-		}
-
 		for _, role := range roles() {
 			if role.Name == name {
+				// Noted only once the role is found, so no caller-chosen
+				// name reaches the log-once set or the log.
+				if legacyOnly {
+					hh.noteLegacyRoleGrant(r.Context(), name)
+				}
 				writeKDexRolesJSON(w, role)
 				return
 			}
@@ -234,6 +290,7 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 								Description: new("The role"),
 							}),
 							denied,
+							openapi.WithStatus(403, &openapi.ResponseRef{Ref: ko.RespRefForbidden}),
 							openapi.WithStatus(404, &openapi.ResponseRef{Ref: ko.RespRefNotFound}),
 						),
 						Security: security,
@@ -249,7 +306,8 @@ func (hh *HostHandler) kdexRolesHandler(mux *http.ServeMux, registeredPaths map[
 }
 
 // legacyRoleGrantNote names the deprecated alias in both operations' text.
-const legacyRoleGrantNote = "The legacy kdexroles:<name>:read is a deprecated alias, accepted until the next minor release."
+const legacyRoleGrantNote = "The legacy kdexroles:<name>:read is a deprecated alias, accepted until v0.36.0 " +
+	"(kdex-tech/host-manager#304)."
 
 // kdexRoleList is the GET /-/roles body.
 type kdexRoleList struct {
@@ -260,6 +318,6 @@ type kdexRoleList struct {
 // caller's grants, so it must never be served from a shared cache.
 func writeKDexRolesJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Cache-Control", noStoreCacheControl)
 	_ = json.NewEncoder(w).Encode(v)
 }

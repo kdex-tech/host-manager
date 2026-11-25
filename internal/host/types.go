@@ -125,12 +125,25 @@ type HostHandler struct {
 	pathsCollectedInReconcile  map[string]ko.PathInfo
 	proxyTimeouts              ProxyTimeouts
 	reconcileTime              time.Time
-	registeredPaths            map[string]ko.PathInfo
-	registerLimiter            *registerLimiter
-	registerLimiterOnce        sync.Once
-	scheme                     string
-	scripts                    []kdexv1alpha1.ScriptDef
-	sniffer                    interface {
+	// roleBindingsMu guards roleBindingsDigest and roleBindingsSince: the
+	// binding table digest /-/rolebindings last served and when it first did
+	// (roleBindingsLastModified).
+	roleBindingsMu     sync.Mutex
+	roleBindingsDigest string
+	roleBindingsSince  time.Time
+	// legacyRoleGrantMu guards legacyRoleGrantLogged, the callers already told
+	// their kdexroles grant is deprecated, and legacyRoleGrantSuppressed
+	// (noteLegacyRoleGrant).
+	// TODO(#304, v0.36.0): remove with the kdexroles alias.
+	legacyRoleGrantMu         sync.Mutex
+	legacyRoleGrantLogged     map[string]struct{}
+	legacyRoleGrantSuppressed bool
+	registeredPaths           map[string]ko.PathInfo
+	registerLimiter           *registerLimiter
+	registerLimiterOnce       sync.Once
+	scheme                    string
+	scripts                   []kdexv1alpha1.ScriptDef
+	sniffer                   interface {
 		Analyze(*http.Request) (*sniffer.AnalysisResult, error)
 		DocsHandler(http.ResponseWriter, *http.Request)
 	}
