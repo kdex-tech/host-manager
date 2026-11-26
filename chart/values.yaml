@@ -153,6 +153,14 @@ readinessProbe:
 # it well under the Deployment's progressDeadlineSeconds (600s by default).
 readinessTimeout: ""
 
+# On SIGTERM, how long the pod keeps serving before it closes its web
+# listener (a Go duration), so the load balancer and ingress have stopped
+# routing to it first; without it a rollout drops a request or two with 502.
+# Keep it plus 5s (the graceful-shutdown window) under the pod's
+# terminationGracePeriodSeconds (30s by default). "0s" closes the listener at
+# once; empty keeps the binary default (5s).
+shutdownDrain: ""
+
 replicaCount: 1
 
 resources:

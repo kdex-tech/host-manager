@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -108,6 +109,7 @@ func main() {
 	var proxyResponseHeaderTimeout time.Duration
 	var proxyIdleConnTimeout time.Duration
 	var readinessTimeout time.Duration
+	var shutdownDrain time.Duration
 	var refreshGraceWindow time.Duration
 	var serverReadHeaderTimeout time.Duration
 	var serverReadTimeout time.Duration
@@ -148,6 +150,11 @@ func main() {
 		"How long a starting pod reports not-ready while its host loads. It turns ready as soon as "+
 			"the host has loaded, or once this has passed regardless, so a host that cannot load "+
 			"never holds a rollout. 0 reports ready at once.")
+
+	flag.DurationVar(&shutdownDrain, "shutdown-drain", 5*time.Second,
+		"On SIGTERM, keep serving this long before closing the web listener, so the load balancer "+
+			"and ingress stop routing to the pod first. Keep drain + 5s under the pod's "+
+			"terminationGracePeriodSeconds (30s by default). 0 closes it at once.")
 
 	flag.StringVar(&pageDenialMode, "page-denial-mode", string(host.PageDenialDiscover),
 		"How the page gate renders a denial to a browser: \"discover\" sends the caller to the "+
@@ -511,25 +518,23 @@ func main() {
 			"server-write-timeout", serverWriteTimeout.String())
 	}
 
+	ln, err := net.Listen("tcp", webserverAddr)
+	if err != nil {
+		setupLog.Error(err, "unable to listen", "address", webserverAddr)
+		os.Exit(1)
+	}
+	// SIGTERM drains the web server first (server.Serve), and only then stops
+	// the manager: pages, proxying and auth read the manager's cache, so it
+	// must outlive every request the drain still serves.
+	served := server.Serve(ctx, srv, ln, shutdownDrain, 5*time.Second, setupLog)
+	mgrCtx, stopMgr := context.WithCancel(context.Background())
 	go func() {
-		setupLog.Info("starting web server")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			setupLog.Error(err, "problem running web server")
-		}
-	}()
-
-	go func() {
-		<-ctx.Done()
-		setupLog.Info("shutting down web server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			setupLog.Error(err, "problem shutting down web server")
-		}
+		<-served
+		stopMgr()
 	}()
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(mgrCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
