@@ -154,7 +154,9 @@ func (s *RequestSniffer) DocsHandler(w http.ResponseWriter, r *http.Request) {
 	etag := fmt.Sprintf(`"%d"`, lastModified.Unix())
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+	// Revalidate on every reuse, as host renders do (#305): the ETag moves
+	// with ReconcileTime, so an upgrade's new docs show on the next load.
+	w.Header().Set("Cache-Control", "public, no-cache")
 	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
 	w.Header().Set("ETag", etag)
 

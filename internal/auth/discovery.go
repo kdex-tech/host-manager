@@ -85,8 +85,10 @@ func DiscoveryHandler(issuer string, registrationEndpoint string) http.HandlerFu
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Cache-Control, ETag and the 304 belong to the caller
+		// (HostHandler.discoveryHandler), which revalidates on every reuse
+		// so a host apply is seen on the next load (#305).
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=3600")
 
 		if err := json.NewEncoder(w).Encode(config); err != nil {
 			http.Error(w, "Failed to encode discovery document", http.StatusInternalServerError)

@@ -283,6 +283,6 @@ func sortedKeys[V any](m map[string]V) []string {
 // grants, so neither form is ever served from a shared cache.
 func writeCatalog(w http.ResponseWriter, cat entitlementCatalog) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Cache-Control", noStoreCacheControl)
 	_ = json.NewEncoder(w).Encode(cat)
 }

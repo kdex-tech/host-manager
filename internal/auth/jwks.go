@@ -80,8 +80,10 @@ func JWKSHandler(keyPairs *keys.KeyPairs) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Cache-Control, ETag and the 304 belong to the caller
+		// (HostHandler's jwks route), which revalidates on every reuse so a
+		// rotated key is seen on the next fetch (#305).
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=3600")
 
 		if err := json.NewEncoder(w).Encode(jwks); err != nil {
 			http.Error(w, "Failed to encode JWKS", http.StatusInternalServerError)

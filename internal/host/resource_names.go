@@ -146,7 +146,7 @@ func (hh *HostHandler) resourceNamesHandler(mux *http.ServeMux, registeredPaths 
 			result.Items = []resourceName{}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Cache-Control", noStoreCacheControl)
 		_ = json.NewEncoder(w).Encode(result)
 	})
 

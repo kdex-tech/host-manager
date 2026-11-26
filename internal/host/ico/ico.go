@@ -7,16 +7,9 @@ import (
 	"sync"
 	"text/template"
 
-	"time"
-
 	"github.com/Masterminds/sprig/v3"
 	"kdex.dev/crds/render"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-)
-
-var (
-	// Cache stores [string][]byte
-	faviconCache sync.Map
 )
 
 const svgTemplateDefault = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
@@ -30,10 +23,20 @@ const svgTemplateDefault = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0
           dominant-baseline="central">[[ .BrandName | trunc 1 ]]</text>
 </svg>`
 
+// Ico renders a host's favicon. A host apply builds a new Ico, and the render
+// is memoized on that instance only, so a brand or template change shows on
+// the next request. It was a package-global cache that kept the first render
+// until the process restarted (#305).
+//
+// Caching headers (Cache-Control, ETag, Last-Modified, the 304) belong to the
+// caller, HostHandler.faviconHandler, as they do for every host render.
 type Ico struct {
-	data          render.TemplateData
-	template      *template.Template
-	reconcileTime time.Time
+	data     render.TemplateData
+	template *template.Template
+
+	once sync.Once
+	svg  []byte
+	err  error
 }
 
 func NewICO(svgTemplate string, data render.TemplateData) *Ico {
@@ -42,63 +45,33 @@ func NewICO(svgTemplate string, data render.TemplateData) *Ico {
 	}
 
 	return &Ico{
-		data:          data,
-		template:      template.Must(template.New("favicon").Funcs(sprig.FuncMap()).Delims("[[", "]]").Parse(svgTemplate)),
-		reconcileTime: time.Now(),
+		data:     data,
+		template: template.Must(template.New("favicon").Funcs(sprig.FuncMap()).Delims("[[", "]]").Parse(svgTemplate)),
 	}
 }
 
-func (i *Ico) SetReconcileTime(t time.Time) {
-	i.reconcileTime = t
+func (i *Ico) render() ([]byte, error) {
+	i.once.Do(func() {
+		var buf bytes.Buffer
+		if i.err = i.template.Execute(&buf, i.data); i.err == nil {
+			i.svg = buf.Bytes()
+		}
+	})
+	return i.svg, i.err
 }
 
 func (i *Ico) FaviconHandler(w http.ResponseWriter, r *http.Request) {
-	// 1. Check Cache
-	if val, ok := faviconCache.Load("favicon"); ok {
-		serveSVG(w, r, val.([]byte), i.reconcileTime)
-		return
-	}
-
-	// 2. Generate SVG
-	var buf bytes.Buffer
-	if err := i.template.Execute(&buf, i.data); err != nil {
+	svg, err := i.render()
+	if err != nil {
 		log := logf.FromContext(r.Context())
 		log.Error(err, "error rendering favicon template")
 		http.Error(w, fmt.Sprintf("Favicon template error: %s", err.Error()), http.StatusInternalServerError)
 		return
 	}
-	svgContent := buf.Bytes()
-
-	// 3. Store and Serve
-	faviconCache.Store("favicon", svgContent)
-	serveSVG(w, r, svgContent, i.reconcileTime)
-}
-
-func serveSVG(w http.ResponseWriter, r *http.Request, data []byte, reconcileTime time.Time) {
-	lastModified := reconcileTime.UTC().Truncate(time.Second)
-	etag := fmt.Sprintf(`"%d"`, lastModified.Unix())
 
 	// Note: We serve image/svg+xml even for the .ico path
 	w.Header().Set("Content-Type", "image/svg+xml")
-	w.Header().Set("Cache-Control", "public, max-age=86400, must-revalidate")
-	w.Header().Set("Last-Modified", lastModified.Format(http.TimeFormat))
-	w.Header().Set("ETag", etag)
-
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	if ifModifiedSince := r.Header.Get("If-Modified-Since"); ifModifiedSince != "" {
-		t, err := http.ParseTime(ifModifiedSince)
-		if err == nil && !lastModified.After(t) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
-
-	_, err := w.Write(data)
-	if err != nil {
+	if _, err := w.Write(svg); err != nil {
 		log := logf.FromContext(r.Context())
 		log.Error(err, "failed to write favicon response")
 	}

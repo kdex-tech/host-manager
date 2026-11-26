@@ -708,7 +708,7 @@ func TestRewrite_GatedAliasForcesPrivateCaching(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Equal(t, "hello", rr.Body.String())
 	cc := rr.Result().Header.Get("Cache-Control")
-	assert.Equal(t, "private, no-cache, must-revalidate", cc)
+	assert.Equal(t, privateCacheControl, cc)
 	assert.NotContains(t, cc, "public")
 }
 
@@ -741,7 +741,7 @@ func TestRewrite_GatedAliasOverridesFunctionPublicCaching(t *testing.T) {
 	})
 	rr := doRequest(t, mux, "GET", "/a")
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.Equal(t, privateCacheControl, rr.Result().Header.Get("Cache-Control"))
 }
 
 // A target that writes nothing still sends an implicit 200 with its headers
@@ -752,7 +752,7 @@ func TestRewrite_GatedAliasDecidesImplicitEmpty200(t *testing.T) {
 	})
 	rr := doRequest(t, mux, "GET", "/a")
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.Equal(t, privateCacheControl, rr.Result().Header.Get("Cache-Control"))
 	assert.NotEmpty(t, rr.Result().Header.Get("Link"))
 }
 
@@ -810,7 +810,7 @@ func TestRewrite_WriterPassesFlush(t *testing.T) {
 	rr := doRequest(t, mux, "GET", "/a")
 	require.NoError(t, flushErr)
 	assert.True(t, rr.Flushed)
-	assert.Equal(t, "private, no-cache, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.Equal(t, privateCacheControl, rr.Result().Header.Get("Cache-Control"))
 	assert.NotEmpty(t, rr.Result().Header.Get("Link"))
 
 	// Flushing before any write commits a 200 and so decides as a 2xx.

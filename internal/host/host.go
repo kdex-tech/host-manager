@@ -1260,7 +1260,6 @@ func (hh *HostHandler) SetHost(
 		DefaultLanguage: host.DefaultLang,
 		Organization:    host.Organization,
 	})
-	favicon.SetReconcileTime(hh.reconcileTime)
 	hh.favicon = favicon
 
 	if snif != nil {
