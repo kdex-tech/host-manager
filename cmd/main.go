@@ -107,6 +107,7 @@ func main() {
 	var proxyDialTimeout time.Duration
 	var proxyResponseHeaderTimeout time.Duration
 	var proxyIdleConnTimeout time.Duration
+	var readinessTimeout time.Duration
 	var refreshGraceWindow time.Duration
 	var serverReadHeaderTimeout time.Duration
 	var serverReadTimeout time.Duration
@@ -142,6 +143,11 @@ func main() {
 			"scale-from-zero cold start (gRPC + cloudsqlconn + OTel); bump higher for heavier functions.")
 	flag.DurationVar(&proxyIdleConnTimeout, "proxy-idle-conn-timeout", 90*time.Second,
 		"How long an unused keep-alive connection lingers in the proxy transport's pool.")
+
+	flag.DurationVar(&readinessTimeout, "readiness-timeout", 2*time.Minute,
+		"How long a starting pod reports not-ready while its host loads. It turns ready as soon as "+
+			"the host has loaded, or once this has passed regardless, so a host that cannot load "+
+			"never holds a rollout. 0 reports ready at once.")
 
 	flag.StringVar(&pageDenialMode, "page-denial-mode", string(host.PageDenialDiscover),
 		"How the page gate renders a denial to a browser: \"discover\" sends the caller to the "+
@@ -466,7 +472,7 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := addProbes(mgr); err != nil {
+	if err := addProbes(mgr, hostHandler.ReadinessCheck(time.Now(), readinessTimeout, nil)); err != nil {
 		setupLog.Error(err, "unable to set up probes")
 		os.Exit(1)
 	}
@@ -633,14 +639,16 @@ func hostCacheOptions(hostNamespace string, referenceable []string, mapper meta.
 
 // addProbes registers the liveness and readiness checks.
 //
-// Readiness is deliberately not gated on the host being loaded: with
-// LeaderElection off and the chart's default RollingUpdate, an ungated new
-// pod replaces the old one in seconds, whereas a gate on a host that cannot
-// load (one broken page, a reference the new referenceNamespaces refuses)
-// would leave the old and new pods reconciling side by side indefinitely.
-func addProbes(mgr ctrl.Manager) error {
+// Liveness is a ping. Readiness is the host's bounded load gate
+// (HostHandler.ReadinessCheck): not ready until the host has loaded, or until
+// --readiness-timeout has passed regardless. An ungated probe moved traffic to
+// a pod that 404ed every route until its first reconcile; an unbounded gate
+// on a host that cannot load (one broken page, a reference the new
+// referenceNamespaces refuses) would leave the old and new pods reconciling
+// side by side indefinitely, with LeaderElection off (#290).
+func addProbes(mgr ctrl.Manager, ready healthz.Checker) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return err
 	}
-	return mgr.AddReadyzCheck("readyz", healthz.Ping)
+	return mgr.AddReadyzCheck("readyz", ready)
 }
