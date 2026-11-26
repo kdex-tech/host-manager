@@ -219,6 +219,24 @@ func TestRefreshGraceWindowArg(t *testing.T) {
 	}
 }
 
+// TestRolloutTimingArgs pins readinessTimeout and shutdownDrain: empty keeps
+// the binary default (no flag), and a set value, "0s" included, reaches the
+// flag.
+func TestRolloutTimingArgs(t *testing.T) {
+	got := renderChart(t)
+	for _, flag := range []string{"--readiness-timeout", "--shutdown-drain"} {
+		if strings.Contains(got, flag) {
+			t.Errorf("empty value must not render %s:\n%s", flag, got)
+		}
+	}
+	got = renderChart(t, "readinessTimeout=0s", "shutdownDrain=10s")
+	for _, want := range []string{"--readiness-timeout=0s", "--shutdown-drain=10s"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered manifests missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // splitDocs splits rendered helm output into its YAML documents.
 func splitDocs(manifests string) []string {
 	return strings.Split(manifests, "\n---\n")

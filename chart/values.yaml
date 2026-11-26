@@ -154,12 +154,18 @@ readinessProbe:
 readinessTimeout: ""
 
 # On SIGTERM, how long the pod keeps serving before it closes its web
-# listener (a Go duration), so the load balancer and ingress have stopped
-# routing to it first; without it a rollout drops a request or two with 502.
-# Keep it plus 5s (the graceful-shutdown window) under the pod's
-# terminationGracePeriodSeconds (30s by default). "0s" closes the listener at
-# once; empty keeps the binary default (5s).
+# listener (a Go duration), so the ingress has stopped routing to it first;
+# without it a rollout drops a request or two with 502. 5s covers an ingress
+# (Traefik) watching EndpointSlices. A load balancer that targets the pods
+# directly (a GKE container-native NEG) deregisters more slowly: raise it, and
+# terminationGracePeriodSeconds with it. "0s" closes the listener at once;
+# empty keeps the binary default (5s).
 shutdownDrain: ""
+
+# The SIGTERM sequence is shutdownDrain, then up to 5s for in-flight requests,
+# then up to 10s for the controller to stop: ~20s with the defaults. Keep this
+# above that sum, or the kubelet kills the pod mid-stop.
+terminationGracePeriodSeconds: 30
 
 replicaCount: 1
 

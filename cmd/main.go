@@ -47,6 +47,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	kdexv1alpha1 "kdex.dev/crds/api/v1alpha1"
 	"kdex.dev/crds/configuration"
 	kdexlog "kdex.dev/crds/log"
@@ -153,8 +154,9 @@ func main() {
 
 	flag.DurationVar(&shutdownDrain, "shutdown-drain", 5*time.Second,
 		"On SIGTERM, keep serving this long before closing the web listener, so the load balancer "+
-			"and ingress stop routing to the pod first. Keep drain + 5s under the pod's "+
-			"terminationGracePeriodSeconds (30s by default). 0 closes it at once.")
+			"and ingress stop routing to the pod first. The whole SIGTERM sequence takes up to this "+
+			"+ 5s (web stop) + 10s (manager stop); keep it under the pod's "+
+			"terminationGracePeriodSeconds (chart value, 30s by default). 0 closes it at once.")
 
 	flag.StringVar(&pageDenialMode, "page-denial-mode", string(host.PageDenialDiscover),
 		"How the page gate renders a denial to a browser: \"discover\" sends the caller to the "+
@@ -358,12 +360,17 @@ func main() {
 		Controller: config.Controller{
 			Logger: logger,
 		},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         false,
-		Logger:                 logger,
-		Metrics:                metricsServerOptions,
-		Scheme:                 scheme,
-		WebhookServer:          webhookServer,
+		// Bounded so the whole SIGTERM sequence -- drain, web stop
+		// (server.StopTimeout), then this -- fits the pod's grace period.
+		// controller-runtime's own default is 30s, which alone fills the
+		// Kubernetes default grace period.
+		GracefulShutdownTimeout: ptr.To(managerStopTimeout),
+		HealthProbeBindAddress:  probeAddr,
+		LeaderElection:          false,
+		Logger:                  logger,
+		Metrics:                 metricsServerOptions,
+		Scheme:                  scheme,
+		WebhookServer:           webhookServer,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -526,16 +533,23 @@ func main() {
 	// SIGTERM drains the web server first (server.Serve), and only then stops
 	// the manager: pages, proxying and auth read the manager's cache, so it
 	// must outlive every request the drain still serves.
-	served := server.Serve(ctx, srv, ln, shutdownDrain, 5*time.Second, setupLog)
+	served := server.Serve(ctx, srv, ln, shutdownDrain, server.StopTimeout, setupLog)
 	mgrCtx, stopMgr := context.WithCancel(context.Background())
+	var serveErr error
 	go func() {
-		<-served
+		serveErr = <-served
 		stopMgr()
 	}()
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mgrCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+	// mgr.Start returned because stopMgr ran, after serveErr was set. A web
+	// server that died on its own takes the pod down with it, but must not
+	// look like a clean stop.
+	if serveErr != nil {
 		os.Exit(1)
 	}
 }
@@ -641,6 +655,10 @@ func hostCacheOptions(hostNamespace string, referenceable []string, mapper meta.
 	}
 	return crcache.Options{DefaultNamespaces: defaults, ByObject: byObject}, nil
 }
+
+// managerStopTimeout bounds the manager's graceful stop, the last step of the
+// SIGTERM sequence (after the web drain and server.StopTimeout).
+const managerStopTimeout = 10 * time.Second
 
 // addProbes registers the liveness and readiness checks.
 //

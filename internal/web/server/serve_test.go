@@ -38,7 +38,7 @@ func TestServe_KeepsServingThroughTheDrainThenStops(t *testing.T) {
 	ln, url := listen(t)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}), ReadHeaderTimeout: time.Second}
 	ctx, stop := context.WithCancel(context.Background())
-	done := Serve(ctx, srv, ln, 300*time.Millisecond, time.Second, logr.Discard())
+	done := Serve(ctx, srv, ln, time.Second, time.Second, logr.Discard())
 
 	code, err := get(url)
 	require.NoError(t, err)
@@ -51,8 +51,9 @@ func TestServe_KeepsServingThroughTheDrainThenStops(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code)
 
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
+	case err := <-done:
+		assert.NoError(t, err, "a requested stop reports no error")
+	case <-time.After(4 * time.Second):
 		t.Fatal("server did not stop after the drain")
 	}
 	_, err = get(url)
@@ -80,7 +81,7 @@ func TestServe_ShutdownLetsAnInFlightRequestFinish(t *testing.T) {
 	stop()
 
 	assert.Equal(t, http.StatusTeapot, <-result)
-	<-done
+	assert.NoError(t, <-done)
 }
 
 // A zero drain shuts down at once, the pre-drain behaviour.
@@ -91,8 +92,24 @@ func TestServe_ZeroDrainStopsAtOnce(t *testing.T) {
 	done := Serve(ctx, srv, ln, 0, time.Second, logr.Discard())
 	stop()
 	select {
-	case <-done:
+	case err := <-done:
+		assert.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("a zero drain must stop at once")
+	}
+}
+
+// A server that fails on its own reports the error, so main can exit
+// non-zero instead of stopping cleanly.
+func TestServe_ReportsAServerThatFailsOnItsOwn(t *testing.T) {
+	ln, _ := listen(t)
+	srv := &http.Server{Handler: http.NotFoundHandler(), ReadHeaderTimeout: time.Second}
+	require.NoError(t, ln.Close()) // Serve's Accept fails at once
+	done := Serve(context.Background(), srv, ln, time.Second, time.Second, logr.Discard())
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("a failed server must report at once, without a drain")
 	}
 }
