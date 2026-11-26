@@ -67,6 +67,14 @@ func (hh *HostHandler) applyCachingHeadersWithLang(
 // see: never stored by a shared cache, revalidated before any reuse.
 const privateCacheControl = "private, no-cache, must-revalidate"
 
+// publicCacheControl is the Cache-Control of a public host render. A shared
+// cache may store it, but every reuse is revalidated: these bodies change the
+// moment a CR applies (a KDexTranslation, a page, the host), and the ETag
+// already moves with that content (#44, #302), so a conditional request is
+// what makes the change visible. A freshness window (max-age) let a browser
+// keep the old body for up to that long without asking (#305).
+const publicCacheControl = "public, no-cache"
+
 // isPrivateResponse reports whether a response governed by requirements is
 // private to its caller: auth is enabled (with auth disabled everything is
 // public) and there is at least one requirement. The rewrite alias's caching
@@ -105,7 +113,7 @@ func (hh *HostHandler) applyCachingHeadersWithSeed(
 	if isPrivate {
 		w.Header().Set("Cache-Control", privateCacheControl)
 	} else {
-		w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+		w.Header().Set("Cache-Control", publicCacheControl)
 	}
 
 	vary := "Accept-Language"

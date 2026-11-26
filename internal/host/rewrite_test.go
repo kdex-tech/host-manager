@@ -717,7 +717,7 @@ func TestRewrite_PublicAliasKeepsTargetCaching(t *testing.T) {
 	mux := gatedAliasTextTarget(t, nil)
 	rr := doRequest(t, mux, "GET", "/k")
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "public, max-age=3600, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.Equal(t, publicCacheControl, rr.Result().Header.Get("Cache-Control"))
 }
 
 // A target answering no-store keeps it behind a gated alias: no-store is
@@ -850,5 +850,5 @@ func TestRewrite_GatedAliasOnAuthDisabledHostKeepsTargetCaching(t *testing.T) {
 
 	rr := doRequest(t, mux, "GET", "/k")
 	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "public, max-age=3600, must-revalidate", rr.Result().Header.Get("Cache-Control"))
+	assert.Equal(t, publicCacheControl, rr.Result().Header.Get("Cache-Control"))
 }

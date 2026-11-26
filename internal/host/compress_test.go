@@ -465,3 +465,40 @@ func TestCompress_ETagSeedOnlyWhereNegotiated(t *testing.T) {
 	assert.Empty(t, head.Header().Get("Content-Encoding"))
 	assert.Equal(t, plainDoc.Header().Get("ETag"), head.Header().Get("ETag"), "a HEAD is identity, so it has the identity ETag")
 }
+
+// An applied translation must reach a browser that already holds the old
+// strings on its next load: the public response carries no freshness window,
+// so every reuse is revalidated, and the old ETag no longer answers 304 (#305).
+func TestTranslation_RevalidatesAndSeesAppliedChange(t *testing.T) {
+	hh := renderHost(t, nil)
+	apply := func(v string) {
+		hh.AddOrUpdateTranslation("tr-en", &kdexv1alpha1.KDexTranslationSpec{
+			Translations: []kdexv1alpha1.Translation{{Lang: "en", KeysAndValues: map[string]string{"greeting": v}}},
+		})
+	}
+	apply("hello")
+
+	first := compressGet(t, hh, "/-/translation/en", nil)
+	require.Equal(t, http.StatusOK, first.Code)
+	assert.Equal(t, publicCacheControl, first.Header().Get("Cache-Control"))
+	assert.False(t, hasCacheDirective(first.Header(), "max-age"), "no freshness window")
+	etag := first.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	same := compressGet(t, hh, "/-/translation/en", map[string]string{"If-None-Match": etag})
+	assert.Equal(t, http.StatusNotModified, same.Code, "unchanged strings revalidate to a 304")
+
+	apply("bonjour")
+	after := compressGet(t, hh, "/-/translation/en", map[string]string{"If-None-Match": etag})
+	require.Equal(t, http.StatusOK, after.Code, "the old ETag must not validate the new strings")
+	assert.Contains(t, after.Body.String(), "bonjour")
+	assert.NotEqual(t, etag, after.Header().Get("ETag"))
+}
+
+// A public page render carries the same revalidate-every-time policy (#305).
+func TestPage_PublicCacheControlHasNoFreshnessWindow(t *testing.T) {
+	hh := renderHost(t, nil)
+	rr := compressGet(t, hh, "/doc", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, publicCacheControl, rr.Header().Get("Cache-Control"))
+}
