@@ -472,7 +472,7 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := addProbes(mgr, hostHandler.ReadinessCheck(time.Now(), readinessTimeout, nil)); err != nil {
+	if err := addProbes(mgr, hostHandler.ReadinessCheck(start, readinessTimeout, nil)); err != nil {
 		setupLog.Error(err, "unable to set up probes")
 		os.Exit(1)
 	}

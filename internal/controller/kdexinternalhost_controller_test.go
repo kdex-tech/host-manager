@@ -65,6 +65,11 @@ var _ = Describe("KDexInternalHost Controller", func() {
 			assertResourceReady(
 				ctx, k8sClient, focalHost, namespace,
 				&kdexv1alpha1.KDexInternalHost{}, true)
+
+			// The readiness gate's input: a real reconcile reaching Ready
+			// leaves the host handler loaded, so a starting pod turns ready
+			// on load, not on the timeout.
+			Eventually(hostHandler.Loaded, "10s").Should(BeTrue())
 		})
 
 		It("should produce an HTTPRoute when routing.strategy is HTTPRoute", func() {

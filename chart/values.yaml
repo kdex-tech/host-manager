@@ -145,6 +145,14 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
 
+# How long a starting pod reports not-ready while its host loads (a Go
+# duration). It turns ready once the host has loaded, or once this has passed
+# regardless, so a host that cannot load never holds a rollout. "0s" reports
+# ready at once; empty keeps the binary default (2m). A host whose first
+# reconcile routinely takes longer (a packages image build) can raise it; keep
+# it well under the Deployment's progressDeadlineSeconds (600s by default).
+readinessTimeout: ""
+
 replicaCount: 1
 
 resources:

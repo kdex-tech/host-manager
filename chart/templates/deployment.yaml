@@ -53,6 +53,9 @@ spec:
             {{- with .Values.pageDenialMode }}
             - --page-denial-mode={{ . }}
             {{- end }}
+            {{- with .Values.readinessTimeout }}
+            - --readiness-timeout={{ . }}
+            {{- end }}
             {{- with .Values.server }}
             - --server-read-header-timeout={{ .readHeaderTimeout }}
             - --server-read-timeout={{ .readTimeout }}

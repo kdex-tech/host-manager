@@ -62,7 +62,7 @@ func (hh *HostHandler) ReadinessCheck(start time.Time, timeout time.Duration, no
 		if now().Sub(start) >= timeout {
 			ready.Store(true)
 			hh.log.Info("readiness timeout elapsed before the host loaded; taking traffic anyway",
-				"timeout", timeout.String())
+				"timeout", timeout.String(), "hostStatus", hh.GetStatus())
 			return nil
 		}
 		return errHostLoading
